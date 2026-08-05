@@ -14,67 +14,86 @@
 - 写入前创建带时间戳的备份，每个受管环境默认只保留最近五份，并支持恢复。
 - 使用同目录临时文件和平台原子替换，不能让目标文件暴露在部分写入或先删后建状态。
 - 首次接管已有配置时使用结构化 TOML 迁移；管理区块建立后只替换 dotted-key 管理区块。
+- 损坏、歧义、不支持的 TOML 形状或并发外部修改必须在替换前停止。
 
 ## How to Build It
 
 ### 1. 把配置处理建模为显式状态机
 
-读取原始字节后，先识别以下状态，再决定写入策略：
+读取原始字节后，先识别状态，再决定写入策略：
 
 | 状态 | 处理 |
 |------|------|
-| TOML 无法解析 | 停止，不创建临时文件，不尝试自动修复 |
-| 没有管理区块，但已有 `model`、`model_provider` 或 `model_providers.gpteasy` | 执行首次结构化迁移 |
-| 没有管理区块，也没有冲突键 | 可以直接建立管理区块 |
-| 恰好一对顺序正确的管理标记 | 只替换区块 |
+| TOML 无法解析 | 停止，不创建备份或临时文件，不自动修复 |
+| 没有管理区块 | 执行单事务首次结构化接管 |
+| 恰好一对顺序正确的管理标记 | 只替换整个管理区块 |
 | 标记缺失、重复或倒置 | 停止并提示恢复备份或人工处理 |
+| 最终候选 TOML 无法重新解析 | 在备份和写入前停止 |
 
-管理区块标记必须是独占整行的精确文本，避免匹配普通注释：
+管理标记是独占整行的精确文本：
 
 ```text
 # >>> GPTEasy managed provider >>>
 # <<< GPTEasy managed provider <<<
 ```
 
-### 2. 首次接管使用结构化迁移
+不可变供应商 ID 是区块内的唯一注释：
 
-使用 `toml_edit::DocumentMut`，不要把整个文件反序列化后重新生成。结构化阶段只处理受管键：
-
-```rust
-let mut doc = original_text.parse::<DocumentMut>()?;
-doc["model"] = value(provider.model);
-doc["model_provider"] = value("gpteasy");
-
-let providers = doc["model_providers"]
-    .as_table_mut()
-    .ok_or("model_providers is not a table")?;
-let managed = providers["gpteasy"]
-    .as_table_mut()
-    .ok_or("gpteasy provider is not a table")?;
-managed["name"] = value(provider.name);
-managed["base_url"] = value(provider.base_url);
-managed["wire_api"] = value("responses");
-managed["supports_websockets"] = value(false);
-managed["experimental_bearer_token"] = value(provider.bearer_token);
+```text
+# GPTEasy provider-id: immutable-provider-id
 ```
 
-正式实现需要把 003a 与 003b 的结果组合成一个首次迁移事务：
+重复 ID 注释、空 ID 或损坏标记都进入 `needs_attention`，不猜测修复。
 
-1. 用 `DocumentMut` 验证并定位旧的受管顶层键和 provider 表。
-2. 从结构化文档中移除将由管理区块接管的键，保留其他 provider 和未知字段。
-3. 按原换行风格渲染剩余文档。
-4. 在根上下文插入 dotted-key 管理区块。
-5. 重新解析最终 TOML，确认没有重复键和作用域错误。
-6. 仅在最终文本有效后进入备份和原子写入。
+### 2. 首次接管必须在一个结构化事务中完成
 
-这一步不能简单地先写 003a 的表，再调用 003b；003b 会正确地把已有受管键视为冲突并拒绝插入。正式组合实现必须在同一个结构化迁移中消除冲突。
+003a 与 003b 不能简单串联。结构化写入旧受管键后，再插入 dotted-key 区块会造成重复定义。已验证的首次接管顺序是：
+
+1. 用 `toml_edit::DocumentMut` 解析原文件。
+2. 删除旧顶层 `model` 和 `model_provider`。
+3. 从 `model_providers` 中删除旧 `gpteasy` provider。
+4. 检查 `model_providers` 父表形状。
+5. 渲染剩余文档并保持原 LF/CRLF 风格。
+6. 在根上下文建立唯一 dotted-key 管理区块。
+7. 对最终文本再次执行 `DocumentMut` 解析。
+8. 最终候选有效后，才创建备份并进入原子替换。
+
+核心迁移模式：
+
+```rust
+let mut doc = original.parse::<DocumentMut>()?;
+doc.remove("model");
+doc.remove("model_provider");
+
+if let Some(providers) = doc
+    .get_mut("model_providers")
+    .and_then(|item| item.as_table_mut())
+{
+    providers.remove("gpteasy");
+    if providers.iter().any(|(_, item)| !item.is_table()) {
+        return Err("refusing lossy migration".into());
+    }
+    if providers.is_empty() {
+        doc.remove("model_providers");
+    } else {
+        providers.set_implicit(true);
+    }
+}
+```
+
+`model_providers.gpteasy.*` dotted keys 会隐式定义 `model_providers`。若剩余文件仍输出显式 `[model_providers]`，TOML 会把它视为重复表。因此：
+
+- 父表只包含 provider 子表时，调用 `set_implicit(true)`。
+- 父表为空时，删除父表。
+- 父表包含直属非 table 值时，停止迁移，不能猜测改变语义。
 
 ### 3. 后续切换只替换 dotted-key 区块
 
-管理区块不能使用 `[model_providers.gpteasy]` 表头，因为 TOML 表头会改变其后裸键的作用域。使用根级 dotted keys：
+不要使用 `[model_providers.gpteasy]` 表头作为可移动区块；表头会改变其后裸键作用域。使用根级 dotted keys：
 
 ```toml
 # >>> GPTEasy managed provider >>>
+# GPTEasy provider-id: immutable-provider-id
 model = "provider-model"
 model_provider = "gpteasy"
 model_providers.gpteasy.name = "Provider"
@@ -85,31 +104,31 @@ model_providers.gpteasy.experimental_bearer_token = "API Key"
 # <<< GPTEasy managed provider <<<
 ```
 
-区块替换算法应：
+区块替换算法：
 
 1. 按完整行扫描开始和结束标记。
-2. 无标记时先做结构化冲突检查。
-3. 有且仅有一对正确标记时替换 `[start, end]` 整段。
-4. 替换后重新用 `DocumentMut` 解析。
-5. 保留区块之外的原始字节和原始 LF/CRLF 风格。
+2. 要求有且仅有一对，且开始位置早于结束位置。
+3. 用新块替换 `[start, end]` 整段。
+4. 保留区块之外的原始字节。
+5. 替换后重新解析最终 TOML。
 
-已验证的核心判定：
+已验证的核心实现：
 
 ```rust
 match (starts.as_slice(), ends.as_slice()) {
-    ([], []) => {
-        let doc = original.parse::<DocumentMut>()?;
-        if has_managed_keys(&doc) {
-            return Err("existing managed keys require structural migration".into());
-        }
-        Ok(format!("{block}{original}"))
-    }
     ([(start, _)], [(_, end)]) if start < end => {
-        Ok(format!("{}{}{}", &original[..*start], block, &original[*end..]))
+        let mut rendered = String::with_capacity(original.len() + block.len());
+        rendered.push_str(&original[..*start]);
+        rendered.push_str(&block);
+        rendered.push_str(&original[*end..]);
+        rendered.parse::<DocumentMut>()?;
+        Ok(rendered)
     }
     _ => Err("managed block markers are missing, duplicated, or reversed".into()),
 }
 ```
+
+字节级“区块外不变”从管理区块建立后的第二次切换开始成立。首次结构化迁移只承诺保留语义、未知字段、旧 provider、注释和换行风格。
 
 ### 4. 使用完整的备份与原子替换协议
 
@@ -118,13 +137,13 @@ match (starts.as_slice(), ends.as_slice()) {
 1. 读取原始字节并解析。
 2. 生成最终文本并再次解析。
 3. 创建 `.gpteasy-backups/config-<timestamp>.toml`，写入原始字节并 `sync_all`。
-4. 按文件名排序裁剪旧备份，只保留最近五份。
-5. 在目标同目录使用 `create_new` 创建临时文件。
-6. 写入全部字节并 `sync_all`，继承目标权限；Unix 新文件初始权限设为 `0600`。
-7. 替换前再次读取目标，与最初字节比较；不同则停止，避免覆盖并发编辑。
-8. Windows 对已有文件调用 `ReplaceFileW(..., REPLACEFILE_WRITE_THROUGH, ...)`。
+4. 按可排序时间戳文件名裁剪旧备份，只保留最近五份。
+5. 在目标同目录用 `create_new` 创建临时文件。
+6. 写入全部候选字节并 `sync_all`，继承目标权限；Unix 新文件初始权限为 `0600`。
+7. 替换前再次读取目标，与最初字节比较；不同则删除临时文件并停止。
+8. Windows 对已有文件调用 `ReplaceFileW(..., flags = 0)`。
 9. macOS/Unix 在同一文件系统 `rename`，随后同步父目录。
-10. 恢复备份也必须走同样的临时文件和原子替换流程。
+10. 恢复备份也走同目录临时文件和原子替换。
 
 并发保护不能省略：
 
@@ -136,31 +155,62 @@ if fs::read(path)? != original {
 atomic_replace(path, &temp)?;
 ```
 
-### 5. 记录哈希和状态，不记录正文
+Windows 实现必须传 `flags = 0`：
 
-诊断可以保存目标路径、原始/结果哈希、备份路径、备份数量、原子替换结果和错误类别。不要记录配置正文或管理区块，因为其中包含明文 API Key。
+```rust
+let result = unsafe {
+    ReplaceFileW(
+        target_wide.as_ptr(),
+        replacement_wide.as_ptr(),
+        std::ptr::null(),
+        0,
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+    )
+};
+```
+
+Microsoft 当前文档把 `REPLACEFILE_WRITE_THROUGH` 标记为不支持。临时文件必须自行 `sync_all`，不能把该标志描述成额外持久性保证。
+
+### 5. 把供应商切换纳入跨资源 Saga
+
+安全写文件不等于数据库状态一致。正式切换应由 `switch-consistency-reconciliation.md` 的 Saga 编排：
+
+1. 在 SQLite 持久化旧/新配置哈希和 `prepared` 意图。
+2. 调用本文件协议替换配置。
+3. 提交环境当前供应商。
+4. 在独立阶段处理桌面/CLI 重启。
+5. 崩溃恢复时根据当前文件哈希前滚、回滚或进入外部配置。
+
+### 6. 只记录哈希和状态
+
+诊断可保存目标路径、原始/结果 SHA-256、备份路径、备份数量、替换阶段和错误类别。不要记录配置正文、管理区块或备份内容，因为它们包含明文 API Key。
 
 ## What to Avoid
 
 - **不要使用普通 `toml` 序列化重建整份文件。** 会丢失注释、排序和用户格式。
-- **不要把带表头的管理区块插到任意位置。** 它会改变后续键的 TOML 作用域。
-- **不要在首次接管时直接插入 dotted keys。** 已有顶层键会形成重复定义。
-- **不要在损坏 TOML 或歧义标记上猜测性修复。** 安全策略是停止修改。
-- **不要先删除 Windows 目标文件再重命名。** 删除成功、移动失败会制造空窗。
-- **不要认为原子替换自动解决并发覆盖。** 必须在替换前比较原始字节。
-- **不要统一改写换行。** 输入为 CRLF 时，新增和替换内容也必须使用 CRLF。
-- **不要把备份当成无敏感信息的普通日志。** 备份同样包含明文凭据。
+- **不要把 003a 与 003b 简单串联。** 必须在一个结构化事务中移除旧受管节点并建立新区块。
+- **不要让显式 `[model_providers]` 与 dotted keys 同时重复定义父表。**
+- **不要猜测迁移 `model_providers` 中的直属未知值。**
+- **不要把带表头的管理区块插到任意位置。**
+- **不要在损坏 TOML、歧义标记或重复 provider ID 上自动修复。**
+- **不要先删除 Windows 目标文件再重命名。**
+- **不要依赖 `REPLACEFILE_WRITE_THROUGH`。**
+- **不要认为原子替换自动解决并发覆盖。**
+- **不要统一改写换行。**
+- **不要把备份当成无敏感信息的普通日志。**
 
 ## Constraints
 
-- 003a 已在 Windows 通过 6 个结构化写入、故障、并发、备份和恢复场景；003b 已在 Windows 通过 11 个管理区块场景。
-- “首次结构化迁移后立即建立管理区块”的组合事务尚未由一个端到端 Spike 实现；正式开发应优先为该组合补测试。
-- 结构化迁移只能近似保留被修改节点附近的格式；区块外字节完全不变只在管理区块已经建立后成立。
+- 003a 已验证结构化写入、故障、并发、备份和恢复；003b 已验证管理区块替换和歧义停止。
+- 006 在 Windows 上以 13 个场景验证了单事务首次接管、implicit 父表处理、后续区块外字节不变、故障、并发、五份备份和恢复。
+- 首次迁移会重新渲染被移除受管节点附近的局部格式；精确字节保留从管理区块建立后的后续切换开始。
+- `[model_providers]` 中的直属非 table 值不会自动迁移，必须作为外部配置交给用户处理。
 - macOS Intel/Apple Silicon 目标编译通过，但真实 APFS 上的替换、崩溃和断电行为尚未执行。
-- 安全保证覆盖解析失败、进程级故障和并发修改，不等同于完成了真实断电一致性认证。
-- 完全相同的标记若作为 TOML 多行字符串中的独占行出现，扫描器会安全拒绝而不是冒险写入。
+- 安全保证覆盖解析失败、进程级故障和并发修改，不等同于真实断电一致性认证。
+- 完全相同的标记若出现在 TOML 多行字符串的独占行，扫描器会安全拒绝而不是冒险写入。
 
 ## Origin
 
-Synthesized from spikes: 003a, 003b
-Source files available in: `sources/003-a-toml-structural-edit/`, `sources/003-b-managed-block-edit/`
+Synthesized from spikes: 003a, 003b, 006
+Source files available in: `sources/003-a-toml-structural-edit/`, `sources/003-b-managed-block-edit/`, `sources/006-first-takeover-managed-block-transaction/`

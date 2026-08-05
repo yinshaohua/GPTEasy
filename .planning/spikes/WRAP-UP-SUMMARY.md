@@ -2,11 +2,20 @@
 
 **Date:** 2026-08-05
 
-**Spikes processed:** 6
+**New spikes processed:** 7
 
-**Feature areas:** Codex 与供应商兼容、安全配置写入、桌面运行生命周期、安装与更新
+**Total spikes packaged:** 13
+
+**Feature areas:** Codex 与供应商兼容、安全配置写入、切换一致性与外部协调、桌面运行生命周期、WSL2 与 Linux 导出物、安装与更新
 
 **Skill output:** `./.codex/skills/spike-findings-gpteasy/`
+
+## Wrap-Up Sessions
+
+| Session | Date | Newly Processed |
+|---------|------|-----------------|
+| Initial | 2026-08-05 | 001、002、003a、003b、004、005 |
+| Append | 2026-08-05 | 006、007、008、009、010a、010b、011 |
 
 ## Processed Spikes
 
@@ -18,32 +27,48 @@
 | 003b | managed-block-edit | comparison | PARTIAL | 安全配置写入 |
 | 004 | tauri-tray-process-restart | standard | PARTIAL | 桌面运行生命周期 |
 | 005 | desktop-install-update-matrix | standard | PARTIAL | 安装与更新 |
+| 006 | first-takeover-managed-block-transaction | standard | VALIDATED | 安全配置写入 |
+| 007 | provider-switch-saga | standard | VALIDATED | 切换一致性与外部协调 |
+| 008 | external-config-reconciliation | standard | VALIDATED | 切换一致性与外部协调 |
+| 009 | wsl2-environment-lifecycle | standard | PARTIAL | WSL2 与 Linux 导出物 |
+| 010a | linux-switch-functions-bash | comparison | VALIDATED | WSL2 与 Linux 导出物 |
+| 010b | linux-switch-functions-zsh | comparison | VALIDATED | WSL2 与 Linux 导出物 |
+| 011 | real-provider-compatibility-matrix | standard | VALIDATED | Codex 与供应商兼容 |
 
 ## Key Findings
 
 ### Codex 与供应商兼容
 
 - Windows 默认环境中，统一 ChatGPT 桌面应用的 bundled Codex 与本机 Codex CLI 共享当前用户的 `~/.codex` 配置根。
-- Codex provider 配置可直接发出 Responses 流式请求和工具定义，不需要在请求链路中运行本地代理。
-- 供应商保存不能退化为连通性测试；必须完成模型发现、SSE 完成事件、函数调用和工具结果回传的两轮 nonce 闭环。
-- 用户层配置不是 Codex 唯一配置层，产品必须保留“外部配置/覆盖层”状态。
+- 供应商保存门禁必须完整覆盖模型发现、Responses SSE、strict function call 和 `function_call_output` nonce 回传。
+- 真实供应商组合已在 2026-08-05 完成四阶段闭环；兼容结论只绑定当次地址、Key 和模型组合，任一变化都必须重新验证。
+- SSE 解析器必须容忍附加事件和分段 arguments delta，只对完成事件、最终函数调用项及 nonce 结果设门禁。
+- 首事件、流空闲、整体超时和 429 限流必须分开分类；诊断只记录事件类型、耗时、状态和正文长度。
 
 ### 安全配置写入
 
-- `toml_edit` 适合首次接管和异常配置检查，能保留未知字段、注释和旧 provider。
-- 管理区块建立后，dotted-key 区块替换能保证区块外字节不变；表头区块不能安全插入任意位置。
-- 正式实现必须把结构化迁移和首次建立管理区块合并成一个事务；现有两个 Spike 分别验证了两半，但未验证组合路径。
-- 备份、同目录临时文件、写入同步、并发原始字节比较和平台原子替换缺一不可。
+- 003a 与 003b 的接缝已由 006 闭合：首次接管必须在单个结构化事务中移除旧受管键、处理 `model_providers` 父表、建立唯一管理区块并重新解析。
+- `model_providers` 父表只含 provider 子表时可转为 implicit；含直属未知值时必须在备份和写入前停止。
+- 管理区块建立后，后续切换可保证区块外字节完全不变。
+- Windows 使用同步临时文件加 `ReplaceFileW(..., flags = 0)`；不能依赖文档标记为不支持的 `REPLACEFILE_WRITE_THROUGH`。
 
-### 桌面运行生命周期
+### 切换一致性与外部协调
 
-- 进程分类必须结合名称、路径、父子关系和 Electron `--type=` 参数，不能只按进程名。
-- 桌面主进程树可以通过平台应用激活机制重启；CLI 无法恢复原终端状态，只能提示用户人工重启。
-- 取消必须发生在写配置前；关闭窗口只隐藏到托盘，明确退出才结束应用。
+- SQLite、Codex TOML 和进程不存在跨资源 ACID；必须先持久化 `prepared` 意图、旧/新配置哈希和备份路径，再替换配置。
+- 恢复时旧哈希回滚、新哈希前滚、未知哈希进入 `needs_attention`，不得覆盖外部编辑。
+- 不可变供应商 ID 保存在管理区块注释中；地址、Key 或模型变化需要重新验证，而不是修改原身份后静默接受。
+- 最终有效配置通过 Codex app-server `config/read(cwd, includeLayers=true)` 获取，只在内存中提取 model/provider 和来源摘要。
+- 用户层配置正确但被项目或会话层覆盖时应展示 `managed_overridden`，不得自动改写用户文件争夺优先级。
 
-### 安装与更新
+### WSL2 与 Linux 导出物
 
-- Windows x64 的 Tauri NSIS `currentUser` 安装、卸载和 updater 签名产物已验证。
-- 更新检查与下载/安装必须分成两个用户操作；updater 签名不能替代操作系统代码签名。
-- Windows ARM64 和完整 macOS 发布链路仍受原生工具链、签名凭据和真实机器验证限制。
-- 严格 macOS 当前用户安装必须以 `~/Applications/GPTEasy.app` 为目标，默认 `/Applications` DMG 不能作为唯一方案。
+- WSL2 检测使用全部发行版、运行中发行版的集合差和当前用户 Lxss 注册表，不进入或启动发行版。
+- 数据库身份使用注册 GUID；显示名称重复且无法解歧时必须停止管理。
+- 已停止发行版只在用户明确切换后临时启动，并在成功、写入失败和管理区块损坏路径恢复原停止状态。
+- Bash 4.4 与 Zsh 5.9 的 12 项矩阵均通过；source 和取消零写入，后续切换保留区块外内容、权限、最近五份备份和恢复语义。
+- 正式产品应由同一个 Rust 生成器共享 provider、管理区块和备份模板，只分叉 Bash/Zsh 的交互与选项隔离层。
+
+### 保留的既有结论
+
+- 桌面进程分类必须结合名称、路径、父子关系和 Electron `--type=` 参数；桌面宿主可自动重启，CLI 必须人工重启。
+- Windows x64 NSIS 当前用户安装与 updater 签名产物已验证；macOS 严格 `~/Applications` 安装及完整签名、公证、更新链路仍需真实机器验证。
