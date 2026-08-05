@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Default capability for custom updater commands","local":true,"windows":["main"],"permissions":["core:default"]}}

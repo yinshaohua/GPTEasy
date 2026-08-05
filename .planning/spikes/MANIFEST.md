@@ -28,4 +28,4 @@
 | 003a | toml-structural-edit | comparison | Given 含未知字段、注释和不同换行的 Codex TOML，when 使用结构化 TOML 编辑执行供应商切换，then 能保留非受管配置并安全原子落盘、备份和恢复 | VALIDATED | rust, toml, atomic-write, backup, comparison |
 | 003b | managed-block-edit | comparison | Given 含未知字段、注释、损坏或重复管理区块的 Codex TOML，when 只替换 GPTEasy 管理区块，then 能保留文件其余字节并在歧义时停止修改 | PARTIAL | rust, managed-block, atomic-write, backup, comparison |
 | 004 | tauri-tray-process-restart | standard | Given Tauri 2 托盘程序运行且桌面 Codex 或 Codex CLI 可能持有旧配置，when 检测进程并切换供应商，then 能呈现立即重启、稍后重启、取消和明确退出语义且不误杀无关进程 | PARTIAL | tauri, tray, process, restart, windows, macos |
-| 005 | desktop-install-update-matrix | standard | Given Windows/macOS x64/ARM64 目标，when 构建、安装和更新 Tauri 2 应用，then 能确认当前用户安装、权限、签名公证、更新包和显式确认更新的可交付方式 | PENDING | tauri, installer, updater, windows, macos |
+| 005 | desktop-install-update-matrix | standard | Given Windows/macOS x64/ARM64 目标，when 构建、安装和更新 Tauri 2 应用，then 能确认当前用户安装、权限、签名公证、更新包和显式确认更新的可交付方式 | PARTIAL | tauri, installer, updater, windows, macos |
