@@ -8,7 +8,7 @@ description: GPTEasy Spike 实验形成的实现蓝图，包含不可妥协的�
 
 GPTEasy 使用 Tauri 2 与 Rust 管理当前用户的原生 Codex、WSL2 与独立 Linux 环境，统一覆盖 ChatGPT 桌面应用中的 Codex 和本机 Codex CLI，并提供供应商验证、安全配置写入、跨资源切换恢复、外部配置协调、托盘进程生命周期，以及 Windows/macOS 当前用户范围的安装和更新。
 
-Spike sessions wrapped: 2026-08-05（001–005、006–011）
+Spike sessions wrapped: 2026-08-05（001–013、017）
 </context>
 
 <requirements>
@@ -30,6 +30,7 @@ Spike sessions wrapped: 2026-08-05（001–005、006–011）
 - macOS 严格当前用户安装以 `~/Applications/GPTEasy.app` 为目标，默认指向 `/Applications` 的 DMG 不能作为唯一正式安装路径。
 - 远程供应商必须使用 HTTPS；仅回环地址允许 HTTP。
 - 供应商使用不可变 ID；地址、凭据或默认模型变化时必须验证后替换，失败保留旧配置。
+- 供应商验证结果必须以不可逆组合指纹绑定服务地址、API Key 和默认模型；只有同一已验证组合可以进入保存或切换 Saga。
 - SQLite 与 Codex 配置文件之间的跨资源切换必须能在失败或崩溃后恢复到一致状态。
 - WSL2 检测不得启动发行版；用户明确切换已停止发行版时才临时启动，并在处理结束后恢复原停止状态。
 - WSL2 首版只管理发行版默认用户的 Codex 配置，不主动终止其中运行的 Codex。
@@ -47,8 +48,10 @@ Spike sessions wrapped: 2026-08-05（001–005、006–011）
 | 安全配置写入 | `references/safe-config-editing.md` | 首次接管已验证为单事务结构化迁移并建立 dotted-key 区块；后续只替换区块并配合备份、并发检查和平台原子替换。 |
 | 切换一致性与外部协调 | `references/switch-consistency-reconciliation.md` | SQLite 与配置文件通过持久化 Saga、旧/新哈希和不可变供应商 ID 收敛；覆盖层或外部修改只展示，不自动争夺。 |
 | 桌面运行生命周期 | `references/desktop-runtime-lifecycle.md` | 进程分类必须结合路径和父子关系；桌面进程可自动重启，CLI 只能提示人工重启。 |
-| WSL2 与 Linux 导出物 | `references/wsl-linux-environments.md` | 检测 WSL2 不得启动发行版；Bash/Zsh 导出函数 source 零写入，并以保守管理区块协议完成独立切换。 |
+| 桌面供应商切换端到端 | `references/desktop-provider-switch-e2e.md` | 验证、组合指纹、首次接管、Saga、app-server 协调和重启计划必须由单个 Rust 后端流程串成不可绕过的链路。 |
+| WSL2 与 Linux 导出物 | `references/wsl-linux-environments.md` | 检测 WSL2 不得启动发行版；受管切换以 Rust 内存渲染加 stdin guest writer 完成，Bash/Zsh 导出函数则保持 source 零写入。 |
 | 安装与更新 | `references/install-and-update.md` | Windows NSIS 当前用户安装已验证；更新检查与安装必须分离，macOS 严格用户级安装仍需真实机器验证。 |
+| macOS 真实宿主契约 | `references/macos-host-contract.md` | `~/Applications`、托盘、LaunchServices、签名公证和两版本 updater 必须在原生 CI 与真实 Mac 分层验证，非 macOS 结果不能冒充宿主证据。 |
 
 ## Source Files
 
@@ -71,4 +74,7 @@ Spike sessions wrapped: 2026-08-05（001–005、006–011）
 - 010-a-linux-switch-functions-bash
 - 010-b-linux-switch-functions-zsh
 - 011-real-provider-compatibility-matrix
+- 012-desktop-provider-switch-e2e
+- 013-wsl2-host-guest-switch-transaction
+- 017-macos-real-host-contract
 </metadata>

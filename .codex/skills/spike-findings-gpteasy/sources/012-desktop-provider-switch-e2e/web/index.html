@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GPTEasy 供应商切换端到端</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <p class="eyebrow">SPIKE 012 · END TO END</p>
+          <h1>从供应商验证到 Codex 生效状态</h1>
+          <p>所有写入都发生在隔离的 <code>.run/ui</code>，真实 Codex 进程只扫描、不终止。</p>
+        </div>
+        <button id="scan">扫描真实进程</button>
+      </header>
+
+      <section class="controls">
+        <label>
+          供应商来源
+          <select id="provider-source">
+            <option value="mock">确定性已验证供应商</option>
+            <option value="live">私密文件中的真实供应商</option>
+          </select>
+        </label>
+        <label>
+          切换决策
+          <select id="decision">
+            <option value="later">稍后重启</option>
+            <option value="immediate">立即重启（只生成安全计划）</option>
+            <option value="cancel">取消</option>
+          </select>
+        </label>
+        <label>
+          故障注入
+          <select id="injection">
+            <option value="none">无</option>
+            <option value="crash_after_prepared">prepared 后崩溃</option>
+            <option value="config_fail_before_replace">替换前失败</option>
+            <option value="crash_after_config_replace">配置替换后崩溃</option>
+            <option value="crash_after_state_commit">状态提交后崩溃</option>
+            <option value="external_edit_after_prepared">外部编辑</option>
+            <option value="restart_failure">桌面重启失败</option>
+          </select>
+        </label>
+        <button id="run">运行端到端流程</button>
+      </section>
+
+      <section>
+        <h2>真实进程边界</h2>
+        <div id="process-metrics" class="metrics"></div>
+        <div id="processes" class="processes">尚未扫描。</div>
+      </section>
+
+      <section>
+        <h2>流水线</h2>
+        <div id="pipeline" class="pipeline">
+          <article data-stage="validation">1. 供应商验证</article>
+          <article data-stage="prepared">2. Saga prepared</article>
+          <article data-stage="config_replaced">3. 原子配置替换</article>
+          <article data-stage="state_committed">4. SQLite 提交</article>
+          <article data-stage="restart_finalized">5. 重启边界</article>
+          <article data-stage="effective">6. app-server 有效状态</article>
+        </div>
+      </section>
+
+      <section class="result-grid">
+        <article>
+          <h2>最终状态</h2>
+          <div id="status-cards" class="metrics"></div>
+        </article>
+        <article>
+          <h2>验证阶段</h2>
+          <div id="validation-stages"></div>
+        </article>
+      </section>
+
+      <section>
+        <div class="section-title">
+          <h2>脱敏证据</h2>
+          <button id="export" class="secondary">查看导出位置</button>
+        </div>
+        <pre id="report">请选择参数并运行。</pre>
+      </section>
+    </main>
+    <script src="./app.js"></script>
+  </body>
+</html>

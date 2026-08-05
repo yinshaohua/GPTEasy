@@ -1,0 +1,35 @@
+[package]
+name = "gpteasy-spike-012"
+version = "0.1.0"
+description = "Desktop provider switch end-to-end spike"
+edition = "2021"
+
+[lib]
+name = "gpteasy_spike_012_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "gpteasy-spike-012"
+path = "src/main.rs"
+
+[[bin]]
+name = "spike-012-matrix"
+path = "src/bin/matrix.rs"
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+dunce = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sysinfo = "0.39.6"
+tauri = { version = "2.11.5", features = ["tray-icon", "image-png"] }
+toml_edit = "0.23"
+url = "2"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }

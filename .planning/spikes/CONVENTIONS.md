@@ -38,6 +38,8 @@ Patterns and stack choices established across spike sessions. New spikes follow 
 - 最终有效 Codex 状态通过 app-server `config/read(cwd, includeLayers=true)` 读取，只保留 model/provider 和字段来源摘要，不保存可能包含凭据的完整响应。
 - SQLite、Codex 配置和进程之间使用可恢复 Saga；持久化 `prepared` 意图和旧/新配置哈希，恢复时按旧哈希回滚、新哈希前滚、未知哈希转外部配置。
 - 所有跨平台结论区分“当前平台实测”“目标编译检查”和“待真实机器验证”，不把交叉编译失败误判为业务不可行。
+- macOS 结论进一步区分“非 macOS 契约测试”“macOS 原生 CI 构建”和“真实用户 Mac”；CI 不能替代托盘、LaunchServices、真实 Codex 拓扑和 updater 体验。
+- macOS 的 Developer ID 代码签名、公证/Stapling、Gatekeeper 与 Tauri updater 内容签名是独立门禁；严格当前用户安装必须显式落到 `~/Applications`。
 - 进程检测组合名称、可执行路径、父子关系和 Electron `--type=` 参数；不能只按进程名分类。
 - 自动重启只应用于可恢复的桌面应用；CLI 的 TTY、cwd、stdin 和会话不可可靠恢复，因此要求人工重启。
 - WSL2 检测只使用全部/运行发行版列表和当前用户 Lxss 注册表，不执行发行版内命令；数据库身份使用注册 GUID，显示名称重复或无法解歧时停止管理。
