@@ -430,7 +430,7 @@ GPTEasy 是一个完全本地运行、托盘优先、由 Rust 后端保持权威
 
 ### Primary（HIGH confidence）
 
-- `C:/src/GPTEasy/.planning/PROJECT.md` — Core Value、完整首版范围、约束、阶段优先级。
+- `.planning/PROJECT.md` — Core Value、完整首版范围、约束、阶段优先级。
 - `C:/src/GPTEasy/CONTEXT.md` — 精确领域术语、供应商生命周期、受管环境、备份、待重启、凭据、平台和发布行为。
 - `C:/src/GPTEasy/docs/adr/0001-plaintext-provider-credentials.md` — 明文供应商凭据与脱敏边界。
 - `C:/src/GPTEasy/docs/adr/0002-tauri-rust-react.md` — Tauri 2 + Rust + TypeScript/React 架构边界。
@@ -459,6 +459,13 @@ GPTEasy 是一个完全本地运行、托盘优先、由 Rust 后端保持权威
 - `.planning/research/FEATURES.md`
 - `.planning/research/ARCHITECTURE.md`
 - `.planning/research/PITFALLS.md`
+
+## Quality Check
+
+- ✓ 已综合四个研究维度并保留其关键实施结论。
+- ✓ 已按锁定基线裁决冲突，没有重新打开领域、ADR 或 UI 决策。
+- ✓ 已给出阶段依赖、风险门禁、研究缺口和完整首版发布条件。
+- ✓ 文档不存在未完成的续写标记。
 
 ---
 *Research completed: 2026-08-05*  
