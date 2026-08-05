@@ -61,7 +61,7 @@
 
 状态 schema 应只持久化稳定领域事实：不可变供应商 ID 与当前已保存配置、独立验证记录、不可变受管环境 ID 与当前供应商关联、类型化单行应用设置，以及迁移账本。运行中进程、最终有效 Codex 层、WSL2 当前运行状态等动态事实不应在本阶段作为数据库权威；后续阶段通过迁移添加其持久化操作状态。`[VERIFIED: CONTEXT.md + ADR-0005/0006/0008 + spike 007/008]`
 
-阶段不能直接把 2026-08-05 已有 Spike 结论视为最终契约。官方 Codex latest API 已把最新稳定版推进到 `0.146.1`，而本机与 Spike 仍是 `0.146.0`；相关核心配置和 `config/read` schema 文件在两个 tag 间未变化，但目标二进制、正式宿主 bundle 与 stdio 启动仍需重新跑 contract fixture。真实 macOS、Windows Authenticode、Windows ARM64 构建和签名、公证也仍未验证，因此必须成为 Phase 1 结束门禁而不是备注。`[VERIFIED: official OpenAI release API + GitHub compare + environment probe + spike 017]`
+阶段不能直接把 2026-08-05 已有 Spike 结论视为最终契约。官方 Codex latest API 已把最新稳定版推进到 `0.146.1`，而本机与 Spike 仍是 `0.146.0`；相关核心配置和 `config/read` schema 文件在两个 tag 间未变化，但 Windows 与 macOS 双架构目标二进制、正式宿主 bundled Codex 与 stdio 启动仍需重新跑 contract fixture。真实 macOS、Windows Authenticode、Windows ARM64 构建和签名、公证也仍未验证，因此必须成为 Phase 1 结束门禁而不是备注。外部 runner 的 manifest 只有在主工作区按 CI run/job ID 取回工件、验证签名 provenance attestation 并重新比对源码 commit 与 artifact digest 后才可关闭门禁；manifest 自报摘要不构成来源证明。`[VERIFIED: official OpenAI release API + GitHub compare + environment probe + spike 017 + revision resolution]`
 
 **Primary recommendation:** 计划按“契约门禁与项目骨架 → 状态 tracer → 备份/迁移/高版本拒写 → 历史 fixture 与打包 smoke”四个波次推进；在 Codex 0.146.1、真实 macOS 和正式签名工件证据齐全前，不宣称 schema/host contract 已冻结。`[VERIFIED: project risk boundary + evidence gaps]`
 
@@ -81,7 +81,7 @@
 
 | Contract | Proven Evidence | Current Verdict | Required Freeze Artifact / Gate |
 |----------|-----------------|-----------------|---------------------------------|
-| Codex 默认配置根 | 官方 0.146.1 source 仍定义 `CODEX_HOME`，未设置时为 `~/.codex`；Windows Spike 001 观察到 CLI 与正式宿主均未覆盖 `CODEX_HOME`。`[CITED: https://raw.githubusercontent.com/openai/codex/rust-v0.146.1/codex-rs/utils/home-dir/src/lib.rs]` | **Source verified；0.146.1 runtime pending**。`[VERIFIED: source diff + local codex 0.146.0 probe]` | `tests/contracts/codex/0.146.1/manifest.json`：二进制版本、路径、SHA-256、生成 schema SHA-256、隔离 `CODEX_HOME` 结果。`[VERIFIED: proposed gate]` |
+| Codex 默认配置根 | 官方 0.146.1 source 仍定义 `CODEX_HOME`，未设置时为 `~/.codex`；Windows Spike 001 观察到 CLI 与正式宿主均未覆盖 `CODEX_HOME`。`[CITED: https://raw.githubusercontent.com/openai/codex/rust-v0.146.1/codex-rs/utils/home-dir/src/lib.rs]` | **Source verified；Windows x64/ARM64 与 macOS Intel/Apple Silicon runtime pending**。`[VERIFIED: source diff + local codex 0.146.0 probe]` | 四目标 Codex manifest：精确二进制版本与摘要、默认配置根、生成 schema 摘要、initialize/initialized/config-read、provider 字段与凭据载体；macOS 还比较官方 CLI 与正式宿主 bundled Codex 的用户层来源。`[VERIFIED: revision resolution]` |
 | Provider 字段与凭据载体 | 0.146.1 source 包含 `base_url`、`env_key`、`experimental_bearer_token`、`wire_api=responses`、`requires_openai_auth`、`supports_websockets`；0.146.0 Spike 已实发 Bearer 请求。`[CITED: https://raw.githubusercontent.com/openai/codex/rust-v0.146.1/codex-rs/model-provider-info/src/lib.rs]` | **Source verified；target binary regression pending**。`[VERIFIED: spike 001 + source compare]` | 0.146.1 fake-provider fixture：`env_key`、direct bearer、缺失 env、Responses request summary，绝不保存完整 Key。`[VERIFIED: proposed gate]` |
 | 配置优先级与 `config/read` | 0.146.1 `ConfigReadParams` 仍含 `cwd`/`includeLayers`，响应含 effective config、origins、layers；优先级 source 明确 user < project < session flags。`[CITED: https://raw.githubusercontent.com/openai/codex/rust-v0.146.1/codex-rs/app-server-protocol/src/protocol/v2/config.rs]` | **Schema verified；0.146.1 stdio smoke pending**。`[VERIFIED: spike 008 + source compare]` | 运行 `codex app-server generate-json-schema --out ...`，再执行 initialize/initialized/config-read 三场景并提交脱敏 golden。`[CITED: https://raw.githubusercontent.com/openai/codex/rust-v0.146.1/codex-rs/app-server/README.md]` |
 | Windows 正式宿主身份 | 2026-08-05 Spike 观察到 AppX `OpenAI.Codex 26.730.8199.0`、`ChatGPT.exe` 根进程和 bundled `resources/codex.exe app-server`。`[VERIFIED: .planning/spikes/001.../windows-evidence.json]` | **Observed on one x64 host；not durable identity**。`[VERIFIED: spike 004 limitation]` | 新 fixture 只保存 package family、bundle version、exe SHA-256、PID/PPID 角色与布尔分类理由；禁止完整命令行。`[VERIFIED: spike discrepancy audit]` |
@@ -89,7 +89,8 @@
 | 真实 WSL2 写入载体 | Spike 013 用一次性 Ubuntu Base 24.04.3 amd64 完成 10/10，证明 stdin 可避免 Key 进入参数并恢复生命周期。`[VERIFIED: spike 013 summary]` | **Representative amd64 verified；ARM64 pending**。`[VERIFIED: spike 013 limitation]` | Phase 1 只冻结 host probe schema；实际 guest 写入仍留给 Phase 5。`[VERIFIED: roadmap boundary]` |
 | Windows 当前用户安装 | Spike 005 用 Tauri 2.11.5/CLI 2.11.4 生成 NSIS `currentUser` 工件并安装到 `%LOCALAPPDATA%`。`[VERIFIED: spike 005 build/install summaries]` | **Unsigned x64 verified**。`[VERIFIED: spike 005]` | 正式 Authenticode x64 smoke：签名有效、安装范围、启动、写状态、重启读取、卸载不破坏状态备份策略。`[CITED: https://v2.tauri.app/distribute/sign/windows/]` |
 | Windows ARM64 | Rust target 已安装，但本机没有 VS ARM64 C++ tools；Spike 未生成 ARM64 installer。`[VERIFIED: environment probe + spike 005]` | **BLOCKER**。`[VERIFIED: environment probe]` | 原生 ARM64 runner 产出签名 NSIS 并运行同一状态 tracer。`[VERIFIED: project platform matrix]` |
-| macOS 当前用户安装/宿主/签名 | 只有 Windows contract harness 与 CI 模板；没有真实 macOS 14+、`~/Applications`、Codex/ChatGPT bundle、codesign、公证或 updater 证据。`[VERIFIED: spike 017 summary]` | **BLOCKER**。`[VERIFIED: spike 017]` | Intel 与 Apple Silicon 各自生成签名/公证 `.app`，安装到 `~/Applications/GPTEasy.app`，运行状态 tracer 并提交 Gatekeeper/codesign/bundle/host fixture。`[CITED: https://v2.tauri.app/distribute/sign/macos/]` |
+| macOS 当前用户安装/宿主/签名 | 只有 Windows contract harness 与 CI 模板；没有真实 macOS 14+、`~/Applications`、Codex/ChatGPT bundle、codesign、公证或 updater 证据。`[VERIFIED: spike 017 summary]` | **BLOCKER**。`[VERIFIED: spike 017]` | Intel 与 Apple Silicon 各自在一次性当前用户 profile 中运行 Codex 0.146.1 与正式宿主 bundled Codex contract，随后生成签名/公证 `.app`、安装到 `~/Applications/GPTEasy.app`，提交 Gatekeeper/codesign/bundle/host fixture；任何资源缺失都保持阻断。`[CITED: https://v2.tauri.app/distribute/sign/macos/]` |
+| 外部证据 provenance | 旧计划只让 manifest 自报 `artifact_sha256` 与 source revision，主工作区无法独立确认 runner、job 或真实工件。`[VERIFIED: independent plan checker]` | **BLOCKER until attested**。 | 每个外部 job 记录不可变 workflow ref、run ID、run attempt、数值 job ID、commit SHA、artifact ID/name/digest；CI 对真实工件和 evidence bundle 生成签名 provenance attestation。主聚合器按 run/artifact ID 取回文件、验证 attestation 签名、重算 digest 并匹配 commit；自报字段永远不能单独关闭 gate。`[VERIFIED: revision resolution]` |
 
 ## Standard Stack
 
@@ -478,9 +479,9 @@ pub enum BootstrapState {
 }
 ```
 
-### Pattern 4: Versioned Contract Fixtures
+### Pattern 4: Versioned, Attested Contract Fixtures
 
-**What:** 每个外部契约 fixture 都包含 `contract_name`、`observed_version`、`evidence_level`、`captured_at`、`artifact_sha256`、`assertions` 和 `redactions`；禁止只提交 README 结论。`[VERIFIED: spike 017 evidence-level pattern + phase risk boundary]`  
+**What:** 每个外部契约 fixture 都包含 `contract_name`、`observed_version`、`evidence_level`、`captured_at`、`assertions`、`redactions` 和独立 provenance 引用；provenance 至少包含 repository、workflow ref、run ID/run attempt、数值 job ID、commit SHA、artifact ID/name/digest 与签名 attestation subject digest。主工作区必须取回并验证真实 artifact；禁止只提交 README 结论，也禁止让 manifest 自报 SHA-256 关闭门禁。`[VERIFIED: spike 017 evidence-level pattern + revision resolution]`
 **When to use:** Codex 升级、宿主应用升级、WSL 版本变化、签名工件候选变化。`[VERIFIED: spike limitations]`
 
 ### Anti-Patterns to Avoid
@@ -497,11 +498,11 @@ pub enum BootstrapState {
 
 ## Tracer-First Decomposition
 
-1. **Tracer A — 可构建空壳:** 建立官方 Tauri React TS 结构、最小 capability、`app_local_data_dir` 路径解析和 `bootstrap_state` command；`npm run build`、`cargo test`、Windows debug launch 全通。`[VERIFIED: official Tauri template + phase scope]`
-2. **Tracer B — 重启持久化:** v1 schema、repository、合成 provider/verification/native environment/settings 集成测试；drop connection 后重开并逐字段断言。`[VERIFIED: STATE-01]`
-3. **Tracer C — 升级安全:** committed v1 fixture、test-only v2 migration、Online Backup API、三份 retention、故障注入、higher-schema refusal、兼容 backup restore。`[VERIFIED: STATE-03/04/05]`
-4. **Tracer D — 契约冻结:** Codex 0.146.1、Windows host、WSL2 probe、Windows signed x64/ARM64、macOS Intel/ARM64 fixture 全部产出 manifest；未完成项保持 phase blocker。`[VERIFIED: phase risk boundary]`
-5. **Tracer E — 安装后状态 canary:** 从已签名安装包启动，写入设置 canary，退出/重开，确认 state path、schema 和值保持；升级/降级用 fixture 运行，不触碰真实供应商配置。`[VERIFIED: STATE-01 + packaging gate]`
+1. **前置门禁（不是生产 tracer）:** package legitimacy、attested contract provenance、Windows/macOS 原生 Codex/宿主/WSL2 探针、可构建 Tauri 壳与签名当前用户安装 path smoke。它们可以先执行，但不得被标记为 Phase 1 生产能力。`[VERIFIED: revision resolution]`
+2. **唯一领先生产 tracer:** 通过真实测试入口走 Tauri mock IPC 调用已注册的窄 `update_app_settings` command，将一个固定非敏感设置写入批准后的 SQLite；销毁第一个进程后，由第二个新进程通过已注册的 `bootstrap_state` command 读回。测试不得直接调用 `StateStore` 代替 command 接线。`[VERIFIED: tracer-first contract + checker resolution]`
+3. **状态扩展:** 在 tracer 已证明的 command/store/disk/reopen 架构上，扩展两个供应商、验证记录、native + WSL2 环境、不同当前供应商和完整设置；installed smoke 使用固定假数据完成同一深比较。`[VERIFIED: STATE-01]`
+4. **升级与恢复扩展:** 分开实现永久历史 fixture、统一只读 DB contract validator、Online Backup + 全 pending rollback、higher-schema refusal + quarantine restore。`[VERIFIED: STATE-03/04/05]`
+5. **最终平台证明:** 四个正式签名目标在专用一次性当前用户 profile 中执行完整状态重开、higher-schema 拒写与备份恢复；全部证据必须来自同一 commit 的可取回签名 attestation。`[VERIFIED: revision resolution]`
 
 ## Don't Hand-Roll
 
@@ -668,27 +669,19 @@ fn restore_database_backup(
 |---|-------|---------|---------------|
 | — | 本研究没有把未经验证的外部事实写成锁定实现；缺失事实均列为 blocker 或 fail-closed contract。`[VERIFIED: research audit]` | 全文 | — |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **Codex 0.146.1 在目标二进制上的实际 app-server/config/provider 回归是否通过？**
-   - What we know: 0.146.1 是截至 2026-08-05 的最新稳定版，关键 source/schema 文件与 0.146.0 相同。`[VERIFIED: OpenAI release + compare API]`
-   - What's unclear: 本机只安装 0.146.0，正式宿主 bundled binary 也没有按 0.146.1 fixture 重跑。`[VERIFIED: environment probe + spikes]`
-   - Recommendation: Phase 1 第一个契约任务必须安装/取得官方 0.146.1 隔离二进制并生成 schema + runtime fixture；失败则阻断 schema freeze。`[VERIFIED: risk boundary]`
+1. **RESOLVED — Codex 0.146.1 目标运行回归如何关闭？**
+   - 规划结果：Windows x64/ARM64、macOS Intel/Apple Silicon 分别运行精确 0.146.1 contract。每个目标验证默认配置根、app-server initialize/initialized/config-read、provider 字段、`env_key`/direct bearer/缺失凭据载体；macOS 额外比较官方 CLI 与正式宿主 bundled Codex 的用户层来源。任一目标缺失或失败，strict freeze gate 保持阻断，不使用 source diff、0.146.0 或另一架构替代。`[VERIFIED: revision resolution]`
 
-2. **重复 WSL `DistributionName` 如何安全映射到 `wsl.exe -d NAME`？**
-   - What we know: 当前主机 registry 有两个 GUID 都显示 Ubuntu，而 `wsl --list` 只展示一个 Ubuntu。`[VERIFIED: spike 009 evidence]`
-   - What's unclear: Microsoft 公共 CLI 文档没有提供按 registration GUID 选择发行版的命令。`[CITED: https://learn.microsoft.com/en-us/windows/wsl/basic-commands]`
-   - Recommendation: contract 固定为 `command_target_resolvable=false -> needs_attention`；不得猜映射。`[VERIFIED: fail-closed requirement]`
+2. **RESOLVED — 重复 WSL `DistributionName` 如何处理？**
+   - 规划结果：固定 `command_target_resolvable=false` 与 `needs_attention`，不猜测 registration GUID 到 `wsl.exe -d NAME` 的映射，不进入发行版。该结果是冻结合同本身，不再作为待选择问题。`[CITED: https://learn.microsoft.com/en-us/windows/wsl/basic-commands]`
 
-3. **真实 macOS 与正式签名资源何时可用？**
-   - What we know: 当前 Windows 主机无法形成 macOS 14+、codesign、公证、Gatekeeper、LaunchServices 或 `~/Applications` 证据。`[VERIFIED: spike 017]`
-   - What's unclear: 是否已有 Intel/Apple Silicon runner、Developer ID、notary credentials 和真实 Codex/ChatGPT host。`[VERIFIED: environment gap]`
-   - Recommendation: planner 加 `checkpoint:human-action` 获取 runner/凭据；没有证据不得关闭 Phase 1。`[VERIFIED: project risk boundary]`
+3. **RESOLVED — 真实 macOS 与正式签名资源缺失时怎么办？**
+   - 规划结果：由 blocking checkpoint 获取 Intel/Apple Silicon 原生 runner、Developer ID/notary 与正式 Codex/ChatGPT host；缺少任一资源时 Phase 1 保持阻断。非 macOS、交叉构建、unsigned 或未公证结果只能证明脚本 fail-closed，不能关闭门禁。`[VERIFIED: revision resolution]`
 
-4. **Windows Authenticode 与 ARM64 build host 是否可用？**
-   - What we know: x64 unsigned NSIS 已通过；`signtool.exe` 不在当前 PATH，VS ARM64 C++ tools 不存在。`[VERIFIED: environment probe + spike 005]`
-   - What's unclear: 正式证书位置/CI secret 与 ARM64 runner。`[VERIFIED: environment gap]`
-   - Recommendation: signed x64 和 signed ARM64 分开验收；不接受 updater `.sig` 代替 Authenticode。`[VERIFIED: Tauri docs + spike 005]`
+4. **RESOLVED — Windows Authenticode 与 ARM64 runner 缺失时怎么办？**
+   - 规划结果：由 blocking checkpoint 获取原生 x64/ARM64 runner 与正式 Authenticode 身份；两个目标分别验收，缺少任一项时阶段保持阻断。Tauri updater `.sig`、unsigned x64 或交叉架构结果不得替代。`[VERIFIED: revision resolution]`
 
 ## Environment Availability
 
