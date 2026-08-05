@@ -1,0 +1,14 @@
+[package]
+name = "gpteasy-spike-013"
+version = "0.1.0"
+edition = "2021"
+description = "WSL2 host-to-guest provider switch transaction spike"
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sysinfo = "0.39.6"
+toml_edit = "0.23"
