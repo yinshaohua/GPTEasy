@@ -11,3 +11,7 @@
 ### Domain docs
 
 采用 single-context 布局：根目录使用 `CONTEXT.md`，架构决策记录存放于 `docs/adr/`。参见 `docs/agents/domain.md`。
+
+### Spike findings
+
+- **Spike findings for GPTEasy** (implementation patterns, constraints, gotchas) → `Skill("spike-findings-gpteasy")`

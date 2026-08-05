@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GPTEasy 进程与重启 Spike</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <p class="eyebrow">SPIKE 004</p>
+          <h1>Codex 进程与重启决策</h1>
+          <p>读取真实进程，不会从此页面终止任何真实 Codex 进程。</p>
+        </div>
+        <button id="scan">重新扫描</button>
+      </header>
+
+      <section class="summary" id="summary"></section>
+
+      <section>
+        <h2>检测结果</h2>
+        <div id="processes" class="cards"></div>
+      </section>
+
+      <section>
+        <h2>切换前决策</h2>
+        <div class="choices">
+          <button data-decision="immediate">立即重启</button>
+          <button data-decision="later">稍后重启</button>
+          <button data-decision="cancel" class="secondary">取消</button>
+        </div>
+        <pre id="plan">请先扫描进程。</pre>
+      </section>
+
+      <footer>
+        关闭窗口后应用应继续驻留托盘；只有托盘“明确退出”才结束进程。
+      </footer>
+    </main>
+    <script src="./app.js"></script>
+  </body>
+</html>

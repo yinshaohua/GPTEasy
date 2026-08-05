@@ -22,9 +22,12 @@ Patterns and stack choices established across spike sessions. New spikes follow 
 - 不读取、输出或提交真实供应商 Key；测试使用明显的假凭据。
 - Key 不放在外部进程命令行。正式 Tauri command 在同一 Rust 进程内以内存参数传递。
 - 日志只保留事件类型、耗时、状态、路径和布尔判据，不保存完整请求、模型输出、配置正文或进程完整命令行。
+- 远程供应商地址只允许 HTTPS；HTTP 只用于 `localhost`、`127.0.0.1` 和 `[::1]` 回环测试。
+- 供应商验证固定覆盖 URL 策略、模型发现、Responses SSE/工具调用和工具结果回传；地址、Key 或默认模型变化后全量重跑。
 - 修改配置时先解析和校验，再备份、写同目录临时文件、同步、检查并发变化并原子替换。
 - Windows 已有文件替换使用 `ReplaceFileW`；macOS/Unix 使用同文件系统 rename 并同步父目录。
 - 首次接管使用结构化 TOML 迁移；管理区块建立后使用 dotted-key 区块替换，标记损坏或重复时停止。
+- 当前用户默认 `~/.codex/config.toml` 是受管写入目标；若发现无法匹配的 provider 或外部配置层，展示实际状态而不自动争夺。
 - 所有跨平台结论区分“当前平台实测”“目标编译检查”和“待真实机器验证”，不把交叉编译失败误判为业务不可行。
 - 进程检测组合名称、可执行路径、父子关系和 Electron `--type=` 参数；不能只按进程名分类。
 - 自动重启只应用于可恢复的桌面应用；CLI 的 TTY、cwd、stdin 和会话不可可靠恢复，因此要求人工重启。
