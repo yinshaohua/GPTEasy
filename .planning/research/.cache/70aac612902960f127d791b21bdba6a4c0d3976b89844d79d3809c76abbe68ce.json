@@ -1,0 +1,1 @@
+{"content":"Bash 与 Zsh 官方手册显示两者在数组索引、read 提示语法、参数展开和选项行为上存在差异，单引号内不能直接出现单引号。GPTEasy 必须为 Bash 4+ 和 Zsh 5+ 维护独立模板，并分别实现 shell literal 编码和 TOML 字符串编码；所有供应商名称、API Key、URL、模型 ID 应以属性/模糊语料测试，不能通过 eval 或拼接命令执行。","source":"web","provider":"websearch","confidence":"MEDIUM","fetched_at":"2026-08-05T07:13:22.888Z","ttl":86400000,"kind":"web"}

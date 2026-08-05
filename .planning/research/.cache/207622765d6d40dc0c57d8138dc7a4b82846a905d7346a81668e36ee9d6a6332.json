@@ -1,0 +1,1 @@
+{"content":"SQLite 官方建议活动数据库使用 Online Backup API 或 VACUUM INTO 获取一致快照；简单复制活动数据库可能在掉电后得到损坏备份，WAL 模式还涉及 -wal/-shm 状态。迁移应在显式写事务中顺序执行并把 schema/user_version 更新纳入同一提交；foreign_keys 默认连接级关闭且不能在事务中切换，需在每个连接打开时启用；迁移后可用 quick_check/integrity_check 验证。","source":"web","provider":"websearch","confidence":"MEDIUM","fetched_at":"2026-08-05T07:13:20.047Z","ttl":86400000,"kind":"docs"}

@@ -1,0 +1,1 @@
+{"content":"Windows 官方进程枚举只先给 PID/快照，需再通过 QueryFullProcessImageName 等校验完整可执行路径；PID 只在进程生命周期内有效。macOS 可通过 NSWorkspace/NSRunningApplication 的 bundle identifier 识别应用。GPTEasy 不应仅按进程名匹配或持久化裸 PID，应使用路径/签名或 bundle ID 加启动时刻做身份确认，并把访问拒绝/检测失败视为未知或待重启。","source":"web","provider":"websearch","confidence":"MEDIUM","fetched_at":"2026-08-05T07:13:21.442Z","ttl":86400000,"kind":"web"}

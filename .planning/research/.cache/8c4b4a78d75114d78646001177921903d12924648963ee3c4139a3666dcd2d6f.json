@@ -1,0 +1,1 @@
+{"content":"WSL 官方说明命令默认以目标发行版默认用户运行，导入发行版可能没有发行版 launcher，默认用户配置方式不同；--list --verbose 同时包含 WSL1/WSL2。自动化应使用 --quiet 名称集合避免解析本地化状态列，结构化传递发行版参数，显式过滤版本 2，并在发行版内查询实际用户与 HOME，不能假设 Ubuntu launcher、/home/<name> 或非 root。","source":"web","provider":"websearch","confidence":"MEDIUM","fetched_at":"2026-08-05T07:13:22.290Z","ttl":86400000,"kind":"web"}

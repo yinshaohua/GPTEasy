@@ -1,0 +1,1 @@
+{"content":"Rust std::fs::rename 明确说明 Unix 与 Windows 在目标已存在时行为不同；Windows 的 ReplaceFileW/MoveFileEx 提供替换语义与写穿选项。跨平台原子配置写入必须使用同目录临时文件、平台适配替换、文件刷盘和必要的目录刷盘，并显式处理权限/ACL、符号链接、共享锁和读改写竞态，不能把 rename 当作天然跨平台原子覆盖。","source":"web","provider":"websearch","confidence":"MEDIUM","fetched_at":"2026-08-05T07:13:20.395Z","ttl":86400000,"kind":"web"}

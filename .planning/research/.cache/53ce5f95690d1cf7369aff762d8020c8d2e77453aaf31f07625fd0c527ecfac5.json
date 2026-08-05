@@ -1,0 +1,1 @@
+{"content":"Tauri 2 的托盘由 Rust/JavaScript API显式创建；窗口 CloseRequested 与应用 ExitRequested 是不同生命周期事件，关闭设置窗口若要托盘驻留必须 prevent_close 后 hide，而明确退出要走单独退出状态并允许清理。Tray 图标、菜单事件、macOS template icon 和单实例窗口复用都需要显式管理，重复创建窗口/托盘或让关闭拦截器吞掉退出会造成幽灵进程、重复菜单与更新无法退出。","source":"web","provider":"websearch","confidence":"MEDIUM","fetched_at":"2026-08-05T07:13:18.940Z","ttl":86400000,"kind":"docs"}
