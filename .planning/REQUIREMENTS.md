@@ -171,24 +171,104 @@
 
 ## Traceability
 
-路线图创建时为每项 v1 要求分配唯一阶段。
+每项 v1 要求均已分配到一个且仅一个路线图阶段。
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| STATE-01…STATE-08 | 待路线图创建 | Pending |
-| PROV-01…PROV-12 | 待路线图创建 | Pending |
-| VALD-01…VALD-08 | 待路线图创建 | Pending |
-| NATV-01…NATV-13 | 待路线图创建 | Pending |
-| UX-01…UX-11 | 待路线图创建 | Pending |
-| WSL-01…WSL-10 | 待路线图创建 | Pending |
-| LNX-01…LNX-09 | 待路线图创建 | Pending |
-| OPS-01…OPS-09 | 待路线图创建 | Pending |
-| REL-01…REL-08 | 待路线图创建 | Pending |
+| STATE-01 | Phase 1 | Pending |
+| STATE-02 | Phase 1 | Pending |
+| STATE-03 | Phase 1 | Pending |
+| STATE-04 | Phase 1 | Pending |
+| STATE-05 | Phase 1 | Pending |
+| STATE-06 | Phase 2 | Pending |
+| STATE-07 | Phase 2 | Pending |
+| STATE-08 | Phase 2 | Pending |
+| PROV-01 | Phase 3 | Pending |
+| PROV-02 | Phase 3 | Pending |
+| PROV-03 | Phase 3 | Pending |
+| PROV-04 | Phase 3 | Pending |
+| PROV-05 | Phase 3 | Pending |
+| PROV-06 | Phase 3 | Pending |
+| PROV-07 | Phase 3 | Pending |
+| PROV-08 | Phase 3 | Pending |
+| PROV-09 | Phase 3 | Pending |
+| PROV-10 | Phase 3 | Pending |
+| PROV-11 | Phase 5 | Pending |
+| PROV-12 | Phase 3 | Pending |
+| VALD-01 | Phase 3 | Pending |
+| VALD-02 | Phase 3 | Pending |
+| VALD-03 | Phase 3 | Pending |
+| VALD-04 | Phase 3 | Pending |
+| VALD-05 | Phase 3 | Pending |
+| VALD-06 | Phase 3 | Pending |
+| VALD-07 | Phase 3 | Pending |
+| VALD-08 | Phase 3 | Pending |
+| NATV-01 | Phase 4 | Pending |
+| NATV-02 | Phase 4 | Pending |
+| NATV-03 | Phase 4 | Pending |
+| NATV-04 | Phase 4 | Pending |
+| NATV-05 | Phase 4 | Pending |
+| NATV-06 | Phase 4 | Pending |
+| NATV-07 | Phase 4 | Pending |
+| NATV-08 | Phase 4 | Pending |
+| NATV-09 | Phase 4 | Pending |
+| NATV-10 | Phase 4 | Pending |
+| NATV-11 | Phase 4 | Pending |
+| NATV-12 | Phase 4 | Pending |
+| NATV-13 | Phase 4 | Pending |
+| UX-01 | Phase 7 | Pending |
+| UX-02 | Phase 7 | Pending |
+| UX-03 | Phase 7 | Pending |
+| UX-04 | Phase 7 | Pending |
+| UX-05 | Phase 7 | Pending |
+| UX-06 | Phase 7 | Pending |
+| UX-07 | Phase 7 | Pending |
+| UX-08 | Phase 7 | Pending |
+| UX-09 | Phase 7 | Pending |
+| UX-10 | Phase 7 | Pending |
+| UX-11 | Phase 7 | Pending |
+| WSL-01 | Phase 5 | Pending |
+| WSL-02 | Phase 5 | Pending |
+| WSL-03 | Phase 5 | Pending |
+| WSL-04 | Phase 5 | Pending |
+| WSL-05 | Phase 5 | Pending |
+| WSL-06 | Phase 5 | Pending |
+| WSL-07 | Phase 5 | Pending |
+| WSL-08 | Phase 5 | Pending |
+| WSL-09 | Phase 5 | Pending |
+| WSL-10 | Phase 5 | Pending |
+| LNX-01 | Phase 6 | Pending |
+| LNX-02 | Phase 6 | Pending |
+| LNX-03 | Phase 6 | Pending |
+| LNX-04 | Phase 6 | Pending |
+| LNX-05 | Phase 6 | Pending |
+| LNX-06 | Phase 6 | Pending |
+| LNX-07 | Phase 6 | Pending |
+| LNX-08 | Phase 6 | Pending |
+| LNX-09 | Phase 6 | Pending |
+| OPS-01 | Phase 2 | Pending |
+| OPS-02 | Phase 2 | Pending |
+| OPS-03 | Phase 2 | Pending |
+| OPS-04 | Phase 8 | Pending |
+| OPS-05 | Phase 8 | Pending |
+| OPS-06 | Phase 8 | Pending |
+| OPS-07 | Phase 7 | Pending |
+| OPS-08 | Phase 7 | Pending |
+| OPS-09 | Phase 7 | Pending |
+| REL-01 | Phase 8 | Pending |
+| REL-02 | Phase 8 | Pending |
+| REL-03 | Phase 8 | Pending |
+| REL-04 | Phase 8 | Pending |
+| REL-05 | Phase 8 | Pending |
+| REL-06 | Phase 8 | Pending |
+| REL-07 | Phase 8 | Pending |
+| REL-08 | Phase 8 | Pending |
 
 **Coverage:**
 - v1 requirements: 88 total
-- Mapped to phases: 0
-- Unmapped: 88
+- Mapped to phases: 88
+- Unmapped: 0
+- Duplicate mappings: 0
 
 ---
 *Requirements defined: 2026-08-05*
