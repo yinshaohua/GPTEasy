@@ -27,7 +27,7 @@
 - WSL2 首版只管理发行版默认用户的 Codex 配置，不主动终止其中运行的 Codex。
 - Linux 导出物分别支持 Bash 4+ 与 Zsh 5+，不依赖 Python、Node.js、第三方解析器或 GPTEasy 可执行文件。
 - Linux 切换脚本 source 时不得修改配置；只有用户调用交互式 function 并选择供应商后才写入。
-- 真实供应商凭据只从仓库外的当前用户私密文件读取，不进入命令行、日志、诊断或 Git。
+- 真实供应商凭据只从 Git 忽略的 `.planning/spikes/.secrets/provider.json` 读取，不进入命令行、日志、诊断或 Git。
 
 ## Spikes
 
@@ -45,4 +45,4 @@
 | 009 | wsl2-environment-lifecycle | standard | Given 多个运行中或已停止的 WSL2 发行版及其默认用户，when 检测、单独切换或批量切换供应商，then 检测不启动发行版、显式切换才临时启动、只修改默认用户并恢复原停止状态 | PARTIAL | wsl2, windows, process, config, lifecycle, backup |
 | 010a | linux-switch-functions-bash | comparison | Given 只有 Bash 4+ 且无额外运行时的 Linux 环境，when source 导出脚本并交互选择、取消或重复切换供应商，then 只有明确选择后才安全替换管理区块、备份并保留其他配置 | VALIDATED | bash, linux, shell, managed-block, backup, comparison |
 | 010b | linux-switch-functions-zsh | comparison | Given 只有 Zsh 5+ 且无额外运行时的 Linux 环境，when source 导出脚本并交互选择、取消或重复切换供应商，then 只有明确选择后才安全替换管理区块、备份并保留其他配置 | VALIDATED | zsh, linux, shell, managed-block, backup, comparison |
-| 011 | real-provider-compatibility-matrix | standard | Given 仓库外私密文件中的真实供应商地址、API Key 和模型，when 在分阶段截止时间、限流和协议差异下运行完整 nonce 工具闭环，then 能形成真实兼容结论、稳定失败分类和脱敏证据 | PENDING | provider, responses-api, sse, tools, timeout, rate-limit, live |
+| 011 | real-provider-compatibility-matrix | standard | Given Git 忽略的项目本地私密文件中的真实供应商地址、API Key 和模型，when 在分阶段截止时间、限流和协议差异下运行完整 nonce 工具闭环，then 能形成真实兼容结论、稳定失败分类和脱敏证据 | VALIDATED | provider, responses-api, sse, tools, timeout, rate-limit, live |
