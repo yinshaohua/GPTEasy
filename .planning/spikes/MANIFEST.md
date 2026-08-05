@@ -2,7 +2,7 @@
 
 ## Idea
 
-验证使用 Tauri 2 与 Rust 直接管理当前用户原生 Codex 配置的可行性，覆盖 Windows/macOS、统一 ChatGPT 桌面应用中的 Codex 与本机 Codex CLI、供应商配置与验证、原子修改和备份恢复、托盘与进程检测，以及当前用户范围的安装和显式确认更新。
+验证使用 Tauri 2 与 Rust 管理 GPTEasy 当前用户环境的可行性，覆盖 Windows/macOS 原生 Codex、统一 ChatGPT 桌面应用中的 Codex 与本机 Codex CLI、供应商配置与验证、原子修改和备份恢复、托盘与进程检测、当前用户范围的安装和显式确认更新，以及 WSL2、独立 Linux 切换脚本和跨资源状态协调。
 
 ## Requirements
 
@@ -21,6 +21,13 @@
 - 只提供当前用户安装；更新必须由用户确认，不进行静默安装。
 - macOS 严格当前用户安装以 `~/Applications/GPTEasy.app` 为目标，默认指向 `/Applications` 的 DMG 不能作为唯一正式安装路径。
 - 远程供应商必须使用 HTTPS；仅回环地址允许 HTTP。
+- 供应商使用不可变 ID；地址、凭据或默认模型变化时必须验证后替换，失败保留旧配置。
+- SQLite 与 Codex 配置文件之间的跨资源切换必须能在失败或崩溃后恢复到一致状态。
+- WSL2 检测不得启动发行版；用户明确切换已停止发行版时才临时启动，并在处理结束后恢复原停止状态。
+- WSL2 首版只管理发行版默认用户的 Codex 配置，不主动终止其中运行的 Codex。
+- Linux 导出物分别支持 Bash 4+ 与 Zsh 5+，不依赖 Python、Node.js、第三方解析器或 GPTEasy 可执行文件。
+- Linux 切换脚本 source 时不得修改配置；只有用户调用交互式 function 并选择供应商后才写入。
+- 真实供应商凭据只从仓库外的当前用户私密文件读取，不进入命令行、日志、诊断或 Git。
 
 ## Spikes
 
@@ -32,3 +39,10 @@
 | 003b | managed-block-edit | comparison | Given 含未知字段、注释、损坏或重复管理区块的 Codex TOML，when 只替换 GPTEasy 管理区块，then 能保留文件其余字节并在歧义时停止修改 | PARTIAL | rust, managed-block, atomic-write, backup, comparison |
 | 004 | tauri-tray-process-restart | standard | Given Tauri 2 托盘程序运行且桌面 Codex 或 Codex CLI 可能持有旧配置，when 检测进程并切换供应商，then 能呈现立即重启、稍后重启、取消和明确退出语义且不误杀无关进程 | PARTIAL | tauri, tray, process, restart, windows, macos |
 | 005 | desktop-install-update-matrix | standard | Given Windows/macOS x64/ARM64 目标，when 构建、安装和更新 Tauri 2 应用，then 能确认当前用户安装、权限、签名公证、更新包和显式确认更新的可交付方式 | PARTIAL | tauri, installer, updater, windows, macos |
+| 006 | first-takeover-managed-block-transaction | standard | Given 已有受管键、未知字段、注释和不同换行的 Codex TOML，when 首次接管在一个事务中完成结构化迁移并建立 dotted-key 管理区块，then 最终配置有效、非受管配置保留、后续切换区块外字节不变且故障可恢复 | VALIDATED | rust, toml, migration, managed-block, atomic-write, integration |
+| 007 | provider-switch-saga | standard | Given SQLite 中的已验证供应商、当前 Codex 配置和相关进程，when 在验证、状态写入、配置替换及重启边界发生失败或崩溃，then 系统重启后能收敛到完整旧状态或完整新状态且不静默终止 CLI | PENDING | rust, sqlite, config, saga, recovery, restart, integration |
+| 008 | external-config-reconciliation | standard | Given 用户层配置被外部修改、存在覆盖层或供应商身份匹配歧义，when GPTEasy 启动或重新扫描，then 能识别受管供应商、展示外部配置和层级差异且不自动覆盖 | PENDING | codex, config-layer, provider-id, reconciliation, external-config, integration |
+| 009 | wsl2-environment-lifecycle | standard | Given 多个运行中或已停止的 WSL2 发行版及其默认用户，when 检测、单独切换或批量切换供应商，then 检测不启动发行版、显式切换才临时启动、只修改默认用户并恢复原停止状态 | PENDING | wsl2, windows, process, config, lifecycle, backup |
+| 010a | linux-switch-functions-bash | comparison | Given 只有 Bash 4+ 且无额外运行时的 Linux 环境，when source 导出脚本并交互选择、取消或重复切换供应商，then 只有明确选择后才安全替换管理区块、备份并保留其他配置 | PENDING | bash, linux, shell, managed-block, backup, comparison |
+| 010b | linux-switch-functions-zsh | comparison | Given 只有 Zsh 5+ 且无额外运行时的 Linux 环境，when source 导出脚本并交互选择、取消或重复切换供应商，then 只有明确选择后才安全替换管理区块、备份并保留其他配置 | PENDING | zsh, linux, shell, managed-block, backup, comparison |
+| 011 | real-provider-compatibility-matrix | standard | Given 仓库外私密文件中的真实供应商地址、API Key 和模型，when 在分阶段截止时间、限流和协议差异下运行完整 nonce 工具闭环，then 能形成真实兼容结论、稳定失败分类和脱敏证据 | PENDING | provider, responses-api, sse, tools, timeout, rate-limit, live |
