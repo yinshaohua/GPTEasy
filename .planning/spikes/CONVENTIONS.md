@@ -19,6 +19,7 @@ Patterns and stack choices established across spike sessions. New spikes follow 
 - 自验证实验输出 `.run/summary.json`；长流程按场景写独立 JSON/JSONL 证据。
 - Tauri Spike 使用 `web/` 保存无构建器静态前端，`src-tauri/` 保存 Rust 应用和配置。
 - 临时真实凭据统一放在 `.planning/spikes/.secrets/`，该目录必须由 `.planning/spikes/.gitignore` 忽略；运行前使用 `git check-ignore` 再验证。
+- 含受管配置、备份或一次性 VHD 的 operational workspace 与可导出的 evidence 目录分离；泄漏扫描只允许 evidence、数据库和事件日志通过。
 
 ## Patterns
 
@@ -27,6 +28,7 @@ Patterns and stack choices established across spike sessions. New spikes follow 
 - 日志只保留事件类型、耗时、状态、路径和布尔判据，不保存完整请求、模型输出、配置正文或进程完整命令行。
 - 远程供应商地址只允许 HTTPS；HTTP 只用于 `localhost`、`127.0.0.1` 和 `[::1]` 回环测试。
 - 供应商验证固定覆盖 URL 策略、模型发现、Responses SSE/工具调用和工具结果回传；地址、Key 或默认模型变化后全量重跑。
+- 验证到保存必须在同一 Rust 后端调用中持有类型化 `VerifiedProvider`；使用版本化 SHA-256 组合指纹绑定地址、模型和 Key，SQLite 只保存指纹而不保存 Key。
 - 修改配置时先解析和校验，再备份、写同目录临时文件、同步、检查并发变化并原子替换。
 - Windows 已有文件替换使用 `ReplaceFileW`；macOS/Unix 使用同文件系统 rename 并同步父目录。
 - 首次接管使用结构化 TOML 迁移；管理区块建立后使用 dotted-key 区块替换，标记损坏或重复时停止。
@@ -40,10 +42,12 @@ Patterns and stack choices established across spike sessions. New spikes follow 
 - 自动重启只应用于可恢复的桌面应用；CLI 的 TTY、cwd、stdin 和会话不可可靠恢复，因此要求人工重启。
 - WSL2 检测只使用全部/运行发行版列表和当前用户 Lxss 注册表，不执行发行版内命令；数据库身份使用注册 GUID，显示名称重复或无法解歧时停止管理。
 - 已停止 WSL2 环境只在用户明确切换时临时启动，并在成功、失败和配置损坏路径都恢复原停止状态。
+- Windows 管理 WSL 配置时由 Rust 在内存中完成 TOML 迁移，把完整候选经 `wsl.exe` stdin 交给无凭据 guest writer；Key、地址和模型不得作为 Windows 或 Linux 进程参数。
 - Bash/Zsh 导出脚本 source 时零写入；无管理区块但已有供应商键时停止并要求结构化迁移，后续只替换区块。
 - Linux 备份使用 UTC 纳秒时间戳文件名并按文件名逆序裁剪，避免依赖 DrvFS 等挂载文件系统的 mtime 排序。
 - blocking `reqwest` 的 SSE 首事件、空闲和 overall 截止时间通过 reader thread 与 channel timeout 区分；429 单独分类为 `rate_limit`。
 - updater 检查与下载/安装必须是两个独立用户操作，不能在检查成功后自动安装。
+- 传给 Codex app-server 的 Windows cwd 和项目 trust 路径使用无 `\\?\` 前缀的规范路径；`std::fs::canonicalize` 的结果需要通过 `dunce::canonicalize` 等方式归一化。
 
 ## Tools & Libraries
 
@@ -57,3 +61,5 @@ Patterns and stack choices established across spike sessions. New spikes follow 
 - `serde` / `serde_json` 1.x：所有实验统一使用的结构化输入、输出和证据格式。
 - `codex-cli` 0.146.0 app-server：`config/read` 的 user/project/sessionFlags 层和字段 origins 已验证。
 - GNU Bash 4.4.0、Zsh 5.9：独立 Linux 切换函数的 12 项对照矩阵已验证。
+- Ubuntu Base 24.04.3 amd64：一次性 WSL2 真实停止/运行生命周期、stdin 凭据传递和 guest 原子写入矩阵已验证。
+- `dunce` 1.x：Windows 路径去除 verbatim `\\?\` 前缀后，Codex 项目 trust 与 `config/read` cwd 可稳定匹配。
