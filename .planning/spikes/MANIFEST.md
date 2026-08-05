@@ -43,6 +43,6 @@
 | 007 | provider-switch-saga | standard | Given SQLite 中的已验证供应商、当前 Codex 配置和相关进程，when 在验证、状态写入、配置替换及重启边界发生失败或崩溃，then 系统重启后能收敛到完整旧状态或完整新状态且不静默终止 CLI | VALIDATED | rust, sqlite, config, saga, recovery, restart, integration |
 | 008 | external-config-reconciliation | standard | Given 用户层配置被外部修改、存在覆盖层或供应商身份匹配歧义，when GPTEasy 启动或重新扫描，then 能识别受管供应商、展示外部配置和层级差异且不自动覆盖 | VALIDATED | codex, config-layer, provider-id, reconciliation, external-config, integration |
 | 009 | wsl2-environment-lifecycle | standard | Given 多个运行中或已停止的 WSL2 发行版及其默认用户，when 检测、单独切换或批量切换供应商，then 检测不启动发行版、显式切换才临时启动、只修改默认用户并恢复原停止状态 | PARTIAL | wsl2, windows, process, config, lifecycle, backup |
-| 010a | linux-switch-functions-bash | comparison | Given 只有 Bash 4+ 且无额外运行时的 Linux 环境，when source 导出脚本并交互选择、取消或重复切换供应商，then 只有明确选择后才安全替换管理区块、备份并保留其他配置 | PENDING | bash, linux, shell, managed-block, backup, comparison |
-| 010b | linux-switch-functions-zsh | comparison | Given 只有 Zsh 5+ 且无额外运行时的 Linux 环境，when source 导出脚本并交互选择、取消或重复切换供应商，then 只有明确选择后才安全替换管理区块、备份并保留其他配置 | PENDING | zsh, linux, shell, managed-block, backup, comparison |
+| 010a | linux-switch-functions-bash | comparison | Given 只有 Bash 4+ 且无额外运行时的 Linux 环境，when source 导出脚本并交互选择、取消或重复切换供应商，then 只有明确选择后才安全替换管理区块、备份并保留其他配置 | VALIDATED | bash, linux, shell, managed-block, backup, comparison |
+| 010b | linux-switch-functions-zsh | comparison | Given 只有 Zsh 5+ 且无额外运行时的 Linux 环境，when source 导出脚本并交互选择、取消或重复切换供应商，then 只有明确选择后才安全替换管理区块、备份并保留其他配置 | VALIDATED | zsh, linux, shell, managed-block, backup, comparison |
 | 011 | real-provider-compatibility-matrix | standard | Given 仓库外私密文件中的真实供应商地址、API Key 和模型，when 在分阶段截止时间、限流和协议差异下运行完整 nonce 工具闭环，then 能形成真实兼容结论、稳定失败分类和脱敏证据 | PENDING | provider, responses-api, sse, tools, timeout, rate-limit, live |
