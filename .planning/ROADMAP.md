@@ -82,53 +82,56 @@ Plans:
 
 **Wave 7** *(blocked on Wave 6 completion)*
 
-- [ ] 01-15-PLAN.md — 获取 Windows x64/ARM64 独立 attested freeze evidence
-- [ ] 01-16-PLAN.md — 获取 macOS Intel/Apple Silicon 独立 attested freeze evidence
+- [ ] 01-15-PLAN.md — 建立不依赖发布签名的诚实合同 Freeze，并保持 PhaseComplete 的正式证据硬门
 
 **Wave 8** *(blocked on Wave 7 completion)*
 
-- [ ] 01-17-PLAN.md — 执行 Strict freeze 并批准 schema/backup 两个 one-way 合同
+- [ ] 01-16-PLAN.md — 批准非签名 Freeze、永久 schema version 1 与 backup/recovery 两个 one-way 合同
 
 **Wave 9** *(blocked on Wave 8 completion)*
 
-- [ ] 01-18-PLAN.md — 以 Tauri command→SQLite→新进程 bootstrap 贯通生产 tracer
+- [ ] 01-17-PLAN.md — 以 Tauri command→SQLite→新进程 bootstrap 贯通生产 tracer
 
 **Wave 10** *(blocked on Wave 9 completion)*
 
-- [ ] 01-19-PLAN.md — 扩展完整供应商/验证/环境/设置状态重开
+- [ ] 01-18-PLAN.md — 扩展完整供应商/验证/受管环境/设置状态重开与脱敏投影
 
 **Wave 11** *(blocked on Wave 10 completion)*
 
-- [ ] 01-20-PLAN.md — 建立 truthful installed state smoke、local-only 与跨进程协调
+- [ ] 01-19-PLAN.md — 建立 truthful installed state smoke、local-only 与跨进程协调
 
 **Wave 12** *(blocked on Wave 11 completion)*
 
-- [ ] 01-21-PLAN.md — 创建 append-only registry 与确定性 create-once v001 fixture
+- [ ] 01-20-PLAN.md — 创建 append-only registry 与确定性 create-once v001 fixture
 
 **Wave 13** *(blocked on Wave 12 completion)*
 
-- [ ] 01-22-PLAN.md — 建立历史迁移矩阵、history lock 与 forbidden-migration lint
+- [ ] 01-21-PLAN.md — 建立历史迁移矩阵、history lock 与 forbidden-migration lint
 
 **Wave 14** *(blocked on Wave 13 completion)*
 
-- [ ] 01-23-PLAN.md — 实现统一只读 DB contract validator 与 preflight
+- [ ] 01-22-PLAN.md — 实现统一只读 DB contract validator 与 preflight
 
 **Wave 15** *(blocked on Wave 14 completion)*
 
-- [ ] 01-24-PLAN.md — 实现 verified backup、三份 retention、rollback 与并发协调
+- [ ] 01-23-PLAN.md — 实现 verified backup、三份 retention、全 pending rollback 与并发协调
 
 **Wave 16** *(blocked on Wave 15 completion)*
 
-- [ ] 01-25-PLAN.md — 实现 higher-schema 拒写、quarantine、restore 与 headless recovery
+- [ ] 01-24-PLAN.md — 实现 higher-schema 拒写、verified quarantine、opaque restore 与 headless recovery
 
 **Wave 17** *(blocked on Wave 16 completion)*
 
-- [ ] 01-26-PLAN.md — 重跑 Windows 双架构最终 full-state/recovery installed evidence
-- [ ] 01-27-PLAN.md — 重跑 macOS 双架构最终 full-state/recovery installed evidence
+- [ ] 01-25-PLAN.md — 在不读取签名凭据的前提下接好 Windows/macOS full-state/recovery 最终工作流
 
 **Wave 18** *(blocked on Wave 17 completion)*
 
-- [ ] 01-28-PLAN.md — 执行只读 PhaseComplete 与 STATE-01..STATE-05 最终批准
+- [ ] 01-26-PLAN.md — 获取 Windows x64/ARM64 真实 Authenticode full-state/recovery evidence
+- [ ] 01-27-PLAN.md — 获取 macOS Intel/Apple Silicon 真实 Developer ID/notary full-state/recovery evidence
+
+**Wave 19** *(blocked on Wave 18 completion)*
+
+- [ ] 01-28-PLAN.md — 执行 fail-closed PhaseComplete 与 STATE-01..STATE-05 最终批准
 
 ### Phase 2: 可恢复配置事务与敏感信息边界
 

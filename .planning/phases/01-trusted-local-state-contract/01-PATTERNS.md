@@ -2,7 +2,7 @@
 
 **Mapped:** 2026-08-05  
 **范围来源:** `CONTEXT.md`、`docs/adr/0001-0008`、`.planning/REQUIREMENTS.md`、`01-RESEARCH.md`、`01-VALIDATION.md`  
-**最终拓扑:** 28 个计划、18 个 wave、101 个 concrete files_modified 路径  
+**最终拓扑:** 28 个计划、19 个 wave、101 个 concrete files_modified 路径
 **关键约束:** 所有路径逐项枚举；关键 artifact 不使用 glob；每份 PLAN 的 Artifacts 集合必须与 frontmatter files_modified 完全相等。
 
 ## 锁定边界
@@ -30,9 +30,9 @@
 
 | Path | Plan(s) | Role | Closest Analog | Classification |
 |------|---------|------|----------------|----------------|
-| `.github/workflows/phase1-macos-evidence.yml` | 01-14, 01-27 | macOS contract/package | Spike 017 | 角色匹配/原生补全 |
+| `.github/workflows/phase1-macos-evidence.yml` | 01-14, 01-25 | macOS contract/package | Spike 017 | 角色匹配/原生补全 |
 | `.github/workflows/phase1-macos-wave0.yml` | 01-12 | macOS contract/package | Spike 017 | 角色匹配/原生补全 |
-| `.github/workflows/phase1-windows-evidence.yml` | 01-13, 01-26 | Windows package/lifecycle | Spike 005 | 角色匹配/生命周期补全 |
+| `.github/workflows/phase1-windows-evidence.yml` | 01-13, 01-25 | Windows package/lifecycle | Spike 005 | 角色匹配/生命周期补全 |
 | `index.html` | 01-08 | config/component | 官方 Tauri React TS template | 角色匹配 |
 | `package-lock.json` | 01-08 | config/component | 官方 Tauri React TS template | 角色匹配 |
 | `package.json` | 01-08 | config/component | 官方 Tauri React TS template | 角色匹配 |
@@ -46,89 +46,89 @@
 | `scripts/contracts/probe-windows-host.ps1` | 01-11 | Windows contract probe | Spike 001 | 角色匹配/安全收紧 |
 | `scripts/contracts/probe-wsl2.ps1` | 01-11 | WSL host probe | Spike 009 | 精确/扩展 |
 | `scripts/contracts/run-macos.zsh` | 01-14 | macOS contract/package | Spike 017 | 角色匹配/原生补全 |
-| `scripts/contracts/run-phase1-contracts.ps1` | 01-03 | contract/security gate | 无完整类比 | No Analog / Research |
+| `scripts/contracts/run-phase1-contracts.ps1` | 01-03, 01-15 | contract/security gate | 无完整类比 | No Analog / Research |
 | `scripts/contracts/test-evidence-provenance.ps1` | 01-04 | contract/security gate | 无完整类比 | No Analog / Research |
 | `scripts/contracts/test-gh-preflight.ps1` | 01-05 | contract/security gate | 无完整类比 | No Analog / Research |
 | `scripts/contracts/test-macos-contract-probes.zsh` | 01-12 | macOS contract/package | Spike 017 | 角色匹配/原生补全 |
 | `scripts/contracts/test-macos-package-verifier.zsh` | 01-14 | macOS contract/package | Spike 017 | 角色匹配/原生补全 |
-| `scripts/contracts/test-macos-wave0-contract.ps1` | 01-12 | macOS contract/package | Spike 017 | 角色匹配/原生补全 |
+| `scripts/contracts/test-macos-wave0-contract.ps1` | 01-12, 01-25 | macOS contract/package | Spike 017 | 角色匹配/原生补全 |
 | `scripts/contracts/test-npm-package-allowlist.ps1` | 01-01 | contract/security gate | 无完整类比 | No Analog / Research |
 | `scripts/contracts/test-phase1-plan-source-audit.ps1` | 01-07 | test/config artifact | 无直接类比 | No Analog |
-| `scripts/contracts/test-run-phase1-cli.ps1` | 01-03 | contract/security gate | 无完整类比 | No Analog / Research |
+| `scripts/contracts/test-run-phase1-cli.ps1` | 01-03, 01-15 | contract/security gate | 无完整类比 | No Analog / Research |
 | `scripts/contracts/test-windows-contract-probes.ps1` | 01-11 | Windows contract probe | Spike 001 | 角色匹配/安全收紧 |
-| `scripts/contracts/test-windows-package-verifier.ps1` | 01-13 | Windows package/lifecycle | Spike 005 | 角色匹配/生命周期补全 |
+| `scripts/contracts/test-windows-package-verifier.ps1` | 01-13, 01-25 | Windows package/lifecycle | Spike 005 | 角色匹配/生命周期补全 |
 | `scripts/contracts/test-wsl2-probe.ps1` | 01-11 | WSL host probe | Spike 009 | 精确/扩展 |
 | `scripts/contracts/validate-contract-evidence.ps1` | 01-04 | test/config artifact | 无直接类比 | No Analog |
 | `scripts/contracts/verify-evidence-provenance.ps1` | 01-04 | contract/security gate | 无完整类比 | No Analog / Research |
-| `scripts/contracts/verify-migration-history.ps1` | 01-22 | test/config artifact | 无直接类比 | No Analog |
-| `scripts/contracts/verify-migration-policy.ps1` | 01-22 | test/config artifact | 无直接类比 | No Analog |
+| `scripts/contracts/verify-migration-history.ps1` | 01-21 | test/config artifact | 无直接类比 | No Analog |
+| `scripts/contracts/verify-migration-policy.ps1` | 01-21 | test/config artifact | 无直接类比 | No Analog |
 | `scripts/contracts/verify-npm-package-allowlist.ps1` | 01-01 | contract/security gate | 无完整类比 | No Analog / Research |
 | `scripts/contracts/verify-windows-package.ps1` | 01-13 | Windows package/lifecycle | Spike 005 | 角色匹配/生命周期补全 |
 | `src-tauri/Cargo.lock` | 01-09 | config/bootstrap | Spike 005/012 | 精确或角色匹配 |
 | `src-tauri/Cargo.toml` | 01-09 | config/bootstrap | Spike 005/012 | 精确或角色匹配 |
 | `src-tauri/build.rs` | 01-09 | config/bootstrap | Spike 005/012 | 精确或角色匹配 |
 | `src-tauri/capabilities/default.json` | 01-09 | config/bootstrap | Spike 005/012 | 精确或角色匹配 |
-| `src-tauri/src/bin/generate_v001_fixture.rs` | 01-21 | migration/history fixture | 无永久历史类比 | No Analog / Research |
-| `src-tauri/src/commands.rs` | 01-18, 01-19, 01-25 | domain/repository/command | Spike 012 | 部分；遵循 ADR-0001/0006 |
-| `src-tauri/src/domain/mod.rs` | 01-19 | domain/repository/command | Spike 012 | 部分；遵循 ADR-0001/0006 |
-| `src-tauri/src/lib.rs` | 01-09, 01-10, 01-18, 01-20, 01-25 | composition/state service | Spike 012 | 角色匹配/安全收紧 |
+| `src-tauri/src/bin/generate_v001_fixture.rs` | 01-20 | migration/history fixture | 无永久历史类比 | No Analog / Research |
+| `src-tauri/src/commands.rs` | 01-17, 01-18, 01-24 | domain/repository/command | Spike 012 | 部分；遵循 ADR-0001/0006 |
+| `src-tauri/src/domain/mod.rs` | 01-18 | domain/repository/command | Spike 012 | 部分；遵循 ADR-0001/0006 |
+| `src-tauri/src/lib.rs` | 01-09, 01-10, 01-17, 01-19, 01-24 | composition/state service | Spike 012 | 角色匹配/安全收紧 |
 | `src-tauri/src/main.rs` | 01-09 | config/bootstrap | Spike 005/012 | 精确或角色匹配 |
 | `src-tauri/src/path_smoke.rs` | 01-10 | platform path smoke | Spike 017 + Tauri PathResolver | 部分 |
-| `src-tauri/src/state/backup.rs` | 01-24 | backup/rollback | Spike 009 仅普通文件备份 | 部分/Online Backup 绿色实现 |
-| `src-tauri/src/state/coordination.rs` | 01-20 | inter-process coordination | 无完整类比 | No Analog / Research |
-| `src-tauri/src/state/migrations/0001_initial.sql` | 01-18 | migration/history fixture | 无永久历史类比 | No Analog / Research |
-| `src-tauri/src/state/migrations/mod.rs` | 01-21, 01-24 | migration/history fixture | 无永久历史类比 | No Analog / Research |
-| `src-tauri/src/state/mod.rs` | 01-18, 01-19, 01-20, 01-21, 01-23, 01-24 | composition/state service | Spike 012 | 角色匹配/安全收紧 |
-| `src-tauri/src/state/preflight.rs` | 01-23, 01-25 | DB validation/preflight | 无只读完整合同类比 | No Analog / Research |
-| `src-tauri/src/state/recovery.rs` | 01-25 | recovery/higher schema | 无完整类比 | No Analog / Research |
-| `src-tauri/src/state/repositories.rs` | 01-19 | domain/repository/command | Spike 012 | 部分；遵循 ADR-0001/0006 |
-| `src-tauri/src/state/validation.rs` | 01-23 | DB validation/preflight | 无只读完整合同类比 | No Analog / Research |
+| `src-tauri/src/state/backup.rs` | 01-23 | backup/rollback | Spike 009 仅普通文件备份 | 部分/Online Backup 绿色实现 |
+| `src-tauri/src/state/coordination.rs` | 01-19 | inter-process coordination | 无完整类比 | No Analog / Research |
+| `src-tauri/src/state/migrations/0001_initial.sql` | 01-17 | migration/history fixture | 无永久历史类比 | No Analog / Research |
+| `src-tauri/src/state/migrations/mod.rs` | 01-20, 01-23 | migration/history fixture | 无永久历史类比 | No Analog / Research |
+| `src-tauri/src/state/mod.rs` | 01-17, 01-18, 01-19, 01-20, 01-22, 01-23 | composition/state service | Spike 012 | 角色匹配/安全收紧 |
+| `src-tauri/src/state/preflight.rs` | 01-22, 01-24 | DB validation/preflight | 无只读完整合同类比 | No Analog / Research |
+| `src-tauri/src/state/recovery.rs` | 01-24 | recovery/higher schema | 无完整类比 | No Analog / Research |
+| `src-tauri/src/state/repositories.rs` | 01-18 | domain/repository/command | Spike 012 | 部分；遵循 ADR-0001/0006 |
+| `src-tauri/src/state/validation.rs` | 01-22 | DB validation/preflight | 无只读完整合同类比 | No Analog / Research |
 | `src-tauri/tauri.conf.json` | 01-09 | config/bootstrap | Spike 005/012 | 精确或角色匹配 |
-| `src-tauri/tests/backup_restore.rs` | 01-24 | backup/rollback | Spike 009 仅普通文件备份 | 部分/Online Backup 绿色实现 |
-| `src-tauri/tests/db_contract_validation.rs` | 01-23 | DB validation/preflight | 无只读完整合同类比 | No Analog / Research |
-| `src-tauri/tests/fixture_generation.rs` | 01-21 | migration/history fixture | 无永久历史类比 | No Analog / Research |
-| `src-tauri/tests/higher_schema_refusal.rs` | 01-25 | recovery/higher schema | 无完整类比 | No Analog / Research |
-| `src-tauri/tests/installed_recovery_smoke.rs` | 01-25 | recovery/higher schema | 无完整类比 | No Analog / Research |
-| `src-tauri/tests/installed_state_smoke.rs` | 01-20 | state integration test | Spike 012 场景矩阵 | 部分/产品 schema 重写 |
-| `src-tauri/tests/local_only_boundary.rs` | 01-20 | state integration test | Spike 012 场景矩阵 | 部分/产品 schema 重写 |
-| `src-tauri/tests/migration_failure.rs` | 01-24 | migration/history fixture | 无永久历史类比 | No Analog / Research |
-| `src-tauri/tests/migration_matrix.rs` | 01-22 | migration/history fixture | 无永久历史类比 | No Analog / Research |
+| `src-tauri/tests/backup_restore.rs` | 01-23 | backup/rollback | Spike 009 仅普通文件备份 | 部分/Online Backup 绿色实现 |
+| `src-tauri/tests/db_contract_validation.rs` | 01-22 | DB validation/preflight | 无只读完整合同类比 | No Analog / Research |
+| `src-tauri/tests/fixture_generation.rs` | 01-20 | migration/history fixture | 无永久历史类比 | No Analog / Research |
+| `src-tauri/tests/higher_schema_refusal.rs` | 01-24 | recovery/higher schema | 无完整类比 | No Analog / Research |
+| `src-tauri/tests/installed_recovery_smoke.rs` | 01-24 | recovery/higher schema | 无完整类比 | No Analog / Research |
+| `src-tauri/tests/installed_state_smoke.rs` | 01-19 | state integration test | Spike 012 场景矩阵 | 部分/产品 schema 重写 |
+| `src-tauri/tests/local_only_boundary.rs` | 01-19 | state integration test | Spike 012 场景矩阵 | 部分/产品 schema 重写 |
+| `src-tauri/tests/migration_failure.rs` | 01-23 | migration/history fixture | 无永久历史类比 | No Analog / Research |
+| `src-tauri/tests/migration_matrix.rs` | 01-21 | migration/history fixture | 无永久历史类比 | No Analog / Research |
 | `src-tauri/tests/path_smoke.rs` | 01-10 | platform path smoke | Spike 017 + Tauri PathResolver | 部分 |
-| `src-tauri/tests/ready_preflight.rs` | 01-23 | DB validation/preflight | 无只读完整合同类比 | No Analog / Research |
-| `src-tauri/tests/recovery_validation.rs` | 01-25 | DB validation/preflight | 无只读完整合同类比 | No Analog / Research |
-| `src-tauri/tests/state_command_restart.rs` | 01-18 | state integration test | Spike 012 场景矩阵 | 部分/产品 schema 重写 |
-| `src-tauri/tests/state_concurrency.rs` | 01-20, 01-24, 01-25 | inter-process coordination | 无完整类比 | No Analog / Research |
-| `src-tauri/tests/state_persistence.rs` | 01-19 | state integration test | Spike 012 场景矩阵 | 部分/产品 schema 重写 |
+| `src-tauri/tests/ready_preflight.rs` | 01-22 | DB validation/preflight | 无只读完整合同类比 | No Analog / Research |
+| `src-tauri/tests/recovery_validation.rs` | 01-24 | DB validation/preflight | 无只读完整合同类比 | No Analog / Research |
+| `src-tauri/tests/state_command_restart.rs` | 01-17 | state integration test | Spike 012 场景矩阵 | 部分/产品 schema 重写 |
+| `src-tauri/tests/state_concurrency.rs` | 01-19, 01-23, 01-24 | inter-process coordination | 无完整类比 | No Analog / Research |
+| `src-tauri/tests/state_persistence.rs` | 01-18 | state integration test | Spike 012 场景矩阵 | 部分/产品 schema 重写 |
 | `src/App.tsx` | 01-08 | config/component | 官方 Tauri React TS template | 角色匹配 |
 | `src/global.css` | 01-08 | config/component | 官方 Tauri React TS template | 角色匹配 |
 | `src/main.tsx` | 01-08 | config/component | 官方 Tauri React TS template | 角色匹配 |
-| `tests/fixtures/contracts/codex/macos-apple-silicon/manifest.json` | 01-16 | external evidence fixture | Spike 001/005/009/017 | 部分/attested 扩展 |
-| `tests/fixtures/contracts/codex/macos-intel/manifest.json` | 01-16 | external evidence fixture | Spike 001/005/009/017 | 部分/attested 扩展 |
-| `tests/fixtures/contracts/codex/windows-arm64/manifest.json` | 01-15 | external evidence fixture | Spike 001/005/009/017 | 部分/attested 扩展 |
-| `tests/fixtures/contracts/codex/windows-x64/manifest.json` | 01-15 | external evidence fixture | Spike 001/005/009/017 | 部分/attested 扩展 |
+| `tests/fixtures/contracts/codex/macos-apple-silicon/manifest.json` | 01-27 | external evidence fixture | Spike 001/005/009/017 | 部分/attested 扩展 |
+| `tests/fixtures/contracts/codex/macos-intel/manifest.json` | 01-27 | external evidence fixture | Spike 001/005/009/017 | 部分/attested 扩展 |
+| `tests/fixtures/contracts/codex/windows-arm64/manifest.json` | 01-26 | external evidence fixture | Spike 001/005/009/017 | 部分/attested 扩展 |
+| `tests/fixtures/contracts/codex/windows-x64/manifest.json` | 01-26 | external evidence fixture | Spike 001/005/009/017 | 部分/attested 扩展 |
 | `tests/fixtures/contracts/gh-preflight-cases.json` | 01-05 | contract/security gate | 无完整类比 | No Analog / Research |
-| `tests/fixtures/contracts/host/macos-apple-silicon/manifest.json` | 01-16 | external evidence fixture | Spike 001/005/009/017 | 部分/attested 扩展 |
-| `tests/fixtures/contracts/host/macos-intel/manifest.json` | 01-16 | external evidence fixture | Spike 001/005/009/017 | 部分/attested 扩展 |
-| `tests/fixtures/contracts/host/windows-arm64/manifest.json` | 01-15 | external evidence fixture | Spike 001/005/009/017 | 部分/attested 扩展 |
-| `tests/fixtures/contracts/host/windows-x64/manifest.json` | 01-15 | external evidence fixture | Spike 001/005/009/017 | 部分/attested 扩展 |
+| `tests/fixtures/contracts/host/macos-apple-silicon/manifest.json` | 01-27 | external evidence fixture | Spike 001/005/009/017 | 部分/attested 扩展 |
+| `tests/fixtures/contracts/host/macos-intel/manifest.json` | 01-27 | external evidence fixture | Spike 001/005/009/017 | 部分/attested 扩展 |
+| `tests/fixtures/contracts/host/windows-arm64/manifest.json` | 01-26 | external evidence fixture | Spike 001/005/009/017 | 部分/attested 扩展 |
+| `tests/fixtures/contracts/host/windows-x64/manifest.json` | 01-26 | external evidence fixture | Spike 001/005/009/017 | 部分/attested 扩展 |
 | `tests/fixtures/contracts/npm-package-allowlist.json` | 01-01 | contract/security gate | 无完整类比 | No Analog / Research |
-| `tests/fixtures/contracts/packaging/macos-apple-silicon/manifest.json` | 01-16, 01-27 | macOS contract/package | Spike 017 | 角色匹配/原生补全 |
-| `tests/fixtures/contracts/packaging/macos-intel/manifest.json` | 01-16, 01-27 | macOS contract/package | Spike 017 | 角色匹配/原生补全 |
+| `tests/fixtures/contracts/packaging/macos-apple-silicon/manifest.json` | 01-27 | macOS contract/package | Spike 017 | 角色匹配/原生补全 |
+| `tests/fixtures/contracts/packaging/macos-intel/manifest.json` | 01-27 | macOS contract/package | Spike 017 | 角色匹配/原生补全 |
 | `tests/fixtures/contracts/packaging/macos-positive-control.json` | 01-14 | macOS contract/package | Spike 017 | 角色匹配/原生补全 |
-| `tests/fixtures/contracts/packaging/windows-arm64/manifest.json` | 01-15, 01-26 | external evidence fixture | Spike 001/005/009/017 | 部分/attested 扩展 |
+| `tests/fixtures/contracts/packaging/windows-arm64/manifest.json` | 01-26 | external evidence fixture | Spike 001/005/009/017 | 部分/attested 扩展 |
 | `tests/fixtures/contracts/packaging/windows-positive-control.json` | 01-13 | Windows package/lifecycle | Spike 005 | 角色匹配/生命周期补全 |
-| `tests/fixtures/contracts/packaging/windows-x64/manifest.json` | 01-15, 01-26 | external evidence fixture | Spike 001/005/009/017 | 部分/attested 扩展 |
-| `tests/fixtures/contracts/phase1-plan-audit-lock.json` | 01-07 | contract/security gate | 无完整类比 | No Analog / Research |
+| `tests/fixtures/contracts/packaging/windows-x64/manifest.json` | 01-26 | external evidence fixture | Spike 001/005/009/017 | 部分/attested 扩展 |
+| `tests/fixtures/contracts/phase1-plan-audit-lock.json` | 01-07, 01-15 | contract/security gate | 无完整类比 | No Analog / Research |
 | `tests/fixtures/contracts/provenance-negative-cases.json` | 01-04 | contract/security gate | 无完整类比 | No Analog / Research |
-| `tests/fixtures/contracts/runner-cli-matrix.json` | 01-03 | contract/security gate | 无完整类比 | No Analog / Research |
+| `tests/fixtures/contracts/runner-cli-matrix.json` | 01-03, 01-15 | contract/security gate | 无完整类比 | No Analog / Research |
 | `tests/fixtures/contracts/schema/contract-manifest.schema.json` | 01-04 | contract/security gate | 无完整类比 | No Analog / Research |
 | `tests/fixtures/contracts/schema/provenance.schema.json` | 01-04 | contract/security gate | 无完整类比 | No Analog / Research |
-| `tests/fixtures/contracts/wsl2/windows-arm64/manifest.json` | 01-15 | external evidence fixture | Spike 001/005/009/017 | 部分/attested 扩展 |
-| `tests/fixtures/contracts/wsl2/windows-x64/manifest.json` | 01-15 | external evidence fixture | Spike 001/005/009/017 | 部分/attested 扩展 |
-| `tests/fixtures/databases/history-lock.json` | 01-22 | migration/history fixture | 无永久历史类比 | No Analog / Research |
-| `tests/fixtures/databases/manifest.json` | 01-21 | migration/history fixture | 无永久历史类比 | No Analog / Research |
-| `tests/fixtures/databases/v001/state.sqlite3` | 01-21 | migration/history fixture | 无永久历史类比 | No Analog / Research |
-| `tests/fixtures/migrations/forbidden-migration-cases.json` | 01-22 | migration/history fixture | 无永久历史类比 | No Analog / Research |
+| `tests/fixtures/contracts/wsl2/windows-arm64/manifest.json` | 01-26 | external evidence fixture | Spike 001/005/009/017 | 部分/attested 扩展 |
+| `tests/fixtures/contracts/wsl2/windows-x64/manifest.json` | 01-26 | external evidence fixture | Spike 001/005/009/017 | 部分/attested 扩展 |
+| `tests/fixtures/databases/history-lock.json` | 01-21 | migration/history fixture | 无永久历史类比 | No Analog / Research |
+| `tests/fixtures/databases/manifest.json` | 01-20 | migration/history fixture | 无永久历史类比 | No Analog / Research |
+| `tests/fixtures/databases/v001/state.sqlite3` | 01-20 | migration/history fixture | 无永久历史类比 | No Analog / Research |
+| `tests/fixtures/migrations/forbidden-migration-cases.json` | 01-21 | migration/history fixture | 无永久历史类比 | No Analog / Research |
 | `tsconfig.json` | 01-08 | config/component | 官方 Tauri React TS template | 角色匹配 |
 | `vite.config.ts` | 01-08 | config/component | 官方 Tauri React TS template | 角色匹配 |
 
@@ -150,9 +150,9 @@
 
 ### SQLite 状态、迁移与恢复
 
-- 01-18 是首个生产 tracer：两 OS 进程都经 Tauri mock IPC 调用注册 command。
+- 01-17 是首个生产 tracer：两 OS 进程都经 Tauri mock IPC 调用注册 command。
 - `StateCoordinator` 使用 Rust 标准库 File exclusive lock；是否占用由 OS lock 决定，不由 metadata/marker 自报。
-- historical fixture 先由 01-21 创建，再由 01-22 migration_matrix 消费；verify 不运行 generator。
+- historical fixture 先由 01-20 创建，再由 01-21 migration_matrix 消费；verify 不运行 generator。
 - `verify-migration-policy.ps1` 同时限制 SQL token 与 Rust transform capability。
 - full-state smoke 使用 seed/verify/cleanup；recovery smoke 使用 prepare/refuse/restore/verify/cleanup，且两个 run ID 必须不同。
 - cleanup 只在最终 workflow 统一 finally 执行：recovery cleanup → state cleanup → app cleanup → account/profile cleanup。
@@ -175,15 +175,15 @@
 
 1. package legitimacy、canonical runner、provenance/gh/audit 基础。
 2. frontend/Tauri/path、Windows/macOS/WSL probes 与平台 package lifecycle workflows。
-3. 四目标独立 attested freeze evidence 与 one-way checkpoints。
-4. true production tracer → complete state → local-only/headless/coordinator。
-5. fixture/history/policy → validator → backup/rollback → higher/recovery。
-6. 四目标最终 installed full-state/recovery evidence → read-only PhaseComplete。
+3. 非签名合同 Freeze 与 schema/backup one-way checkpoints，正式签名证据保持 deferred。
+4. 01-17 true production tracer → 01-18 complete state → 01-19 local-only/headless/coordinator。
+5. 01-20 fixture → 01-21 history/policy → 01-22 validator → 01-23 backup/rollback → 01-24 higher/recovery。
+6. 01-25 最终 workflow 接线 → 01-26/01-27 四目标 installed full-state/recovery evidence → 01-28 read-only PhaseComplete。
 
 ## Metadata
 
 - Concrete paths: 101
 - Plans: 28
-- Waves: 18
+- Waves: 19
 - Pattern extraction date: 2026-08-05
 - Wildcard critical artifacts: 0

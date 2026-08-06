@@ -143,6 +143,13 @@ function New-CaseWorkspace {
     Assert-PathUnderDirectory -Path $caseRoot -Directory $TestRoot
     New-Item -ItemType Directory -Path $caseRoot -Force | Out-Null
     Copy-AuditWorkspace -RepositoryRoot $RepositoryRoot -SourcePhaseDir $SourcePhaseDir -DestinationRoot $caseRoot
+    $caseAuditor = Join-Path $caseRoot 'scripts/contracts/audit-phase1-plan-source.ps1'
+    $casePhase = Join-Path $caseRoot '.planning/phases/01-trusted-local-state-contract'
+    $caseLock = Join-Path $caseRoot 'tests/fixtures/contracts/phase1-plan-audit-lock.json'
+    $lockOutput = & powershell -NoProfile -File $caseAuditor -PhaseDir $casePhase -UpdateLock -LockPath $caseLock 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+        throw "无法为临时审计副本建立 digest lock：`n$lockOutput"
+    }
     return $caseRoot
 }
 
@@ -280,6 +287,7 @@ try {
             foreach ($planFile in (Get-ChildItem -LiteralPath $casePhase -Filter '01-??-PLAN.md' -File)) {
                 $content = Read-Utf8File -Path $planFile.FullName
                 $updated = [regex]::Replace($content, '(?m)^\s{2}- STATE-05\s*\r?\n', '')
+                $updated = $updated.Replace(', STATE-05]', ']').Replace('[STATE-05, ', '[').Replace('[STATE-05]', '[]')
                 Write-Utf8File -Path $planFile.FullName -Content $updated
             }
         }
@@ -350,6 +358,90 @@ try {
                 'scripts/contracts/audit-phase1-plan-source-drift.ps1'
             )
             Write-Utf8File -Path $planPath -Content $updated
+        }
+
+    Assert-NegativeCase `
+        -Name 'PATTERNS owner 语义漂移' `
+        -ExpectedPattern 'PATTERNS owner src-tauri/tests/state_command_restart\.rs 计划集合漂移' `
+        -RepositoryRoot $repositoryRoot `
+        -SourcePhaseDir $phaseDir `
+        -TestRoot $testRoot `
+        -AuditorPath $auditorPath `
+        -Mutate {
+            param($caseRoot)
+            $patternsPath = Join-Path $caseRoot '.planning/phases/01-trusted-local-state-contract/01-PATTERNS.md'
+            $content = Read-Utf8File -Path $patternsPath
+            $updated = [regex]::Replace(
+                $content,
+                '(?m)^(\| `src-tauri/tests/state_command_restart\.rs` \| )01-17( \|)',
+                '${1}01-18${2}',
+                1
+            )
+            Write-Utf8File -Path $patternsPath -Content $updated
+        }
+
+    Assert-NegativeCase `
+        -Name 'VALIDATION responsibility 与 command 漂移' `
+        -ExpectedPattern 'VALIDATION (?:responsibility|automated command) 漂移：01-18' `
+        -RepositoryRoot $repositoryRoot `
+        -SourcePhaseDir $phaseDir `
+        -TestRoot $testRoot `
+        -AuditorPath $auditorPath `
+        -Mutate {
+            param($caseRoot)
+            $validationPath = Join-Path $caseRoot '.planning/phases/01-trusted-local-state-contract/01-VALIDATION.md'
+            $content = Read-Utf8File -Path $validationPath
+            $tracerRow = [regex]::Match($content, '(?m)^\| 01-17 \| (?<cells>.+) \|$')
+            if (-not $tracerRow.Success) {
+                throw '未找到 01-17 VALIDATION 行。'
+            }
+            $updated = [regex]::Replace(
+                $content,
+                '(?m)^\| 01-18 \| .+ \|$',
+                ('| 01-18 | ' + $tracerRow.Groups['cells'].Value + ' |'),
+                1
+            )
+            Write-Utf8File -Path $validationPath -Content $updated
+        }
+
+    Assert-NegativeCase `
+        -Name 'SOURCE-AUDIT capability 语义漂移' `
+        -ExpectedPattern 'SOURCE-AUDIT 语义 RESEARCH:R-10 计划集合漂移' `
+        -RepositoryRoot $repositoryRoot `
+        -SourcePhaseDir $phaseDir `
+        -TestRoot $testRoot `
+        -AuditorPath $auditorPath `
+        -Mutate {
+            param($caseRoot)
+            $sourceAuditPath = Join-Path $caseRoot '.planning/phases/01-trusted-local-state-contract/01-SOURCE-AUDIT.md'
+            $content = Read-Utf8File -Path $sourceAuditPath
+            $updated = [regex]::Replace(
+                $content,
+                '(?m)^(\| RESEARCH \| R-10 \|[^|]+\| )17( \| PLANNED \|)$',
+                '${1}18${2}',
+                1
+            )
+            Write-Utf8File -Path $sourceAuditPath -Content $updated
+        }
+
+    Assert-NegativeCase `
+        -Name 'VALIDATION manual gate 拓扑漂移' `
+        -ExpectedPattern 'VALIDATION (?:缺少 checkpoint manual gate：01-26|含无 checkpoint 对应的 manual gate：01-17)' `
+        -RepositoryRoot $repositoryRoot `
+        -SourcePhaseDir $phaseDir `
+        -TestRoot $testRoot `
+        -AuditorPath $auditorPath `
+        -Mutate {
+            param($caseRoot)
+            $validationPath = Join-Path $caseRoot '.planning/phases/01-trusted-local-state-contract/01-VALIDATION.md'
+            $content = Read-Utf8File -Path $validationPath
+            $updated = [regex]::Replace(
+                $content,
+                '(?m)^\| 01-26 \| (Task 1: 核验 Windows 正式凭据与原生 runner 前置条件) \|$',
+                '| 01-17 | $1 |',
+                1
+            )
+            Write-Utf8File -Path $validationPath -Content $updated
         }
 
     Assert-NegativeCase `
@@ -431,6 +523,7 @@ try {
             foreach ($planFile in (Get-ChildItem -LiteralPath $casePhase -Filter '01-??-PLAN.md' -File)) {
                 $content = Read-Utf8File -Path $planFile.FullName
                 $updated = [regex]::Replace($content, '(?m)^\s{2}- STATE-05\s*\r?\n', '')
+                $updated = $updated.Replace(', STATE-05]', ']').Replace('[STATE-05, ', '[').Replace('[STATE-05]', '[]')
                 Write-Utf8File -Path $planFile.FullName -Content $updated
             }
             $sourceAuditPath = Join-Path $casePhase '01-SOURCE-AUDIT.md'
@@ -444,6 +537,7 @@ try {
     foreach ($planFile in (Get-ChildItem -LiteralPath $phaseCompleteNegativePhase -Filter '01-??-PLAN.md' -File)) {
         $content = Read-Utf8File -Path $planFile.FullName
         $updated = [regex]::Replace($content, '(?m)^\s{2}- STATE-05\s*\r?\n', '')
+        $updated = $updated.Replace(', STATE-05]', ']').Replace('[STATE-05, ', '[').Replace('[STATE-05]', '[]')
         Write-Utf8File -Path $planFile.FullName -Content $updated
     }
     $phaseCompleteSourceAuditPath = Join-Path $phaseCompleteNegativePhase '01-SOURCE-AUDIT.md'

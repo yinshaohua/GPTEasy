@@ -125,6 +125,26 @@ function Add-AuditError {
     $script:AuditErrors.Add($Message) | Out-Null
 }
 
+function Format-PlanSet {
+    param([int[]]$Plans)
+
+    return (@($Plans | Sort-Object -Unique | ForEach-Object { '{0:D2}' -f $_ }) -join ',')
+}
+
+function Assert-ExactPlanSet {
+    param(
+        [Parameter(Mandatory = $true)][string]$Label,
+        [int[]]$Expected,
+        [int[]]$Actual
+    )
+
+    $expectedSet = @($Expected | Sort-Object -Unique)
+    $actualSet = @($Actual | Sort-Object -Unique)
+    if (@(Compare-Object -ReferenceObject $expectedSet -DifferenceObject $actualSet).Count -gt 0) {
+        Add-AuditError "$Label 计划集合漂移：expected=$(Format-PlanSet -Plans $expectedSet) actual=$(Format-PlanSet -Plans $actualSet)"
+    }
+}
+
 function Get-Frontmatter {
     param(
         [Parameter(Mandatory = $true)][string]$Content,
@@ -260,7 +280,7 @@ function Get-TaskRecords {
             }
         }
         if ($typeMatch.Success -and
-            $typeMatch.Groups['type'].Value -ne 'checkpoint:decision' -and
+            $typeMatch.Groups['type'].Value -match '^(auto|tracer)$' -and
             $body -notmatch '(?s)<action>.*?</action>') {
             Add-AuditError "$PlanName 的 $($typeMatch.Groups['type'].Value) task 缺少 <action>。"
         }
@@ -274,6 +294,11 @@ function Get-TaskRecords {
         }
 
         $filesMatch = [regex]::Match($body, '(?s)<files>(?<files>.*?)</files>')
+        if ($typeMatch.Success -and
+            $typeMatch.Groups['type'].Value -like 'checkpoint:*' -and
+            $filesMatch.Success) {
+            Add-AuditError "$PlanName 的 checkpoint task 不得声明 <files>。"
+        }
         $taskFiles = @()
         if ($filesMatch.Success) {
             $taskFiles = @(
@@ -283,13 +308,93 @@ function Get-TaskRecords {
             )
         }
 
+        $nameMatch = [regex]::Match($body, '(?s)<name>(?<value>.*?)</name>')
+        $automated = @(
+            [regex]::Matches($body, '(?s)<automated>(?<value>.*?)</automated>') |
+                ForEach-Object { $_.Groups['value'].Value.Trim() }
+        )
         $records.Add([pscustomobject]@{
             Type = $typeMatch.Groups['type'].Value
+            Name = if ($nameMatch.Success) { $nameMatch.Groups['value'].Value.Trim() } else { '' }
             Files = $taskFiles
+            Automated = $automated
             Body = $body
         }) | Out-Null
     }
 
+    return $records.ToArray()
+}
+
+function Get-ObjectiveStatement {
+    param(
+        [Parameter(Mandatory = $true)][string]$Content,
+        [Parameter(Mandatory = $true)][string]$PlanName
+    )
+
+    $match = [regex]::Match($Content, '(?s)<objective>\s*(?<value>[^\r\n]+)')
+    if (-not $match.Success) {
+        Add-AuditError "$PlanName 缺少 objective 首句。"
+        return ''
+    }
+    return $match.Groups['value'].Value.Trim()
+}
+
+function Convert-FromMarkdownCell {
+    param([Parameter(Mandatory = $true)][string]$Value)
+
+    return $Value.Trim().Replace('\|', '|')
+}
+
+function Split-MarkdownBreaks {
+    param([Parameter(Mandatory = $true)][string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return @()
+    }
+    return @(
+        [regex]::Split((Convert-FromMarkdownCell -Value $Value), '(?i)<br\s*/?>') |
+            ForEach-Object { $_.Trim() } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    )
+}
+
+function Get-ValidationMappings {
+    param([Parameter(Mandatory = $true)][string]$Content)
+
+    $records = New-Object System.Collections.Generic.List[object]
+    foreach ($line in ($Content -split '\r?\n')) {
+        $match = [regex]::Match($line, '^\|\s*(?<plan>01-\d{2})\s*\|\s*(?<responsibility>[^|]+?)\s*\|\s*(?<commands>.*?)\s*\|$')
+        if (-not $match.Success) {
+            continue
+        }
+        $records.Add([pscustomobject]@{
+            Plan = $match.Groups['plan'].Value
+            Responsibility = Convert-FromMarkdownCell -Value $match.Groups['responsibility'].Value
+            Commands = @(Split-MarkdownBreaks -Value $match.Groups['commands'].Value)
+        }) | Out-Null
+    }
+    return $records.ToArray()
+}
+
+function Get-ValidationGateMappings {
+    param([Parameter(Mandatory = $true)][string]$Content)
+
+    $section = [regex]::Match($Content, '(?ms)^## Manual / Blocking Gates\s*(?<body>.*?)(?=^## |\z)')
+    if (-not $section.Success) {
+        Add-AuditError 'VALIDATION 缺少 Manual / Blocking Gates。'
+        return @()
+    }
+    $records = New-Object System.Collections.Generic.List[object]
+    foreach ($line in ($section.Groups['body'].Value -split '\r?\n')) {
+        $match = [regex]::Match($line, '^\|\s*(?<plan>01-\d{2})\s*\|\s*(?<gates>.*?)\s*\|$')
+        if (-not $match.Success) {
+            continue
+        }
+        $records.Add([pscustomobject]@{
+            Plan = $match.Groups['plan'].Value
+            Gates = @(Split-MarkdownBreaks -Value $match.Groups['gates'].Value)
+        }) | Out-Null
+    }
     return $records.ToArray()
 }
 
@@ -360,14 +465,19 @@ function Get-PatternPathMappings {
             continue
         }
 
-        $planMatch = [regex]::Match($line, '\|\s*(?:Plan\s*)?(?<plan>\d{1,2})(?:\s*[-–][^|]*)?\s*\|', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-        if (-not $planMatch.Success) {
-            $planMatch = [regex]::Match($line, '\b01-(?<plan>\d{2})\b')
+        $planCellMatch = [regex]::Match($line, '^\|\s*`[^`]+`\s*\|\s*(?<plans>[^|]+?)\s*\|')
+        $declaredPlans = @()
+        if ($planCellMatch.Success) {
+            $declaredPlans = @(
+                [regex]::Matches($planCellMatch.Groups['plans'].Value, '\b01-(?<plan>\d{2})\b') |
+                    ForEach-Object { [int]$_.Groups['plan'].Value } |
+                    Sort-Object -Unique
+            )
         }
 
         $records.Add([pscustomobject]@{
             Path = Convert-ToForwardSlash $pathMatch.Groups['path'].Value.Trim()
-            Plan = if ($planMatch.Success) { [int]$planMatch.Groups['plan'].Value } else { $null }
+            Plans = $declaredPlans
             Line = $line
         }) | Out-Null
     }
@@ -537,6 +647,7 @@ if ($planFiles.Count -ne 28) {
 
 $plans = @{}
 $allFilesByWave = @{}
+$fileOwnersByPath = @{}
 $requirementsToPlans = @{}
 foreach ($requirementId in @('STATE-01', 'STATE-02', 'STATE-03', 'STATE-04', 'STATE-05')) {
     $requirementsToPlans[$requirementId] = New-Object System.Collections.Generic.List[int]
@@ -554,6 +665,7 @@ foreach ($planFile in $planFiles) {
     $yaml = Get-Frontmatter -Content $content -PlanName $planFile.Name
     $planValue = Get-YamlScalar -Yaml $yaml -Key 'plan'
     $waveValue = Get-YamlScalar -Yaml $yaml -Key 'wave'
+    $autonomousValue = Get-YamlScalar -Yaml $yaml -Key 'autonomous'
     if ($planFile.Name -notmatch '^01-(?<number>\d{2})-PLAN\.md$') {
         Add-AuditError "计划文件名不合法：$($planFile.Name)"
         continue
@@ -610,6 +722,13 @@ foreach ($planFile in $planFiles) {
             }
         }
     }
+    $checkpointTasks = @($tasks | Where-Object { $_.Type -like 'checkpoint:*' })
+    if ($checkpointTasks.Count -gt 0 -and $autonomousValue -ne 'false') {
+        Add-AuditError "$($planFile.Name) 含 checkpoint，但 autonomous 不是 false。"
+    }
+    $automatedCommands = @($tasks | ForEach-Object { @($_.Automated) })
+    $checkpointNames = @($checkpointTasks | ForEach-Object { $_.Name })
+    $objectiveStatement = Get-ObjectiveStatement -Content $content -PlanName $planFile.Name
 
     $requirements = @(Get-YamlBlockList -Yaml $yaml -Key 'requirements')
     if ($requirements.Count -eq 0) {
@@ -670,6 +789,10 @@ foreach ($planFile in $planFiles) {
         DependsOn = $dependsOn
         Files = $frontmatterSet
         Requirements = $requirements
+        Objective = $objectiveStatement
+        AutomatedCommands = $automatedCommands
+        CheckpointNames = $checkpointNames
+        Autonomous = $autonomousValue
         Content = $content
     }
 
@@ -677,6 +800,10 @@ foreach ($planFile in $planFiles) {
         $allFilesByWave[$wave] = @{}
     }
     foreach ($path in $frontmatterSet) {
+        if (-not $fileOwnersByPath.ContainsKey($path)) {
+            $fileOwnersByPath[$path] = New-Object System.Collections.Generic.List[int]
+        }
+        $fileOwnersByPath[$path].Add($number) | Out-Null
         if ($allFilesByWave[$wave].ContainsKey($path)) {
             Add-AuditError "同 wave 文件冲突：wave $wave 的 $path 同时由 $($allFilesByWave[$wave][$path]) 与 $($planFile.Name) 修改。"
         }
@@ -730,31 +857,72 @@ foreach ($requirementId in @('STATE-01', 'STATE-02', 'STATE-03', 'STATE-04', 'ST
 }
 
 $sourceMappings = @(Get-SourceAuditMappings -Content $sourceAuditContent)
-$requiredSourceRows = @(
-    'GOAL:—',
-    'REQ:STATE-01', 'REQ:STATE-02', 'REQ:STATE-03', 'REQ:STATE-04', 'REQ:STATE-05',
-    'RESEARCH:R-01', 'RESEARCH:R-02', 'RESEARCH:R-03', 'RESEARCH:R-04',
-    'RESEARCH:R-05', 'RESEARCH:R-06', 'RESEARCH:R-07', 'RESEARCH:R-08',
-    'RESEARCH:R-09', 'RESEARCH:R-10', 'RESEARCH:R-11', 'RESEARCH:R-12',
-    'RESEARCH:R-13', 'RESEARCH:R-14', 'RESEARCH:R-15', 'RESEARCH:R-16',
-    'RESEARCH:R-17',
-    'CONTEXT:CTX-01', 'CONTEXT:CTX-02', 'CONTEXT:CTX-03', 'CONTEXT:CTX-04',
-    'PATTERNS:P-01', 'VALIDATION:V-01'
-)
-$actualSourceRows = @($sourceMappings | ForEach-Object { "$($_.Source):$($_.Id)" })
-foreach ($requiredSourceRow in $requiredSourceRows) {
-    if ($actualSourceRows -notcontains $requiredSourceRow) {
-        Add-AuditError "SOURCE-AUDIT 缺少映射：$requiredSourceRow"
-    }
+$expectedSourcePlans = [ordered]@{
+    'GOAL:—' = @(17..28)
+    'RESEARCH:R-01' = @(3, 7, 28)
+    'RESEARCH:R-02' = @(1, 2, 8)
+    'RESEARCH:R-03' = @(1)
+    'RESEARCH:R-04' = @(4, 5, 6, 7, 13, 14, 15, 25, 26, 27, 28)
+    'RESEARCH:R-05' = @(5, 6, 26, 27)
+    'RESEARCH:R-06' = @(11, 13, 25, 26)
+    'RESEARCH:R-07' = @(12, 14, 25, 27)
+    'RESEARCH:R-08' = @(13, 14, 25, 26, 27)
+    'RESEARCH:R-09' = @(13, 14)
+    'RESEARCH:R-10' = @(17)
+    'RESEARCH:R-11' = @(19, 25, 26, 27)
+    'RESEARCH:R-12' = @(19, 23, 24)
+    'RESEARCH:R-13' = @(21, 23)
+    'RESEARCH:R-14' = @(20, 21)
+    'RESEARCH:R-15' = @(22, 23, 24)
+    'RESEARCH:R-16' = @(16, 23, 24)
+    'RESEARCH:R-17' = @(7, 15, 28)
+    'CONTEXT:CTX-01' = @(1, 4, 11, 12, 13, 14, 15, 18, 19, 25, 26, 27, 28)
+    'CONTEXT:CTX-02' = @(18, 19, 25, 26, 27, 28)
+    'CONTEXT:CTX-03' = @(11, 18, 19, 25, 26, 28)
+    'CONTEXT:CTX-04' = @(8..28)
+    'ADR:ADR-0002' = @(8..25)
+    'ADR:ADR-0006' = @(16..28)
+    'ADR:ADR-0001/0005/0007/0008' = @(11, 12, 13, 14, 15, 16, 17, 18, 19, 25, 26, 27, 28)
+    'PATTERNS:P-01' = @(1..28)
+    'VALIDATION:V-01' = @(1..28)
 }
+foreach ($requirementId in @('STATE-01', 'STATE-02', 'STATE-03', 'STATE-04', 'STATE-05')) {
+    $expectedSourcePlans["REQ:$requirementId"] = @($requirementsToPlans[$requirementId] | Sort-Object -Unique)
+}
+
+$mappingByKey = @{}
 foreach ($mapping in $sourceMappings) {
+    $mappingKey = "$($mapping.Source):$($mapping.Id)"
+    if ($mappingByKey.ContainsKey($mappingKey)) {
+        Add-AuditError "SOURCE-AUDIT 含重复映射：$mappingKey"
+        continue
+    }
+    $mappingByKey[$mappingKey] = $mapping
     if ($mapping.Plans.Count -eq 0) {
         Add-AuditError "SOURCE-AUDIT 映射没有计划：$($mapping.Source)/$($mapping.Id)"
+    }
+    if ($mapping.Status -ne 'PLANNED') {
+        Add-AuditError "SOURCE-AUDIT 映射状态必须为 PLANNED：$mappingKey"
     }
     foreach ($planNumber in $mapping.Plans) {
         if (-not $plans.Contains($planNumber)) {
             Add-AuditError "SOURCE-AUDIT 映射引用不存在计划：$($mapping.Source)/$($mapping.Id) -> $planNumber"
         }
+    }
+}
+foreach ($expectedKey in $expectedSourcePlans.Keys) {
+    if (-not $mappingByKey.ContainsKey($expectedKey)) {
+        Add-AuditError "SOURCE-AUDIT 缺少映射：$expectedKey"
+        continue
+    }
+    Assert-ExactPlanSet `
+        -Label "SOURCE-AUDIT 语义 $expectedKey" `
+        -Expected @($expectedSourcePlans[$expectedKey]) `
+        -Actual @($mappingByKey[$expectedKey].Plans)
+}
+foreach ($actualKey in $mappingByKey.Keys) {
+    if (-not $expectedSourcePlans.Contains($actualKey)) {
+        Add-AuditError "SOURCE-AUDIT 含未声明映射：$actualKey"
     }
 }
 
@@ -764,23 +932,100 @@ if ($sourceAuditContent -notmatch '文本状态不参与最终通过判定' -or
 }
 
 $patternMappings = @(Get-PatternPathMappings -Content $patternsContent)
-$patternPaths = @($patternMappings | ForEach-Object { $_.Path } | Sort-Object -Unique)
+$patternMappingByPath = @{}
 foreach ($patternMapping in $patternMappings) {
     if (-not (Test-ConcretePath -Path $patternMapping.Path)) {
         Add-AuditError "PATTERNS 含非具体关键路径：$($patternMapping.Path)"
     }
+    if ($patternMapping.Plans.Count -eq 0) {
+        Add-AuditError "PATTERNS 路径未声明 owner：$($patternMapping.Path)"
+    }
+    if ($patternMappingByPath.ContainsKey($patternMapping.Path)) {
+        Add-AuditError "PATTERNS 含重复路径行：$($patternMapping.Path)"
+        continue
+    }
+    $patternMappingByPath[$patternMapping.Path] = $patternMapping
 }
-foreach ($plan in $plans.Values) {
-    foreach ($path in $plan.Files) {
-        if ($patternPaths -notcontains $path) {
-            Add-AuditError "$($plan.Name) 的 files_modified 未在 PATTERNS 中分类：$path"
-        }
+foreach ($path in $fileOwnersByPath.Keys) {
+    if (-not $patternMappingByPath.ContainsKey($path)) {
+        Add-AuditError "PLAN files_modified 未在 PATTERNS 中分类：$path"
+        continue
+    }
+    Assert-ExactPlanSet `
+        -Label "PATTERNS owner $path" `
+        -Expected @($fileOwnersByPath[$path]) `
+        -Actual @($patternMappingByPath[$path].Plans)
+}
+foreach ($path in $patternMappingByPath.Keys) {
+    if (-not $fileOwnersByPath.ContainsKey($path)) {
+        Add-AuditError "PATTERNS 含无实际 files_modified owner 的路径：$path"
     }
 }
 $codeTickForGlob = [char]96
 $globPattern = '(?m)' + $codeTickForGlob + '[^' + $codeTickForGlob + '\r\n]*[*?\[\]][^' + $codeTickForGlob + '\r\n]*' + $codeTickForGlob
 if ($patternsContent -match $globPattern) {
     Add-AuditError "PATTERNS 含通配关键路径：$($Matches[0])"
+}
+
+$validationMappings = @(Get-ValidationMappings -Content $validationContent)
+$validationByPlan = @{}
+foreach ($mapping in $validationMappings) {
+    if ($validationByPlan.ContainsKey($mapping.Plan)) {
+        Add-AuditError "VALIDATION 含重复计划行：$($mapping.Plan)"
+        continue
+    }
+    $validationByPlan[$mapping.Plan] = $mapping
+}
+foreach ($planNumber in 1..28) {
+    $planId = '01-{0:D2}' -f $planNumber
+    if (-not $plans.Contains($planNumber)) {
+        continue
+    }
+    if (-not $validationByPlan.ContainsKey($planId)) {
+        Add-AuditError "VALIDATION 缺少计划验证行：$planId"
+        continue
+    }
+    $validationMapping = $validationByPlan[$planId]
+    $plan = $plans[$planNumber]
+    if ($validationMapping.Responsibility -cne $plan.Objective) {
+        Add-AuditError "VALIDATION responsibility 漂移：$planId"
+    }
+    $expectedCommands = @($plan.AutomatedCommands)
+    $actualCommands = @($validationMapping.Commands)
+    if (($expectedCommands -join ([char]31)) -cne ($actualCommands -join ([char]31))) {
+        Add-AuditError "VALIDATION automated command 漂移：$planId"
+    }
+}
+
+$validationGateMappings = @(Get-ValidationGateMappings -Content $validationContent)
+$validationGatesByPlan = @{}
+foreach ($mapping in $validationGateMappings) {
+    if ($validationGatesByPlan.ContainsKey($mapping.Plan)) {
+        Add-AuditError "VALIDATION 含重复 manual gate 行：$($mapping.Plan)"
+        continue
+    }
+    $validationGatesByPlan[$mapping.Plan] = $mapping
+}
+foreach ($planNumber in 1..28) {
+    $planId = '01-{0:D2}' -f $planNumber
+    if (-not $plans.Contains($planNumber)) {
+        continue
+    }
+    $expectedGates = @($plans[$planNumber].CheckpointNames)
+    if ($expectedGates.Count -eq 0) {
+        if ($validationGatesByPlan.ContainsKey($planId)) {
+            Add-AuditError "VALIDATION 含无 checkpoint 对应的 manual gate：$planId"
+        }
+        continue
+    }
+    if (-not $validationGatesByPlan.ContainsKey($planId)) {
+        Add-AuditError "VALIDATION 缺少 checkpoint manual gate：$planId"
+        continue
+    }
+    $actualGates = @($validationGatesByPlan[$planId].Gates)
+    if (($expectedGates -join ([char]31)) -cne ($actualGates -join ([char]31))) {
+        Add-AuditError "VALIDATION manual gate 漂移：$planId"
+    }
 }
 
 foreach ($requiredValidationToken in @(
