@@ -37,10 +37,12 @@ jobs:
           - job_name: macos-apple-silicon
             runner: macos-15
             expected_arch: arm64
+            smoke_arch: aarch64
             rust_target: aarch64-apple-darwin
           - job_name: macos-intel
             runner: macos-15-intel
             expected_arch: x86_64
+            smoke_arch: x86_64
             rust_target: x86_64-apple-darwin
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
@@ -63,6 +65,7 @@ jobs:
         shell: zsh {0}
         env:
           EXPECTED_ARCH: ${{ matrix.expected_arch }}
+          EXPECTED_SMOKE_ARCH: ${{ matrix.smoke_arch }}
           EXPECTED_REVISION: ${{ github.sha }}
         run: |
           set -euo pipefail
@@ -339,12 +342,20 @@ jobs:
           second_run_id=$(/usr/bin/plutil -extract run_id raw -o - "$second_output")
           first_schema=$(/usr/bin/plutil -extract schema raw -o - "$first_output")
           second_schema=$(/usr/bin/plutil -extract schema raw -o - "$second_output")
+          first_os=$(/usr/bin/plutil -extract os raw -o - "$first_output")
+          second_os=$(/usr/bin/plutil -extract os raw -o - "$second_output")
+          first_arch=$(/usr/bin/plutil -extract arch raw -o - "$first_output")
+          second_arch=$(/usr/bin/plutil -extract arch raw -o - "$second_output")
           first_reopened=$(/usr/bin/plutil -extract reopened raw -o - "$first_output")
           second_reopened=$(/usr/bin/plutil -extract reopened raw -o - "$second_output")
           [[ "$first_run_id" == "$run_id" ]]
           [[ "$second_run_id" == "$run_id" ]]
           [[ "$first_schema" == "gpteasy.phase1.path-smoke.v1" ]]
           [[ "$second_schema" == "gpteasy.phase1.path-smoke.v1" ]]
+          [[ "$first_os" == macos ]]
+          [[ "$second_os" == macos ]]
+          [[ "$first_arch" == "$EXPECTED_SMOKE_ARCH" ]]
+          [[ "$second_arch" == "$EXPECTED_SMOKE_ARCH" ]]
           [[ "$first_reopened" == false ]]
           [[ "$second_reopened" == true ]]
 
@@ -354,7 +365,7 @@ jobs:
               /usr/bin/awk '{print $1}'
           )
           install_evidence="$GPTEASY_EVIDENCE_DIR/install.json"
-          print -r -- "{\"schema_version\":1,\"install\":{\"scope\":\"currentUser\",\"root_kind\":\"HOME_APPLICATIONS\",\"profile_id_sha256\":\"${profile_sha256}\",\"absolute_path_redacted\":true,\"gatekeeper_accepted\":true},\"path_smoke\":{\"outcome\":\"passed\",\"root_kind\":\"app_local_data_dir\",\"reopened\":true,\"absolute_path_redacted\":true},\"marker_correlated\":true}" \
+          print -r -- "{\"schema_version\":1,\"install\":{\"scope\":\"currentUser\",\"root_kind\":\"HOME_APPLICATIONS\",\"profile_id_sha256\":\"${profile_sha256}\",\"absolute_path_redacted\":true,\"gatekeeper_accepted\":true},\"path_smoke\":{\"outcome\":\"passed\",\"os_name\":\"macos\",\"architecture\":\"${EXPECTED_SMOKE_ARCH}\",\"root_kind\":\"app_local_data_dir\",\"reopened\":true,\"absolute_path_redacted\":true},\"marker_correlated\":true}" \
             > "$install_evidence"
           /bin/chmod 600 "$install_evidence"
           account_name=""

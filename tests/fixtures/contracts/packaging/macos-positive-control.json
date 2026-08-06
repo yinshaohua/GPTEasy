@@ -41,6 +41,8 @@
     },
     "path_smoke": {
       "outcome": "passed",
+      "os_name": "macos",
+      "architecture": "aarch64",
       "root_kind": "app_local_data_dir",
       "reopened": true,
       "absolute_path_redacted": true

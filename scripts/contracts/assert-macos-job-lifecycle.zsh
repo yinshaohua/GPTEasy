@@ -39,6 +39,23 @@ function valid_hex_string() {
   [[ ${#value} -eq "$expected_length" && -z "$remainder" ]]
 }
 
+function valid_decimal_string() {
+  local value="$1"
+  local remainder="${value//[0-9]/}"
+  [[ -n "$value" && -z "$remainder" ]]
+}
+
+function restore_caller_ownership() {
+  local path="$1"
+  local caller_uid="${SUDO_UID:-}"
+  local caller_gid="${SUDO_GID:-}"
+  [[ -e "$path" ]] || return 0
+  valid_decimal_string "$caller_uid" || return 0
+  valid_decimal_string "$caller_gid" || return 0
+  [[ "$caller_uid" -ne 0 ]] || return 0
+  /usr/sbin/chown "${caller_uid}:${caller_gid}" "$path"
+}
+
 function required_environment() {
   local name="$1"
   local value=""
@@ -78,6 +95,7 @@ function write_private_file() {
   print -nr -- "$content" > "$temporary_path"
   /bin/chmod 600 "$temporary_path"
   /bin/mv -f "$temporary_path" "$path"
+  restore_caller_ownership "$path"
 }
 
 function read_json_value() {
@@ -119,7 +137,8 @@ function load_runner_identity() {
     emit_blocked "MACOS_GITHUB_IDENTITY_MISSING"
   github_sha="$(required_environment GITHUB_SHA)" ||
     emit_blocked "MACOS_GITHUB_IDENTITY_MISSING"
-  github_repository="$(optional_environment GITHUB_REPOSITORY "$EXPECTED_REPOSITORY")"
+  github_repository="$(required_environment GITHUB_REPOSITORY)" ||
+    emit_blocked "MACOS_GITHUB_IDENTITY_MISSING"
   [[ "$github_repository" == "$EXPECTED_REPOSITORY" ]] ||
     emit_blocked "MACOS_GITHUB_IDENTITY_MISMATCH"
 
@@ -130,8 +149,23 @@ function load_runner_identity() {
   runner_arch_reported="$(required_environment RUNNER_ARCH)" ||
     emit_blocked "MACOS_RUNNER_IDENTITY_MISSING"
   runner_architecture="$(/usr/bin/uname -m)"
+  local normalized_reported_architecture=""
+  case "${runner_arch_reported:l}" in
+    arm64)
+      normalized_reported_architecture="arm64"
+      ;;
+    x64|x86_64)
+      normalized_reported_architecture="x86_64"
+      ;;
+    *)
+      emit_blocked "MACOS_RUNNER_ARCHITECTURE_INVALID"
+      ;;
+  esac
+  [[ "$normalized_reported_architecture" == "$runner_architecture" ]] ||
+    emit_blocked "MACOS_RUNNER_ARCHITECTURE_MISMATCH"
   runner_image="$(optional_environment ImageOS "$(optional_environment ImageVersion self-hosted)")"
-  runner_environment="$(optional_environment RUNNER_ENVIRONMENT github-hosted)"
+  runner_environment="$(required_environment RUNNER_ENVIRONMENT)" ||
+    emit_blocked "MACOS_RUNNER_IDENTITY_MISSING"
   runner_ephemeral=false
   if [[ "$runner_environment" == "github-hosted" ||
         "$(optional_environment RUNNER_EPHEMERAL false)" == true ]]; then
@@ -163,6 +197,17 @@ function valid_disposable_identity() {
   [[ "$account_name" == "gpteasyjob${suffix}" &&
      "$account_home" == "/Users/$account_name" ]] &&
     valid_hex_string "$suffix" 10
+}
+
+function rollback_disposable_account() {
+  local account_name="$1"
+  local account_home="$2"
+  valid_disposable_identity "$account_name" "$account_home" || return 1
+  /usr/sbin/sysadminctl -deleteUser "$account_name" -secure >/dev/null 2>&1 || true
+  if /usr/bin/id -u "$account_name" >/dev/null 2>&1; then
+    /usr/bin/dscl . -delete "/Users/$account_name" >/dev/null 2>&1 || true
+  fi
+  [[ ! -e "$account_home" ]] || /bin/rm -rf "$account_home"
 }
 
 function initialize_lifecycle() {
@@ -197,25 +242,33 @@ function initialize_lifecycle() {
     -shell /bin/zsh \
     -password "$password" \
     >/dev/null 2>&1; then
+    if /usr/bin/id -u "$account_name" >/dev/null 2>&1 ||
+       [[ -e "$account_home" ]]; then
+      rollback_disposable_account "$account_name" "$account_home" || true
+    fi
     emit_blocked "MACOS_ACCOUNT_CREATION_FAILED"
   fi
   password=""
 
   /usr/sbin/createhomedir -c -u "$account_name" >/dev/null 2>&1 || true
   if [[ ! -d "$account_home" ]]; then
-    /usr/sbin/sysadminctl -deleteUser "$account_name" -secure >/dev/null 2>&1 || true
+    rollback_disposable_account "$account_name" "$account_home" || true
     emit_blocked "MACOS_PROFILE_CREATION_FAILED"
   fi
 
   local uid
-  uid="$(/usr/bin/id -u "$account_name" 2>/dev/null)" ||
+  if ! uid="$(/usr/bin/id -u "$account_name" 2>/dev/null)"; then
+    rollback_disposable_account "$account_name" "$account_home" || true
     emit_blocked "MACOS_ACCOUNT_CREATION_FAILED"
-  [[ -d "$account_home" ]] ||
-    emit_blocked "MACOS_PROFILE_CREATION_FAILED"
+  fi
 
   local state
   state="{\"schema_version\":1,\"account_name\":$(json_quote "$account_name"),\"account_uid\":$(json_quote "$uid"),\"profile_path\":$(json_quote "$account_home"),\"created_for_job\":true,\"profile_created_for_job\":true,\"baseline_root\":$(json_quote "$baseline_root"),\"baseline_before_sha256\":$(json_quote "$baseline_before"),\"created_utc\":$(json_quote "$(/bin/date -u +'%Y-%m-%dT%H:%M:%SZ')"),\"identity\":{\"github\":{\"repository\":$(json_quote "$github_repository"),\"run_id\":$(json_quote "$github_run_id"),\"run_attempt\":${github_run_attempt},\"job\":$(json_quote "$github_job"),\"commit\":$(json_quote "$github_sha")},\"runner\":{\"name_sha256\":$(json_quote "$runner_name_sha256"),\"image\":$(json_quote "$runner_image"),\"tracking_id_sha256\":$(json_quote "$runner_tracking_sha256"),\"reported_architecture\":$(json_quote "$runner_arch_reported"),\"architecture\":$(json_quote "$runner_architecture"),\"ephemeral\":${runner_ephemeral},\"dedicated_job\":${runner_dedicated}}}}"
-  write_private_file "$state_path" "$state"
+  if ! write_private_file "$state_path" "$state"; then
+    rollback_disposable_account "$account_name" "$account_home" || true
+    /bin/rm -f "$state_path" "${state_path}.tmp.$$"
+    emit_blocked "MACOS_LIFECYCLE_STATE_WRITE_FAILED"
+  fi
 
   print -r -- "{\"schema_version\":1,\"probe\":\"macos-job-lifecycle\",\"action\":\"initialize\",\"outcome\":\"passed\",\"exit_code\":0,\"strict_gate_eligible\":false,\"account_created_for_job\":true,\"profile_created_for_job\":true}"
 }
@@ -281,6 +334,10 @@ function invoke_as_disposable_user() {
   else
     "${invocation[@]}" || status="$?"
   fi
+  [[ -n "$standard_output_path" ]] &&
+    restore_caller_ownership "$standard_output_path"
+  [[ -n "$standard_error_path" ]] &&
+    restore_caller_ownership "$standard_error_path"
   return "$status"
 }
 

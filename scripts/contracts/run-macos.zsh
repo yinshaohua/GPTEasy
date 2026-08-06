@@ -103,6 +103,8 @@ typeset notary_stapled=false
 typeset notary_validated=false
 typeset gatekeeper_accepted=false
 typeset path_smoke_outcome=""
+typeset path_smoke_os_name=""
+typeset path_smoke_architecture=""
 typeset path_smoke_root_kind=""
 typeset path_smoke_reopened=false
 typeset path_smoke_absolute_path_redacted=false
@@ -158,6 +160,8 @@ function load_fixture() {
   notary_validated="$(read_json_value "$fixture_path" package.notarization.validated)" || return 1
   gatekeeper_accepted="$(read_json_value "$fixture_path" package.gatekeeper.accepted)" || return 1
   path_smoke_outcome="$(read_json_value "$fixture_path" package.path_smoke.outcome)" || return 1
+  path_smoke_os_name="$(read_json_value "$fixture_path" package.path_smoke.os_name)" || return 1
+  path_smoke_architecture="$(read_json_value "$fixture_path" package.path_smoke.architecture)" || return 1
   path_smoke_root_kind="$(read_json_value "$fixture_path" package.path_smoke.root_kind)" || return 1
   path_smoke_reopened="$(read_json_value "$fixture_path" package.path_smoke.reopened)" || return 1
   path_smoke_absolute_path_redacted="$(read_json_value "$fixture_path" package.path_smoke.absolute_path_redacted)" || return 1
@@ -390,6 +394,8 @@ function load_live_facts() {
   install_absolute_path_redacted="$(read_json_value "$install_evidence_path" install.absolute_path_redacted)" || return 1
   install_gatekeeper_accepted="$(read_json_value "$install_evidence_path" install.gatekeeper_accepted)" || return 1
   path_smoke_outcome="$(read_json_value "$install_evidence_path" path_smoke.outcome)" || return 1
+  path_smoke_os_name="$(read_json_value "$install_evidence_path" path_smoke.os_name)" || return 1
+  path_smoke_architecture="$(read_json_value "$install_evidence_path" path_smoke.architecture)" || return 1
   path_smoke_root_kind="$(read_json_value "$install_evidence_path" path_smoke.root_kind)" || return 1
   path_smoke_reopened="$(read_json_value "$install_evidence_path" path_smoke.reopened)" || return 1
   path_smoke_absolute_path_redacted="$(read_json_value "$install_evidence_path" path_smoke.absolute_path_redacted)" || return 1
@@ -475,7 +481,11 @@ function evaluate_predicate() {
   add_check "current_user_install" "$current_user_install" "MACOS_PACKAGE_NOT_CURRENT_USER"
 
   local path_smoke_ok=false
+  local expected_smoke_architecture="x86_64"
+  [[ "$expected_arch" == arm64 ]] && expected_smoke_architecture="aarch64"
   [[ "$path_smoke_outcome" == passed &&
+     "$path_smoke_os_name" == macos &&
+     "$path_smoke_architecture" == "$expected_smoke_architecture" &&
      "$path_smoke_root_kind" == app_local_data_dir &&
      "$path_smoke_reopened" == true &&
      "$path_smoke_absolute_path_redacted" == true ]] && path_smoke_ok=true
