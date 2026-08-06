@@ -1,0 +1,33 @@
+[package]
+name = "gpteasy"
+version = "0.1.0"
+description = "GPTEasy desktop application"
+authors = ["GPTEasy contributors"]
+edition = "2021"
+
+[lib]
+name = "gpteasy_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "gpteasy"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "=2.6.3", features = [] }
+
+[dependencies]
+chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }
+rusqlite = { version = "=0.40.1", default-features = false, features = ["bundled", "backup"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+sha2 = "=0.11.0"
+tauri = { version = "=2.11.5", features = [] }
+thiserror = "=2.0.19"
+uuid = { version = "=1.24.0", features = ["v4", "serde"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+tempfile = "=3.27.0"
