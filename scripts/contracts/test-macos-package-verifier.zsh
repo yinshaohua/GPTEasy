@@ -73,6 +73,7 @@ all_outputs=()
 invoke_case positive 0
 invoke_case non-darwin 5 MACOS_NATIVE_HOST_REQUIRED
 invoke_case wrong-arch 5 MACOS_PACKAGE_ARCH_MISMATCH
+invoke_case artifact-mismatch 5 MACOS_ARTIFACT_APP_MISMATCH
 invoke_case missing-codesign 5 MACOS_CODESIGN_INVALID
 invoke_case missing-notary 5 MACOS_NOTARIZATION_INVALID
 invoke_case missing-gatekeeper 5 MACOS_GATEKEEPER_REJECTED
@@ -93,4 +94,4 @@ do
   assert_not_contains "$combined_output" "$forbidden"
 done
 
-print -r -- "macOS package verifier self-test passed: syntax, positive control, and 8 fail-closed cases"
+print -r -- "macOS package verifier self-test passed: syntax, positive control, and 9 fail-closed cases"

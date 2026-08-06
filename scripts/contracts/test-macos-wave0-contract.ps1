@@ -284,6 +284,7 @@ try {
             "stapler",
             "spctl",
             "HOME_APPLICATIONS",
+            "artifact_correlated",
             "strict_gate_eligible",
             "fixture_mode",
             "cleanup_attested"
@@ -306,6 +307,7 @@ try {
             "positive",
             "non-darwin",
             "wrong-arch",
+            "artifact-mismatch",
             "missing-codesign",
             "missing-notary",
             "missing-gatekeeper",
