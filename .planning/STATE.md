@@ -4,15 +4,15 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 1
 status: executing
-stopped_at: Completed 01-12-PLAN.md
-last_updated: "2026-08-06T05:06:09.778Z"
+stopped_at: Completed 01-06-PLAN.md
+last_updated: "2026-08-06T05:37:24.796Z"
 last_activity: 2026-08-06
-last_activity_desc: 完成 01-08 计划的 exact React/Vite 前端壳与可重复构建验证
+last_activity_desc: 完成 01-06 gh 真实只读 preflight 人工批准与 PowerShell 运行时边界记录
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 28
-  completed_plans: 9
+  completed_plans: 10
 ---
 
 # Project State
@@ -29,9 +29,9 @@ See: .planning/PROJECT.md (updated 2026-08-05)
 Phase: 1 of 8（可信本地状态与实现契约）
 Plan: 9 of 28 in current phase
 Status: Ready to execute
-Last activity: 2026-08-06 — 完成 01-08 计划的 exact React/Vite 前端壳与可重复构建验证
+Last activity: 2026-08-06 — 完成 01-06 gh 真实只读 preflight 人工批准与 PowerShell 运行时边界记录
 
-Progress: [███░░░░░░░] 32%
+Progress: [████░░░░░░] 36%
 
 ## Performance Metrics
 
@@ -66,6 +66,7 @@ Progress: [███░░░░░░░] 32%
 | Phase 01 P08 | 约 15 分钟 | 2 tasks | 8 files |
 | Phase 01 P11 | 约 38 分钟 | 2 tasks | 5 files |
 | Phase 01 P12 | 约 20 分钟 | 1 tasks | 5 files |
+| Phase 01 P06 | 约 10 分钟（不含人工等待） | 1 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -99,6 +100,8 @@ Recent decisions affecting current work:
 - [Phase 01]: macOS Codex probe 固定 0.146.1 与 initialize/initialized/config-read(includeLayers=true)，原始响应和配置正文不进入证据。 — 保持与 Windows manifest schema 一致并满足 T-01-27 脱敏边界。
 - [Phase 01]: macOS 正式宿主候选固定 Codex.app/ChatGPT.app 与 Contents/Resources/codex，fixture 永不获得 strict eligibility。 — 防止调用方放宽宿主身份或用 synthetic fixture 冒充原生证据。
 - [Phase 01]: macOS Wave 0 固定 exact checkout，并在 macos-15 arm64 与 macos-15-intel x86_64 上先执行全部 zsh 语法与 fixture tests。 — 任何后续 macOS evidence 必须依赖可复用 Wave 0，不能以 Windows 静态结果替代。
+- [Phase 01]: 01-06：接受 PowerShell 7.6.4 下真实只读 gh preflight 成功结果并解除 blocking-human checkpoint；不宣称 Windows PowerShell 5.1 已完成同等真实网络兼容性验证。
+- [Phase 01]: 01-06：后续真实 evidence 仍须执行固定 preflight，任何非零结果在下载或验签前 fail-closed，历史批准不能覆盖当前失败。
 
 ### Pending Todos
 
@@ -120,6 +123,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-06T05:06:09.712Z
-Stopped at: Completed 01-12-PLAN.md
+Last session: 2026-08-06T05:37:24.733Z
+Stopped at: Completed 01-06-PLAN.md
 Resume file: None
