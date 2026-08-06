@@ -4,15 +4,15 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 1
 status: executing
-stopped_at: Completed 01-02-PLAN.md
-last_updated: "2026-08-06T03:40:06.586Z"
+stopped_at: Completed 01-08-PLAN.md
+last_updated: "2026-08-06T03:57:41.756Z"
 last_activity: 2026-08-06
-last_activity_desc: 完成 01-02 计划的 npm 官方来源人工批准 checkpoint 记录
+last_activity_desc: 完成 01-08 计划的 exact React/Vite 前端壳与可重复构建验证
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 28
-  completed_plans: 6
+  completed_plans: 7
 ---
 
 # Project State
@@ -27,11 +27,11 @@ See: .planning/PROJECT.md (updated 2026-08-05)
 ## Current Position
 
 Phase: 1 of 8（可信本地状态与实现契约）
-Plan: 6 of 28 in current phase
+Plan: 7 of 28 in current phase
 Status: Ready to execute
-Last activity: 2026-08-06 — 完成 01-02 计划的 npm 官方来源人工批准 checkpoint 记录
+Last activity: 2026-08-06 — 完成 01-08 计划的 exact React/Vite 前端壳与可重复构建验证
 
-Progress: [██░░░░░░░░] 21%
+Progress: [███░░░░░░░] 25%
 
 ## Performance Metrics
 
@@ -63,6 +63,7 @@ Progress: [██░░░░░░░░] 21%
 | Phase 01 P05 | 14m | 2 tasks | 3 files |
 | Phase 01 P07 | 36m | 2 tasks | 4 files |
 | Phase 01 P02 | 22m | 1 tasks | 0 files |
+| Phase 01 P08 | 约 15 分钟 | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -89,6 +90,7 @@ Recent decisions affecting current work:
 - [Phase 1]: 01-07：SOURCE-AUDIT 的 PLANNED/COVERED 状态不授予通过，requirement、拓扑、路径、CLI、key link、threat 与 digest 必须实时重算。
 - [Phase 1]: 01-07：PhaseComplete 在 aggregate 前强制执行只读来源审计，审计非零直接 fail-closed。
 - [Phase 01]: 01-02：人工官方来源 checkpoint 结论为 approved；批准严格覆盖 allowlist 中的 7 个 package@version、官方 repository 与官方 create-tauri-app React TypeScript 模板来源。 — 机器 exact allowlist verifier 与真实公开 registry 查询均通过，但发布者和官方模板来源属于不可自动替代的人工门禁；用户已明确回复 approved，因此仅解除 01-08 的首次安装前置条件。
+- [Phase 1]: 01-08：前端依赖使用 exact pins，React 仅作为无业务状态的单一 root；Vite 8 使用内置 Oxc minifier，避免额外 esbuild 依赖。
 
 ### Pending Todos
 
@@ -110,6 +112,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-06T03:40:06.572Z
-Stopped at: Completed 01-02-PLAN.md
+Last session: 2026-08-06T03:57:41.682Z
+Stopped at: Completed 01-08-PLAN.md
 Resume file: None
