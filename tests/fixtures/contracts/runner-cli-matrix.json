@@ -226,6 +226,10 @@
           "arguments": [
             "-SelfTest"
           ]
+        },
+        {
+          "path": "scripts/contracts/test-evidence-provenance.ps1",
+          "arguments": []
         }
       ]
     },

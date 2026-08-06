@@ -56,7 +56,7 @@
             "artifact_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
             "attestation": {
               "subject_name": "windows-x64-contract-evidence.zip",
-              "subject_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+              "subject_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
               "predicate_type": "https://slsa.dev/provenance/v1"
             }
           },
@@ -67,7 +67,7 @@
             "artifact_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
             "attestation": {
               "subject_name": "codex.exe",
-              "subject_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+              "subject_digest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
               "predicate_type": "https://slsa.dev/provenance/v1"
             }
           }
@@ -101,7 +101,7 @@
           "name": "windows-x64-contract-evidence",
           "digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
           "expired": false,
-          "download_sha256": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+          "download_sha256": "sha256:5555555555555555555555555555555555555555555555555555555555555555"
         },
         {
           "role": "subject_artifact",
@@ -109,7 +109,7 @@
           "name": "codex-windows-x64",
           "digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
           "expired": false,
-          "download_sha256": "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+          "download_sha256": "sha256:6666666666666666666666666666666666666666666666666666666666666666"
         }
       ],
       "attestations": [
@@ -117,7 +117,7 @@
           "role": "evidence_bundle",
           "repository": "yinshaohua/GPTEasy",
           "subject_name": "windows-x64-contract-evidence.zip",
-          "subject_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+          "subject_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
           "predicate_type": "https://slsa.dev/provenance/v1",
           "verified": true
         },
@@ -125,7 +125,7 @@
           "role": "subject_artifact",
           "repository": "yinshaohua/GPTEasy",
           "subject_name": "codex.exe",
-          "subject_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+          "subject_digest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
           "predicate_type": "https://slsa.dev/provenance/v1",
           "verified": true
         }
@@ -243,14 +243,15 @@
       "stage": "verification",
       "operation": "set",
       "path": "retrieval.artifacts.1.download_sha256",
-      "value": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "value": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
       "expected_outcome": "failed"
     },
     {
       "name": "missing-attestation",
       "stage": "verification",
-      "operation": "remove",
+      "operation": "set",
       "path": "retrieval.attestations.1",
+      "value": null,
       "expected_outcome": "failed"
     },
     {
