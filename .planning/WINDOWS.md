@@ -2,9 +2,9 @@
 schema_version: 1
 open_count: 1
 waived_count: 0
-fixed_count: 9
-total_count: 10
-last_updated: 2026-08-06T07:09:21.079Z
+fixed_count: 14
+total_count: 15
+last_updated: 2026-08-06T08:41:56.928Z
 ---
 
 # Broken Windows Ledger
@@ -25,6 +25,11 @@ last_updated: 2026-08-06T07:09:21.079Z
 | 8 | 01 | deviation | src-tauri/icons/icon.ico |  | Tauri Windows Resource 编译需要计划外补充确定性 icon.ico，已在 baed5d0 修复 | fixed |  | 2026-08-06T06:13:20.973Z | 2026-08-06T06:14:58.640Z |
 | 9 | 01 | deviation | src-tauri/Cargo.toml |  | Tauri mock 测试需要 dev test feature 与 Windows test resource linking | fixed |  | 2026-08-06T07:07:57.218Z | 2026-08-06T07:09:20.264Z |
 | 10 | 01 | deviation | src-tauri/src/path_smoke.rs |  | 公开 path smoke 入口在解析状态根前重复验证 opaque ID | fixed |  | 2026-08-06T07:07:58.156Z | 2026-08-06T07:09:21.079Z |
+| 11 | 01 | deviation | scripts/contracts/test-macos-wave0-contract.ps1 |  | 扩展 Wave 0 静态合同以支持独立 package 脚本集并匹配计划级验证入口 | fixed |  | 2026-08-06T08:40:36.864Z | 2026-08-06T08:41:27.977Z |
+| 12 | 01 | deviation | tests/fixtures/contracts/runner-cli-matrix.json |  | canonical PackagingSelfTest 接入完整 macOS package/evidence contract 并刷新只读 digest lock | fixed |  | 2026-08-06T08:41:33.031Z | 2026-08-06T08:41:36.597Z |
+| 13 | 01 | deviation | scripts/contracts/run-macos.zsh |  | 解包最终 attested archive 并与签名 app 建立 fail-closed 关联 | fixed |  | 2026-08-06T08:41:39.654Z | 2026-08-06T08:41:42.914Z |
+| 14 | 01 | deviation | scripts/contracts/assert-macos-job-lifecycle.zsh |  | 补齐 runner 身份、调用者所有权、半创建账户回滚与 finalized cleanup 硬化 | fixed |  | 2026-08-06T08:41:46.893Z | 2026-08-06T08:41:49.935Z |
+| 15 | 01 | deviation | .github/workflows/phase1-macos-evidence.yml |  | 将当前用户 Gatekeeper 与 path smoke OS/原生架构事实纳入 strict predicate | fixed |  | 2026-08-06T08:41:53.671Z | 2026-08-06T08:41:56.928Z |
 
 ````json
 [
@@ -147,6 +152,66 @@ last_updated: 2026-08-06T07:09:21.079Z
     "reason": "",
     "recorded_at": "2026-08-06T07:07:58.156Z",
     "resolved_at": "2026-08-06T07:09:21.079Z"
+  },
+  {
+    "id": 11,
+    "kind": "deviation",
+    "phase": "01",
+    "file": "scripts/contracts/test-macos-wave0-contract.ps1",
+    "line": null,
+    "description": "扩展 Wave 0 静态合同以支持独立 package 脚本集并匹配计划级验证入口",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-08-06T08:40:36.864Z",
+    "resolved_at": "2026-08-06T08:41:27.977Z"
+  },
+  {
+    "id": 12,
+    "kind": "deviation",
+    "phase": "01",
+    "file": "tests/fixtures/contracts/runner-cli-matrix.json",
+    "line": null,
+    "description": "canonical PackagingSelfTest 接入完整 macOS package/evidence contract 并刷新只读 digest lock",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-08-06T08:41:33.031Z",
+    "resolved_at": "2026-08-06T08:41:36.597Z"
+  },
+  {
+    "id": 13,
+    "kind": "deviation",
+    "phase": "01",
+    "file": "scripts/contracts/run-macos.zsh",
+    "line": null,
+    "description": "解包最终 attested archive 并与签名 app 建立 fail-closed 关联",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-08-06T08:41:39.654Z",
+    "resolved_at": "2026-08-06T08:41:42.914Z"
+  },
+  {
+    "id": 14,
+    "kind": "deviation",
+    "phase": "01",
+    "file": "scripts/contracts/assert-macos-job-lifecycle.zsh",
+    "line": null,
+    "description": "补齐 runner 身份、调用者所有权、半创建账户回滚与 finalized cleanup 硬化",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-08-06T08:41:46.893Z",
+    "resolved_at": "2026-08-06T08:41:49.935Z"
+  },
+  {
+    "id": 15,
+    "kind": "deviation",
+    "phase": "01",
+    "file": ".github/workflows/phase1-macos-evidence.yml",
+    "line": null,
+    "description": "将当前用户 Gatekeeper 与 path smoke OS/原生架构事实纳入 strict predicate",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-08-06T08:41:53.671Z",
+    "resolved_at": "2026-08-06T08:41:56.928Z"
   }
 ]
 ````

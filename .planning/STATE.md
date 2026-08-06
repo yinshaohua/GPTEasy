@@ -4,15 +4,15 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 1
 status: executing
-stopped_at: Completed 01-13-PLAN.md
-last_updated: "2026-08-06T07:48:33.137Z"
+stopped_at: Completed 01-14-PLAN.md
+last_updated: "2026-08-06T08:46:08.849Z"
 last_activity: 2026-08-06
-last_activity_desc: 完成 01-13 Windows package predicate、一次性账户生命周期与双架构 attested workflow
+last_activity_desc: 完成 01-14 macOS package predicate、一次性账户生命周期与双架构 attested workflow
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 28
-  completed_plans: 13
+  completed_plans: 14
 ---
 
 # Project State
@@ -27,11 +27,11 @@ See: .planning/PROJECT.md (updated 2026-08-05)
 ## Current Position
 
 Phase: 1 of 8（可信本地状态与实现契约）
-Plan: 14 of 28 in current phase
+Plan: 15 of 28 in current phase
 Status: Ready to execute
-Last activity: 2026-08-06 — 完成 01-13 Windows package predicate、一次性账户生命周期与双架构 attested workflow
+Last activity: 2026-08-06 — 完成 01-14 macOS package predicate、一次性账户生命周期与双架构 attested workflow
 
-Progress: [█████░░░░░] 46%
+Progress: [█████░░░░░] 50%
 
 ## Performance Metrics
 
@@ -70,6 +70,7 @@ Progress: [█████░░░░░] 46%
 | Phase 01 P09 | 约 26 分钟 | 2 tasks | 8 files |
 | Phase 01 P10 | 40min | 2 tasks | 5 files |
 | Phase 01 P13 | 31min | 2 tasks | 7 files |
+| Phase 01 P14 | 49min | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -112,6 +113,10 @@ Recent decisions affecting current work:
 - [Phase 01]: 01-13：Windows package strict pass 同时要求 Authenticode、目标 PE 架构、current-user 路径、跨进程 reopen、profile digest 绑定与 finalized cleanup attestation。
 - [Phase 01]: 01-13：一次性账户证据绑定 GitHub run/attempt/job、runner tracking、SID/profile；marker 不能单独证明 disposable。
 - [Phase 01]: 01-13：PackagingSelfTest Local 必须实际运行 Windows 正负例与 macOS Wave 0 contract，不能只检查脚本存在。
+- [Phase 1]: 01-14：macOS strict pass 同时要求 Developer ID codesign、公证 stapling、Gatekeeper、HOME_APPLICATIONS、path smoke、archive/app 关联与 finalized cleanup。
+- [Phase 1]: 01-14：一次性账户证据绑定 repository/run/attempt/job、runner tracking/arch、UID/profile；状态与 evidence 不保存账户密码或 Apple 凭据。
+- [Phase 1]: 01-14：最终上传 archive 必须解包重验签并与 build app 关联，fixture 永远 test_only 且不能获得 strict eligibility。
+- [Phase 1]: 01-14：Intel/Apple Silicon evidence matrix 统一 needs Wave 0；本地 Windows 静态验证不能替代真实 macOS/Apple/GitHub evidence。
 
 ### Pending Todos
 
@@ -133,6 +138,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-06T07:48:33.096Z
-Stopped at: Completed 01-13-PLAN.md
+Last session: 2026-08-06T08:46:08.765Z
+Stopped at: Completed 01-14-PLAN.md
 Resume file: None
