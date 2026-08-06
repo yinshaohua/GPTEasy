@@ -153,6 +153,8 @@ pub fn run_path_smoke<R: Runtime>(
     app: &AppHandle<R>,
     run_id: &str,
 ) -> Result<PathSmokeReport, PathSmokeError> {
+    validate_run_id(run_id)?;
+
     let smoke_root = app
         .path()
         .app_local_data_dir()
