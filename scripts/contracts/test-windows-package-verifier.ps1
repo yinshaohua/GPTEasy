@@ -299,6 +299,12 @@ function Assert-SourceContract {
         "probe-windows-host.ps1",
         "probe-wsl2.ps1",
         "verify-windows-package.ps1",
+        "preflight-gh-evidence.ps1",
+        "WINDOWS_AUTHENTICODE_PFX_BASE64",
+        "certificateThumbprint",
+        "Get-AuthenticodeSignature",
+        "phase1-path-smoke",
+        "strict-pass.json",
         "if: always()",
         "upload-artifact",
         "attest-build-provenance",
@@ -311,13 +317,25 @@ function Assert-SourceContract {
 
     $finalizeOffset = $workflowSource.IndexOf("-Action Finalize")
     $verifyOffset = $workflowSource.LastIndexOf("verify-windows-package.ps1")
+    $uploadOffset = $workflowSource.IndexOf("upload-artifact")
     $attestOffset = $workflowSource.IndexOf("attest-build-provenance")
     Assert-True `
         -Condition ($finalizeOffset -ge 0 -and $verifyOffset -gt $finalizeOffset) `
         -Message "package predicate must consume finalized lifecycle evidence"
     Assert-True `
-        -Condition ($attestOffset -gt $verifyOffset) `
-        -Message "provenance attestation must happen after package and lifecycle verification"
+        -Condition ($uploadOffset -gt $verifyOffset -and $attestOffset -gt $uploadOffset) `
+        -Message "artifact upload and provenance attestation must follow package and lifecycle verification"
+
+    $actionReferences = @(
+        [regex]::Matches($workflowSource, "(?m)^\s*uses:\s*(?<reference>[^\s]+)\s*$") |
+            ForEach-Object { $_.Groups["reference"].Value }
+    )
+    Assert-True `
+        -Condition (
+            $actionReferences.Count -gt 0 -and
+            @($actionReferences | Where-Object { $_ -notmatch "@[0-9a-f]{40}$" }).Count -eq 0
+        ) `
+        -Message "every GitHub Action must be pinned to an immutable commit"
 }
 
 $repositoryRoot = Get-RepositoryRoot

@@ -6,6 +6,8 @@ param(
     [string]$EvidencePath,
     [string]$CommandPath,
     [string[]]$CommandArguments = @(),
+    [string]$StandardOutputPath,
+    [string]$StandardErrorPath,
     [string]$BaselineRoot
 )
 
@@ -107,12 +109,17 @@ function Get-RunnerIdentity {
 
 function Get-RandomPassword {
     $alphabet = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$%^&*"
-    $bytes = New-Object byte[] 32
-    [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+    $bytes = New-Object byte[] 28
+    $generator = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $generator.GetBytes($bytes)
+    } finally {
+        $generator.Dispose()
+    }
     $characters = foreach ($byte in $bytes) {
         $alphabet[$byte % $alphabet.Length]
     }
-    return -join $characters
+    return "Aa1!" + (-join $characters)
 }
 
 function Get-FileTreeHash {
@@ -196,8 +203,32 @@ function New-LifecycleState {
         -AccountNeverExpires `
         -PasswordNeverExpires `
         -UserMayNotChangePassword
-    $credential = [Management.Automation.PSCredential]::new($accountName, $securePassword)
+    $sid = Get-UserSid -Name $accountName
+    $baselineBefore = $null
+    if (-not [string]::IsNullOrWhiteSpace($BaselineRoot)) {
+        $baselineBefore = Get-FileTreeHash -Root $BaselineRoot
+    }
 
+    $state = [ordered]@{
+        schema_version = 1
+        account_name = $accountName
+        account_sid = $sid
+        profile_path = $null
+        password_protected = ConvertFrom-SecureString -SecureString $securePassword
+        identity = $identity
+        baseline_root = $BaselineRoot
+        baseline_before_sha256 = $baselineBefore
+        created_for_job = $true
+        profile_created_for_job = $false
+        created_utc = [DateTime]::UtcNow.ToString("o")
+    }
+    Save-State -State $state
+
+    $credentialName = "{0}\{1}" -f $env:COMPUTERNAME, $accountName
+    $credential = [Management.Automation.PSCredential]::new(
+        $credentialName,
+        $securePassword
+    )
     $profileWarmup = Start-Process `
         -FilePath "powershell.exe" `
         -Credential $credential `
@@ -209,30 +240,12 @@ function New-LifecycleState {
         throw "disposable account profile could not be created"
     }
 
-    $sid = Get-UserSid -Name $accountName
     $profilePath = Get-ProfilePath -Sid $sid
     if ([string]::IsNullOrWhiteSpace($profilePath)) {
         throw "disposable account profile was not observed"
     }
-
-    $baselineBefore = $null
-    if (-not [string]::IsNullOrWhiteSpace($BaselineRoot)) {
-        $baselineBefore = Get-FileTreeHash -Root $BaselineRoot
-    }
-
-    $state = [ordered]@{
-        schema_version = 1
-        account_name = $accountName
-        account_sid = $sid
-        profile_path = $profilePath
-        password_protected = ConvertFrom-SecureString -SecureString $securePassword
-        identity = $identity
-        baseline_root = $BaselineRoot
-        baseline_before_sha256 = $baselineBefore
-        created_for_job = $true
-        profile_created_for_job = $true
-        created_utc = [DateTime]::UtcNow.ToString("o")
-    }
+    $state.profile_path = $profilePath
+    $state.profile_created_for_job = $true
     Save-State -State $state
     return $state
 }
@@ -314,14 +327,19 @@ function Write-LifecycleEvidence {
         [bool]$BaselineRestored
     )
 
+    $profileIdentity = if ($null -eq $State.profile_path) {
+        ""
+    } else {
+        [string]$State.profile_path
+    }
     $accountCleanup = [ordered]@{
         sid_sha256 = Get-Sha256String -Value ([string]$State.account_sid)
-        profile_id_sha256 = Get-Sha256String -Value ([string]$State.profile_path)
+        profile_id_sha256 = Get-Sha256String -Value $profileIdentity
         created_for_job = [bool]$State.created_for_job
         profile_created_for_job = [bool]$State.profile_created_for_job
         cleanup_attempted = $true
         cleanup_attested = ([bool]$Cleanup.account_absent -and [bool]$Cleanup.profile_absent) -or $BaselineRestored
-        cleanup_succeeded = ([bool]$Cleanup.account_removed -and [bool]$Cleanup.profile_removed) -or $BaselineRestored
+        cleanup_succeeded = ([bool]$Cleanup.account_absent -and [bool]$Cleanup.profile_absent) -or $BaselineRestored
         account_absent_after_cleanup = [bool]$Cleanup.account_absent
         profile_absent_after_cleanup = [bool]$Cleanup.profile_absent
         baseline_restored = $BaselineRestored
@@ -345,6 +363,7 @@ function Write-LifecycleEvidence {
     return $evidence
 }
 
+$state = $null
 try {
     if ($Action -ceq "Initialize") {
         $state = New-LifecycleState
@@ -365,17 +384,26 @@ try {
             throw "CommandPath is required for Invoke"
         }
         $securePassword = ConvertTo-SecureString -String $state.password_protected
+        $credentialName = "{0}\{1}" -f $env:COMPUTERNAME, [string]$state.account_name
         $credential = [Management.Automation.PSCredential]::new(
-            [string]$state.account_name,
+            $credentialName,
             $securePassword
         )
-        $process = Start-Process `
-            -FilePath $CommandPath `
-            -Credential $credential `
-            -LoadUserProfile `
-            -ArgumentList $CommandArguments `
-            -Wait `
-            -PassThru
+        $startParameters = @{
+            FilePath = $CommandPath
+            Credential = $credential
+            LoadUserProfile = $true
+            ArgumentList = $CommandArguments
+            Wait = $true
+            PassThru = $true
+        }
+        if (-not [string]::IsNullOrWhiteSpace($StandardOutputPath)) {
+            $startParameters.RedirectStandardOutput = $StandardOutputPath
+        }
+        if (-not [string]::IsNullOrWhiteSpace($StandardErrorPath)) {
+            $startParameters.RedirectStandardError = $StandardErrorPath
+        }
+        $process = Start-Process @startParameters
         exit [int]$process.ExitCode
     }
 
@@ -385,7 +413,7 @@ try {
     $cleanup = Remove-DisposableAccount -State $state
     $baselineRestored = $false
     if (-not [string]::IsNullOrWhiteSpace([string]$state.baseline_root) -and
-        -not [bool]$cleanup.account_absent) {
+        (-not [bool]$cleanup.account_absent -or -not [bool]$cleanup.profile_absent)) {
         $baselineAfter = Get-FileTreeHash -Root ([string]$state.baseline_root)
         $baselineRestored = (
             [string]$baselineAfter -ceq [string]$state.baseline_before_sha256 -and
@@ -417,13 +445,29 @@ try {
     }) | ConvertTo-Json -Compress))
     exit $exitCode
 } catch {
+    if ($Action -ceq "Finalize" -and
+        $null -ne $state -and
+        -not [string]::IsNullOrWhiteSpace($EvidencePath)) {
+        try {
+            Write-LifecycleEvidence `
+                -State $state `
+                -Cleanup ([pscustomobject]@{
+                    account_removed = $false
+                    account_absent = $false
+                    profile_removed = $false
+                    profile_absent = $false
+                }) `
+                -BaselineRestored $false | Out-Null
+        } catch {
+        }
+    }
     [Console]::Out.WriteLine((([ordered]@{
         schema_version = 1
         action = $Action
         outcome = "blocked"
         exit_code = $script:ExitCodes.StrictPrerequisiteBlocked
         strict_gate_eligible = $false
-        error = [string]$_.Exception.Message
+        blocking_reasons = @("WINDOWS_LIFECYCLE_UNAVAILABLE")
     }) | ConvertTo-Json -Compress))
     exit $script:ExitCodes.StrictPrerequisiteBlocked
 }

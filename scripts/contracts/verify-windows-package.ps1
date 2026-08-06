@@ -25,6 +25,22 @@ function Get-Sha256File {
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
+function Get-Sha256String {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Value
+    )
+
+    $bytes = [Text.Encoding]::UTF8.GetBytes($Value)
+    $hash = [Security.Cryptography.SHA256]::Create()
+    try {
+        return ([BitConverter]::ToString($hash.ComputeHash($bytes))).Replace("-", "").ToLowerInvariant()
+    } finally {
+        $hash.Dispose()
+    }
+}
+
 function New-Check {
     param(
         [string]$Name,
@@ -93,35 +109,6 @@ function Read-JsonFile {
     return Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
 }
 
-function Assert-ExactValue {
-    param(
-        [Parameter(Mandatory = $true)]
-        [object]$Actual,
-        [Parameter(Mandatory = $true)]
-        [object]$Expected,
-        [Parameter(Mandatory = $true)]
-        [string]$Code
-    )
-
-    if ([string]$Actual -cne [string]$Expected) {
-        throw $Code
-    }
-}
-
-function Test-CurrentUserPath {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path
-    )
-
-    if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
-        return $false
-    }
-    $fullPath = [IO.Path]::GetFullPath($Path).TrimEnd("\")
-    $localAppData = [IO.Path]::GetFullPath($env:LOCALAPPDATA).TrimEnd("\")
-    return $fullPath.StartsWith($localAppData + "\", [StringComparison]::OrdinalIgnoreCase)
-}
-
 function Test-Lifecycle {
     param(
         [Parameter(Mandatory = $true)]
@@ -176,6 +163,93 @@ function Test-Lifecycle {
     }
 }
 
+function Test-IdentityBinding {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Document,
+        [bool]$FixtureMode
+    )
+
+    $lifecycle = $Document.lifecycle
+    $targetArchitecture = if ($FixtureMode) {
+        [string]$Document.target_architecture
+    } else {
+        $TargetArchitecture
+    }
+    $expectedRunnerArchitecture = if ($targetArchitecture -ceq "x64") {
+        "X64"
+    } else {
+        "ARM64"
+    }
+    $checks = @(
+        New-Check `
+            -Name "runner_architecture_binding" `
+            -Passed ([string]$lifecycle.runner.architecture -ceq $expectedRunnerArchitecture -or
+                [string]$lifecycle.runner.architecture -ceq $targetArchitecture) `
+            -FailureCode "WINDOWS_RUNNER_ARCH_MISMATCH"
+        New-Check `
+            -Name "profile_binding" `
+            -Passed (
+                [string]$Document.package.install.profile_id_sha256 -match "^[0-9a-f]{64}$" -and
+                [string]$Document.package.install.profile_id_sha256 -ceq
+                    [string]$lifecycle.account_lifecycle.profile_id_sha256
+            ) `
+            -FailureCode "WINDOWS_INSTALL_PROFILE_MISMATCH"
+        New-Check `
+            -Name "runner_identity_digest" `
+            -Passed (
+                [string]$lifecycle.runner.name_sha256 -match "^[0-9a-f]{64}$" -and
+                [string]$lifecycle.runner.tracking_id_sha256 -match "^[0-9a-f]{64}$"
+            ) `
+            -FailureCode "WINDOWS_RUNNER_IDENTITY_INVALID"
+        New-Check `
+            -Name "account_identity_digest" `
+            -Passed (
+                [string]$lifecycle.account_lifecycle.sid_sha256 -match "^[0-9a-f]{64}$" -and
+                [string]$lifecycle.account_lifecycle.profile_id_sha256 -match "^[0-9a-f]{64}$"
+            ) `
+            -FailureCode "WINDOWS_ACCOUNT_IDENTITY_INVALID"
+        New-Check `
+            -Name "github_identity_shape" `
+            -Passed (
+                [string]$lifecycle.github.repository -ceq "yinshaohua/GPTEasy" -and
+                [string]$lifecycle.github.run_id -match "^[0-9]+$" -and
+                [int]$lifecycle.github.run_attempt -ge 1 -and
+                [string]$lifecycle.github.job -match "^[A-Za-z0-9_-]+$" -and
+                [string]$lifecycle.github.commit -match "^[0-9a-f]{40}$"
+            ) `
+            -FailureCode "WINDOWS_GITHUB_IDENTITY_INVALID"
+    )
+
+    if (-not $FixtureMode) {
+        $checks += @(
+            New-Check `
+                -Name "github_repository_binding" `
+                -Passed (
+                    [string]$lifecycle.github.repository -ceq "yinshaohua/GPTEasy" -and
+                    [string]$lifecycle.github.repository -ceq [string]$env:GITHUB_REPOSITORY
+                ) `
+                -FailureCode "WINDOWS_GITHUB_IDENTITY_MISMATCH"
+            New-Check `
+                -Name "github_run_binding" `
+                -Passed (
+                    [string]$lifecycle.github.run_id -ceq [string]$env:GITHUB_RUN_ID -and
+                    [int]$lifecycle.github.run_attempt -eq [int]$env:GITHUB_RUN_ATTEMPT -and
+                    [string]$lifecycle.github.job -ceq [string]$env:GITHUB_JOB -and
+                    [string]$lifecycle.github.commit -ceq [string]$env:GITHUB_SHA
+                ) `
+                -FailureCode "WINDOWS_GITHUB_IDENTITY_MISMATCH"
+        )
+    }
+
+    $failed = @($checks | Where-Object { $_.outcome -ceq "failed" })
+    return [pscustomobject]@{
+        Checks = @($checks)
+        Passed = @($failed).Count -eq 0
+        FailureCodes = @($failed | ForEach-Object { [string]$_.code })
+    }
+}
+
 function Test-InstallEvidence {
     param(
         [Parameter(Mandatory = $true)]
@@ -192,6 +266,13 @@ function Test-InstallEvidence {
             -Name "localappdata_install_root" `
             -Passed ([string]$Package.install.root_kind -ceq "LOCALAPPDATA") `
             -FailureCode "WINDOWS_PACKAGE_NOT_CURRENT_USER"
+        New-Check `
+            -Name "install_evidence_redacted" `
+            -Passed (
+                [bool]$Package.install.absolute_path_redacted -and
+                [bool]$Package.path_smoke.absolute_path_redacted
+            ) `
+            -FailureCode "WINDOWS_INSTALL_EVIDENCE_NOT_REDACTED"
         New-Check `
             -Name "path_smoke" `
             -Passed (
@@ -235,6 +316,10 @@ function Test-Package {
         -Name "authenticode" `
         -Passed $signaturePassed `
         -FailureCode "WINDOWS_PACKAGE_UNSIGNED"))
+    $checks.Add((New-Check `
+        -Name "authenticode_signer_identity" `
+        -Passed ([string]$package.authenticode.signer_thumbprint_sha256 -match "^[0-9a-f]{64}$") `
+        -FailureCode "WINDOWS_PACKAGE_SIGNER_INVALID"))
 
     $machine = if ($FixtureMode) {
         [string]$package.pe.machine
@@ -255,6 +340,13 @@ function Test-Package {
         -Lifecycle $Document.lifecycle `
         -FixtureMode $FixtureMode
     foreach ($check in @($lifecycle.Checks)) {
+        $checks.Add($check)
+    }
+
+    $identity = Test-IdentityBinding `
+        -Document $Document `
+        -FixtureMode $FixtureMode
+    foreach ($check in @($identity.Checks)) {
         $checks.Add($check)
     }
 
@@ -293,9 +385,6 @@ function Test-LivePreconditions {
     if (-not (Test-Path -LiteralPath $PackagePath -PathType Leaf)) {
         throw "package artifact does not exist"
     }
-    if (-not (Test-CurrentUserPath -Path $InstallEvidencePath)) {
-        throw "install evidence must be held under current-user LOCALAPPDATA"
-    }
 }
 
 $fixtureMode = -not [string]::IsNullOrWhiteSpace($FixturePath)
@@ -313,8 +402,14 @@ try {
             lifecycle = (Read-JsonFile -Path $LifecycleEvidencePath)
         }
         $signature = Get-AuthenticodeSignature -FilePath $PackagePath
+        $signerThumbprint = if ($null -eq $signature.SignerCertificate) {
+            ""
+        } else {
+            [string]$signature.SignerCertificate.Thumbprint
+        }
         $document.package | Add-Member -NotePropertyName authenticode -NotePropertyValue @{
             status = [string]$signature.Status
+            signer_thumbprint_sha256 = Get-Sha256String -Value $signerThumbprint
         }
         $document.package | Add-Member -NotePropertyName pe -NotePropertyValue @{
             machine = Get-PeMachine -Path $PackagePath
@@ -346,7 +441,6 @@ try {
                 "WINDOWS_PACKAGE_VERIFICATION_UNAVAILABLE"
             }
         )
-        error = [string]$_.Exception.Message
     }
     [Console]::Out.WriteLine(($blocked | ConvertTo-Json -Compress -Depth 30))
     exit [int]$blocked.exit_code

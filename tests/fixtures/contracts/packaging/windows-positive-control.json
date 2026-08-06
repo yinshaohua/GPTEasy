@@ -16,6 +16,7 @@
     "install": {
       "scope": "currentUser",
       "root_kind": "LOCALAPPDATA",
+      "profile_id_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
       "absolute_path_redacted": true
     },
     "path_smoke": {

@@ -279,10 +279,24 @@
       ]
     },
     "packaging-self-test-local": {
-      "kind": "aggregate",
-      "required_paths": [
-        "scripts/contracts/test-windows-package-verifier.ps1",
-        "scripts/contracts/test-macos-wave0-contract.ps1"
+      "kind": "command",
+      "commands": [
+        {
+          "path": "scripts/contracts/test-windows-package-verifier.ps1",
+          "arguments": [
+            "-CaseSet",
+            "All"
+          ]
+        },
+        {
+          "path": "scripts/contracts/test-macos-wave0-contract.ps1",
+          "arguments": [
+            "-Scripts",
+            "scripts/contracts/probe-codex-macos.zsh,scripts/contracts/probe-macos-host.zsh,scripts/contracts/test-macos-contract-probes.zsh",
+            "-Workflow",
+            ".github/workflows/phase1-macos-wave0.yml"
+          ]
+        }
       ]
     },
     "packaging-self-test-windows-x64": {

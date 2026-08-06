@@ -1,0 +1,468 @@
+name: Phase 1 Windows Evidence
+
+on:
+  workflow_call:
+    secrets:
+      WINDOWS_AUTHENTICODE_PFX_BASE64:
+        required: true
+      WINDOWS_AUTHENTICODE_PFX_PASSWORD:
+        required: true
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  attestations: write
+  contents: read
+  id-token: write
+
+jobs:
+  windows-evidence:
+    name: ${{ matrix.job_name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - job_name: windows-x64
+            runner: windows-2025
+            runner_arch: X64
+            target_arch: x64
+            rust_target: x86_64-pc-windows-msvc
+          - job_name: windows-arm64
+            runner: windows-11-arm
+            runner_arch: ARM64
+            target_arch: arm64
+            rust_target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      GPTEASY_JOB_VARIANT: ${{ matrix.job_name }}
+      GPTEASY_PRIVATE_DIR: ${{ runner.temp }}\gpteasy-private-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.target_arch }}
+      GPTEASY_EVIDENCE_DIR: ${{ runner.temp }}\gpteasy-evidence-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.target_arch }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout exact source revision
+        uses: actions/checkout@200ca3772d6bf0f748598244a5eb52a1a57e3c54
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify exact native runner
+        shell: powershell
+        env:
+          EXPECTED_ARCH: ${{ matrix.runner_arch }}
+          EXPECTED_REVISION: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ((git rev-parse HEAD) -cne $env:EXPECTED_REVISION) {
+            throw "checkout revision mismatch"
+          }
+          $actualArchitecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+          if ($actualArchitecture -cne $env:EXPECTED_ARCH) {
+            throw "native runner architecture mismatch"
+          }
+          if ($env:RUNNER_ENVIRONMENT -cne "github-hosted") {
+            throw "Windows evidence requires an attested GitHub-hosted ephemeral runner"
+          }
+          New-Item -ItemType Directory -Path $env:GPTEASY_PRIVATE_DIR -Force | Out-Null
+          New-Item -ItemType Directory -Path $env:GPTEASY_EVIDENCE_DIR -Force | Out-Null
+
+      - name: Preflight read-only GitHub evidence APIs
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          powershell -NoProfile -File scripts/contracts/preflight-gh-evidence.ps1 `
+            -Repository yinshaohua/GPTEasy `
+            -MinimumVersion 2.49.0
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Setup exact Node runtime
+        uses: actions/setup-node@53a4f7c3ee89bd49776564f2e6b8c5dbfb39b68a
+        with:
+          node-version: 24.18.1
+          cache: npm
+
+      - name: Install locked frontend dependencies
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $npmHome = Join-Path $env:GPTEASY_PRIVATE_DIR "npm"
+          New-Item -ItemType Directory -Path $npmHome -Force | Out-Null
+          $userConfig = Join-Path $npmHome "user.npmrc"
+          $globalConfig = Join-Path $npmHome "global.npmrc"
+          [IO.File]::WriteAllText($userConfig, "", [Text.UTF8Encoding]::new($false))
+          [IO.File]::WriteAllText($globalConfig, "", [Text.UTF8Encoding]::new($false))
+          $env:NPM_CONFIG_USERCONFIG = $userConfig
+          $env:NPM_CONFIG_GLOBALCONFIG = $globalConfig
+          $env:NPM_CONFIG_REGISTRY = "https://registry.npmjs.org/"
+          npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Prepare native Rust target
+        shell: powershell
+        env:
+          RUST_TARGET: ${{ matrix.rust_target }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          rustup target add $env:RUST_TARGET
+          cargo metadata --manifest-path src-tauri/Cargo.toml --locked --no-deps | Out-Null
+
+      - name: Initialize disposable OS user
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $statePath = Join-Path $env:GPTEASY_PRIVATE_DIR "lifecycle-state.json"
+          powershell -NoProfile -File scripts/contracts/assert-windows-job-lifecycle.ps1 `
+            -Action Initialize `
+            -StatePath $statePath
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Run official CLI and host canary parity
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $statePath = Join-Path $env:GPTEASY_PRIVATE_DIR "lifecycle-state.json"
+          $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+          $workingDirectory = Join-Path $state.profile_path "AppData\Local\GPTEasyContract"
+          New-Item -ItemType Directory -Path $workingDirectory -Force | Out-Null
+          $officialCodex = (Get-Command codex.exe -ErrorAction Stop).Source
+          $stdout = Join-Path $env:GPTEASY_EVIDENCE_DIR "windows-host.json"
+          $stderr = Join-Path $env:GPTEASY_PRIVATE_DIR "windows-host.stderr"
+          $arguments = @(
+            "-NoProfile",
+            "-File",
+            (Resolve-Path "scripts/contracts/probe-windows-host.ps1").Path,
+            "-DisposableUserProfile",
+            [string]$state.profile_path,
+            "-WorkingDirectory",
+            $workingDirectory,
+            "-OfficialCliExecutable",
+            $officialCodex,
+            "-ExpectedVersion",
+            "0.146.1"
+          )
+          powershell -NoProfile -File scripts/contracts/assert-windows-job-lifecycle.ps1 `
+            -Action Invoke `
+            -StatePath $statePath `
+            -CommandPath powershell.exe `
+            -CommandArguments $arguments `
+            -StandardOutputPath $stdout `
+            -StandardErrorPath $stderr
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Run WSL passive probe
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $statePath = Join-Path $env:GPTEASY_PRIVATE_DIR "lifecycle-state.json"
+          $stdout = Join-Path $env:GPTEASY_EVIDENCE_DIR "wsl2.json"
+          $stderr = Join-Path $env:GPTEASY_PRIVATE_DIR "wsl2.stderr"
+          $arguments = @(
+            "-NoProfile",
+            "-File",
+            (Resolve-Path "scripts/contracts/probe-wsl2.ps1").Path
+          )
+          powershell -NoProfile -File scripts/contracts/assert-windows-job-lifecycle.ps1 `
+            -Action Invoke `
+            -StatePath $statePath `
+            -CommandPath powershell.exe `
+            -CommandArguments $arguments `
+            -StandardOutputPath $stdout `
+            -StandardErrorPath $stderr
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Build formally signed current-user NSIS package
+        shell: powershell
+        env:
+          RUST_TARGET: ${{ matrix.rust_target }}
+          WINDOWS_AUTHENTICODE_PFX_BASE64: ${{ secrets.WINDOWS_AUTHENTICODE_PFX_BASE64 }}
+          WINDOWS_AUTHENTICODE_PFX_PASSWORD: ${{ secrets.WINDOWS_AUTHENTICODE_PFX_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_AUTHENTICODE_PFX_BASE64) -or
+              [string]::IsNullOrWhiteSpace($env:WINDOWS_AUTHENTICODE_PFX_PASSWORD)) {
+            throw "Authenticode signing secrets are required"
+          }
+
+          $pfxPath = Join-Path $env:GPTEASY_PRIVATE_DIR "authenticode.pfx"
+          $configPath = Join-Path $env:GPTEASY_PRIVATE_DIR "tauri-signing.json"
+          $certificate = $null
+          try {
+            [IO.File]::WriteAllBytes(
+              $pfxPath,
+              [Convert]::FromBase64String($env:WINDOWS_AUTHENTICODE_PFX_BASE64)
+            )
+            $password = ConvertTo-SecureString `
+              -String $env:WINDOWS_AUTHENTICODE_PFX_PASSWORD `
+              -AsPlainText `
+              -Force
+            $certificate = Import-PfxCertificate `
+              -FilePath $pfxPath `
+              -CertStoreLocation Cert:\CurrentUser\My `
+              -Password $password `
+              -Exportable:$false
+            if ($null -eq $certificate -or -not $certificate.HasPrivateKey) {
+              throw "Authenticode certificate import failed"
+            }
+
+            $signingConfig = @{
+              bundle = @{
+                windows = @{
+                  certificateThumbprint = $certificate.Thumbprint
+                  digestAlgorithm = "sha256"
+                  timestampUrl = "http://timestamp.digicert.com"
+                }
+              }
+            }
+            [IO.File]::WriteAllText(
+              $configPath,
+              (($signingConfig | ConvertTo-Json -Depth 10) + "`n"),
+              [Text.UTF8Encoding]::new($false)
+            )
+            npm run tauri -- build `
+              --target $env:RUST_TARGET `
+              --bundles nsis `
+              --config $configPath
+
+            $bundleDirectory = Join-Path `
+              (Resolve-Path "src-tauri").Path `
+              "target\$env:RUST_TARGET\release\bundle\nsis"
+            $installers = @(
+              Get-ChildItem -LiteralPath $bundleDirectory -Filter "*.exe" -File
+            )
+            if ($installers.Count -ne 1) {
+              throw "expected exactly one NSIS installer"
+            }
+            $installer = $installers[0]
+            $signature = Get-AuthenticodeSignature -FilePath $installer.FullName
+            if ([string]$signature.Status -cne "Valid") {
+              throw "built installer does not have a valid Authenticode signature"
+            }
+            "GPTEASY_INSTALLER_PATH=$($installer.FullName)" |
+              Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          } finally {
+            if ($null -ne $certificate) {
+              Remove-Item -LiteralPath ("Cert:\CurrentUser\My\" + $certificate.Thumbprint) `
+                -Force `
+                -ErrorAction SilentlyContinue
+            }
+            Remove-Item -LiteralPath $pfxPath -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $configPath -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Install package and run path smoke as disposable user
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $statePath = Join-Path $env:GPTEASY_PRIVATE_DIR "lifecycle-state.json"
+          $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+          $invokeScript = "scripts/contracts/assert-windows-job-lifecycle.ps1"
+          powershell -NoProfile -File $invokeScript `
+            -Action Invoke `
+            -StatePath $statePath `
+            -CommandPath $env:GPTEASY_INSTALLER_PATH `
+            -CommandArguments @("/S")
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+          $installRoot = Join-Path $state.profile_path "AppData\Local\GPTEasy"
+          $installedExecutables = @(
+            Get-ChildItem `
+              -LiteralPath $installRoot `
+              -Filter "gpteasy.exe" `
+              -File `
+              -Recurse
+          )
+          if ($installedExecutables.Count -ne 1) {
+            throw "expected exactly one installed GPTEasy executable"
+          }
+          $installedExecutable = $installedExecutables[0]
+          $runId = "p1-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT-${{ matrix.target_arch }}"
+          $first = Join-Path $env:GPTEASY_EVIDENCE_DIR "path-smoke-first.json"
+          $second = Join-Path $env:GPTEASY_EVIDENCE_DIR "path-smoke-second.json"
+          $stderr = Join-Path $env:GPTEASY_PRIVATE_DIR "path-smoke.stderr"
+          foreach ($outputPath in @($first, $second)) {
+            powershell -NoProfile -File $invokeScript `
+              -Action Invoke `
+              -StatePath $statePath `
+              -CommandPath $installedExecutable.FullName `
+              -CommandArguments @("phase1-path-smoke", $runId) `
+              -StandardOutputPath $outputPath `
+              -StandardErrorPath $stderr
+            if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+            }
+          }
+
+          $firstReport = Get-Content -LiteralPath $first -Raw | ConvertFrom-Json
+          $secondReport = Get-Content -LiteralPath $second -Raw | ConvertFrom-Json
+          $markerCorrelated = (
+            [string]$firstReport.run_id -ceq $runId -and
+            [string]$secondReport.run_id -ceq $runId -and
+            [string]$firstReport.schema -ceq [string]$secondReport.schema -and
+            -not [bool]$firstReport.reopened -and
+            [bool]$secondReport.reopened
+          )
+          if (-not $markerCorrelated) {
+            throw "path smoke marker did not reopen under the disposable user"
+          }
+
+          $profileHash = [Security.Cryptography.SHA256]::Create()
+          try {
+            $profileBytes = [Text.Encoding]::UTF8.GetBytes([string]$state.profile_path)
+            $profileId = ([BitConverter]::ToString(
+              $profileHash.ComputeHash($profileBytes)
+            )).Replace("-", "").ToLowerInvariant()
+          } finally {
+            $profileHash.Dispose()
+          }
+          $installEvidence = [ordered]@{
+            exists = $true
+            install = [ordered]@{
+              scope = "currentUser"
+              root_kind = "LOCALAPPDATA"
+              profile_id_sha256 = $profileId
+              absolute_path_redacted = $true
+            }
+            path_smoke = [ordered]@{
+              outcome = "passed"
+              root_kind = "app_local_data_dir"
+              reopened = [bool]$secondReport.reopened
+              absolute_path_redacted = $true
+            }
+            marker_correlated = $markerCorrelated
+          }
+          $installEvidence | ConvertTo-Json -Depth 20 |
+            Set-Content `
+              -LiteralPath (Join-Path $env:GPTEASY_EVIDENCE_DIR "install.json") `
+              -Encoding UTF8
+
+      - name: Stop app and uninstall from disposable user
+        if: always()
+        continue-on-error: true
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $statePath = Join-Path $env:GPTEASY_PRIVATE_DIR "lifecycle-state.json"
+          if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {
+            exit 0
+          }
+          $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+          $uninstaller = Join-Path $state.profile_path "AppData\Local\GPTEasy\uninstall.exe"
+          if (Test-Path -LiteralPath $uninstaller -PathType Leaf) {
+            powershell -NoProfile -File scripts/contracts/assert-windows-job-lifecycle.ps1 `
+              -Action Invoke `
+              -StatePath $statePath `
+              -CommandPath $uninstaller `
+              -CommandArguments @("/S")
+          }
+
+      - name: Finalize account and profile cleanup
+        id: lifecycle_cleanup
+        if: always()
+        continue-on-error: true
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $statePath = Join-Path $env:GPTEASY_PRIVATE_DIR "lifecycle-state.json"
+          $evidencePath = Join-Path $env:GPTEASY_EVIDENCE_DIR "lifecycle.json"
+          powershell -NoProfile -File scripts/contracts/assert-windows-job-lifecycle.ps1 `
+            -Action Finalize `
+            -StatePath $statePath `
+            -EvidencePath $evidencePath
+          exit $LASTEXITCODE
+
+      - name: Verify package and finalized lifecycle
+        id: package_verification
+        if: always()
+        shell: powershell
+        env:
+          TARGET_ARCH: ${{ matrix.target_arch }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installEvidence = Join-Path $env:GPTEASY_EVIDENCE_DIR "install.json"
+          $lifecycleEvidence = Join-Path $env:GPTEASY_EVIDENCE_DIR "lifecycle.json"
+          $resultPath = Join-Path $env:GPTEASY_EVIDENCE_DIR "package-verification.json"
+          $output = @(
+            powershell -NoProfile -File scripts/contracts/verify-windows-package.ps1 `
+              -PackagePath $env:GPTEASY_INSTALLER_PATH `
+              -TargetArchitecture $env:TARGET_ARCH `
+              -InstallEvidencePath $installEvidence `
+              -LifecycleEvidencePath $lifecycleEvidence
+          )
+          $exitCode = $LASTEXITCODE
+          $jsonLine = @($output | Where-Object { $_.TrimStart().StartsWith("{") }) |
+            Select-Object -Last 1
+          if ([string]::IsNullOrWhiteSpace([string]$jsonLine)) {
+            throw "package verifier did not emit JSON"
+          }
+          [IO.File]::WriteAllText(
+            $resultPath,
+            ([string]$jsonLine + "`n"),
+            [Text.UTF8Encoding]::new($false)
+          )
+          if ($exitCode -ne 0) {
+            exit $exitCode
+          }
+          $result = $jsonLine | ConvertFrom-Json
+          if (-not [bool]$result.strict_gate_eligible) {
+            throw "live Windows package result is not strict-gate eligible"
+          }
+
+          $strictPass = [ordered]@{
+            schema_version = 1
+            outcome = "passed"
+            strict_gate_eligible = $true
+            repository = "yinshaohua/GPTEasy"
+            commit = $env:GITHUB_SHA
+            run_id = $env:GITHUB_RUN_ID
+            run_attempt = [int]$env:GITHUB_RUN_ATTEMPT
+            job = $env:GITHUB_JOB
+            target_architecture = $env:TARGET_ARCH
+            package_sha256 = [string]$result.package_sha256
+            cleanup_attested = $true
+          }
+          $strictPassPath = Join-Path $env:GPTEASY_EVIDENCE_DIR "strict-pass.json"
+          [IO.File]::WriteAllText(
+            $strictPassPath,
+            (($strictPass | ConvertTo-Json -Depth 10) + "`n"),
+            [Text.UTF8Encoding]::new($false)
+          )
+
+          $bundlePath = Join-Path `
+            $env:RUNNER_TEMP `
+            "gpteasy-windows-${{ matrix.target_arch }}-evidence.zip"
+          Compress-Archive `
+            -Path (Join-Path $env:GPTEASY_EVIDENCE_DIR "*") `
+            -DestinationPath $bundlePath `
+            -CompressionLevel Optimal
+          "installer=$env:GPTEASY_INSTALLER_PATH" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "bundle=$bundlePath" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Upload installer and evidence bundle
+        uses: actions/upload-artifact@3cea5372237819ed00197afe530f5a7ea3e805c8
+        with:
+          name: phase1-windows-${{ matrix.target_arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.package_verification.outputs.installer }}
+            ${{ steps.package_verification.outputs.bundle }}
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Generate provenance attestation
+        uses: actions/attest-build-provenance@cb7e54520ab2c01f0f31fb1838b2e05f204ce3e7
+        with:
+          subject-path: |
+            ${{ steps.package_verification.outputs.installer }}
+            ${{ steps.package_verification.outputs.bundle }}
