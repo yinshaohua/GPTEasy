@@ -185,13 +185,13 @@ function Invoke-PredicateCases {
                 Reason = "WINDOWS_LIFECYCLE_NOT_ATTESTED"
                 Mutate = {
                     param($case)
-                    $case.lifecycle.account.created_for_job = $false
-                    $case.lifecycle.account.profile_created_for_job = $false
-                    $case.lifecycle.account.cleanup_attested = $false
-                    $case.lifecycle.account.cleanup_succeeded = $false
-                    $case.lifecycle.account.account_absent_after_cleanup = $false
-                    $case.lifecycle.account.profile_absent_after_cleanup = $false
-                    $case.lifecycle.marker_correlated = $true
+                    $case.lifecycle.account_lifecycle.created_for_job = $false
+                    $case.lifecycle.account_lifecycle.profile_created_for_job = $false
+                    $case.lifecycle.account_lifecycle.cleanup_attested = $false
+                    $case.lifecycle.account_lifecycle.cleanup_succeeded = $false
+                    $case.lifecycle.account_lifecycle.account_absent_after_cleanup = $false
+                    $case.lifecycle.account_lifecycle.profile_absent_after_cleanup = $false
+                    $case.package.marker_correlated = $true
                 }
             },
             [pscustomobject]@{
@@ -199,11 +199,11 @@ function Invoke-PredicateCases {
                 Reason = "WINDOWS_LIFECYCLE_CLEANUP_MISSING"
                 Mutate = {
                     param($case)
-                    $case.lifecycle.account.cleanup_attempted = $true
-                    $case.lifecycle.account.cleanup_attested = $false
-                    $case.lifecycle.account.cleanup_succeeded = $false
-                    $case.lifecycle.account.account_absent_after_cleanup = $false
-                    $case.lifecycle.account.profile_absent_after_cleanup = $false
+                    $case.lifecycle.account_lifecycle.cleanup_attempted = $false
+                    $case.lifecycle.account_lifecycle.cleanup_attested = $false
+                    $case.lifecycle.account_lifecycle.cleanup_succeeded = $false
+                    $case.lifecycle.account_lifecycle.account_absent_after_cleanup = $false
+                    $case.lifecycle.account_lifecycle.profile_absent_after_cleanup = $false
                 }
             }
         )
