@@ -20,8 +20,8 @@
 
 ### 本地状态与配置安全
 
-- [ ] **STATE-01**: 用户关闭并重新打开 GPTEasy 后，供应商目录、验证状态、各受管环境的当前供应商和应用设置保持不变。
-- [ ] **STATE-02**: 供应商、供应商凭据、当前状态和诊断日志只保存在当前用户本机，应用不要求产品账户，也不默认上传这些数据。
+- [x] **STATE-01**: 用户关闭并重新打开 GPTEasy 后，供应商目录、验证状态、各受管环境的当前供应商和应用设置保持不变。
+- [x] **STATE-02**: 供应商、供应商凭据、当前状态和诊断日志只保存在当前用户本机，应用不要求产品账户，也不默认上传这些数据。
 - [ ] **STATE-03**: 用户从任一正式历史版本升级时，应用能够通过永久保留的顺序迁移直接升级现有 SQLite 数据库。
 - [ ] **STATE-04**: 数据库迁移前自动创建完整备份并默认保留最近三份；迁移失败时事务回滚，应用不能通过清空用户数据继续运行。
 - [ ] **STATE-05**: 旧版 GPTEasy 遇到更高版本数据库时拒绝写入，降级只能通过恢复升级前备份完成。
@@ -175,8 +175,8 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| STATE-01 | Phase 1 | Pending |
-| STATE-02 | Phase 1 | Pending |
+| STATE-01 | Phase 1 | Complete |
+| STATE-02 | Phase 1 | Complete |
 | STATE-03 | Phase 1 | Pending |
 | STATE-04 | Phase 1 | Pending |
 | STATE-05 | Phase 1 | Pending |
@@ -265,6 +265,7 @@
 | REL-08 | Phase 8 | Pending |
 
 **Coverage:**
+
 - v1 requirements: 88 total
 - Mapped to phases: 88
 - Unmapped: 0

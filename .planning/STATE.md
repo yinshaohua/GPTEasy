@@ -4,16 +4,15 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 1
 status: executing
-stopped_at: 路线图文件已创建，下一步为 Phase 1 规划
-last_updated: "2026-08-05T23:02:49.191Z"
+stopped_at: Completed 01-01-PLAN.md
+last_updated: "2026-08-06T01:22:27.115Z"
 last_activity: 2026-08-05
 last_activity_desc: 创建 8 阶段路线图并完成 88 项 v1 要求唯一映射
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 28
-  completed_plans: 0
-  percent: 0
+  completed_plans: 1
 ---
 
 # Project State
@@ -28,11 +27,11 @@ See: .planning/PROJECT.md (updated 2026-08-05)
 ## Current Position
 
 Phase: 1 of 8（可信本地状态与实现契约）
-Plan: 0 of TBD in current phase
+Plan: 1 of 28 in current phase
 Status: Ready to execute
-Last activity: 2026-08-05 — 创建 8 阶段路线图并完成 88 项 v1 要求唯一映射
+Last activity: 2026-08-06 — 完成 01-01 计划的 npm 身份门禁与污染自测
 
-Progress: [░░░░░░░░░░] 0%
+Progress: [░░░░░░░░░░] 4%
 
 ## Performance Metrics
 
@@ -54,6 +53,11 @@ Progress: [░░░░░░░░░░] 0%
 - Trend: Not started
 
 *Updated after each plan completion*
+**Per-Plan Metrics:**
+
+| Plan | Duration | Tasks | Files |
+|------|----------|-------|-------|
+| Phase 01 P01 | 45m | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -65,6 +69,8 @@ Recent decisions affecting current work:
 - [Roadmap]: `CONTEXT.md`、`docs/adr/` 和 `docs/ui/UI-SPEC.md` 是锁定基线，不重新打开其领域、架构、产品或 UI 决策。
 - [Roadmap]: 采用用户选择的 Horizontal Layers 顺序，先完成数据与配置安全基础，再进入供应商、平台集成、统一 UI 和发布门禁。
 - [Roadmap]: 8 个阶段均为内部实施边界；完整 v1 只在 Phase 8 全部门禁通过后一次发布。
+- [Phase 1]: 01-01：npm 身份门禁固定公开 registry、空 user/global config 和无祖先 .npmrc 的隔离 cwd；验证结果 fail-closed。
+- [Phase 1]: 01-01：测试必须复用生产 verifier predicate，并覆盖恶意 npm 配置、私有 registry、token canary 与伪造 metadata。
 
 ### Pending Todos
 
@@ -86,6 +92,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-05
-Stopped at: 路线图文件已创建，下一步为 Phase 1 规划
+Last session: 2026-08-06T01:22:27.102Z
+Stopped at: Completed 01-01-PLAN.md
 Resume file: None
