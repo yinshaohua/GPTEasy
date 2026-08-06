@@ -4,15 +4,15 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 1
 status: executing
-stopped_at: Completed 01-01-PLAN.md
-last_updated: "2026-08-06T01:22:27.115Z"
-last_activity: 2026-08-05
-last_activity_desc: 创建 8 阶段路线图并完成 88 项 v1 要求唯一映射
+stopped_at: Completed 01-03-PLAN.md
+last_updated: "2026-08-06T01:51:53.131Z"
+last_activity: 2026-08-06
+last_activity_desc: 完成 01-03 计划的唯一 runner CLI 合同与 consumer tests
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 28
-  completed_plans: 1
+  completed_plans: 2
 ---
 
 # Project State
@@ -27,11 +27,11 @@ See: .planning/PROJECT.md (updated 2026-08-05)
 ## Current Position
 
 Phase: 1 of 8（可信本地状态与实现契约）
-Plan: 1 of 28 in current phase
+Plan: 2 of 28 in current phase
 Status: Ready to execute
 Last activity: 2026-08-06 — 完成 01-01 计划的 npm 身份门禁与污染自测
 
-Progress: [░░░░░░░░░░] 4%
+Progress: [█░░░░░░░░░] 7%
 
 ## Performance Metrics
 
@@ -58,6 +58,7 @@ Progress: [░░░░░░░░░░] 4%
 | Plan | Duration | Tasks | Files |
 |------|----------|-------|-------|
 | Phase 01 P01 | 45m | 2 tasks | 3 files |
+| Phase 01 P03 | 35m | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -71,6 +72,9 @@ Recent decisions affecting current work:
 - [Roadmap]: 8 个阶段均为内部实施边界；完整 v1 只在 Phase 8 全部门禁通过后一次发布。
 - [Phase 1]: 01-01：npm 身份门禁固定公开 registry、空 user/global config 和无祖先 .npmrc 的隔离 cwd；验证结果 fail-closed。
 - [Phase 1]: 01-01：测试必须复用生产 verifier predicate，并覆盖恶意 npm 配置、私有 registry、token canary 与伪造 metadata。
+- [Phase 1]: 01-03：runner-cli-matrix.json 作为 Scope/Target/Mode、合法组合、dispatch 和退出码的唯一事实源。
+- [Phase 1]: 01-03：RunnerSelfTest/ProvenanceSelfTest/Freeze/PhaseComplete 只允许 Local+Strict，AllowBlocked 只允许具体目标的 ContractSelfTest/PackagingSelfTest。
+- [Phase 1]: 01-03：资源阻断时 Strict 返回 3，AllowBlocked 返回 0 但 outcome=blocked 且 strict_gate_eligible=false。
 
 ### Pending Todos
 
@@ -92,6 +96,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-06T01:22:27.102Z
-Stopped at: Completed 01-01-PLAN.md
+Last session: 2026-08-06T01:51:53.099Z
+Stopped at: Completed 01-03-PLAN.md
 Resume file: None
