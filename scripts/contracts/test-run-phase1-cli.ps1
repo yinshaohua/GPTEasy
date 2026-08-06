@@ -127,6 +127,31 @@ function Invoke-Runner {
     }
 }
 
+function Copy-JsonObject {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Value
+    )
+
+    return (($Value | ConvertTo-Json -Depth 50 -Compress) | ConvertFrom-Json)
+}
+
+function Write-Utf8Json {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [Parameter(Mandatory = $true)]
+        [object]$Value
+    )
+
+    $encoding = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText(
+        $Path,
+        ($Value | ConvertTo-Json -Depth 50),
+        $encoding
+    )
+}
+
 function Find-Combination {
     param(
         [object]$Matrix,
@@ -216,6 +241,89 @@ function Test-MatrixAndParser {
     Assert-Condition ($null -ne $strictBlocked.Json -and -not [bool]$strictBlocked.Json.strict_gate_eligible) 'Strict blocked result became strict eligible' $Failures
 
     return $combinationCount
+}
+
+function Test-FreezeAndPhaseComplete {
+    param(
+        [object]$Matrix,
+        [System.Collections.Generic.List[string]]$Failures
+    )
+
+    $freezeDispatch = $Matrix.dispatch.'freeze-local'
+    $phaseCompleteDispatch = $Matrix.dispatch.'phase-complete-local'
+    $expectedFreezeChecks = @(
+        'runner-self-test',
+        'provenance-self-test',
+        'path-smoke-self-test-local',
+        'windows-contract-self-test-local',
+        'contract-self-test-wsl2',
+        'packaging-self-test-local'
+    )
+    $expectedDeferredEvidence = @(
+        'windows-x64-authenticode',
+        'windows-arm64-authenticode',
+        'macos-intel-developer-id-notarization',
+        'macos-apple-silicon-developer-id-notarization'
+    )
+    $expectedFormalDispatches = @(
+        'contract-self-test-windows-x64',
+        'contract-self-test-windows-arm64',
+        'contract-self-test-mac-intel',
+        'contract-self-test-mac-apple-silicon',
+        'packaging-self-test-windows-x64',
+        'packaging-self-test-windows-arm64',
+        'packaging-self-test-mac-intel',
+        'packaging-self-test-mac-apple-silicon'
+    )
+
+    Assert-Condition ([string]$freezeDispatch.kind -ceq 'composite') 'Freeze dispatch must be composite' $Failures
+    Assert-Condition (Test-SequenceEquals @(Get-StringArray $freezeDispatch.required_dispatches) $expectedFreezeChecks) 'Freeze non-signing check set drifted' $Failures
+    Assert-Condition ([string]$freezeDispatch.freeze_kind -ceq 'non_signing_contract') 'Freeze kind must be non_signing_contract' $Failures
+    Assert-Condition (-not [bool]$freezeDispatch.release_ready) 'Freeze must never report release_ready=true' $Failures
+    Assert-Condition (Test-SequenceEquals @(Get-StringArray $freezeDispatch.deferred_evidence) $expectedDeferredEvidence) 'Freeze deferred evidence set drifted' $Failures
+
+    Assert-Condition ([string]$phaseCompleteDispatch.kind -ceq 'phase_complete') 'PhaseComplete must use the dedicated fail-closed dispatch' $Failures
+    Assert-Condition (Test-SequenceEquals @(Get-StringArray $phaseCompleteDispatch.formal_evidence_dispatches) $expectedFormalDispatches) 'PhaseComplete formal evidence set drifted' $Failures
+    Assert-Condition (-not ((Get-StringArray $phaseCompleteDispatch.formal_evidence_dispatches) -contains 'freeze-local')) 'Freeze result cannot satisfy PhaseComplete formal evidence' $Failures
+
+    $freeze = Invoke-Runner @('-Scope', 'Freeze', '-Target', 'Local', '-Mode', 'Strict')
+    Assert-Condition ($freeze.ExitCode -eq 0) "Freeze positive case returned $($freeze.ExitCode)" $Failures
+    Assert-Condition ($null -ne $freeze.Json -and $freeze.Json.outcome -ceq 'passed' -and [bool]$freeze.Json.strict_gate_eligible) 'Freeze positive result is not strict eligible' $Failures
+    Assert-Condition ($null -ne $freeze.Json -and [string]$freeze.Json.freeze_kind -ceq 'non_signing_contract') 'Freeze result omitted non_signing_contract kind' $Failures
+    Assert-Condition ($null -ne $freeze.Json -and -not [bool]$freeze.Json.release_ready) 'Freeze result incorrectly became release ready' $Failures
+    Assert-Condition ($null -ne $freeze.Json -and (Test-SequenceEquals @(Get-StringArray $freeze.Json.deferred_evidence) $expectedDeferredEvidence)) 'Freeze result deferred evidence drifted' $Failures
+
+    $phaseComplete = Invoke-Runner @('-Scope', 'PhaseComplete', '-Target', 'Local', '-Mode', 'Strict')
+    Assert-Condition ($phaseComplete.ExitCode -eq 3) "PhaseComplete missing-evidence case returned $($phaseComplete.ExitCode)" $Failures
+    Assert-Condition ($null -ne $phaseComplete.Json -and $phaseComplete.Json.outcome -ceq 'blocked') 'PhaseComplete missing-evidence case did not report blocked' $Failures
+    Assert-Condition ($null -ne $phaseComplete.Json -and -not [bool]$phaseComplete.Json.strict_gate_eligible -and -not [bool]$phaseComplete.Json.release_ready) 'Blocked PhaseComplete became strict or release eligible' $Failures
+
+    $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('gpteasy-freeze-matrix-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
+    try {
+        foreach ($requiredDispatch in $expectedFreezeChecks) {
+            $mutated = Copy-JsonObject $Matrix
+            $mutated.dispatch.'freeze-local'.required_dispatches = @(
+                Get-StringArray $mutated.dispatch.'freeze-local'.required_dispatches |
+                    Where-Object { $_ -cne $requiredDispatch }
+            )
+            $matrixPath = Join-Path $tempRoot ("missing-{0}.json" -f $requiredDispatch)
+            Write-Utf8Json $matrixPath $mutated
+            $negative = Invoke-Runner @('-Scope', 'RunnerSelfTest', '-Target', 'Local', '-Mode', 'Strict', '-Matrix', $matrixPath)
+            Assert-Condition ($negative.ExitCode -eq 2) "Freeze matrix without $requiredDispatch returned $($negative.ExitCode)" $Failures
+        }
+
+        $fakeFormal = Copy-JsonObject $Matrix
+        $fakeFormal.dispatch.'phase-complete-local'.formal_evidence_dispatches = @('freeze-local')
+        $fakeFormalPath = Join-Path $tempRoot 'freeze-as-formal-evidence.json'
+        Write-Utf8Json $fakeFormalPath $fakeFormal
+        $fakeFormalResult = Invoke-Runner @('-Scope', 'RunnerSelfTest', '-Target', 'Local', '-Mode', 'Strict', '-Matrix', $fakeFormalPath)
+        Assert-Condition ($fakeFormalResult.ExitCode -eq 2) "PhaseComplete accepted Freeze as formal evidence with exit $($fakeFormalResult.ExitCode)" $Failures
+    } finally {
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force
+        }
+    }
 }
 
 function Get-RunnerInvocations {
@@ -313,6 +421,7 @@ $failures = New-Object System.Collections.Generic.List[string]
 try {
     $matrix = Read-Utf8Json (Get-MatrixPath)
     $combinationCount = Test-MatrixAndParser $matrix $failures
+    Test-FreezeAndPhaseComplete $matrix $failures
     $scan = Scan-PlanConsumers ([string]$parsed.Values.ScanPlans) $matrix
     foreach ($error in $scan.Errors) {
         $failures.Add($error)
