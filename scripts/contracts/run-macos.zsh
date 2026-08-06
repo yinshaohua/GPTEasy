@@ -83,6 +83,7 @@ typeset host_os_name=""
 typeset host_os_major="0"
 typeset host_architecture=""
 typeset package_exists=false
+typeset artifact_correlated=false
 typeset package_artifact_sha256=""
 typeset package_executable_sha256=""
 typeset bundle_identifier=""
@@ -137,6 +138,7 @@ function load_fixture() {
   host_os_major="$(read_json_value "$fixture_path" host.os_major)" || return 1
   host_architecture="$(read_json_value "$fixture_path" host.architecture)" || return 1
   package_exists="$(read_json_value "$fixture_path" package.exists)" || return 1
+  artifact_correlated="$(read_json_value "$fixture_path" package.artifact_correlated)" || return 1
   package_artifact_sha256="$(read_json_value "$fixture_path" package.artifact_sha256)" || return 1
   package_executable_sha256="$(read_json_value "$fixture_path" package.executable_sha256)" || return 1
   bundle_identifier="$(read_json_value "$fixture_path" package.bundle.identifier)" || return 1
@@ -191,6 +193,9 @@ function load_fixture() {
       ;;
     wrong-arch)
       executable_architecture="x86_64"
+      ;;
+    artifact-mismatch)
+      artifact_correlated=false
       ;;
     missing-codesign)
       codesign_verified=false
@@ -270,17 +275,75 @@ function load_live_facts() {
   package_exists=true
   package_artifact_sha256="$(sha256_file "$artifact_path")" || return 1
 
-  local info_plist="$app_path/Contents/Info.plist"
-  [[ -f "$info_plist" ]] || return 1
-  bundle_identifier="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$info_plist" 2>/dev/null)" || return 1
-  minimum_system_version="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$info_plist" 2>/dev/null)" || return 1
+  local temporary_root
+  temporary_root="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/gpteasy-macos-package.XXXXXX")" ||
+    return 1
+  if ! /usr/bin/ditto -x -k "$artifact_path" "$temporary_root" >/dev/null 2>&1; then
+    /bin/rm -rf "$temporary_root"
+    return 1
+  fi
+  typeset -a packaged_apps
+  packaged_apps=("${(@f)$(/usr/bin/find "$temporary_root" -type d -name 'GPTEasy.app' -prune -print)}")
+  if (( ${#packaged_apps} != 1 )); then
+    /bin/rm -rf "$temporary_root"
+    return 1
+  fi
+  local packaged_app_path="${packaged_apps[1]}"
+  local info_plist="$packaged_app_path/Contents/Info.plist"
+  local source_info_plist="$app_path/Contents/Info.plist"
+  if [[ ! -f "$info_plist" || ! -f "$source_info_plist" ]]; then
+    /bin/rm -rf "$temporary_root"
+    return 1
+  fi
+
+  bundle_identifier="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$info_plist" 2>/dev/null)" || {
+    /bin/rm -rf "$temporary_root"
+    return 1
+  }
+  minimum_system_version="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$info_plist" 2>/dev/null)" || {
+    /bin/rm -rf "$temporary_root"
+    return 1
+  }
   local executable_name
-  executable_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$info_plist" 2>/dev/null)" || return 1
-  local executable_path="$app_path/Contents/MacOS/$executable_name"
-  [[ -f "$executable_path" ]] || return 1
-  package_executable_sha256="$(sha256_file "$executable_path")" || return 1
+  executable_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$info_plist" 2>/dev/null)" || {
+    /bin/rm -rf "$temporary_root"
+    return 1
+  }
+  local source_executable_name
+  source_executable_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$source_info_plist" 2>/dev/null)" || {
+    /bin/rm -rf "$temporary_root"
+    return 1
+  }
+  local source_bundle_identifier
+  source_bundle_identifier="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$source_info_plist" 2>/dev/null)" || {
+    /bin/rm -rf "$temporary_root"
+    return 1
+  }
+  local executable_path="$packaged_app_path/Contents/MacOS/$executable_name"
+  local source_executable_path="$app_path/Contents/MacOS/$source_executable_name"
+  if [[ ! -f "$executable_path" || ! -f "$source_executable_path" ]]; then
+    /bin/rm -rf "$temporary_root"
+    return 1
+  fi
+  package_executable_sha256="$(sha256_file "$executable_path")" || {
+    /bin/rm -rf "$temporary_root"
+    return 1
+  }
+  local source_executable_sha256
+  source_executable_sha256="$(sha256_file "$source_executable_path")" || {
+    /bin/rm -rf "$temporary_root"
+    return 1
+  }
+  artifact_correlated=false
+  if [[ "$source_bundle_identifier" == "$bundle_identifier" &&
+        "$source_executable_sha256" == "$package_executable_sha256" ]]; then
+    artifact_correlated=true
+  fi
   local executable_architectures
-  executable_architectures="$(/usr/bin/lipo -archs "$executable_path" 2>/dev/null)" || return 1
+  executable_architectures="$(/usr/bin/lipo -archs "$executable_path" 2>/dev/null)" || {
+    /bin/rm -rf "$temporary_root"
+    return 1
+  }
   executable_architecture=""
   if [[ " $executable_architectures " == *" $expected_arch "* ]]; then
     executable_architecture="$expected_arch"
@@ -289,11 +352,11 @@ function load_live_facts() {
   codesign_verified=false
   codesign_deep=true
   codesign_strict=true
-  if /usr/bin/codesign --verify --deep --strict --verbose=2 "$app_path" >/dev/null 2>&1; then
+  if /usr/bin/codesign --verify --deep --strict --verbose=2 "$packaged_app_path" >/dev/null 2>&1; then
     codesign_verified=true
   fi
   local codesign_details
-  codesign_details="$(/usr/bin/codesign -dv --verbose=4 "$app_path" 2>&1 || true)"
+  codesign_details="$(/usr/bin/codesign -dv --verbose=4 "$packaged_app_path" 2>&1 || true)"
   codesign_developer_id=false
   if [[ "$codesign_details" == *"Authority=Developer ID Application:"* ]]; then
     codesign_developer_id=true
@@ -311,14 +374,15 @@ function load_live_facts() {
 
   notary_stapled=false
   notary_validated=false
-  if /usr/bin/xcrun stapler validate "$app_path" >/dev/null 2>&1; then
+  if /usr/bin/xcrun stapler validate "$packaged_app_path" >/dev/null 2>&1; then
     notary_stapled=true
     notary_validated=true
   fi
   gatekeeper_accepted=false
-  if /usr/sbin/spctl --assess --type execute --verbose=4 "$app_path" >/dev/null 2>&1; then
+  if /usr/sbin/spctl --assess --type execute --verbose=4 "$packaged_app_path" >/dev/null 2>&1; then
     gatekeeper_accepted=true
   fi
+  /bin/rm -rf "$temporary_root"
 
   install_scope="$(read_json_value "$install_evidence_path" install.scope)" || return 1
   install_root_kind="$(read_json_value "$install_evidence_path" install.root_kind)" || return 1
@@ -376,6 +440,10 @@ function evaluate_predicate() {
     package_identity_ok=true
   fi
   add_check "package_identity" "$package_identity_ok" "MACOS_PACKAGE_IDENTITY_INVALID"
+
+  local artifact_correlation_ok=false
+  [[ "$artifact_correlated" == true ]] && artifact_correlation_ok=true
+  add_check "artifact_correlation" "$artifact_correlation_ok" "MACOS_ARTIFACT_APP_MISMATCH"
 
   local codesign_ok=false
   if [[ "$codesign_verified" == true &&
@@ -505,7 +573,7 @@ function evaluate_predicate() {
     reasons_json="${(j:,:)quoted_reasons}"
   fi
 
-  print -r -- "{\"schema_version\":1,\"probe\":\"macos-package-contract\",\"outcome\":$(json_quote "$outcome"),\"exit_code\":${exit_code},\"strict_gate_eligible\":${strict_gate_eligible},\"test_only\":${fixture_mode},\"target_architecture\":$(json_quote "$expected_arch"),\"package\":{\"artifact_sha256\":$(json_quote "$package_artifact_sha256"),\"executable_sha256\":$(json_quote "$package_executable_sha256"),\"bundle_identifier\":$(json_quote "$bundle_identifier"),\"minimum_system_version\":$(json_quote "$minimum_system_version"),\"install_scope\":$(json_quote "$install_scope"),\"install_root_kind\":$(json_quote "$install_root_kind")},\"checks\":[${checks_json}],\"blocking_reasons\":[${reasons_json}]}"
+  print -r -- "{\"schema_version\":1,\"probe\":\"macos-package-contract\",\"outcome\":$(json_quote "$outcome"),\"exit_code\":${exit_code},\"strict_gate_eligible\":${strict_gate_eligible},\"test_only\":${fixture_mode},\"target_architecture\":$(json_quote "$expected_arch"),\"package\":{\"artifact_correlated\":${artifact_correlated},\"artifact_sha256\":$(json_quote "$package_artifact_sha256"),\"executable_sha256\":$(json_quote "$package_executable_sha256"),\"bundle_identifier\":$(json_quote "$bundle_identifier"),\"minimum_system_version\":$(json_quote "$minimum_system_version"),\"install_scope\":$(json_quote "$install_scope"),\"install_root_kind\":$(json_quote "$install_root_kind")},\"checks\":[${checks_json}],\"blocking_reasons\":[${reasons_json}]}"
   return "$exit_code"
 }
 
