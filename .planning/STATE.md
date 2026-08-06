@@ -4,15 +4,15 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 1
 status: executing
-stopped_at: Completed 01-10-PLAN.md
-last_updated: "2026-08-06T07:10:45.345Z"
+stopped_at: Completed 01-13-PLAN.md
+last_updated: "2026-08-06T07:48:33.137Z"
 last_activity: 2026-08-06
-last_activity_desc: 完成 01-10 固定当前用户状态根 path smoke 与跨进程 reopen contract
+last_activity_desc: 完成 01-13 Windows package predicate、一次性账户生命周期与双架构 attested workflow
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 28
-  completed_plans: 12
+  completed_plans: 13
 ---
 
 # Project State
@@ -27,11 +27,11 @@ See: .planning/PROJECT.md (updated 2026-08-05)
 ## Current Position
 
 Phase: 1 of 8（可信本地状态与实现契约）
-Plan: 13 of 28 in current phase
+Plan: 14 of 28 in current phase
 Status: Ready to execute
-Last activity: 2026-08-06 — 完成 01-10 固定当前用户状态根 path smoke 与跨进程 reopen contract
+Last activity: 2026-08-06 — 完成 01-13 Windows package predicate、一次性账户生命周期与双架构 attested workflow
 
-Progress: [████░░░░░░] 43%
+Progress: [█████░░░░░] 46%
 
 ## Performance Metrics
 
@@ -69,6 +69,7 @@ Progress: [████░░░░░░] 43%
 | Phase 01 P06 | 约 10 分钟（不含人工等待） | 1 tasks | 1 files |
 | Phase 01 P09 | 约 26 分钟 | 2 tasks | 8 files |
 | Phase 01 P10 | 40min | 2 tasks | 5 files |
+| Phase 01 P13 | 31min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -108,6 +109,9 @@ Recent decisions affecting current work:
 - [Phase 01]: 01-09：capability 仅授权 main window 的 core:default；Windows NSIS 使用 currentUser，macOS minimumSystemVersion 固定 14.0。
 - [Phase 01]: 01-10：path smoke 固定使用 app_local_data_dir/contract-smoke/path 与 1–64 位 ASCII opaque ID。 — 调用者不能传入路径；marker/report 仅含 run_id、OS、arch、schema 与 reopened。
 - [Phase 01]: 01-10：跨进程 reopen 必须由真实 Tauri mock AppHandle 和当前 integration-test executable 的独立子进程证明。 — Windows test target 显式链接 tauri-build resource，避免测试宿主与正式应用清单漂移。
+- [Phase 01]: 01-13：Windows package strict pass 同时要求 Authenticode、目标 PE 架构、current-user 路径、跨进程 reopen、profile digest 绑定与 finalized cleanup attestation。
+- [Phase 01]: 01-13：一次性账户证据绑定 GitHub run/attempt/job、runner tracking、SID/profile；marker 不能单独证明 disposable。
+- [Phase 01]: 01-13：PackagingSelfTest Local 必须实际运行 Windows 正负例与 macOS Wave 0 contract，不能只检查脚本存在。
 
 ### Pending Todos
 
@@ -129,6 +133,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-06T07:10:25.240Z
-Stopped at: Completed 01-10-PLAN.md
+Last session: 2026-08-06T07:48:33.096Z
+Stopped at: Completed 01-13-PLAN.md
 Resume file: None
