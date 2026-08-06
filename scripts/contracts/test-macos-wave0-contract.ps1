@@ -126,7 +126,7 @@ try {
     $expandedScripts = @(Expand-ScriptArguments -Values $Scripts)
     Assert-Condition `
         -Condition ($expandedScripts.Count -ge 3) `
-        -Reason "Wave 0 must receive the probe and verifier zsh scripts"
+        -Reason "Wave 0 must receive a complete zsh contract set"
 
     $scriptTexts = @{}
     foreach ($scriptPath in $expandedScripts) {
@@ -142,6 +142,13 @@ try {
         $scriptTexts[[System.IO.Path]::GetFileName($scriptPath)] = $text
     }
 
+    $hasProbeSet = $scriptTexts.ContainsKey("probe-codex-macos.zsh")
+    $hasPackageSet = $scriptTexts.ContainsKey("run-macos.zsh")
+    Assert-Condition `
+        -Condition ($hasProbeSet -or $hasPackageSet) `
+        -Reason "Wave 0 input does not contain a recognized zsh contract set"
+
+    if ($hasProbeSet) {
     foreach ($requiredScript in @(
         "probe-codex-macos.zsh",
         "probe-macos-host.zsh",
@@ -238,6 +245,78 @@ try {
         Assert-Condition `
             -Condition ($source -notmatch "(?i)command[_ ]?line") `
             -Reason "zsh contract source must not expose complete command lines"
+    }
+    }
+
+    if ($hasPackageSet) {
+        $packageScriptNames = @(
+            "assert-macos-job-lifecycle.zsh",
+            "run-macos.zsh",
+            "test-macos-package-verifier.zsh"
+        )
+        foreach ($requiredScript in $packageScriptNames) {
+            Assert-Condition `
+                -Condition $scriptTexts.ContainsKey($requiredScript) `
+                -Reason ("missing required package script input: " + $requiredScript)
+        }
+
+        $lifecycleGuard = [string]$scriptTexts["assert-macos-job-lifecycle.zsh"]
+        foreach ($contract in @(
+            "GITHUB_RUN_ID",
+            "GITHUB_RUN_ATTEMPT",
+            "GITHUB_JOB",
+            "RUNNER_NAME",
+            "RUNNER_TRACKING_ID",
+            "sysadminctl",
+            "createhomedir",
+            "cleanup_attested",
+            "baseline_restored"
+        )) {
+            Assert-Condition `
+                -Condition $lifecycleGuard.Contains($contract) `
+                -Reason ("macOS lifecycle guard is missing contract marker: " + $contract)
+        }
+
+        $packageVerifier = [string]$scriptTexts["run-macos.zsh"]
+        foreach ($contract in @(
+            "codesign",
+            "notary",
+            "stapler",
+            "spctl",
+            "HOME_APPLICATIONS",
+            "strict_gate_eligible",
+            "fixture_mode",
+            "cleanup_attested"
+        )) {
+            Assert-Condition `
+                -Condition $packageVerifier.Contains($contract) `
+                -Reason ("macOS package predicate is missing contract marker: " + $contract)
+        }
+
+        $packageTests = [string]$scriptTexts["test-macos-package-verifier.zsh"]
+        foreach ($syntaxTarget in $packageScriptNames) {
+            Assert-Condition `
+                -Condition (
+                    $packageTests.Contains("zsh -n") -and
+                    $packageTests.Contains($syntaxTarget)
+                ) `
+                -Reason ("package verifier must syntax-check: " + $syntaxTarget)
+        }
+        foreach ($fixtureCase in @(
+            "positive",
+            "non-darwin",
+            "wrong-arch",
+            "missing-codesign",
+            "missing-notary",
+            "missing-gatekeeper",
+            "system-install",
+            "marker-only",
+            "cleanup-missing"
+        )) {
+            Assert-Condition `
+                -Condition $packageTests.Contains($fixtureCase) `
+                -Reason ("package verifier is missing fixture case: " + $fixtureCase)
+        }
     }
 
     $workflowText = Read-ContractText -Path $Workflow

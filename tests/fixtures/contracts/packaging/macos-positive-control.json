@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "fixture_mode": true,
+  "case_id": "macos-package-positive-control",
+  "target_architecture": "arm64",
+  "host": {
+    "os_name": "Darwin",
+    "os_major": 15,
+    "architecture": "arm64"
+  },
+  "package": {
+    "exists": true,
+    "artifact_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "executable_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "bundle": {
+      "identifier": "com.gpteasy.desktop",
+      "minimum_system_version": "14.0",
+      "executable_architecture": "arm64"
+    },
+    "install": {
+      "scope": "currentUser",
+      "root_kind": "HOME_APPLICATIONS",
+      "profile_id_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "absolute_path_redacted": true
+    },
+    "codesign": {
+      "verified": true,
+      "deep": true,
+      "strict": true,
+      "developer_id": true,
+      "team_id_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "notarization": {
+      "stapled": true,
+      "validated": true
+    },
+    "gatekeeper": {
+      "accepted": true
+    },
+    "path_smoke": {
+      "outcome": "passed",
+      "root_kind": "app_local_data_dir",
+      "reopened": true,
+      "absolute_path_redacted": true
+    },
+    "marker_correlated": true
+  },
+  "lifecycle": {
+    "schema_version": 1,
+    "runner_lifecycle": {
+      "ephemeral": true,
+      "dedicated_job": true
+    },
+    "account_lifecycle": {
+      "uid_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "profile_id_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "created_for_job": true,
+      "profile_created_for_job": true,
+      "cleanup_attempted": true,
+      "cleanup_attested": true,
+      "cleanup_succeeded": true,
+      "account_absent_after_cleanup": true,
+      "profile_absent_after_cleanup": true,
+      "baseline_restored": false
+    },
+    "github": {
+      "repository": "yinshaohua/GPTEasy",
+      "run_id": "123456789",
+      "run_attempt": 1,
+      "job": "macos-apple-silicon",
+      "commit": "0123456789abcdef0123456789abcdef01234567"
+    },
+    "runner": {
+      "name_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "image": "macos-15",
+      "tracking_id_sha256": "abababababababababababababababababababababababababababababababab",
+      "architecture": "arm64",
+      "ephemeral": true,
+      "dedicated_job": true
+    }
+  }
+}
