@@ -153,14 +153,20 @@ pub fn run_path_smoke<R: Runtime>(
     app: &AppHandle<R>,
     run_id: &str,
 ) -> Result<PathSmokeReport, PathSmokeError> {
-    validate_run_id(run_id)?;
-
     let smoke_root = app
         .path()
         .app_local_data_dir()
-        .map_err(PathSmokeError::ResolveStateRoot)?
-        .join("contract-smoke")
-        .join("path");
+        .map_err(PathSmokeError::ResolveStateRoot)?;
+    run_path_smoke_at_root(&smoke_root, run_id)
+}
+
+fn run_path_smoke_at_root(
+    state_root: &Path,
+    run_id: &str,
+) -> Result<PathSmokeReport, PathSmokeError> {
+    validate_run_id(run_id)?;
+
+    let smoke_root = state_root.join("contract-smoke").join("path");
     fs::create_dir_all(&smoke_root).map_err(PathSmokeError::CreateDirectory)?;
 
     let marker_path = smoke_root.join(format!("{run_id}.json"));
@@ -174,26 +180,20 @@ pub fn run_path_smoke<R: Runtime>(
 
 #[cfg(test)]
 mod tests {
-    use std::{ffi::OsString, path::Path};
+    use std::ffi::OsString;
 
     use serde_json::Value;
-    use tauri::test::{mock_builder, mock_context, noop_assets};
     use tempfile::tempdir;
 
     use super::{
-        parse_cli_args, run_path_smoke, PathSmokeError, PATH_SMOKE_COMMAND, PATH_SMOKE_SCHEMA,
+        parse_cli_args, run_path_smoke_at_root, PathSmokeError, PATH_SMOKE_COMMAND,
+        PATH_SMOKE_SCHEMA,
     };
-
-    fn mock_app_at(root: &Path) -> tauri::App<tauri::test::MockRuntime> {
-        let mut context = mock_context(noop_assets());
-        context.config_mut().identifier = root.to_string_lossy().into_owned();
-        mock_builder().build(context).expect("build mock app")
-    }
 
     #[test]
     fn path_smoke_rejects_non_opaque_ids_before_resolving_paths() {
         let temp = tempdir().expect("create temp directory");
-        let app = mock_app_at(&temp.path().join("app-root"));
+        let app_root = temp.path().join("app-root");
         let invalid_ids = [
             "",
             ".",
@@ -209,7 +209,7 @@ mod tests {
         for run_id in invalid_ids {
             assert!(
                 matches!(
-                    run_path_smoke(app.handle(), run_id),
+                    run_path_smoke_at_root(&app_root, run_id),
                     Err(PathSmokeError::InvalidRunId)
                 ),
                 "unexpected result for {run_id:?}"
@@ -222,11 +222,10 @@ mod tests {
     fn path_smoke_accepts_boundary_ids_and_reopens_fixed_marker() {
         let temp = tempdir().expect("create temp directory");
         let app_root = temp.path().join("app-root");
-        let app = mock_app_at(&app_root);
         let run_id = format!("A-{}", "9".repeat(62));
 
-        let first = run_path_smoke(app.handle(), &run_id).expect("first path smoke");
-        let second = run_path_smoke(app.handle(), &run_id).expect("second path smoke");
+        let first = run_path_smoke_at_root(&app_root, &run_id).expect("first path smoke");
+        let second = run_path_smoke_at_root(&app_root, &run_id).expect("second path smoke");
 
         assert_eq!(first.run_id, run_id);
         assert_eq!(first.schema, PATH_SMOKE_SCHEMA);
@@ -243,8 +242,8 @@ mod tests {
     #[test]
     fn report_serialization_has_only_non_sensitive_contract_fields() {
         let temp = tempdir().expect("create temp directory");
-        let app = mock_app_at(&temp.path().join("private-user-root"));
-        let report = run_path_smoke(app.handle(), "safe-123").expect("run path smoke");
+        let app_root = temp.path().join("private-user-root");
+        let report = run_path_smoke_at_root(&app_root, "safe-123").expect("run path smoke");
         let value = serde_json::to_value(report).expect("serialize report");
         let object = value.as_object().expect("report object");
 
