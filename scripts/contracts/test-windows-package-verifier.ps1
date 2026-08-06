@@ -315,6 +315,20 @@ function Assert-SourceContract {
             -Message "Windows evidence workflow is missing required contract: $pattern"
     }
 
+    Assert-True `
+        -Condition ($workflowSource -notmatch '(?m)^\s+GPTEASY_(?:PRIVATE|EVIDENCE)_DIR:\s*\$\{\{\s*runner\.temp\s*\}\}') `
+        -Message "runner.temp must not be evaluated from job-level env"
+    foreach ($pattern in @(
+        '$env:RUNNER_TEMP',
+        'GPTEASY_PRIVATE_DIR=$privateDirectory',
+        'GPTEASY_EVIDENCE_DIR=$evidenceDirectory',
+        '$env:GITHUB_ENV'
+    )) {
+        Assert-True `
+            -Condition ($workflowSource -match [regex]::Escape($pattern)) `
+            -Message "Windows evidence workflow is missing runner-time temp initialization: $pattern"
+    }
+
     $finalizeOffset = $workflowSource.IndexOf("-Action Finalize")
     $verifyOffset = $workflowSource.LastIndexOf("verify-windows-package.ps1")
     $uploadOffset = $workflowSource.IndexOf("upload-artifact")

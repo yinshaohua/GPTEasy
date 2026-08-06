@@ -36,8 +36,6 @@ jobs:
     timeout-minutes: 90
     env:
       GPTEASY_JOB_VARIANT: ${{ matrix.job_name }}
-      GPTEASY_PRIVATE_DIR: ${{ runner.temp }}\gpteasy-private-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.target_arch }}
-      GPTEASY_EVIDENCE_DIR: ${{ runner.temp }}\gpteasy-evidence-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.target_arch }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Checkout exact source revision
@@ -64,8 +62,18 @@ jobs:
           if ($env:RUNNER_ENVIRONMENT -cne "github-hosted") {
             throw "Windows evidence requires an attested GitHub-hosted ephemeral runner"
           }
-          New-Item -ItemType Directory -Path $env:GPTEASY_PRIVATE_DIR -Force | Out-Null
-          New-Item -ItemType Directory -Path $env:GPTEASY_EVIDENCE_DIR -Force | Out-Null
+          $privateDirectory = Join-Path `
+            $env:RUNNER_TEMP `
+            "gpteasy-private-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT-${{ matrix.target_arch }}"
+          $evidenceDirectory = Join-Path `
+            $env:RUNNER_TEMP `
+            "gpteasy-evidence-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT-${{ matrix.target_arch }}"
+          New-Item -ItemType Directory -Path $privateDirectory -Force | Out-Null
+          New-Item -ItemType Directory -Path $evidenceDirectory -Force | Out-Null
+          "GPTEASY_PRIVATE_DIR=$privateDirectory" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "GPTEASY_EVIDENCE_DIR=$evidenceDirectory" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Preflight read-only GitHub evidence APIs
         shell: powershell
