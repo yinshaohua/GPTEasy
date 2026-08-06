@@ -4,15 +4,15 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 1
 status: executing
-stopped_at: Completed 01-04-PLAN.md
-last_updated: "2026-08-06T02:22:13.984Z"
+stopped_at: Completed 01-05-PLAN.md
+last_updated: "2026-08-06T02:41:04.184Z"
 last_activity: 2026-08-06
-last_activity_desc: 完成 01-04 计划的外部 evidence schema、脱敏与 provenance 验证核心
+last_activity_desc: 完成 01-05 计划的 gh 版本、认证与只读权限 preflight
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 28
-  completed_plans: 3
+  completed_plans: 4
 ---
 
 # Project State
@@ -27,11 +27,11 @@ See: .planning/PROJECT.md (updated 2026-08-05)
 ## Current Position
 
 Phase: 1 of 8（可信本地状态与实现契约）
-Plan: 3 of 28 in current phase
+Plan: 4 of 28 in current phase
 Status: Ready to execute
-Last activity: 2026-08-06 — 完成 01-04 计划的外部 evidence schema、脱敏与 provenance 验证核心
+Last activity: 2026-08-06 — 完成 01-05 计划的 gh 版本、认证与只读权限 preflight
 
-Progress: [█░░░░░░░░░] 11%
+Progress: [█░░░░░░░░░] 14%
 
 ## Performance Metrics
 
@@ -60,6 +60,7 @@ Progress: [█░░░░░░░░░] 11%
 | Phase 01 P01 | 45m | 2 tasks | 3 files |
 | Phase 01 P03 | 35m | 2 tasks | 3 files |
 | Phase 01 P04 | 22m | 2 tasks | 7 files |
+| Phase 01 P05 | 14m | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -79,6 +80,9 @@ Recent decisions affecting current work:
 - [Phase 1]: 01-04：manifest validator 只证明结构与脱敏边界，永远不自行授予 strict eligibility。
 - [Phase 1]: 01-04：API artifact archive digest 与下载文件/attestation subject digest 分开交叉验证。
 - [Phase 1]: 01-04：Transcript 仅用于生产 predicate 自测，test_only=true 且 strict_gate_eligible=false。
+- [Phase 1]: 01-05：gh evidence preflight 固定 github.com、yinshaohua/GPTEasy 与最低版本 2.49.0，调用方不能放宽策略。
+- [Phase 1]: 01-05：repository、Actions 与 attestation API 均显式只读；固定不存在 digest 的 404 表示 endpoint 可读，401/403 阻断。
+- [Phase 1]: 01-05：preflight 始终 artifact_verified=false；fixture 仅用于生产 parser 自测且不能获得 strict eligibility。
 
 ### Pending Todos
 
@@ -100,6 +104,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-06T02:22:13.970Z
-Stopped at: Completed 01-04-PLAN.md
+Last session: 2026-08-06T02:41:04.101Z
+Stopped at: Completed 01-05-PLAN.md
 Resume file: None
