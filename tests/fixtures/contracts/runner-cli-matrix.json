@@ -1,0 +1,328 @@
+{
+  "schema_version": 1,
+  "phase": "01",
+  "cli": {
+    "script": "scripts/contracts/run-phase1-contracts.ps1",
+    "required_parameters": [
+      "Scope",
+      "Target",
+      "Mode"
+    ],
+    "parameters": {
+      "Scope": [
+        "RunnerSelfTest",
+        "ProvenanceSelfTest",
+        "ContractSelfTest",
+        "PackagingSelfTest",
+        "Freeze",
+        "PhaseComplete"
+      ],
+      "Target": [
+        "Local",
+        "WindowsX64",
+        "WindowsArm64",
+        "MacIntel",
+        "MacAppleSilicon",
+        "Wsl2"
+      ],
+      "Mode": [
+        "Strict",
+        "AllowBlocked"
+      ]
+    }
+  },
+  "exit_codes": {
+    "0": {
+      "name": "completed",
+      "meaning": "Requested mode completed. AllowBlocked resource absence also uses this code, but the outcome must be blocked and never strict eligible."
+    },
+    "2": {
+      "name": "assertion_failed",
+      "meaning": "Behavior or assertion failure."
+    },
+    "3": {
+      "name": "strict_prerequisite_blocked",
+      "meaning": "A Strict prerequisite is missing or blocked."
+    },
+    "4": {
+      "name": "provenance_invalid",
+      "meaning": "Provenance or attestation is not trustworthy."
+    },
+    "5": {
+      "name": "security_boundary_failed",
+      "meaning": "A security, canary, or lifecycle boundary failed."
+    },
+    "64": {
+      "name": "usage_or_combination_error",
+      "meaning": "A parameter is missing or unknown, or the combination is undeclared."
+    }
+  },
+  "allow_blocked": {
+    "scopes": [
+      "ContractSelfTest",
+      "PackagingSelfTest"
+    ],
+    "targets": [
+      "WindowsX64",
+      "WindowsArm64",
+      "MacIntel",
+      "MacAppleSilicon",
+      "Wsl2"
+    ],
+    "outcome": "blocked",
+    "exit_code": 0,
+    "strict_gate_eligible": false
+  },
+  "combinations": [
+    {
+      "scope": "RunnerSelfTest",
+      "target": "Local",
+      "modes": [
+        "Strict"
+      ],
+      "dispatch": "runner-self-test"
+    },
+    {
+      "scope": "ProvenanceSelfTest",
+      "target": "Local",
+      "modes": [
+        "Strict"
+      ],
+      "dispatch": "provenance-self-test"
+    },
+    {
+      "scope": "ContractSelfTest",
+      "target": "Local",
+      "modes": [
+        "Strict"
+      ],
+      "dispatch": "contract-self-test-local"
+    },
+    {
+      "scope": "ContractSelfTest",
+      "target": "WindowsX64",
+      "modes": [
+        "Strict",
+        "AllowBlocked"
+      ],
+      "dispatch": "contract-self-test-windows-x64"
+    },
+    {
+      "scope": "ContractSelfTest",
+      "target": "WindowsArm64",
+      "modes": [
+        "Strict",
+        "AllowBlocked"
+      ],
+      "dispatch": "contract-self-test-windows-arm64"
+    },
+    {
+      "scope": "ContractSelfTest",
+      "target": "MacIntel",
+      "modes": [
+        "Strict",
+        "AllowBlocked"
+      ],
+      "dispatch": "contract-self-test-mac-intel"
+    },
+    {
+      "scope": "ContractSelfTest",
+      "target": "MacAppleSilicon",
+      "modes": [
+        "Strict",
+        "AllowBlocked"
+      ],
+      "dispatch": "contract-self-test-mac-apple-silicon"
+    },
+    {
+      "scope": "ContractSelfTest",
+      "target": "Wsl2",
+      "modes": [
+        "Strict",
+        "AllowBlocked"
+      ],
+      "dispatch": "contract-self-test-wsl2"
+    },
+    {
+      "scope": "PackagingSelfTest",
+      "target": "Local",
+      "modes": [
+        "Strict"
+      ],
+      "dispatch": "packaging-self-test-local"
+    },
+    {
+      "scope": "PackagingSelfTest",
+      "target": "WindowsX64",
+      "modes": [
+        "Strict",
+        "AllowBlocked"
+      ],
+      "dispatch": "packaging-self-test-windows-x64"
+    },
+    {
+      "scope": "PackagingSelfTest",
+      "target": "WindowsArm64",
+      "modes": [
+        "Strict",
+        "AllowBlocked"
+      ],
+      "dispatch": "packaging-self-test-windows-arm64"
+    },
+    {
+      "scope": "PackagingSelfTest",
+      "target": "MacIntel",
+      "modes": [
+        "Strict",
+        "AllowBlocked"
+      ],
+      "dispatch": "packaging-self-test-mac-intel"
+    },
+    {
+      "scope": "PackagingSelfTest",
+      "target": "MacAppleSilicon",
+      "modes": [
+        "Strict",
+        "AllowBlocked"
+      ],
+      "dispatch": "packaging-self-test-mac-apple-silicon"
+    },
+    {
+      "scope": "PackagingSelfTest",
+      "target": "Wsl2",
+      "modes": [
+        "Strict",
+        "AllowBlocked"
+      ],
+      "dispatch": "packaging-self-test-wsl2"
+    },
+    {
+      "scope": "Freeze",
+      "target": "Local",
+      "modes": [
+        "Strict"
+      ],
+      "dispatch": "freeze-local"
+    },
+    {
+      "scope": "PhaseComplete",
+      "target": "Local",
+      "modes": [
+        "Strict"
+      ],
+      "dispatch": "phase-complete-local"
+    }
+  ],
+  "dispatch": {
+    "runner-self-test": {
+      "kind": "internal",
+      "description": "Validate the CLI matrix, combinations, and exit-code contract without downstream scripts."
+    },
+    "provenance-self-test": {
+      "kind": "command",
+      "commands": [
+        {
+          "path": "scripts/contracts/validate-contract-evidence.ps1",
+          "arguments": [
+            "-SelfTest"
+          ]
+        }
+      ]
+    },
+    "contract-self-test-local": {
+      "kind": "aggregate",
+      "required_paths": [
+        "scripts/contracts/validate-contract-evidence.ps1"
+      ]
+    },
+    "contract-self-test-windows-x64": {
+      "kind": "aggregate",
+      "required_paths": [
+        "tests/fixtures/contracts/codex/windows-x64/manifest.json",
+        "tests/fixtures/contracts/host/windows-x64/manifest.json",
+        "tests/fixtures/contracts/wsl2/windows-x64/manifest.json"
+      ]
+    },
+    "contract-self-test-windows-arm64": {
+      "kind": "aggregate",
+      "required_paths": [
+        "tests/fixtures/contracts/codex/windows-arm64/manifest.json",
+        "tests/fixtures/contracts/host/windows-arm64/manifest.json",
+        "tests/fixtures/contracts/wsl2/windows-arm64/manifest.json"
+      ]
+    },
+    "contract-self-test-mac-intel": {
+      "kind": "aggregate",
+      "required_paths": [
+        "tests/fixtures/contracts/codex/macos-intel/manifest.json",
+        "tests/fixtures/contracts/host/macos-intel/manifest.json"
+      ]
+    },
+    "contract-self-test-mac-apple-silicon": {
+      "kind": "aggregate",
+      "required_paths": [
+        "tests/fixtures/contracts/codex/macos-apple-silicon/manifest.json",
+        "tests/fixtures/contracts/host/macos-apple-silicon/manifest.json"
+      ]
+    },
+    "contract-self-test-wsl2": {
+      "kind": "command",
+      "commands": [
+        {
+          "path": "scripts/contracts/test-wsl2-probe.ps1",
+          "arguments": []
+        }
+      ]
+    },
+    "packaging-self-test-local": {
+      "kind": "aggregate",
+      "required_paths": [
+        "scripts/contracts/test-windows-package-verifier.ps1",
+        "scripts/contracts/test-macos-wave0-contract.ps1"
+      ]
+    },
+    "packaging-self-test-windows-x64": {
+      "kind": "aggregate",
+      "required_paths": [
+        "tests/fixtures/contracts/packaging/windows-x64/manifest.json"
+      ]
+    },
+    "packaging-self-test-windows-arm64": {
+      "kind": "aggregate",
+      "required_paths": [
+        "tests/fixtures/contracts/packaging/windows-arm64/manifest.json"
+      ]
+    },
+    "packaging-self-test-mac-intel": {
+      "kind": "aggregate",
+      "required_paths": [
+        "tests/fixtures/contracts/packaging/macos-intel/manifest.json"
+      ]
+    },
+    "packaging-self-test-mac-apple-silicon": {
+      "kind": "aggregate",
+      "required_paths": [
+        "tests/fixtures/contracts/packaging/macos-apple-silicon/manifest.json"
+      ]
+    },
+    "packaging-self-test-wsl2": {
+      "kind": "aggregate",
+      "required_paths": [
+        "scripts/contracts/test-wsl2-probe.ps1"
+      ]
+    },
+    "freeze-local": {
+      "kind": "aggregate",
+      "required_paths": [
+        "tests/fixtures/contracts/runner-cli-matrix.json"
+      ]
+    },
+    "phase-complete-local": {
+      "kind": "aggregate",
+      "required_paths": [
+        "scripts/contracts/test-run-phase1-cli.ps1",
+        "scripts/contracts/audit-phase1-plan-source.ps1"
+      ]
+    }
+  }
+}
