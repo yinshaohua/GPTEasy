@@ -2,17 +2,18 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 1
+current_phase: 01
+current_phase_name: 可信本地状态与实现契约
 status: executing
-stopped_at: 01-15 等待配置 Windows Authenticode Actions secrets
-last_updated: "2026-08-06T12:36:07.581Z"
-last_activity: 2026-08-06
-last_activity_desc: 修复 Windows evidence workflow 调度，并停在正式签名 secrets 人工配置门禁
+stopped_at: Completed 01-15-PLAN.md; next 01-16-PLAN.md
+last_updated: "2026-08-06T19:23:52.769Z"
+last_activity: 2026-08-07
+last_activity_desc: 完成 01-15 非签名 Freeze 与 PhaseComplete 证据隔离
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 28
-  completed_plans: 14
+  completed_plans: 15
 ---
 
 # Project State
@@ -22,35 +23,35 @@ progress:
 See: .planning/PROJECT.md (updated 2026-08-05)
 
 **Core value:** 非技术用户能够验证供应商，并在保留既有 Codex 配置且可恢复的前提下，可靠地切换各受管环境使用的 API 服务。
-**Current focus:** Phase 1 — 可信本地状态与实现契约
+**Current focus:** Phase 01 — 可信本地状态与实现契约
 
 ## Current Position
 
-Phase: 1 of 8（可信本地状态与实现契约）
-Plan: 15 of 28 in current phase
-Status: 等待 Windows Authenticode Actions secrets
-Last activity: 2026-08-06 — 修复 Windows evidence workflow 调度，并停在正式签名 secrets 人工配置门禁
+Phase: 01 (可信本地状态与实现契约) — EXECUTING
+Plan: 16 of 28
+Status: Executing Phase 01
+Last activity: 2026-08-07 — 完成 01-15 非签名 Freeze 与 PhaseComplete 证据隔离
 
-Progress: [█████░░░░░] 50%
+Progress: [█████░░░░░] 54%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 0
-- Average duration: -
-- Total execution time: 0.0 hours
+- Total plans completed: 15
+- Average duration: 33m
+- Total execution time: 8.1 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| - | - | - | - |
+| Phase 01 | 15 | 8h 8m | 33m |
 
 **Recent Trend:**
 
-- Last 5 plans: -
-- Trend: Not started
+- Last 5 plans: 26m, 40m, 31m, 49m, 1h 25m
+- Trend: Slower (01-15 included full contract rebuild and source-audit regression suite)
 
 *Updated after each plan completion*
 **Per-Plan Metrics:**
@@ -71,6 +72,7 @@ Progress: [█████░░░░░] 50%
 | Phase 01 P10 | 40min | 2 tasks | 5 files |
 | Phase 01 P13 | 31min | 2 tasks | 7 files |
 | Phase 01 P14 | 49min | 2 tasks | 8 files |
+| Phase 01 P15 | 1h 25m | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -117,6 +119,9 @@ Recent decisions affecting current work:
 - [Phase 1]: 01-14：一次性账户证据绑定 repository/run/attempt/job、runner tracking/arch、UID/profile；状态与 evidence 不保存账户密码或 Apple 凭据。
 - [Phase 1]: 01-14：最终上传 archive 必须解包重验签并与 build app 关联，fixture 永远 test_only 且不能获得 strict eligibility。
 - [Phase 1]: 01-14：Intel/Apple Silicon evidence matrix 统一 needs Wave 0；本地 Windows 静态验证不能替代真实 macOS/Apple/GitHub evidence。
+- [Phase 01]: 01-15：Freeze 只执行六类非签名合同并保持 release_ready=false；Windows Authenticode 与 macOS Developer ID/notary 只记录为 deferred。 — 本地 schema/backup 决策可以继续，但不得冒充发布身份。
+- [Phase 01]: 01-15：PhaseComplete 独立要求八个四目标 evidence-set 和实时 strict provenance；Freeze、fixture 与 test-only override 均不能晋升。 — 最终门继续绑定真实签名、公证、attestation 与当前工件。
+- [Phase 01]: 01-15：-Matrix 只用于负例自测，结果固定 test_only=true、strict_gate_eligible=false、release_ready=false。 — 防止测试矩阵成为正式发布旁路。
 
 ### Pending Todos
 
@@ -138,6 +143,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-06T12:36:07.581Z
-Stopped at: 01-15 Task 1 调度前；Windows workflow 已修复，等待两个 Actions secrets
-Resume file: .planning/phases/01-trusted-local-state-contract/.continue-here.md
+Last session: 2026-08-06T19:23:10.066Z
+Stopped at: Completed 01-15-PLAN.md; next 01-16-PLAN.md
+Resume file: None
