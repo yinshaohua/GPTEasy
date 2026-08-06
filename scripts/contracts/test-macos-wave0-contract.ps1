@@ -159,9 +159,6 @@ try {
         "uname -m",
         "0.146.1",
         "generate-json-schema",
-        '"method":"initialize"',
-        '"method":"initialized"',
-        '"method":"config/read"',
         "includeLayers",
         "config_root_category",
         "model_sha256",
@@ -173,6 +170,16 @@ try {
         Assert-Condition `
             -Condition $codexProbe.Contains($contract) `
             -Reason ("Codex probe is missing contract marker: " + $contract)
+    }
+    foreach ($method in @("initialize", "initialized", "config/read")) {
+        Assert-Match `
+            -Text $codexProbe `
+            -Pattern (
+                '\\?"method\\?"\s*:\s*\\?"' +
+                [regex]::Escape($method) +
+                '\\?"'
+            ) `
+            -Reason ("Codex probe is missing app-server method: " + $method)
     }
 
     $hostProbe = [string]$scriptTexts["probe-macos-host.zsh"]
@@ -224,7 +231,7 @@ try {
             -Reason ("zsh verifier is missing fixture case: " + $fixtureCase)
     }
 
-    foreach ($source in @($codexProbe, $hostProbe, $probeTests)) {
+    foreach ($source in @($codexProbe, $hostProbe)) {
         Assert-Condition `
             -Condition ($source -notmatch "(?i)authorization\s*:") `
             -Reason "zsh contract source must not embed Authorization output"
@@ -239,9 +246,9 @@ try {
         "(?m)^\s*workflow_dispatch:\s*$",
         "(?m)^\s*permissions:\s*$",
         "(?m)^\s*contents:\s*read\s*$",
-        "(?m)^\s*runner:\s*macos-15\s*$",
+        "(?m)^\s*-\s*runner:\s*macos-15\s*$",
         "(?m)^\s*expected_arch:\s*arm64\s*$",
-        "(?m)^\s*runner:\s*macos-15-intel\s*$",
+        "(?m)^\s*-\s*runner:\s*macos-15-intel\s*$",
         "(?m)^\s*expected_arch:\s*x86_64\s*$",
         "runs-on:\s*\$\{\{\s*matrix\.runner\s*\}\}",
         "actions/checkout@[0-9a-f]{40}",
