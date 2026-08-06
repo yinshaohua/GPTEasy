@@ -246,10 +246,12 @@ try {
     Write-Host '[PASS] 基线副本通过实时审计'
 
     $positiveGate = Invoke-PhaseCompleteGate -CaseRoot $positiveRoot
-    if ($positiveGate.ExitCode -ne 0 -or $positiveGate.Output -notmatch '"outcome"\s*:\s*"passed"') {
-        throw "PhaseComplete 未执行并通过只读来源审计：`n$($positiveGate.Output)"
+    if ($positiveGate.ExitCode -ne 3 -or
+        $positiveGate.Output -notmatch '"dispatch"\s*:\s*"source-audit"' -or
+        $positiveGate.Output -notmatch '"outcome"\s*:\s*"blocked"') {
+        throw "PhaseComplete 未先执行只读来源审计并在正式证据缺失时 fail-closed：`n$($positiveGate.Output)"
     }
-    Write-Host '[PASS] PhaseComplete 执行只读来源审计'
+    Write-Host '[PASS] PhaseComplete 执行只读来源审计并拒绝缺失正式证据'
 
     $progressRoot = New-CaseWorkspace -Name 'mutable-execution-progress' -RepositoryRoot $repositoryRoot -SourcePhaseDir $phaseDir -TestRoot $testRoot
     $progressRoadmapPath = Join-Path $progressRoot '.planning/ROADMAP.md'

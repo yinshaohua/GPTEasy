@@ -285,6 +285,10 @@ function Test-FreezeAndPhaseComplete {
     Assert-Condition ([string]$phaseCompleteDispatch.kind -ceq 'phase_complete') 'PhaseComplete must use the dedicated fail-closed dispatch' $Failures
     Assert-Condition (Test-SequenceEquals @(Get-StringArray $phaseCompleteDispatch.formal_evidence_dispatches) $expectedFormalDispatches) 'PhaseComplete formal evidence set drifted' $Failures
     Assert-Condition (-not ((Get-StringArray $phaseCompleteDispatch.formal_evidence_dispatches) -contains 'freeze-local')) 'Freeze result cannot satisfy PhaseComplete formal evidence' $Failures
+    foreach ($formalDispatch in $expectedFormalDispatches) {
+        Assert-Condition ([string]$Matrix.dispatch.$formalDispatch.kind -ceq 'evidence_set') "$formalDispatch must use evidence_set dispatch" $Failures
+        Assert-Condition ([string]$Matrix.dispatch.$formalDispatch.provenance_validator_path -ceq 'scripts/contracts/verify-evidence-provenance.ps1') "$formalDispatch omitted the strict provenance validator" $Failures
+    }
 
     $freeze = Invoke-Runner @('-Scope', 'Freeze', '-Target', 'Local', '-Mode', 'Strict')
     Assert-Condition ($freeze.ExitCode -eq 0) "Freeze positive case returned $($freeze.ExitCode)" $Failures
@@ -301,6 +305,13 @@ function Test-FreezeAndPhaseComplete {
     $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('gpteasy-freeze-matrix-' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
     try {
+        $validOverridePath = Join-Path $tempRoot 'valid-test-only-matrix.json'
+        Write-Utf8Json $validOverridePath $Matrix
+        $validOverride = Invoke-Runner @('-Scope', 'RunnerSelfTest', '-Target', 'Local', '-Mode', 'Strict', '-Matrix', $validOverridePath)
+        Assert-Condition ($validOverride.ExitCode -eq 0) "Valid test-only matrix returned $($validOverride.ExitCode)" $Failures
+        Assert-Condition ($null -ne $validOverride.Json -and [bool]$validOverride.Json.test_only) 'Matrix override was not marked test_only=true' $Failures
+        Assert-Condition ($null -ne $validOverride.Json -and -not [bool]$validOverride.Json.strict_gate_eligible -and -not [bool]$validOverride.Json.release_ready) 'Matrix override became strict or release eligible' $Failures
+
         foreach ($requiredDispatch in $expectedFreezeChecks) {
             $mutated = Copy-JsonObject $Matrix
             $mutated.dispatch.'freeze-local'.required_dispatches = @(
@@ -319,6 +330,16 @@ function Test-FreezeAndPhaseComplete {
         Write-Utf8Json $fakeFormalPath $fakeFormal
         $fakeFormalResult = Invoke-Runner @('-Scope', 'RunnerSelfTest', '-Target', 'Local', '-Mode', 'Strict', '-Matrix', $fakeFormalPath)
         Assert-Condition ($fakeFormalResult.ExitCode -eq 2) "PhaseComplete accepted Freeze as formal evidence with exit $($fakeFormalResult.ExitCode)" $Failures
+
+        $fixtureFormal = Copy-JsonObject $Matrix
+        $fixtureFormal.dispatch.'contract-self-test-windows-x64'.required_paths = @(
+            'tests/fixtures/contracts/packaging/windows-positive-control.json'
+        )
+        $fixtureFormalPath = Join-Path $tempRoot 'fixture-as-formal-evidence.json'
+        Write-Utf8Json $fixtureFormalPath $fixtureFormal
+        $fixtureFormalResult = Invoke-Runner @('-Scope', 'ContractSelfTest', '-Target', 'WindowsX64', '-Mode', 'Strict', '-Matrix', $fixtureFormalPath)
+        Assert-Condition ($fixtureFormalResult.ExitCode -eq 4) "Formal evidence accepted an unsigned fixture with exit $($fixtureFormalResult.ExitCode)" $Failures
+        Assert-Condition ($null -ne $fixtureFormalResult.Json -and [bool]$fixtureFormalResult.Json.test_only -and -not [bool]$fixtureFormalResult.Json.strict_gate_eligible) 'Unsigned fixture result was not isolated as test-only and ineligible' $Failures
     } finally {
         if (Test-Path -LiteralPath $tempRoot) {
             Remove-Item -LiteralPath $tempRoot -Recurse -Force

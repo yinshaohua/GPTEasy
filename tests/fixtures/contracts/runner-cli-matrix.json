@@ -240,7 +240,9 @@
       ]
     },
     "contract-self-test-windows-x64": {
-      "kind": "aggregate",
+      "kind": "evidence_set",
+      "validator_path": "scripts/contracts/validate-contract-evidence.ps1",
+      "provenance_validator_path": "scripts/contracts/verify-evidence-provenance.ps1",
       "required_paths": [
         "tests/fixtures/contracts/codex/windows-x64/manifest.json",
         "tests/fixtures/contracts/host/windows-x64/manifest.json",
@@ -248,7 +250,9 @@
       ]
     },
     "contract-self-test-windows-arm64": {
-      "kind": "aggregate",
+      "kind": "evidence_set",
+      "validator_path": "scripts/contracts/validate-contract-evidence.ps1",
+      "provenance_validator_path": "scripts/contracts/verify-evidence-provenance.ps1",
       "required_paths": [
         "tests/fixtures/contracts/codex/windows-arm64/manifest.json",
         "tests/fixtures/contracts/host/windows-arm64/manifest.json",
@@ -256,14 +260,18 @@
       ]
     },
     "contract-self-test-mac-intel": {
-      "kind": "aggregate",
+      "kind": "evidence_set",
+      "validator_path": "scripts/contracts/validate-contract-evidence.ps1",
+      "provenance_validator_path": "scripts/contracts/verify-evidence-provenance.ps1",
       "required_paths": [
         "tests/fixtures/contracts/codex/macos-intel/manifest.json",
         "tests/fixtures/contracts/host/macos-intel/manifest.json"
       ]
     },
     "contract-self-test-mac-apple-silicon": {
-      "kind": "aggregate",
+      "kind": "evidence_set",
+      "validator_path": "scripts/contracts/validate-contract-evidence.ps1",
+      "provenance_validator_path": "scripts/contracts/verify-evidence-provenance.ps1",
       "required_paths": [
         "tests/fixtures/contracts/codex/macos-apple-silicon/manifest.json",
         "tests/fixtures/contracts/host/macos-apple-silicon/manifest.json"
@@ -302,25 +310,33 @@
       ]
     },
     "packaging-self-test-windows-x64": {
-      "kind": "aggregate",
+      "kind": "evidence_set",
+      "validator_path": "scripts/contracts/validate-contract-evidence.ps1",
+      "provenance_validator_path": "scripts/contracts/verify-evidence-provenance.ps1",
       "required_paths": [
         "tests/fixtures/contracts/packaging/windows-x64/manifest.json"
       ]
     },
     "packaging-self-test-windows-arm64": {
-      "kind": "aggregate",
+      "kind": "evidence_set",
+      "validator_path": "scripts/contracts/validate-contract-evidence.ps1",
+      "provenance_validator_path": "scripts/contracts/verify-evidence-provenance.ps1",
       "required_paths": [
         "tests/fixtures/contracts/packaging/windows-arm64/manifest.json"
       ]
     },
     "packaging-self-test-mac-intel": {
-      "kind": "aggregate",
+      "kind": "evidence_set",
+      "validator_path": "scripts/contracts/validate-contract-evidence.ps1",
+      "provenance_validator_path": "scripts/contracts/verify-evidence-provenance.ps1",
       "required_paths": [
         "tests/fixtures/contracts/packaging/macos-intel/manifest.json"
       ]
     },
     "packaging-self-test-mac-apple-silicon": {
-      "kind": "aggregate",
+      "kind": "evidence_set",
+      "validator_path": "scripts/contracts/validate-contract-evidence.ps1",
+      "provenance_validator_path": "scripts/contracts/verify-evidence-provenance.ps1",
       "required_paths": [
         "tests/fixtures/contracts/packaging/macos-apple-silicon/manifest.json"
       ]
@@ -331,17 +347,126 @@
         "scripts/contracts/test-wsl2-probe.ps1"
       ]
     },
-    "freeze-local": {
-      "kind": "aggregate",
+    "path-smoke-self-test-local": {
+      "kind": "process",
+      "executable": "cargo",
+      "arguments": [
+        "test",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--test",
+        "path_smoke",
+        "--locked"
+      ],
       "required_paths": [
-        "tests/fixtures/contracts/runner-cli-matrix.json"
+        "src-tauri/Cargo.toml",
+        "src-tauri/tests/path_smoke.rs"
+      ]
+    },
+    "windows-contract-self-test-local": {
+      "kind": "command",
+      "commands": [
+        {
+          "path": "scripts/contracts/test-windows-contract-probes.ps1",
+          "arguments": []
+        }
+      ]
+    },
+    "freeze-local": {
+      "kind": "composite",
+      "required_dispatches": [
+        "runner-self-test",
+        "provenance-self-test",
+        "path-smoke-self-test-local",
+        "windows-contract-self-test-local",
+        "contract-self-test-wsl2",
+        "packaging-self-test-local"
+      ],
+      "freeze_kind": "non_signing_contract",
+      "release_ready": false,
+      "deferred_evidence": [
+        "windows-x64-authenticode",
+        "windows-arm64-authenticode",
+        "macos-intel-developer-id-notarization",
+        "macos-apple-silicon-developer-id-notarization"
+      ]
+    },
+    "frontend-build-phase-complete": {
+      "kind": "process",
+      "executable": "npm",
+      "arguments": [
+        "run",
+        "build"
+      ],
+      "required_paths": [
+        "package.json",
+        "package-lock.json"
+      ]
+    },
+    "local-state-phase-complete": {
+      "kind": "process",
+      "executable": "cargo",
+      "arguments": [
+        "test",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--all-targets",
+        "--locked"
+      ],
+      "required_paths": [
+        "src-tauri/tests/state_command_restart.rs",
+        "src-tauri/tests/state_persistence.rs",
+        "src-tauri/tests/local_only_boundary.rs",
+        "src-tauri/tests/installed_state_smoke.rs",
+        "src-tauri/tests/state_concurrency.rs",
+        "src-tauri/tests/migration_matrix.rs",
+        "src-tauri/tests/db_contract_validation.rs",
+        "src-tauri/tests/ready_preflight.rs",
+        "src-tauri/tests/migration_failure.rs",
+        "src-tauri/tests/backup_restore.rs",
+        "src-tauri/tests/higher_schema_refusal.rs",
+        "src-tauri/tests/recovery_validation.rs",
+        "src-tauri/tests/installed_recovery_smoke.rs"
+      ]
+    },
+    "migration-policy-phase-complete": {
+      "kind": "command",
+      "commands": [
+        {
+          "path": "scripts/contracts/verify-migration-history.ps1",
+          "arguments": []
+        },
+        {
+          "path": "scripts/contracts/verify-migration-policy.ps1",
+          "arguments": []
+        }
       ]
     },
     "phase-complete-local": {
-      "kind": "aggregate",
-      "required_paths": [
-        "scripts/contracts/test-run-phase1-cli.ps1",
-        "scripts/contracts/audit-phase1-plan-source.ps1"
+      "kind": "phase_complete",
+      "formal_evidence_dispatches": [
+        "contract-self-test-windows-x64",
+        "contract-self-test-windows-arm64",
+        "contract-self-test-mac-intel",
+        "contract-self-test-mac-apple-silicon",
+        "packaging-self-test-windows-x64",
+        "packaging-self-test-windows-arm64",
+        "packaging-self-test-mac-intel",
+        "packaging-self-test-mac-apple-silicon"
+      ],
+      "required_dispatches": [
+        "freeze-local",
+        "frontend-build-phase-complete",
+        "local-state-phase-complete",
+        "migration-policy-phase-complete",
+        "contract-self-test-windows-x64",
+        "contract-self-test-windows-arm64",
+        "contract-self-test-mac-intel",
+        "contract-self-test-mac-apple-silicon",
+        "packaging-self-test-windows-x64",
+        "packaging-self-test-windows-arm64",
+        "packaging-self-test-mac-intel",
+        "packaging-self-test-mac-apple-silicon"
       ]
     }
   }
