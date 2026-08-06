@@ -1,7 +1,12 @@
-use std::ffi::OsString;
+use std::{
+    ffi::OsString,
+    fs::{self, OpenOptions},
+    io::{self, Write},
+    path::Path,
+};
 
-use serde::Serialize;
-use tauri::{AppHandle, Runtime};
+use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Manager, Runtime};
 use thiserror::Error;
 
 pub const PATH_SMOKE_COMMAND: &str = "phase1-path-smoke";
@@ -16,14 +21,36 @@ pub struct PathSmokeReport {
     pub reopened: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PathSmokeMarker {
+    run_id: String,
+    os: String,
+    arch: String,
+    schema: String,
+}
+
 #[derive(Debug, Error)]
 pub enum PathSmokeError {
     #[error("opaque run ID must be 1-64 ASCII letters, digits, or hyphens")]
     InvalidRunId,
     #[error("phase1-path-smoke accepts exactly one opaque run ID")]
     InvalidArguments,
-    #[error("path smoke is not implemented")]
-    NotImplemented,
+    #[error("failed to resolve the application local data root")]
+    ResolveStateRoot(#[source] tauri::Error),
+    #[error("failed to create the fixed path smoke directory")]
+    CreateDirectory(#[source] io::Error),
+    #[error("failed to read the path smoke marker")]
+    ReadMarker(#[source] io::Error),
+    #[error("path smoke marker does not match the requested contract")]
+    MarkerMismatch,
+    #[error("failed to serialize the path smoke marker")]
+    SerializeMarker(#[source] serde_json::Error),
+    #[error("failed to create the path smoke temporary marker")]
+    CreateTemporaryMarker(#[source] io::Error),
+    #[error("failed to write the path smoke temporary marker")]
+    WriteTemporaryMarker(#[source] io::Error),
+    #[error("failed to commit the path smoke marker")]
+    CommitMarker(#[source] io::Error),
 }
 
 pub(crate) fn parse_cli_args<I>(args: I) -> Result<Option<String>, PathSmokeError>
@@ -31,19 +58,118 @@ where
     I: IntoIterator<Item = OsString>,
 {
     let args = args.into_iter().collect::<Vec<_>>();
-    if args.is_empty() {
-        Ok(None)
-    } else {
-        Err(PathSmokeError::InvalidArguments)
+    match args.as_slice() {
+        [] => Ok(None),
+        [command, run_id] if command == PATH_SMOKE_COMMAND => {
+            let run_id = run_id.to_str().ok_or(PathSmokeError::InvalidArguments)?;
+            validate_run_id(run_id)?;
+            Ok(Some(run_id.to_owned()))
+        }
+        _ => Err(PathSmokeError::InvalidArguments),
     }
+}
+
+fn validate_run_id(run_id: &str) -> Result<(), PathSmokeError> {
+    if (1..=64).contains(&run_id.len())
+        && run_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        Ok(())
+    } else {
+        Err(PathSmokeError::InvalidRunId)
+    }
+}
+
+fn expected_marker(run_id: &str) -> PathSmokeMarker {
+    PathSmokeMarker {
+        run_id: run_id.to_owned(),
+        os: std::env::consts::OS.to_owned(),
+        arch: std::env::consts::ARCH.to_owned(),
+        schema: PATH_SMOKE_SCHEMA.to_owned(),
+    }
+}
+
+fn report_from(marker: &PathSmokeMarker, reopened: bool) -> PathSmokeReport {
+    PathSmokeReport {
+        run_id: marker.run_id.clone(),
+        os: marker.os.clone(),
+        arch: marker.arch.clone(),
+        schema: PATH_SMOKE_SCHEMA,
+        reopened,
+    }
+}
+
+fn read_existing_marker(
+    marker_path: &Path,
+    expected: &PathSmokeMarker,
+) -> Result<Option<PathSmokeReport>, PathSmokeError> {
+    let bytes = match fs::read(marker_path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(PathSmokeError::ReadMarker(error)),
+    };
+    let marker: PathSmokeMarker =
+        serde_json::from_slice(&bytes).map_err(|_| PathSmokeError::MarkerMismatch)?;
+    if marker != *expected {
+        return Err(PathSmokeError::MarkerMismatch);
+    }
+
+    Ok(Some(report_from(&marker, true)))
+}
+
+fn write_new_marker(
+    marker_path: &Path,
+    temporary_path: &Path,
+    marker: &PathSmokeMarker,
+) -> Result<PathSmokeReport, PathSmokeError> {
+    let mut bytes = serde_json::to_vec(marker).map_err(PathSmokeError::SerializeMarker)?;
+    bytes.push(b'\n');
+
+    let mut temporary = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(temporary_path)
+        .map_err(PathSmokeError::CreateTemporaryMarker)?;
+    if let Err(error) = temporary
+        .write_all(&bytes)
+        .and_then(|_| temporary.sync_all())
+    {
+        drop(temporary);
+        let _ = fs::remove_file(temporary_path);
+        return Err(PathSmokeError::WriteTemporaryMarker(error));
+    }
+    drop(temporary);
+
+    if let Err(error) = fs::rename(temporary_path, marker_path) {
+        let _ = fs::remove_file(temporary_path);
+        return Err(PathSmokeError::CommitMarker(error));
+    }
+
+    Ok(report_from(marker, false))
 }
 
 pub fn run_path_smoke<R: Runtime>(
     app: &AppHandle<R>,
     run_id: &str,
 ) -> Result<PathSmokeReport, PathSmokeError> {
-    let _ = (app, run_id);
-    Err(PathSmokeError::NotImplemented)
+    validate_run_id(run_id)?;
+
+    let smoke_root = app
+        .path()
+        .app_local_data_dir()
+        .map_err(PathSmokeError::ResolveStateRoot)?
+        .join("contract-smoke")
+        .join("path");
+    fs::create_dir_all(&smoke_root).map_err(PathSmokeError::CreateDirectory)?;
+
+    let marker_path = smoke_root.join(format!("{run_id}.json"));
+    if let Some(report) = read_existing_marker(&marker_path, &expected_marker(run_id))? {
+        return Ok(report);
+    }
+
+    let temporary_path = smoke_root.join(format!("{run_id}.json.tmp"));
+    write_new_marker(&marker_path, &temporary_path, &expected_marker(run_id))
 }
 
 #[cfg(test)]
@@ -149,10 +275,7 @@ mod tests {
                 OsString::from("run-123"),
                 OsString::from("unexpected"),
             ],
-            vec![
-                OsString::from("unknown-command"),
-                OsString::from("run-123"),
-            ],
+            vec![OsString::from("unknown-command"), OsString::from("run-123")],
         ] {
             assert!(matches!(
                 parse_cli_args(args),
