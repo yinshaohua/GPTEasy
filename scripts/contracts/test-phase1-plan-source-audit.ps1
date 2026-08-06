@@ -115,14 +115,19 @@ function Copy-AuditWorkspace {
     $planningRoot = Join-Path $DestinationRoot '.planning'
     $phaseParent = Join-Path $planningRoot 'phases'
     $fixtureRoot = Join-Path $DestinationRoot 'tests/fixtures/contracts'
+    $scriptRoot = Join-Path $DestinationRoot 'scripts/contracts'
     New-Item -ItemType Directory -Path $phaseParent -Force | Out-Null
     New-Item -ItemType Directory -Path $fixtureRoot -Force | Out-Null
+    New-Item -ItemType Directory -Path $scriptRoot -Force | Out-Null
 
     Copy-Item -LiteralPath (Join-Path $RepositoryRoot '.planning/ROADMAP.md') -Destination (Join-Path $planningRoot 'ROADMAP.md')
     Copy-Item -LiteralPath (Join-Path $RepositoryRoot '.planning/REQUIREMENTS.md') -Destination (Join-Path $planningRoot 'REQUIREMENTS.md')
     Copy-Item -LiteralPath $SourcePhaseDir -Destination $phaseParent -Recurse
     Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'tests/fixtures/contracts/runner-cli-matrix.json') -Destination (Join-Path $fixtureRoot 'runner-cli-matrix.json')
     Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'tests/fixtures/contracts/phase1-plan-audit-lock.json') -Destination (Join-Path $fixtureRoot 'phase1-plan-audit-lock.json')
+    Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'scripts/contracts/audit-phase1-plan-source.ps1') -Destination (Join-Path $scriptRoot 'audit-phase1-plan-source.ps1')
+    Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'scripts/contracts/run-phase1-contracts.ps1') -Destination (Join-Path $scriptRoot 'run-phase1-contracts.ps1')
+    Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'scripts/contracts/test-run-phase1-cli.ps1') -Destination (Join-Path $scriptRoot 'test-run-phase1-cli.ps1')
 }
 
 function New-CaseWorkspace {
@@ -150,6 +155,19 @@ function Invoke-Auditor {
     $phaseDir = Join-Path $CaseRoot '.planning/phases/01-trusted-local-state-contract'
     $lockPath = Join-Path $CaseRoot 'tests/fixtures/contracts/phase1-plan-audit-lock.json'
     $output = & powershell -NoProfile -File $AuditorPath -PhaseDir $phaseDir -ReadOnly -LockPath $lockPath 2>&1 | Out-String
+    return [pscustomobject]@{
+        ExitCode = $LASTEXITCODE
+        Output = $output
+    }
+}
+
+function Invoke-PhaseCompleteGate {
+    param(
+        [Parameter(Mandatory = $true)][string]$CaseRoot
+    )
+
+    $runnerPath = Join-Path $CaseRoot 'scripts/contracts/run-phase1-contracts.ps1'
+    $output = & powershell -NoProfile -File $runnerPath -Scope PhaseComplete -Target Local -Mode Strict 2>&1 | Out-String
     return [pscustomobject]@{
         ExitCode = $LASTEXITCODE
         Output = $output
@@ -219,6 +237,12 @@ try {
         throw "基线副本审计失败：`n$($positive.Output)"
     }
     Write-Host '[PASS] 基线副本通过实时审计'
+
+    $positiveGate = Invoke-PhaseCompleteGate -CaseRoot $positiveRoot
+    if ($positiveGate.ExitCode -ne 0 -or $positiveGate.Output -notmatch '"outcome"\s*:\s*"passed"') {
+        throw "PhaseComplete 未执行并通过只读来源审计：`n$($positiveGate.Output)"
+    }
+    Write-Host '[PASS] PhaseComplete 执行只读来源审计'
 
     Assert-NegativeCase `
         -Name '缺少 requirement mapping' `
@@ -373,6 +397,23 @@ try {
             $covered = $sourceAudit.Replace('PLANNED-COVERAGE', 'COVERED').Replace('PLANNED', 'COVERED')
             Write-Utf8File -Path $sourceAuditPath -Content $covered
         }
+
+    $phaseCompleteNegativeRoot = New-CaseWorkspace -Name 'phase-complete-static-covered' -RepositoryRoot $repositoryRoot -SourcePhaseDir $phaseDir -TestRoot $testRoot
+    $phaseCompleteNegativePhase = Join-Path $phaseCompleteNegativeRoot '.planning/phases/01-trusted-local-state-contract'
+    foreach ($planFile in (Get-ChildItem -LiteralPath $phaseCompleteNegativePhase -Filter '01-??-PLAN.md' -File)) {
+        $content = Read-Utf8File -Path $planFile.FullName
+        $updated = [regex]::Replace($content, '(?m)^\s{2}- STATE-05\s*\r?\n', '')
+        Write-Utf8File -Path $planFile.FullName -Content $updated
+    }
+    $phaseCompleteSourceAuditPath = Join-Path $phaseCompleteNegativePhase '01-SOURCE-AUDIT.md'
+    $phaseCompleteSourceAudit = Read-Utf8File -Path $phaseCompleteSourceAuditPath
+    Write-Utf8File -Path $phaseCompleteSourceAuditPath -Content $phaseCompleteSourceAudit.Replace('PLANNED-COVERAGE', 'COVERED').Replace('PLANNED', 'COVERED')
+    $phaseCompleteNegative = Invoke-PhaseCompleteGate -CaseRoot $phaseCompleteNegativeRoot
+    if ($phaseCompleteNegative.ExitCode -eq 0 -or
+        $phaseCompleteNegative.Output -notmatch 'phase source audit failed') {
+        throw "PhaseComplete 未因实时来源审计缺口失败：`n$($phaseCompleteNegative.Output)"
+    }
+    Write-Host '[PASS] PhaseComplete 拒绝静态 COVERED 掩盖的实时缺口'
 
     $completed = $true
 }

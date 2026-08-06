@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 
 Set-StrictMode -Version Latest
 
@@ -346,6 +346,58 @@ function Invoke-RunnerSelfTest {
     }
 }
 
+function Invoke-PhaseCompleteSourceAudit {
+    param(
+        [string]$RepositoryRoot
+    )
+
+    $auditRelativePath = 'scripts/contracts/audit-phase1-plan-source.ps1'
+    $auditPath = Join-Path $RepositoryRoot ($auditRelativePath -replace '/', '\')
+    $phaseDir = Join-Path $RepositoryRoot '.planning/phases/01-trusted-local-state-contract'
+    if (-not (Test-Path -LiteralPath $auditPath -PathType Leaf)) {
+        return [pscustomobject]@{
+            Outcome = 'blocked'
+            ExitCode = $script:ExitCodes.StrictPrerequisiteBlocked
+            StrictGateEligible = $false
+            Reason = "required command does not exist: $auditRelativePath"
+        }
+    }
+    if (-not (Test-Path -LiteralPath $phaseDir -PathType Container)) {
+        return [pscustomobject]@{
+            Outcome = 'blocked'
+            ExitCode = $script:ExitCodes.StrictPrerequisiteBlocked
+            StrictGateEligible = $false
+            Reason = 'required phase directory does not exist: .planning/phases/01-trusted-local-state-contract'
+        }
+    }
+
+    $auditOutput = @(
+        & powershell -NoProfile -File $auditPath -PhaseDir $phaseDir -ReadOnly 2>&1 |
+            ForEach-Object { [string]$_ }
+    )
+    $childExitCode = Get-ChildExitCode $LASTEXITCODE
+    if ($childExitCode -ne 0) {
+        $reason = "phase source audit failed: $auditRelativePath"
+        $detail = ($auditOutput -join ' ').Trim()
+        if (-not [string]::IsNullOrWhiteSpace($detail)) {
+            $reason = "$reason - $detail"
+        }
+        return [pscustomobject]@{
+            Outcome = 'failed'
+            ExitCode = $childExitCode
+            StrictGateEligible = $false
+            Reason = $reason
+        }
+    }
+
+    return [pscustomobject]@{
+        Outcome = 'passed'
+        ExitCode = $script:ExitCodes.Completed
+        StrictGateEligible = $true
+        Reason = $null
+    }
+}
+
 function Invoke-Dispatch {
     param(
         [object]$Matrix,
@@ -355,6 +407,12 @@ function Invoke-Dispatch {
 
     $dispatch = $Matrix.dispatch.($Combination.dispatch)
     $repositoryRoot = Get-RepositoryRoot
+    if ($Combination.scope -eq 'PhaseComplete') {
+        $sourceAuditResult = Invoke-PhaseCompleteSourceAudit $repositoryRoot
+        if ([int]$sourceAuditResult.ExitCode -ne $script:ExitCodes.Completed) {
+            return $sourceAuditResult
+        }
+    }
     if ($dispatch.kind -eq 'internal') {
         return Invoke-RunnerSelfTest $Matrix
     }

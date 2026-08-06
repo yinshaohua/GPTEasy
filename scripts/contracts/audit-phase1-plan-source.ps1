@@ -586,9 +586,20 @@ foreach ($planFile in $planFiles) {
             }
         }
         $fromPath = Join-Path $repositoryRoot ($keyLinkBlock.Groups['from'].Value.Trim().Replace('/', [System.IO.Path]::DirectorySeparatorChar))
+        $toPath = Join-Path $repositoryRoot ($keyLinkBlock.Groups['to'].Value.Trim().Replace('/', [System.IO.Path]::DirectorySeparatorChar))
         if ((Test-Path -LiteralPath $fromPath -PathType Leaf) -and
             (Get-Content -LiteralPath $fromPath -Raw -Encoding UTF8) -notmatch [regex]::Escape($keyLinkBlock.Groups['pattern'].Value.Trim())) {
             Add-AuditError "$($planFile.Name) 的 key_link pattern 未出现在 from 文件中：$($keyLinkBlock.Groups['pattern'].Value.Trim())"
+        }
+        if ((Test-Path -LiteralPath $fromPath -PathType Leaf) -and
+            (Test-Path -LiteralPath $toPath -PathType Leaf)) {
+            $fromContent = Get-Content -LiteralPath $fromPath -Raw -Encoding UTF8
+            $toReference = Convert-ToForwardSlash $keyLinkBlock.Groups['to'].Value.Trim()
+            $toLeaf = Split-Path -Leaf $toReference
+            if ($fromContent -notmatch [regex]::Escape($toReference) -and
+                $fromContent -notmatch [regex]::Escape($toLeaf)) {
+                Add-AuditError "$($planFile.Name) 的 key_link from 未引用 to：$toReference"
+            }
         }
     }
 
