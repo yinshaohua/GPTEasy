@@ -4,15 +4,15 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 1
 status: executing
-stopped_at: Completed 01-09-PLAN.md
-last_updated: "2026-08-06T06:11:56.877Z"
+stopped_at: Completed 01-10-PLAN.md
+last_updated: "2026-08-06T07:10:45.345Z"
 last_activity: 2026-08-06
-last_activity_desc: 完成 01-09 最小 Tauri 当前用户应用壳与权限/bundle contract
+last_activity_desc: 完成 01-10 固定当前用户状态根 path smoke 与跨进程 reopen contract
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 28
-  completed_plans: 11
+  completed_plans: 12
 ---
 
 # Project State
@@ -27,11 +27,11 @@ See: .planning/PROJECT.md (updated 2026-08-05)
 ## Current Position
 
 Phase: 1 of 8（可信本地状态与实现契约）
-Plan: 10 of 28 in current phase
+Plan: 13 of 28 in current phase
 Status: Ready to execute
-Last activity: 2026-08-06 — 完成 01-09 最小 Tauri 当前用户应用壳与权限/bundle contract
+Last activity: 2026-08-06 — 完成 01-10 固定当前用户状态根 path smoke 与跨进程 reopen contract
 
-Progress: [████░░░░░░] 39%
+Progress: [████░░░░░░] 43%
 
 ## Performance Metrics
 
@@ -68,6 +68,7 @@ Progress: [████░░░░░░] 39%
 | Phase 01 P12 | 约 20 分钟 | 1 tasks | 5 files |
 | Phase 01 P06 | 约 10 分钟（不含人工等待） | 1 tasks | 1 files |
 | Phase 01 P09 | 约 26 分钟 | 2 tasks | 8 files |
+| Phase 01 P10 | 40min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -105,6 +106,8 @@ Recent decisions affecting current work:
 - [Phase 01]: 01-06：后续真实 evidence 仍须执行固定 preflight，任何非零结果在下载或验签前 fail-closed，历史批准不能覆盖当前失败。
 - [Phase 01]: 01-09：Rust/Tauri composition root 保持最小，main 只调用 library run，不注册业务 command 或高权限 plugin。
 - [Phase 01]: 01-09：capability 仅授权 main window 的 core:default；Windows NSIS 使用 currentUser，macOS minimumSystemVersion 固定 14.0。
+- [Phase 01]: 01-10：path smoke 固定使用 app_local_data_dir/contract-smoke/path 与 1–64 位 ASCII opaque ID。 — 调用者不能传入路径；marker/report 仅含 run_id、OS、arch、schema 与 reopened。
+- [Phase 01]: 01-10：跨进程 reopen 必须由真实 Tauri mock AppHandle 和当前 integration-test executable 的独立子进程证明。 — Windows test target 显式链接 tauri-build resource，避免测试宿主与正式应用清单漂移。
 
 ### Pending Todos
 
@@ -126,6 +129,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-06T06:11:56.775Z
-Stopped at: Completed 01-09-PLAN.md
+Last session: 2026-08-06T07:10:25.240Z
+Stopped at: Completed 01-10-PLAN.md
 Resume file: None

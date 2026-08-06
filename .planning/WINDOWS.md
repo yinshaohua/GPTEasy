@@ -2,9 +2,9 @@
 schema_version: 1
 open_count: 1
 waived_count: 0
-fixed_count: 7
-total_count: 8
-last_updated: 2026-08-06T06:14:58.640Z
+fixed_count: 9
+total_count: 10
+last_updated: 2026-08-06T07:09:21.079Z
 ---
 
 # Broken Windows Ledger
@@ -23,6 +23,8 @@ last_updated: 2026-08-06T06:14:58.640Z
 | 6 | 01 | deviation | scripts/contracts/probe-codex-macos.zsh | 629 | 修正 probe 内部摘要分隔符和 host child 退出码传播 | fixed |  | 2026-08-06T05:04:42.372Z | 2026-08-06T05:05:00.497Z |
 | 7 | 01 | deviation | scripts/contracts/probe-codex-macos.zsh | 491 | 补齐 raw response 解析失败和 canary 所有权清理的 fail-closed 路径 | fixed |  | 2026-08-06T05:04:44.398Z | 2026-08-06T05:05:01.738Z |
 | 8 | 01 | deviation | src-tauri/icons/icon.ico |  | Tauri Windows Resource 编译需要计划外补充确定性 icon.ico，已在 baed5d0 修复 | fixed |  | 2026-08-06T06:13:20.973Z | 2026-08-06T06:14:58.640Z |
+| 9 | 01 | deviation | src-tauri/Cargo.toml |  | Tauri mock 测试需要 dev test feature 与 Windows test resource linking | fixed |  | 2026-08-06T07:07:57.218Z | 2026-08-06T07:09:20.264Z |
+| 10 | 01 | deviation | src-tauri/src/path_smoke.rs |  | 公开 path smoke 入口在解析状态根前重复验证 opaque ID | fixed |  | 2026-08-06T07:07:58.156Z | 2026-08-06T07:09:21.079Z |
 
 ````json
 [
@@ -121,6 +123,30 @@ last_updated: 2026-08-06T06:14:58.640Z
     "reason": "",
     "recorded_at": "2026-08-06T06:13:20.973Z",
     "resolved_at": "2026-08-06T06:14:58.640Z"
+  },
+  {
+    "id": 9,
+    "kind": "deviation",
+    "phase": "01",
+    "file": "src-tauri/Cargo.toml",
+    "line": null,
+    "description": "Tauri mock 测试需要 dev test feature 与 Windows test resource linking",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-08-06T07:07:57.218Z",
+    "resolved_at": "2026-08-06T07:09:20.264Z"
+  },
+  {
+    "id": 10,
+    "kind": "deviation",
+    "phase": "01",
+    "file": "src-tauri/src/path_smoke.rs",
+    "line": null,
+    "description": "公开 path smoke 入口在解析状态根前重复验证 opaque ID",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-08-06T07:07:58.156Z",
+    "resolved_at": "2026-08-06T07:09:21.079Z"
   }
 ]
 ````

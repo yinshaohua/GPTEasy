@@ -45,7 +45,7 @@ GPTEasy v1 采用一次完整发布策略，内部按用户选择的 Horizontal 
   4. 迁移失败时原数据库完整回滚且应用不会清空数据继续运行；旧版应用遇到更高版本数据库时拒绝写入，并允许用户通过升级前备份完成降级恢复。
 
 **依赖与风险理由**: 在确定 SQLite schema 和环境状态模型前，必须以目标 Codex 版本、正式宿主应用、代表性 WSL2 环境和签名打包 smoke 验证配置路径、字段、认证/供应商凭据载体、进程身份、停止发行版默认用户发现及当前用户安装可行性。任何未验证事实都作为 blocker，而不是由后续业务代码猜测。
-**Plans**: 11/28 plans executed
+**Plans**: 12/28 plans executed
 
 Plans:
 **Wave 1**
@@ -73,7 +73,7 @@ Plans:
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
-- [ ] 01-10-PLAN.md — 用真实 AppHandle 验证固定 app_local_data_dir 与跨进程 reopen
+- [x] 01-10-PLAN.md — 用真实 AppHandle 验证固定 app_local_data_dir 与跨进程 reopen
 
 **Wave 6** *(blocked on Wave 5 completion)*
 
@@ -270,7 +270,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. 可信本地状态与实现契约 | 11/28 | In Progress|  |
+| 1. 可信本地状态与实现契约 | 12/28 | In Progress|  |
 | 2. 可恢复配置事务与敏感信息边界 | 0/TBD | Not started | - |
 | 3. 供应商目录与供应商验证 | 0/TBD | Not started | - |
 | 4. 原生 Codex 环境编排 | 0/TBD | Not started | - |
