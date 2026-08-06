@@ -4,15 +4,15 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 1
 status: executing
-stopped_at: Completed 01-08-PLAN.md
-last_updated: "2026-08-06T03:57:41.756Z"
+stopped_at: Completed 01-11-PLAN.md
+last_updated: "2026-08-06T04:38:13.062Z"
 last_activity: 2026-08-06
 last_activity_desc: 完成 01-08 计划的 exact React/Vite 前端壳与可重复构建验证
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 28
-  completed_plans: 7
+  completed_plans: 8
 ---
 
 # Project State
@@ -27,11 +27,11 @@ See: .planning/PROJECT.md (updated 2026-08-05)
 ## Current Position
 
 Phase: 1 of 8（可信本地状态与实现契约）
-Plan: 7 of 28 in current phase
+Plan: 8 of 28 in current phase
 Status: Ready to execute
 Last activity: 2026-08-06 — 完成 01-08 计划的 exact React/Vite 前端壳与可重复构建验证
 
-Progress: [███░░░░░░░] 25%
+Progress: [███░░░░░░░] 29%
 
 ## Performance Metrics
 
@@ -64,6 +64,7 @@ Progress: [███░░░░░░░] 25%
 | Phase 01 P07 | 36m | 2 tasks | 4 files |
 | Phase 01 P02 | 22m | 1 tasks | 0 files |
 | Phase 01 P08 | 约 15 分钟 | 2 tasks | 8 files |
+| Phase 01 P11 | 约 38 分钟 | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -91,6 +92,9 @@ Recent decisions affecting current work:
 - [Phase 1]: 01-07：PhaseComplete 在 aggregate 前强制执行只读来源审计，审计非零直接 fail-closed。
 - [Phase 01]: 01-02：人工官方来源 checkpoint 结论为 approved；批准严格覆盖 allowlist 中的 7 个 package@version、官方 repository 与官方 create-tauri-app React TypeScript 模板来源。 — 机器 exact allowlist verifier 与真实公开 registry 查询均通过，但发布者和官方模板来源属于不可自动替代的人工门禁；用户已明确回复 approved，因此仅解除 01-08 的首次安装前置条件。
 - [Phase 1]: 01-08：前端依赖使用 exact pins，React 仅作为无业务状态的单一 root；Vite 8 使用内置 Oxc minifier，避免额外 esbuild 依赖。
+- [Phase 01]: Codex 探针固定 0.146.1，app-server 只执行 initialize、initialized、config/read(includeLayers=true)，raw response、配置正文和凭据值不进入证据。
+- [Phase 01]: Windows 正式宿主身份固定为 OpenAI.Codex_2p2nqsd0c76g0 与 app/resources/codex.exe，调用方不能放宽 allowlist。
+- [Phase 01]: WSL2 探针只允许 version/list/list-running 固定只读调用，重复 DistributionName 固定 command_target_resolvable=false。
 
 ### Pending Todos
 
@@ -112,6 +116,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-06T03:57:41.682Z
-Stopped at: Completed 01-08-PLAN.md
+Last session: 2026-08-06T04:38:12.985Z
+Stopped at: Completed 01-11-PLAN.md
 Resume file: None
