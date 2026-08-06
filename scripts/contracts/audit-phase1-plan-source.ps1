@@ -57,10 +57,66 @@ function Get-RelativePathPortable {
     return Convert-ToForwardSlash ([System.Uri]::UnescapeDataString($baseUri.MakeRelativeUri($targetUri).ToString()))
 }
 
-function Get-Sha256 {
-    param([Parameter(Mandatory = $true)][string]$Path)
+function Get-CanonicalDigestContent {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$RelativePath
+    )
 
-    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    $content = [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8) -replace "\r\n?", "`n"
+    if ($RelativePath -eq '.planning/ROADMAP.md') {
+        $content = [regex]::Replace(
+            $content,
+            '(?m)^-\s+\[[ xX]\]\s+(\*\*Phase 1:[^\r\n]+)$',
+            '- [ ] $1'
+        )
+        $content = [regex]::Replace(
+            $content,
+            '(?m)^(\*\*Plans\*\*:\s+)\d+/28(\s+plans executed)$',
+            '${1}<executed>/28${2}'
+        )
+        $content = [regex]::Replace(
+            $content,
+            '(?m)^-\s+\[[ xX]\]\s+(01-\d{2}-PLAN\.md\b.*)$',
+            '- [ ] $1'
+        )
+        $content = [regex]::Replace(
+            $content,
+            '(?m)^(\|\s*1\.\s+可信本地状态与实现契约\s+\|)\s*\d+/28\s*\|\s*(?:In Progress|Complete)\s*\|[^\r\n]*$',
+            '${1} <executed>/28 | <status> | <date> |'
+        )
+    }
+    elseif ($RelativePath -eq '.planning/REQUIREMENTS.md') {
+        $content = [regex]::Replace(
+            $content,
+            '(?m)^-\s+\[[ xX]\]\s+(\*\*STATE-0[1-5]\*\*:.*)$',
+            '- [ ] $1'
+        )
+        $content = [regex]::Replace(
+            $content,
+            '(?m)^(\|\s*STATE-0[1-5]\s*\|\s*Phase 1\s*\|)\s*(?:Pending|Complete)\s*(\|)$',
+            '${1} <status> $2'
+        )
+    }
+
+    return $content
+}
+
+function Get-AuditSha256 {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$RelativePath
+    )
+
+    $content = Get-CanonicalDigestContent -Path $Path -RelativePath $RelativePath
+    $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($content)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString($sha256.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $sha256.Dispose()
+    }
 }
 
 function Add-AuditError {
@@ -415,7 +471,7 @@ function New-DigestLockObject {
             Add-AuditError "digest 输入不存在：$relativePath"
             continue
         }
-        $files[$relativePath] = Get-Sha256 -Path $fullPath
+        $files[$relativePath] = Get-AuditSha256 -Path $fullPath -RelativePath $relativePath
     }
 
     return [ordered]@{
@@ -423,6 +479,10 @@ function New-DigestLockObject {
         phase = '01'
         algorithm = 'SHA-256'
         excluded = @('tests/fixtures/contracts/phase1-plan-audit-lock.json')
+        normalization = [ordered]@{
+            '.planning/ROADMAP.md' = 'execution-progress-v1'
+            '.planning/REQUIREMENTS.md' = 'requirement-status-v1'
+        }
         files = $files
     }
 }

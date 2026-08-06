@@ -244,6 +244,29 @@ try {
     }
     Write-Host '[PASS] PhaseComplete 执行只读来源审计'
 
+    $progressRoot = New-CaseWorkspace -Name 'mutable-execution-progress' -RepositoryRoot $repositoryRoot -SourcePhaseDir $phaseDir -TestRoot $testRoot
+    $progressRoadmapPath = Join-Path $progressRoot '.planning/ROADMAP.md'
+    $progressRoadmap = Read-Utf8File -Path $progressRoadmapPath
+    $progressRoadmap = [regex]::Replace($progressRoadmap, '(?m)^(\*\*Plans\*\*:\s+)\d+/28', '${1}17/28', 1)
+    $progressRoadmap = [regex]::Replace($progressRoadmap, '(?m)^-\s+\[[ xX]\]\s+(01-08-PLAN\.md\b)', '- [x] $1', 1)
+    $progressRoadmap = [regex]::Replace(
+        $progressRoadmap,
+        '(?m)^(\|\s*1\.\s+可信本地状态与实现契约\s+\|)\s*\d+/28\s*\|\s*(?:In Progress|Complete)\s*\|[^\r\n]*$',
+        '${1} 17/28 | In Progress |  |',
+        1
+    )
+    Write-Utf8File -Path $progressRoadmapPath -Content $progressRoadmap
+    $progressRequirementsPath = Join-Path $progressRoot '.planning/REQUIREMENTS.md'
+    $progressRequirements = Read-Utf8File -Path $progressRequirementsPath
+    $progressRequirements = [regex]::Replace($progressRequirements, '(?m)^-\s+\[[ xX]\]\s+(\*\*STATE-01\*\*:)', '- [ ] $1', 1)
+    $progressRequirements = [regex]::Replace($progressRequirements, '(?m)^(\|\s*STATE-01\s*\|\s*Phase 1\s*\|)\s*(?:Pending|Complete)\s*(\|)$', '${1} Pending $2', 1)
+    Write-Utf8File -Path $progressRequirementsPath -Content $progressRequirements
+    $progressResult = Invoke-Auditor -AuditorPath $auditorPath -CaseRoot $progressRoot
+    if ($progressResult.ExitCode -ne 0) {
+        throw "仅执行进度变化不应使规划合同 digest 漂移：`n$($progressResult.Output)"
+    }
+    Write-Host '[PASS] ROADMAP/REQUIREMENTS 执行状态变化不污染规划合同 digest'
+
     Assert-NegativeCase `
         -Name '缺少 requirement mapping' `
         -ExpectedPattern 'STATE-05 未映射到任何计划' `
@@ -375,6 +398,24 @@ try {
             $content = Read-Utf8File -Path $lockPath
             $updated = [regex]::Replace($content, '(?i)"[a-f0-9]{64}"', ('"' + ('0' * 64) + '"'), 1)
             Write-Utf8File -Path $lockPath -Content $updated
+        }
+
+    Assert-NegativeCase `
+        -Name 'ROADMAP 语义漂移' `
+        -ExpectedPattern 'digest 漂移：\.planning/ROADMAP\.md' `
+        -RepositoryRoot $repositoryRoot `
+        -SourcePhaseDir $phaseDir `
+        -TestRoot $testRoot `
+        -AuditorPath $auditorPath `
+        -Mutate {
+            param($caseRoot)
+            $roadmapPath = Join-Path $caseRoot '.planning/ROADMAP.md'
+            $content = Read-Utf8File -Path $roadmapPath
+            $updated = $content.Replace(
+                '**Goal**: 用户的供应商、环境选择和设置能够可靠保存在本机，并在版本升级或降级边界下保持可恢复。',
+                '**Goal**: 被篡改的规划目标。'
+            )
+            Write-Utf8File -Path $roadmapPath -Content $updated
         }
 
     Assert-NegativeCase `

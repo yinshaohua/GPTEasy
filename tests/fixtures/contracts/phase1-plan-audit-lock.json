@@ -5,6 +5,10 @@
     "excluded":  [
                      "tests/fixtures/contracts/phase1-plan-audit-lock.json"
                  ],
+    "normalization":  {
+                          ".planning/ROADMAP.md":  "execution-progress-v1",
+                          ".planning/REQUIREMENTS.md":  "requirement-status-v1"
+                      },
     "files":  {
                   ".planning/phases/01-trusted-local-state-contract/01-01-PLAN.md":  "d085770b94a4c1d826f180c34d1fc8f095c0810da217ff0bc5ea09cdd2a81bf7",
                   ".planning/phases/01-trusted-local-state-contract/01-02-PLAN.md":  "f01b450d0145f79ce27a0d82a5dc992e5c3fd5568aea27ea2749247dca407092",
@@ -37,8 +41,8 @@
                   ".planning/phases/01-trusted-local-state-contract/01-PATTERNS.md":  "31ef5b9aa081a00c887ee806e8749a65a4f9136cd2523f8e0348ff6c9945c176",
                   ".planning/phases/01-trusted-local-state-contract/01-SOURCE-AUDIT.md":  "2e75ec4b499c0f81e48ea9d44eba7644e5c4d7e601d79f09196d33575e5a1d2b",
                   ".planning/phases/01-trusted-local-state-contract/01-VALIDATION.md":  "2b6aee467d9f220d6164aece772ccde90d609b454e0c2b2bbd703cc137d77aa3",
-                  ".planning/REQUIREMENTS.md":  "c7fd23554f99a40dafd2d26bc8e7ade503c0be951dacd325c7bc016260b5ef2b",
-                  ".planning/ROADMAP.md":  "a0140da6d78502f682ff32d0e316b64280110393949e9ca8baaba50d6ebc2e26",
+                  ".planning/REQUIREMENTS.md":  "d0810cf0c28cab280f46d3aafebeef8f651f211c86ef9a253e760b48ce2914fd",
+                  ".planning/ROADMAP.md":  "919215d9ea3cdcede2924540a282cc71087ef8fc5f7d3b240f80b60029dc4bd1",
                   "tests/fixtures/contracts/runner-cli-matrix.json":  "a357427aeca4aebf30c6e0d924cdcd9d6f46187889a54c366f654e307379b76d"
               }
 }
