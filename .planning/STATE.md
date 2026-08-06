@@ -4,10 +4,10 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 1
 status: executing
-stopped_at: Completed 01-14-PLAN.md
-last_updated: "2026-08-06T08:46:08.849Z"
+stopped_at: 01-15 等待配置 Windows Authenticode Actions secrets
+last_updated: "2026-08-06T12:36:07.581Z"
 last_activity: 2026-08-06
-last_activity_desc: 完成 01-14 macOS package predicate、一次性账户生命周期与双架构 attested workflow
+last_activity_desc: 修复 Windows evidence workflow 调度，并停在正式签名 secrets 人工配置门禁
 progress:
   total_phases: 1
   completed_phases: 0
@@ -28,8 +28,8 @@ See: .planning/PROJECT.md (updated 2026-08-05)
 
 Phase: 1 of 8（可信本地状态与实现契约）
 Plan: 15 of 28 in current phase
-Status: Ready to execute
-Last activity: 2026-08-06 — 完成 01-14 macOS package predicate、一次性账户生命周期与双架构 attested workflow
+Status: 等待 Windows Authenticode Actions secrets
+Last activity: 2026-08-06 — 修复 Windows evidence workflow 调度，并停在正式签名 secrets 人工配置门禁
 
 Progress: [█████░░░░░] 50%
 
@@ -138,6 +138,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-06T08:46:08.765Z
-Stopped at: Completed 01-14-PLAN.md
-Resume file: None
+Last session: 2026-08-06T12:36:07.581Z
+Stopped at: 01-15 Task 1 调度前；Windows workflow 已修复，等待两个 Actions secrets
+Resume file: .planning/phases/01-trusted-local-state-contract/.continue-here.md
