@@ -2,9 +2,9 @@
 schema_version: 1
 open_count: 1
 waived_count: 0
-fixed_count: 6
-total_count: 7
-last_updated: 2026-08-06T05:05:01.738Z
+fixed_count: 7
+total_count: 8
+last_updated: 2026-08-06T06:14:58.640Z
 ---
 
 # Broken Windows Ledger
@@ -22,6 +22,7 @@ last_updated: 2026-08-06T05:05:01.738Z
 | 5 | 01 | deviation | scripts/contracts/test-macos-wave0-contract.ps1 | 174 | 修正 RED 静态合同对 shell 转义和 YAML matrix 列表的误判 | fixed |  | 2026-08-06T05:04:40.045Z | 2026-08-06T05:04:59.302Z |
 | 6 | 01 | deviation | scripts/contracts/probe-codex-macos.zsh | 629 | 修正 probe 内部摘要分隔符和 host child 退出码传播 | fixed |  | 2026-08-06T05:04:42.372Z | 2026-08-06T05:05:00.497Z |
 | 7 | 01 | deviation | scripts/contracts/probe-codex-macos.zsh | 491 | 补齐 raw response 解析失败和 canary 所有权清理的 fail-closed 路径 | fixed |  | 2026-08-06T05:04:44.398Z | 2026-08-06T05:05:01.738Z |
+| 8 | 01 | deviation | src-tauri/icons/icon.ico |  | Tauri Windows Resource 编译需要计划外补充确定性 icon.ico，已在 baed5d0 修复 | fixed |  | 2026-08-06T06:13:20.973Z | 2026-08-06T06:14:58.640Z |
 
 ````json
 [
@@ -108,6 +109,18 @@ last_updated: 2026-08-06T05:05:01.738Z
     "reason": "",
     "recorded_at": "2026-08-06T05:04:44.398Z",
     "resolved_at": "2026-08-06T05:05:01.738Z"
+  },
+  {
+    "id": 8,
+    "kind": "deviation",
+    "phase": "01",
+    "file": "src-tauri/icons/icon.ico",
+    "line": null,
+    "description": "Tauri Windows Resource 编译需要计划外补充确定性 icon.ico，已在 baed5d0 修复",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-08-06T06:13:20.973Z",
+    "resolved_at": "2026-08-06T06:14:58.640Z"
   }
 ]
 ````

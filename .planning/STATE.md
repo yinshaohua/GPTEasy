@@ -4,15 +4,15 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 1
 status: executing
-stopped_at: Completed 01-06-PLAN.md
-last_updated: "2026-08-06T05:37:24.796Z"
+stopped_at: Completed 01-09-PLAN.md
+last_updated: "2026-08-06T06:11:56.877Z"
 last_activity: 2026-08-06
-last_activity_desc: 完成 01-06 gh 真实只读 preflight 人工批准与 PowerShell 运行时边界记录
+last_activity_desc: 完成 01-09 最小 Tauri 当前用户应用壳与权限/bundle contract
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 28
-  completed_plans: 10
+  completed_plans: 11
 ---
 
 # Project State
@@ -27,11 +27,11 @@ See: .planning/PROJECT.md (updated 2026-08-05)
 ## Current Position
 
 Phase: 1 of 8（可信本地状态与实现契约）
-Plan: 9 of 28 in current phase
+Plan: 10 of 28 in current phase
 Status: Ready to execute
-Last activity: 2026-08-06 — 完成 01-06 gh 真实只读 preflight 人工批准与 PowerShell 运行时边界记录
+Last activity: 2026-08-06 — 完成 01-09 最小 Tauri 当前用户应用壳与权限/bundle contract
 
-Progress: [████░░░░░░] 36%
+Progress: [████░░░░░░] 39%
 
 ## Performance Metrics
 
@@ -67,6 +67,7 @@ Progress: [████░░░░░░] 36%
 | Phase 01 P11 | 约 38 分钟 | 2 tasks | 5 files |
 | Phase 01 P12 | 约 20 分钟 | 1 tasks | 5 files |
 | Phase 01 P06 | 约 10 分钟（不含人工等待） | 1 tasks | 1 files |
+| Phase 01 P09 | 约 26 分钟 | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -102,6 +103,8 @@ Recent decisions affecting current work:
 - [Phase 01]: macOS Wave 0 固定 exact checkout，并在 macos-15 arm64 与 macos-15-intel x86_64 上先执行全部 zsh 语法与 fixture tests。 — 任何后续 macOS evidence 必须依赖可复用 Wave 0，不能以 Windows 静态结果替代。
 - [Phase 01]: 01-06：接受 PowerShell 7.6.4 下真实只读 gh preflight 成功结果并解除 blocking-human checkpoint；不宣称 Windows PowerShell 5.1 已完成同等真实网络兼容性验证。
 - [Phase 01]: 01-06：后续真实 evidence 仍须执行固定 preflight，任何非零结果在下载或验签前 fail-closed，历史批准不能覆盖当前失败。
+- [Phase 01]: 01-09：Rust/Tauri composition root 保持最小，main 只调用 library run，不注册业务 command 或高权限 plugin。
+- [Phase 01]: 01-09：capability 仅授权 main window 的 core:default；Windows NSIS 使用 currentUser，macOS minimumSystemVersion 固定 14.0。
 
 ### Pending Todos
 
@@ -123,6 +126,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-06T05:37:24.733Z
-Stopped at: Completed 01-06-PLAN.md
+Last session: 2026-08-06T06:11:56.775Z
+Stopped at: Completed 01-09-PLAN.md
 Resume file: None
