@@ -92,6 +92,7 @@ typeset install_scope=""
 typeset install_root_kind=""
 typeset install_profile_sha256=""
 typeset install_absolute_path_redacted=false
+typeset install_gatekeeper_accepted=false
 typeset codesign_verified=false
 typeset codesign_deep=false
 typeset codesign_strict=false
@@ -145,6 +146,7 @@ function load_fixture() {
   install_root_kind="$(read_json_value "$fixture_path" package.install.root_kind)" || return 1
   install_profile_sha256="$(read_json_value "$fixture_path" package.install.profile_id_sha256)" || return 1
   install_absolute_path_redacted="$(read_json_value "$fixture_path" package.install.absolute_path_redacted)" || return 1
+  install_gatekeeper_accepted="$(read_json_value "$fixture_path" package.install.gatekeeper_accepted)" || return 1
   codesign_verified="$(read_json_value "$fixture_path" package.codesign.verified)" || return 1
   codesign_deep="$(read_json_value "$fixture_path" package.codesign.deep)" || return 1
   codesign_strict="$(read_json_value "$fixture_path" package.codesign.strict)" || return 1
@@ -202,6 +204,7 @@ function load_fixture() {
       ;;
     missing-gatekeeper)
       gatekeeper_accepted=false
+      install_gatekeeper_accepted=false
       ;;
     system-install)
       install_scope="system"
@@ -321,6 +324,7 @@ function load_live_facts() {
   install_root_kind="$(read_json_value "$install_evidence_path" install.root_kind)" || return 1
   install_profile_sha256="$(read_json_value "$install_evidence_path" install.profile_id_sha256)" || return 1
   install_absolute_path_redacted="$(read_json_value "$install_evidence_path" install.absolute_path_redacted)" || return 1
+  install_gatekeeper_accepted="$(read_json_value "$install_evidence_path" install.gatekeeper_accepted)" || return 1
   path_smoke_outcome="$(read_json_value "$install_evidence_path" path_smoke.outcome)" || return 1
   path_smoke_root_kind="$(read_json_value "$install_evidence_path" path_smoke.root_kind)" || return 1
   path_smoke_reopened="$(read_json_value "$install_evidence_path" path_smoke.reopened)" || return 1
@@ -395,7 +399,8 @@ function evaluate_predicate() {
   local current_user_install=false
   if [[ "$install_scope" == currentUser &&
         "$install_root_kind" == "$EXPECTED_INSTALL_ROOT_KIND" &&
-        "$install_absolute_path_redacted" == true ]] &&
+        "$install_absolute_path_redacted" == true &&
+        "$install_gatekeeper_accepted" == true ]] &&
      valid_sha256 "$install_profile_sha256"; then
     current_user_install=true
   fi

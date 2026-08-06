@@ -43,6 +43,6 @@
                   ".planning/phases/01-trusted-local-state-contract/01-VALIDATION.md":  "2b6aee467d9f220d6164aece772ccde90d609b454e0c2b2bbd703cc137d77aa3",
                   ".planning/REQUIREMENTS.md":  "d0810cf0c28cab280f46d3aafebeef8f651f211c86ef9a253e760b48ce2914fd",
                   ".planning/ROADMAP.md":  "919215d9ea3cdcede2924540a282cc71087ef8fc5f7d3b240f80b60029dc4bd1",
-                  "tests/fixtures/contracts/runner-cli-matrix.json":  "20467ecd338e9772a3c26a6039ee3a8de758d5889d2f4cf8cebee5a26ad99ddb"
+                  "tests/fixtures/contracts/runner-cli-matrix.json":  "e16849098b6203fe84306d6fecce0f9615942bbca1238b07f51dd75fa05e3057"
               }
 }

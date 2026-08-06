@@ -292,9 +292,11 @@
           "path": "scripts/contracts/test-macos-wave0-contract.ps1",
           "arguments": [
             "-Scripts",
-            "scripts/contracts/probe-codex-macos.zsh,scripts/contracts/probe-macos-host.zsh,scripts/contracts/test-macos-contract-probes.zsh",
+            "scripts/contracts/probe-codex-macos.zsh,scripts/contracts/probe-macos-host.zsh,scripts/contracts/test-macos-contract-probes.zsh,scripts/contracts/assert-macos-job-lifecycle.zsh,scripts/contracts/run-macos.zsh,scripts/contracts/test-macos-package-verifier.zsh",
             "-Workflow",
-            ".github/workflows/phase1-macos-wave0.yml"
+            ".github/workflows/phase1-macos-wave0.yml",
+            "-EvidenceWorkflow",
+            ".github/workflows/phase1-macos-evidence.yml"
           ]
         }
       ]

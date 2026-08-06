@@ -21,7 +21,8 @@
       "scope": "currentUser",
       "root_kind": "HOME_APPLICATIONS",
       "profile_id_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-      "absolute_path_redacted": true
+      "absolute_path_redacted": true,
+      "gatekeeper_accepted": true
     },
     "codesign": {
       "verified": true,

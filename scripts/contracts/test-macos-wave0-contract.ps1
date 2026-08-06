@@ -360,8 +360,86 @@ try {
             "(?m)^\s*needs:\s*wave0\s*$"
         )
         Assert-Condition `
-            -Condition ($needsMatches.Count -ge 2) `
-            -Reason "both native evidence jobs must depend on Wave 0"
+            -Condition ($needsMatches.Count -ge 1) `
+            -Reason "the dual-architecture native evidence matrix must depend on Wave 0"
+
+        foreach ($contractPattern in @(
+            "(?m)^\s*attestations:\s*write\s*$",
+            "(?m)^\s*id-token:\s*write\s*$",
+            "(?m)^\s*-\s*job_name:\s*macos-apple-silicon\s*$",
+            "(?m)^\s*runner:\s*macos-15\s*$",
+            "(?m)^\s*expected_arch:\s*arm64\s*$",
+            "(?m)^\s*rust_target:\s*aarch64-apple-darwin\s*$",
+            "(?m)^\s*-\s*job_name:\s*macos-intel\s*$",
+            "(?m)^\s*runner:\s*macos-15-intel\s*$",
+            "(?m)^\s*expected_arch:\s*x86_64\s*$",
+            "(?m)^\s*rust_target:\s*x86_64-apple-darwin\s*$",
+            "actions/checkout@[0-9a-f]{40}",
+            "persist-credentials:\s*false",
+            "assert-macos-job-lifecycle\.zsh",
+            "--action initialize",
+            "--action invoke",
+            "--action finalize",
+            "probe-macos-host\.zsh",
+            "APPLE_CERTIFICATE",
+            "APPLE_SIGNING_IDENTITY",
+            "APPLE_API_ISSUER",
+            "APPLE_API_KEY_ID",
+            "codesign",
+            "notarytool",
+            "stapler",
+            "spctl",
+            "HOME_APPLICATIONS",
+            "phase1-path-smoke",
+            "run-macos\.zsh",
+            "strict-pass\.json",
+            "if:\s*always\(\)",
+            "upload-artifact@[0-9a-f]{40}",
+            "attest-build-provenance@[0-9a-f]{40}"
+        )) {
+            Assert-Match `
+                -Text $evidenceText `
+                -Pattern $contractPattern `
+                -Reason ("macOS evidence workflow is missing contract pattern: " + $contractPattern)
+        }
+
+        $finalizeOffset = $evidenceText.IndexOf("--action finalize")
+        $verifyOffset = $evidenceText.LastIndexOf("scripts/contracts/run-macos.zsh")
+        $uploadOffset = $evidenceText.IndexOf("actions/upload-artifact@")
+        $attestOffset = $evidenceText.IndexOf("actions/attest-build-provenance@")
+        Assert-Condition `
+            -Condition (
+                $finalizeOffset -ge 0 -and
+                $verifyOffset -gt $finalizeOffset
+            ) `
+            -Reason "macOS package predicate must consume finalized lifecycle evidence"
+        Assert-Condition `
+            -Condition (
+                $uploadOffset -gt $verifyOffset -and
+                $attestOffset -gt $uploadOffset
+            ) `
+            -Reason "macOS upload and attestation must follow strict package verification"
+
+        $actionReferences = @(
+            [regex]::Matches(
+                $evidenceText,
+                "(?m)^\s*uses:\s*(?<reference>[^\s]+)\s*$"
+            ) |
+                ForEach-Object { $_.Groups["reference"].Value }
+        )
+        $externalActionReferences = @(
+            $actionReferences |
+                Where-Object { -not $_.StartsWith("./") }
+        )
+        Assert-Condition `
+            -Condition (
+                $externalActionReferences.Count -gt 0 -and
+                @(
+                    $externalActionReferences |
+                        Where-Object { $_ -notmatch "@[0-9a-f]{40}$" }
+                ).Count -eq 0
+            ) `
+            -Reason "every external GitHub Action must be pinned to an immutable commit"
     }
 
     Write-Output (

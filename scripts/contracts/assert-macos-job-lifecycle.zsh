@@ -201,7 +201,8 @@ function initialize_lifecycle() {
   fi
   password=""
 
-  if ! /usr/sbin/createhomedir -c -u "$account_name" >/dev/null 2>&1; then
+  /usr/sbin/createhomedir -c -u "$account_name" >/dev/null 2>&1 || true
+  if [[ ! -d "$account_home" ]]; then
     /usr/sbin/sysadminctl -deleteUser "$account_name" -secure >/dev/null 2>&1 || true
     emit_blocked "MACOS_PROFILE_CREATION_FAILED"
   fi
