@@ -30,4 +30,5 @@ uuid = { version = "=1.24.0", features = ["v4", "serde"] }
 windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
+tauri = { version = "=2.11.5", features = ["test"] }
 tempfile = "=3.27.0"
