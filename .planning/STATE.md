@@ -4,15 +4,15 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 1
 status: executing
-stopped_at: Completed 01-03-PLAN.md
-last_updated: "2026-08-06T01:51:53.131Z"
+stopped_at: Completed 01-04-PLAN.md
+last_updated: "2026-08-06T02:22:13.984Z"
 last_activity: 2026-08-06
-last_activity_desc: 完成 01-03 计划的唯一 runner CLI 合同与 consumer tests
+last_activity_desc: 完成 01-04 计划的外部 evidence schema、脱敏与 provenance 验证核心
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 28
-  completed_plans: 2
+  completed_plans: 3
 ---
 
 # Project State
@@ -27,11 +27,11 @@ See: .planning/PROJECT.md (updated 2026-08-05)
 ## Current Position
 
 Phase: 1 of 8（可信本地状态与实现契约）
-Plan: 2 of 28 in current phase
+Plan: 3 of 28 in current phase
 Status: Ready to execute
-Last activity: 2026-08-06 — 完成 01-01 计划的 npm 身份门禁与污染自测
+Last activity: 2026-08-06 — 完成 01-04 计划的外部 evidence schema、脱敏与 provenance 验证核心
 
-Progress: [█░░░░░░░░░] 7%
+Progress: [█░░░░░░░░░] 11%
 
 ## Performance Metrics
 
@@ -59,6 +59,7 @@ Progress: [█░░░░░░░░░] 7%
 |------|----------|-------|-------|
 | Phase 01 P01 | 45m | 2 tasks | 3 files |
 | Phase 01 P03 | 35m | 2 tasks | 3 files |
+| Phase 01 P04 | 22m | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -75,6 +76,9 @@ Recent decisions affecting current work:
 - [Phase 1]: 01-03：runner-cli-matrix.json 作为 Scope/Target/Mode、合法组合、dispatch 和退出码的唯一事实源。
 - [Phase 1]: 01-03：RunnerSelfTest/ProvenanceSelfTest/Freeze/PhaseComplete 只允许 Local+Strict，AllowBlocked 只允许具体目标的 ContractSelfTest/PackagingSelfTest。
 - [Phase 1]: 01-03：资源阻断时 Strict 返回 3，AllowBlocked 返回 0 但 outcome=blocked 且 strict_gate_eligible=false。
+- [Phase 1]: 01-04：manifest validator 只证明结构与脱敏边界，永远不自行授予 strict eligibility。
+- [Phase 1]: 01-04：API artifact archive digest 与下载文件/attestation subject digest 分开交叉验证。
+- [Phase 1]: 01-04：Transcript 仅用于生产 predicate 自测，test_only=true 且 strict_gate_eligible=false。
 
 ### Pending Todos
 
@@ -96,6 +100,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-06T01:51:53.099Z
-Stopped at: Completed 01-03-PLAN.md
+Last session: 2026-08-06T02:22:13.970Z
+Stopped at: Completed 01-04-PLAN.md
 Resume file: None
