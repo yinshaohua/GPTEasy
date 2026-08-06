@@ -1,0 +1,146 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/yinshaohua/GPTEasy/tests/fixtures/contracts/schema/provenance.schema.json",
+  "title": "GPTEasy external evidence provenance",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "repository",
+    "workflow_ref",
+    "run_id",
+    "run_attempt",
+    "job_id",
+    "commit_sha",
+    "artifacts"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "repository": {
+      "const": "yinshaohua/GPTEasy"
+    },
+    "workflow_ref": {
+      "type": "string",
+      "pattern": "^yinshaohua/GPTEasy/\\.github/workflows/[A-Za-z0-9._/-]+\\.ya?ml@[0-9a-f]{40}$"
+    },
+    "run_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "run_attempt": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "job_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "commit_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "$ref": "#/$defs/artifact"
+      },
+      "allOf": [
+        {
+          "contains": {
+            "type": "object",
+            "required": [
+              "role"
+            ],
+            "properties": {
+              "role": {
+                "const": "evidence_bundle"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": [
+              "role"
+            ],
+            "properties": {
+              "role": {
+                "const": "subject_artifact"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "artifact_id",
+        "artifact_name",
+        "artifact_digest",
+        "attestation"
+      ],
+      "properties": {
+        "role": {
+          "enum": [
+            "evidence_bundle",
+            "subject_artifact"
+          ]
+        },
+        "artifact_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "artifact_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+        },
+        "artifact_digest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "attestation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "subject_name",
+            "subject_digest",
+            "predicate_type"
+          ],
+          "properties": {
+            "subject_name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "pattern": "^[^\\r\\n]+$"
+            },
+            "subject_digest": {
+              "$ref": "#/$defs/sha256"
+            },
+            "predicate_type": {
+              "const": "https://slsa.dev/provenance/v1"
+            }
+          }
+        }
+      }
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  }
+}
