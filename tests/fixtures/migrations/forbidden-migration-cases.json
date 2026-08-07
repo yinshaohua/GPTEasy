@@ -1,0 +1,87 @@
+{
+  "format_version": 1,
+  "sql_cases": [
+    {
+      "id": "normal-ddl-dml",
+      "should_pass": true,
+      "source": "CREATE TABLE example (id INTEGER PRIMARY KEY) STRICT;\nINSERT INTO example (id) VALUES (1);"
+    },
+    {
+      "id": "keywords-in-string-and-comments",
+      "should_pass": true,
+      "source": "-- VACUUM; ATTACH;\nINSERT INTO example (id) VALUES (1);\nSELECT 'DETACH DATABASE x; PRAGMA journal_mode = WAL';\n/* vacuum */"
+    },
+    {
+      "id": "vacuum-case-insensitive",
+      "should_pass": false,
+      "source": "vAcUuM;"
+    },
+    {
+      "id": "attach-whitespace",
+      "should_pass": false,
+      "source": "ATTACH\nDATABASE 'other.sqlite3' AS other;"
+    },
+    {
+      "id": "attach-comment-bypass",
+      "should_pass": false,
+      "source": "ATTACH /* keep looking */ DATABASE 'other.sqlite3' AS other;"
+    },
+    {
+      "id": "detach-database",
+      "should_pass": false,
+      "source": "DeTaCh DATABASE other;"
+    },
+    {
+      "id": "pragma-journal-mode",
+      "should_pass": false,
+      "source": "PRAGMA journal_mode = WAL;"
+    },
+    {
+      "id": "qualified-pragma-comment-bypass",
+      "should_pass": false,
+      "source": "PRAGMA main /* comment */ . journal_mode(DELETE);"
+    }
+  ],
+  "rust_cases": [
+    {
+      "id": "transaction-only-transform",
+      "should_pass": true,
+      "source": "fn transform_v2(transaction: &rusqlite::Transaction<'_>) -> rusqlite::Result<()> { transaction.execute_batch(\"CREATE TABLE ok (id INTEGER);\") }"
+    },
+    {
+      "id": "capabilities-in-comment-and-string",
+      "should_pass": true,
+      "source": "// std::fs::write and Command::new are forbidden examples\nconst MESSAGE: &str = \"TcpStream OpenOptions Path\";"
+    },
+    {
+      "id": "filesystem-module",
+      "should_pass": false,
+      "source": "fn transform_v2(transaction: &Transaction<'_>) { std::fs::write(\"outside\", b\"x\").unwrap(); }"
+    },
+    {
+      "id": "open-options",
+      "should_pass": false,
+      "source": "use std::fs::OpenOptions; fn transform_v2(transaction: &Transaction<'_>) { OpenOptions::new(); }"
+    },
+    {
+      "id": "path-capability",
+      "should_pass": false,
+      "source": "use std::path::Path; fn transform_v2(transaction: &Transaction<'_>) { let _ = Path::new(\"outside\"); }"
+    },
+    {
+      "id": "subprocess-command",
+      "should_pass": false,
+      "source": "use std::process::Command; fn transform_v2(transaction: &Transaction<'_>) { Command::new(\"helper\").status().unwrap(); }"
+    },
+    {
+      "id": "network-api",
+      "should_pass": false,
+      "source": "use std::net::TcpStream; fn transform_v2(transaction: &Transaction<'_>) { TcpStream::connect(\"127.0.0.1:1\").unwrap(); }"
+    },
+    {
+      "id": "connection-transform",
+      "should_pass": false,
+      "source": "fn transform_v2(connection: &rusqlite::Connection) -> rusqlite::Result<()> { connection.execute_batch(\"SELECT 1;\") }"
+    }
+  ]
+}
