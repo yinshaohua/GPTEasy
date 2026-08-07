@@ -3,17 +3,17 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 current_phase: 01
-current_phase_name: 可信本地状态与实现契约
+current_phase_name: trusted-local-state-contract
 status: executing
-stopped_at: Completed 01-18-PLAN.md; next 01-19-PLAN.md
-last_updated: "2026-08-07T04:21:23.676Z"
+stopped_at: Completed 01-19-PLAN.md; next 01-20-PLAN.md
+last_updated: "2026-08-07T06:42:12.842Z"
 last_activity: 2026-08-07
-last_activity_desc: 完成 01-18 完整权威状态持久化与公开脱敏投影
+last_activity_desc: 完成 01-19 installed state smoke、本地边界与跨进程协调
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 28
-  completed_plans: 18
+  completed_plans: 19
 ---
 
 # Project State
@@ -23,35 +23,35 @@ progress:
 See: .planning/PROJECT.md (updated 2026-08-05)
 
 **Core value:** 非技术用户能够验证供应商，并在保留既有 Codex 配置且可恢复的前提下，可靠地切换各受管环境使用的 API 服务。
-**Current focus:** Phase 01 — 可信本地状态与实现契约
+**Current focus:** Phase 01 — trusted-local-state-contract
 
 ## Current Position
 
-Phase: 01 (可信本地状态与实现契约) — EXECUTING
-Plan: 19 of 28
+Phase: 01 (trusted-local-state-contract) — EXECUTING
+Plan: 20 of 28
 Status: Ready to execute
-Last activity: 2026-08-07 — 完成 01-18 完整权威状态持久化与公开脱敏投影
+Last activity: 2026-08-07 — 完成 01-19 installed state smoke、本地边界与跨进程协调
 
-Progress: [██████░░░░] 64%
+Progress: [███████░░░] 68%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 18
-- Average duration: 34m
-- Total execution time: 10h 20m
+- Total plans completed: 19
+- Average duration: 36m
+- Total execution time: 11h 26m
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| Phase 01 | 18 | 10h 20m | 34m |
+| Phase 01 | 19 | 11h 26m | 36m |
 
 **Recent Trend:**
 
-- Last 5 plans: 49m, 1h 25m, 1h 14m, 33m, 25m
-- Trend: Improving after 01-15/01-16 contract rebuild and blocking approvals
+- Last 5 plans: 1h 25m, 1h 14m, 33m, 25m, 1h 06m
+- Trend: Variable due to TDD cold builds and cross-process coordination coverage
 
 *Updated after each plan completion*
 **Per-Plan Metrics:**
@@ -76,6 +76,7 @@ Progress: [██████░░░░] 64%
 | Phase 01 P16 | 1h 14m | 3 tasks | 1 files |
 | Phase 01 P17 | 33m | 1 tasks | 5 files |
 | Phase 01 P18 | 25m | 1 tasks | 6 files |
+| Phase 01 P19 | 1h 06m | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -131,6 +132,10 @@ Recent decisions affecting current work:
 - [Phase 01]: 01-18：组合指纹绑定 base URL、默认模型与 API Key，验证记录不匹配时在写入前拒绝。 — 确保验证证据只能用于同一关键配置组合。
 - [Phase 01]: 01-18：公开 state digest 使用版本化 canonical 编码覆盖完整 secret-bearing snapshot。 — 无需公开秘密即可证明跨进程恢复的内部状态逐字段一致。
 - [Phase 01]: 01-18：完整 snapshot 在单个 SQLite IMMEDIATE transaction 内整体替换并提交后权威重读。 — 任何约束或完整性失败都回滚，避免部分新状态。
+- [Phase 01]: 01-19：state smoke 根固定由 app_local_data_dir 与 opaque run ID 派生，verify 不清理，cleanup 必须通过 marker 与文件允许清单。
+- [Phase 01]: 01-19：StateStore 在任何 DB/WAL/backup 写 seam 前取得 OS exclusive File lock，并持有到 SQLite Connection 销毁。
+- [Phase 01]: 01-19：owner metadata 仅含 PID、进程启动 token 与 run ID 摘要，ownership 只由 File::try_lock 决定。
+- [Phase 01]: 01-19：local-only gate 对依赖、capability、注册 command、公开 DTO 与前端 API surface 使用精确允许清单。
 
 ### Pending Todos
 
@@ -152,6 +157,7 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-07T04:21:23.643Z
-Stopped at: Completed 01-18-PLAN.md; next 01-19-PLAN.md
+Last session: 2026-08-07T06:42:12.828Z
+Stopped at: Completed 01-19-PLAN.md; next 01-20-PLAN.md
 Resume file: None
+Previous resume context: 2026-08-07T05:20:18.248Z — Session resumed, proceeding to execute 01-19-PLAN.md (`.planning/phases/01-trusted-local-state-contract/.continue-here.md`)
