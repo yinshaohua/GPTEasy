@@ -11,6 +11,10 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::domain::StateSnapshot;
+
+pub mod repositories;
+
 pub const APPLICATION_ID: i64 = 0x4750_5445;
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 
@@ -26,6 +30,7 @@ pub struct AppSettingsRecord {
     pub close_to_tray_notice_seen: bool,
     pub onboarding_completed: bool,
     pub last_update_check_at: Option<String>,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Error)]
@@ -92,6 +97,20 @@ impl StateStore {
         drop(statement);
 
         read_settings(&connection)
+    }
+
+    pub fn replace_snapshot(&self, snapshot: &StateSnapshot) -> Result<StateSnapshot, StoreError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        repositories::replace_snapshot(&transaction, snapshot)?;
+        ensure_integrity(&transaction)?;
+        transaction.commit()?;
+        repositories::read_snapshot(&connection)
+    }
+
+    pub fn snapshot(&self) -> Result<StateSnapshot, StoreError> {
+        let connection = self.connection()?;
+        repositories::read_snapshot(&connection)
     }
 
     fn connection(&self) -> Result<MutexGuard<'_, Connection>, StoreError> {
@@ -244,7 +263,7 @@ fn read_settings(connection: &Connection) -> Result<AppSettingsRecord, StoreErro
     let mut statement = connection.prepare(
         "SELECT locale, theme, launch_at_login_desired,
                 close_to_tray_notice_seen, onboarding_completed,
-                last_update_check_at
+                last_update_check_at, updated_at
          FROM app_settings
          WHERE singleton_id = 1",
     )?;
@@ -257,6 +276,7 @@ fn read_settings(connection: &Connection) -> Result<AppSettingsRecord, StoreErro
                 close_to_tray_notice_seen: row.get::<_, i64>(3)? != 0,
                 onboarding_completed: row.get::<_, i64>(4)? != 0,
                 last_update_check_at: row.get(5)?,
+                updated_at: row.get(6)?,
             })
         })
         .map_err(Into::into)

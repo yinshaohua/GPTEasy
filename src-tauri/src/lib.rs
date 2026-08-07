@@ -3,6 +3,7 @@ use std::ffi::OsString;
 use tauri::{Manager, Runtime};
 
 pub mod commands;
+pub mod domain;
 pub mod path_smoke;
 pub mod state;
 
@@ -16,7 +17,9 @@ pub fn configure_builder<R: Runtime>(builder: tauri::Builder<R>) -> tauri::Build
         })
         .invoke_handler(tauri::generate_handler![
             commands::update_app_settings,
-            commands::bootstrap_state
+            commands::bootstrap_state,
+            commands::replace_state_snapshot,
+            commands::bootstrap_state_snapshot
         ])
 }
 
