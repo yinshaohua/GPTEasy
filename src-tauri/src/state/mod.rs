@@ -7,7 +7,6 @@ use std::{
 
 use chrono::{SecondsFormat, Utc};
 use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -18,13 +17,11 @@ pub mod migrations;
 pub mod repositories;
 
 use coordination::{CoordinationError, StateCoordinator};
+use migrations::{validate_registry, MIGRATIONS};
 
-pub const APPLICATION_ID: i64 = 0x4750_5445;
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+pub use migrations::{APPLICATION_ID, CURRENT_SCHEMA_VERSION};
 
 const DATABASE_FILENAME: &str = "state.sqlite3";
-const INITIAL_MIGRATION_NAME: &str = "0001_initial";
-const INITIAL_MIGRATION_SQL: &str = include_str!("migrations/0001_initial.sql");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppSettingsRecord {
@@ -76,6 +73,7 @@ impl StateStore {
     }
 
     fn open_with_owner_run_id(state_root: &Path, run_id: Option<&str>) -> Result<Self, StoreError> {
+        validate_registry().map_err(|_| StoreError::ContractMismatch)?;
         fs::create_dir_all(state_root).map_err(StoreError::PrepareDirectory)?;
         let coordinator = StateCoordinator::acquire(state_root, run_id).map_err(|error| {
             if matches!(error, CoordinationError::Busy) {
@@ -147,34 +145,6 @@ fn utc_now() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
-    lowercase_hex(&Sha256::digest(bytes))
-}
-
-fn lowercase_hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-
-    let mut encoded = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        encoded.push(HEX[(byte >> 4) as usize] as char);
-        encoded.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    encoded
-}
-
-fn initial_migration_checksum() -> String {
-    sha256_hex(INITIAL_MIGRATION_SQL.as_bytes())
-}
-
-fn current_schema_fingerprint(migration_checksum: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(b"gpteasy-schema-fingerprint-v1\0");
-    hasher.update(APPLICATION_ID.to_be_bytes());
-    hasher.update(CURRENT_SCHEMA_VERSION.to_be_bytes());
-    hasher.update(migration_checksum.as_bytes());
-    lowercase_hex(&hasher.finalize())
-}
-
 fn inspect_existing_database(database_path: &Path) -> Result<(), StoreError> {
     let connection = Connection::open_with_flags(database_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let application_id: i64 =
@@ -184,8 +154,7 @@ fn inspect_existing_database(database_path: &Path) -> Result<(), StoreError> {
         return Err(StoreError::ContractMismatch);
     }
 
-    let checksum = initial_migration_checksum();
-    let expected_fingerprint = current_schema_fingerprint(&checksum);
+    let current_migration = MIGRATIONS.last().ok_or(StoreError::ContractMismatch)?;
     let (database_uuid, observed_fingerprint): (String, String) = connection
         .query_row(
             "SELECT database_uuid, schema_fingerprint
@@ -195,20 +164,42 @@ fn inspect_existing_database(database_path: &Path) -> Result<(), StoreError> {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(|_| StoreError::ContractMismatch)?;
-    if Uuid::parse_str(&database_uuid).is_err() || observed_fingerprint != expected_fingerprint {
+    if Uuid::parse_str(&database_uuid).is_err()
+        || observed_fingerprint != current_migration.schema_fingerprint
+    {
         return Err(StoreError::ContractMismatch);
     }
 
-    let ledger_matches: i64 = connection
-        .query_row(
-            "SELECT COUNT(*)
-             FROM schema_migrations
-             WHERE version = ?1 AND name = ?2 AND checksum = ?3",
-            params![CURRENT_SCHEMA_VERSION, INITIAL_MIGRATION_NAME, checksum],
-            |row| row.get(0),
-        )
-        .map_err(|_| StoreError::ContractMismatch)?;
-    if ledger_matches != 1 {
+    let observed_migrations = {
+        let mut statement = connection
+            .prepare(
+                "SELECT version, name, checksum
+                 FROM schema_migrations
+                 ORDER BY version",
+            )
+            .map_err(|_| StoreError::ContractMismatch)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, u32>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|_| StoreError::ContractMismatch)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|_| StoreError::ContractMismatch)?;
+        rows
+    };
+    let ledger_matches_registry = observed_migrations.len() == MIGRATIONS.len()
+        && observed_migrations.iter().zip(MIGRATIONS).all(
+            |((version, name, checksum), migration)| {
+                *version == migration.version
+                    && name == migration.name
+                    && checksum == migration.checksum
+            },
+        );
+    if !ledger_matches_registry {
         return Err(StoreError::ContractMismatch);
     }
 
@@ -230,25 +221,31 @@ fn configure_ready_connection(connection: &Connection) -> Result<(), StoreError>
 
 fn initialize_database(connection: &mut Connection) -> Result<(), StoreError> {
     let applied_at = utc_now();
-    let checksum = initial_migration_checksum();
-    let fingerprint = current_schema_fingerprint(&checksum);
+    let current_migration = MIGRATIONS.last().ok_or(StoreError::ContractMismatch)?;
     let database_uuid = Uuid::new_v4().to_string();
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
-    transaction.execute_batch(INITIAL_MIGRATION_SQL)?;
+    for migration in MIGRATIONS {
+        transaction.execute_batch(migration.sql)?;
+        transaction.execute(
+            "INSERT INTO schema_migrations (version, name, checksum, applied_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                migration.version,
+                migration.name,
+                migration.checksum,
+                applied_at
+            ],
+        )?;
+        transaction.pragma_update(None, "user_version", migration.version)?;
+    }
     transaction.execute(
         "INSERT INTO state_metadata (
              singleton_id, database_uuid, schema_fingerprint, created_at
          ) VALUES (1, ?1, ?2, ?3)",
-        params![database_uuid, fingerprint, applied_at],
-    )?;
-    transaction.execute(
-        "INSERT INTO schema_migrations (version, name, checksum, applied_at)
-         VALUES (?1, ?2, ?3, ?4)",
         params![
-            CURRENT_SCHEMA_VERSION,
-            INITIAL_MIGRATION_NAME,
-            checksum,
+            database_uuid,
+            current_migration.schema_fingerprint,
             applied_at
         ],
     )?;
@@ -261,7 +258,6 @@ fn initialize_database(connection: &mut Connection) -> Result<(), StoreError> {
         params![applied_at],
     )?;
     transaction.pragma_update(None, "application_id", APPLICATION_ID)?;
-    transaction.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
     ensure_integrity(&transaction)?;
     transaction.commit()?;
     Ok(())
