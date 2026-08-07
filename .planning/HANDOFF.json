@@ -1,0 +1,68 @@
+{
+  "version": "1.0",
+  "timestamp": "2026-08-07T04:45:27.149Z",
+  "phase": "01",
+  "phase_name": "可信本地状态与实现契约",
+  "phase_dir": ".planning/phases/01-trusted-local-state-contract",
+  "plan": 19,
+  "task": 0,
+  "total_tasks": 2,
+  "status": "paused",
+  "completed_tasks": [],
+  "remaining_tasks": [
+    {
+      "id": 1,
+      "name": "实现不提前清理的 full-state installed smoke 与 local-only gate",
+      "status": "not_started"
+    },
+    {
+      "id": 2,
+      "name": "建立由 OS 释放的跨进程 StateCoordinator",
+      "status": "not_started"
+    }
+  ],
+  "blockers": [],
+  "async_jobs": [],
+  "human_actions_pending": [
+    {
+      "action": "准备 Windows Authenticode PFX/正式签名证书",
+      "context": "用户明确要求最后再解决；仅在 01-26 真实 Windows 签名 evidence 前需要，不阻塞 01-19。",
+      "blocking": false
+    }
+  ],
+  "decisions": [
+    {
+      "decision": "ProviderId 与 EnvironmentId 只接受 UUID，显示名、地址、模型、Key 和平台身份都不承担主键语义。",
+      "rationale": "确保可编辑字段不会破坏供应商或环境引用。",
+      "phase": "01"
+    },
+    {
+      "decision": "组合指纹绑定 base URL、默认模型与 API Key，不匹配的验证记录在写入前拒绝。",
+      "rationale": "确保验证证据只能用于同一关键配置组合。",
+      "phase": "01"
+    },
+    {
+      "decision": "公开 state digest 使用版本化 canonical 编码覆盖完整 secret-bearing snapshot。",
+      "rationale": "无需公开秘密即可证明跨进程恢复的内部状态逐字段一致。",
+      "phase": "01"
+    },
+    {
+      "decision": "完整 snapshot 在单个 SQLite IMMEDIATE transaction 内整体替换并在提交后权威重读。",
+      "rationale": "约束或完整性失败时整体回滚，避免部分新状态。",
+      "phase": "01"
+    }
+  ],
+  "uncommitted_files": [
+    ".planning/config.json",
+    ".planning/research/.cache/191556426c60d69ee9005b74c8c1ba0f4b151849314e6f7e55d99bee0de10798.json",
+    ".planning/research/.cache/3a53d201d3a692fc04961c1958c0a2286512ab80040d4b5f6eb940b0f568bcf1.json",
+    ".planning/research/.cache/3ea7bb202b161d3f1925669dbf39090e9657a1820319e1557ddc38517defd1dd.json",
+    ".planning/research/.cache/6426ca63e57c7f5c27e13158500568013075fbb399c30d9d38fca0de0b4d31b0.json",
+    ".planning/research/.cache/d3a5ad39588256e6caa04407dc609494938ea783399acc08cfd99b1730d77bfa.json",
+    ".planning/research/.cache/d6b6741857164390c9b1f07ff3a18c3ed4abcfa7357cefe4b69bf6dc43fa08e5.json",
+    ".planning/research/.cache/dee77ab4925fbb0afa323ed3191159bc9b62efdd782a2171f83f514437d489ec.json",
+    ".planning/research/.cache/f17d868a9bab39b8abae814af96f9ae0f30c4a7339f4202bec3be74c780d01c0.json"
+  ],
+  "next_action": "执行 $gsd-resume-work，确认交接后从 01-19 Task 1 的 RED 测试开始；在生产实现前先复核 installed cleanup 路径边界、File lock 的 OS ownership 语义与 local-only 扫描允许清单。",
+  "context_notes": "01-18 已由 f69f14c/23e0149/4d19b76 完成 RED、GREEN 与计划元数据，6 个目标/回归测试、Clippy -D warnings 和 locked check 均通过。Phase 1 当前 18/28，01-19 尚未修改任何代码。src-tauri/target 与 src-tauri/gen 已清理，恢复后的首次 Windows/Tauri 构建可能需要 5–10 分钟；超时本身不是 RED 证据。没有 async job 或项目相关后台服务。"
+}
