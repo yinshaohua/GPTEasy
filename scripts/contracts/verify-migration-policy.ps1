@@ -326,9 +326,9 @@ function Get-RustPolicyViolations {
     }
 
     $capabilities = @(
-        @{ label = 'filesystem'; pattern = '(?i)(?:\bstd\s*::\s*)?\bfs\s*::|\bFile\s*::|\bOpenOptions\s*::' },
+        @{ label = 'filesystem'; pattern = '(?i)\b(?:fs|File|OpenOptions)\b' },
         @{ label = 'path'; pattern = '(?i)\bstd\s*::\s*path\b|\bPath(?:Buf)?\b' },
-        @{ label = 'subprocess'; pattern = '(?i)\bstd\s*::\s*process\b|\bCommand\s*::' },
+        @{ label = 'subprocess'; pattern = '(?i)\bstd\s*::\s*process\b|\bCommand\b' },
         @{ label = 'network'; pattern = '(?i)\bstd\s*::\s*net\b|\btokio\s*::\s*net\b|\b(?:TcpStream|TcpListener|UdpSocket|reqwest|hyper|ureq|curl)\b' },
         @{ label = 'connection'; pattern = '(?i)\b(?:rusqlite\s*::\s*)?Connection\b' }
     )

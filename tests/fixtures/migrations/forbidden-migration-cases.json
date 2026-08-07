@@ -59,6 +59,11 @@
       "source": "fn transform_v2(transaction: &Transaction<'_>) { std::fs::write(\"outside\", b\"x\").unwrap(); }"
     },
     {
+      "id": "filesystem-grouped-alias",
+      "should_pass": false,
+      "source": "use std::{fs as disk}; fn transform_v2(transaction: &Transaction<'_>) { disk::write(\"outside\", b\"x\").unwrap(); }"
+    },
+    {
       "id": "open-options",
       "should_pass": false,
       "source": "use std::fs::OpenOptions; fn transform_v2(transaction: &Transaction<'_>) { OpenOptions::new(); }"
