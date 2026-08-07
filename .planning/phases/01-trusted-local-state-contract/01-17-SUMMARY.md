@@ -20,7 +20,7 @@ tech-stack:
   patterns:
     - "Tauri mock IPC 测试由 integration-test executable 的两个独立子进程按注册 command 名调用"
     - "existing DB 先只读验证 APPLICATION_ID、user_version、metadata、ledger 与 quick_check，再打开 RW connection"
-    - "SQLite connection 封装在 Mutex<StateStore> 内部并只通过 typed command 公开脱敏投影"
+    - "StateStore 内部以 Mutex<Connection> 持有 SQLite connection，并只通过 typed command 公开脱敏投影"
 
 key-files:
   created:
