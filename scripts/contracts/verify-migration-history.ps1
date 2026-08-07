@@ -103,6 +103,20 @@ function Read-JsonDocument {
     return [System.IO.File]::ReadAllText($Path, $script:Utf8NoBom) | ConvertFrom-Json
 }
 
+function ConvertTo-NativeArgument {
+    param([string]$Argument)
+
+    if ($Argument.Length -eq 0) {
+        return '""'
+    }
+    if ($Argument -notmatch '[\s"]') {
+        return $Argument
+    }
+    $escaped = [regex]::Replace($Argument, '(\\*)"', '$1$1\"')
+    $escaped = [regex]::Replace($escaped, '(\\+)$', '$1$1')
+    return '"' + $escaped + '"'
+}
+
 function Invoke-GitBytes {
     param(
         [string]$Root,
@@ -115,9 +129,7 @@ function Invoke-GitBytes {
     $startInfo.UseShellExecute = $false
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
-    foreach ($argument in $Arguments) {
-        $startInfo.ArgumentList.Add($argument)
-    }
+    $startInfo.Arguments = (($Arguments | ForEach-Object { ConvertTo-NativeArgument -Argument $_ }) -join ' ')
 
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
