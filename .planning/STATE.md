@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 01
 current_phase_name: trusted-local-state-contract
 status: executing
-stopped_at: Completed 01-20-PLAN.md; next 01-21-PLAN.md
-last_updated: "2026-08-07T08:03:16.945Z"
+stopped_at: Completed 01-21-PLAN.md; next 01-22-PLAN.md
+last_updated: "2026-08-07T08:49:54.758Z"
 last_activity: 2026-08-07
-last_activity_desc: 完成 01-20 确定性 v001 fixture 与单一迁移注册表
+last_activity_desc: 完成 01-21 历史迁移矩阵、history lock 与迁移策略 lint
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 28
-  completed_plans: 20
+  completed_plans: 21
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-08-05)
 ## Current Position
 
 Phase: 01 (trusted-local-state-contract) — EXECUTING
-Plan: 21 of 28
+Plan: 22 of 28
 Status: Ready to execute
-Last activity: 2026-08-07 — 完成 01-20 确定性 v001 fixture 与单一迁移注册表
+Last activity: 2026-08-07 — 完成 01-21 历史迁移矩阵、history lock 与迁移策略 lint
 
-Progress: [███████░░░] 71%
+Progress: [████████░░] 75%
 
 ## Performance Metrics
 
@@ -78,6 +78,7 @@ Progress: [███████░░░] 71%
 | Phase 01 P18 | 25m | 1 tasks | 6 files |
 | Phase 01 P19 | 1h 06m | 2 tasks | 7 files |
 | Phase 01 P20 | 1h 08m | 2 tasks | 6 files |
+| Phase 01 P21 | 35m | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -140,6 +141,9 @@ Recent decisions affecting current work:
 - [Phase 01]: 01-20：APPLICATION_ID 与 CURRENT_SCHEMA_VERSION 由 append-only migration registry 导出；StateStore 不保留第二份 migration metadata。
 - [Phase 01]: 01-20：v001 generator 固定 SQLite 配置、UUID、UTC 与纯假凭据，DB 或 manifest 任一存在时 fail-closed 且不覆盖。
 - [Phase 01]: 01-20：fixture 分开记录 file、schema、data 与 logical digest；manifest 只声明 synthetic-only，不记录凭据字节。
+- [Phase 01]: 01-21：migration matrix 只从 manifest 枚举并在完整身份校验后升级 TempDir 副本，仓库历史数据库保持只读。
+- [Phase 01]: 01-21：history lock 同时固定 migration SQL、fixture bytes/logical digest 与 schema fingerprint；无 release tag 也不能跳过本地一致性门禁。
+- [Phase 01]: 01-21：migration policy SelfTest 固定 test_only 且不能授予 strict eligibility；真实扫描拒绝非事务 SQL 与 Rust 外部能力。
 
 ### Pending Todos
 
@@ -161,7 +165,7 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-07T08:03:16.896Z
-Stopped at: Completed 01-20-PLAN.md; next 01-21-PLAN.md
+Last session: 2026-08-07T08:49:54.721Z
+Stopped at: Completed 01-21-PLAN.md; next 01-22-PLAN.md
 Resume file: None
 Previous resume context: 2026-08-07T05:20:18.248Z — Session resumed, proceeding to execute 01-19-PLAN.md (`.planning/phases/01-trusted-local-state-contract/.continue-here.md`)
