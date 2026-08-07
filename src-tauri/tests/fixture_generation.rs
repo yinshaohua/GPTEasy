@@ -148,7 +148,10 @@ fn assert_fixed_database(root: &Path, manifest: &Value) {
         )
         .expect("read fixed state metadata");
     assert_eq!(database_uuid, FIXED_DATABASE_UUID);
-    assert_eq!(schema_fingerprint, fixture_entry(manifest)["schema_fingerprint"]);
+    assert_eq!(
+        schema_fingerprint,
+        fixture_entry(manifest)["schema_fingerprint"]
+    );
     assert_eq!(created_at, FIXED_TIMESTAMP);
 
     let provider_rows = connection
@@ -229,11 +232,18 @@ fn generator_refuses_every_existing_output_without_modification() {
     let complete = tempdir().expect("create complete fixture tempdir");
     assert_success(&run_generator(complete.path()));
     let original_database = fs::read(fixture_path(complete.path())).expect("read original DB");
-    let original_manifest = fs::read(manifest_path(complete.path())).expect("read original manifest");
+    let original_manifest =
+        fs::read(manifest_path(complete.path())).expect("read original manifest");
     let repeated = run_generator(complete.path());
     assert!(!repeated.status.success());
-    assert_eq!(fs::read(fixture_path(complete.path())).unwrap(), original_database);
-    assert_eq!(fs::read(manifest_path(complete.path())).unwrap(), original_manifest);
+    assert_eq!(
+        fs::read(fixture_path(complete.path())).unwrap(),
+        original_database
+    );
+    assert_eq!(
+        fs::read(manifest_path(complete.path())).unwrap(),
+        original_manifest
+    );
 
     let manifest_only = tempdir().expect("create manifest-only tempdir");
     fs::write(manifest_path(manifest_only.path()), b"manifest-sentinel")

@@ -14,6 +14,7 @@ use uuid::Uuid;
 use crate::domain::StateSnapshot;
 
 pub mod coordination;
+pub mod migrations;
 pub mod repositories;
 
 use coordination::{CoordinationError, StateCoordinator};
