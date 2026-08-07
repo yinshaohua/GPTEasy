@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 01
 current_phase_name: 可信本地状态与实现契约
 status: executing
-stopped_at: Completed 01-15-PLAN.md; next 01-16-PLAN.md
-last_updated: "2026-08-06T19:23:52.769Z"
+stopped_at: Completed 01-16-PLAN.md; next 01-17-PLAN.md
+last_updated: "2026-08-07T02:27:49.582Z"
 last_activity: 2026-08-07
-last_activity_desc: 完成 01-15 非签名 Freeze 与 PhaseComplete 证据隔离
+last_activity_desc: 完成 01-16 非签名 Freeze、schema v1 与数据库备份恢复合同批准
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 28
-  completed_plans: 15
+  completed_plans: 16
 ---
 
 # Project State
@@ -28,11 +28,11 @@ See: .planning/PROJECT.md (updated 2026-08-05)
 ## Current Position
 
 Phase: 01 (可信本地状态与实现契约) — EXECUTING
-Plan: 16 of 28
-Status: Executing Phase 01
-Last activity: 2026-08-07 — 完成 01-15 非签名 Freeze 与 PhaseComplete 证据隔离
+Plan: 17 of 28
+Status: Ready to execute
+Last activity: 2026-08-07 — 完成 01-16 非签名 Freeze、schema v1 与数据库备份恢复合同批准
 
-Progress: [█████░░░░░] 54%
+Progress: [██████░░░░] 57%
 
 ## Performance Metrics
 
@@ -73,6 +73,7 @@ Progress: [█████░░░░░] 54%
 | Phase 01 P13 | 31min | 2 tasks | 7 files |
 | Phase 01 P14 | 49min | 2 tasks | 8 files |
 | Phase 01 P15 | 1h 25m | 2 tasks | 5 files |
+| Phase 01 P16 | 1h 14m | 3 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -122,6 +123,7 @@ Recent decisions affecting current work:
 - [Phase 01]: 01-15：Freeze 只执行六类非签名合同并保持 release_ready=false；Windows Authenticode 与 macOS Developer ID/notary 只记录为 deferred。 — 本地 schema/backup 决策可以继续，但不得冒充发布身份。
 - [Phase 01]: 01-15：PhaseComplete 独立要求八个四目标 evidence-set 和实时 strict provenance；Freeze、fixture 与 test-only override 均不能晋升。 — 最终门继续绑定真实签名、公证、attestation 与当前工件。
 - [Phase 01]: 01-15：-Matrix 只用于负例自测，结果固定 test_only=true、strict_gate_eligible=false、release_ready=false。 — 防止测试矩阵成为正式发布旁路。
+- [Phase 01]: 01-16：用户明确批准 freeze-approved、approve-schema-version-1 与 approve-db-backup-contract；六表 schema v1 和 verified backup/quarantine 合同成为后续 one-way 实现前置。 — 正式 Windows/macOS 签名与公证继续延期到 01-26/01-27，release_ready=false 且 PhaseComplete 仍 blocked。
 
 ### Pending Todos
 
@@ -143,6 +145,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-06T19:23:10.066Z
-Stopped at: Completed 01-15-PLAN.md; next 01-16-PLAN.md
+Last session: 2026-08-07T02:25:57.269Z
+Stopped at: Completed 01-16-PLAN.md; next 01-17-PLAN.md
 Resume file: None
