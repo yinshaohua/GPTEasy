@@ -1,38 +1,36 @@
 [package]
 name = "gpteasy"
 version = "0.1.0"
-description = "GPTEasy desktop application"
+description = "安全管理当前用户 Codex 环境"
 authors = ["GPTEasy contributors"]
-edition = "2021"
+edition = "2024"
+rust-version = "1.85"
 
 [lib]
 name = "gpteasy_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["lib", "cdylib", "staticlib"]
 
 [[bin]]
 name = "gpteasy"
 path = "src/main.rs"
 
-[[test]]
-name = "path_smoke"
-path = "tests/path_smoke.rs"
-
 [build-dependencies]
-tauri-build = { version = "=2.6.3", features = [] }
+tauri-build = { version = "2.5", features = [] }
 
 [dependencies]
-chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }
-rusqlite = { version = "=0.40.1", default-features = false, features = ["bundled", "backup"] }
-serde = { version = "=1.0.229", features = ["derive"] }
-serde_json = "=1.0.151"
-sha2 = "=0.11.0"
-tauri = { version = "=2.11.5", features = [] }
-thiserror = "=2.0.19"
-uuid = { version = "=1.24.0", features = ["v4", "serde"] }
-
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+rusqlite = { version = "0.37", features = ["backup", "bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+tauri = { version = "2.8", features = [] }
+thiserror = "2.0"
+toml_edit = "0.23"
 
 [dev-dependencies]
-tauri = { version = "=2.11.5", features = ["test"] }
-tempfile = "=3.27.0"
+tempfile = "3.15"
+
+[profile.release]
+codegen-units = 1
+lto = true
+panic = "abort"
+strip = true

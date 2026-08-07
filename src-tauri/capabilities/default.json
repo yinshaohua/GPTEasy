@@ -1,11 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
-  "identifier": "default",
-  "description": "GPTEasy main window core capability",
-  "windows": [
-    "main"
-  ],
-  "permissions": [
-    "core:default"
-  ]
+  "identifier": "main-window",
+  "description": "主窗口仅使用 Tauri 核心窗口能力和显式 Rust 用例命令",
+  "windows": ["main"],
+  "permissions": ["core:default"]
 }

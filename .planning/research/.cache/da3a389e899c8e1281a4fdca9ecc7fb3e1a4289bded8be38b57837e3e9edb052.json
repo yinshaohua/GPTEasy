@@ -1,1 +1,0 @@
-{"content":"POSIX rename/mv 的原子替换依赖同一文件系统，shell 编辑应在目标目录创建临时文件再移动。Standalone function 还需 umask 077、trap 清理、唯一备份名、受控备份轮换，以及在写入前确认 GPTEasy 管理区块恰好为 0 或 1 个；重复/损坏/嵌套区块必须停止而非猜测修复。","source":"web","provider":"websearch","confidence":"MEDIUM","fetched_at":"2026-08-05T07:13:23.642Z","ttl":86400000,"kind":"web"}

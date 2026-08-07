@@ -1,1 +1,0 @@
-{"content":"Tauri capabilities/permissions 约束前端可调用命令，但不会自动防止业务层把 API Key 写入日志、错误或 IPC。OWASP logging 指南要求访问令牌、认证密码等直接删除、掩码或哈希；GPTEasy 应从源头采用敏感类型与日志允许清单，并用固定 canary 凭据覆盖 Rust Debug/Display、SQL 参数、HTTP 错误链、Tauri command 返回、通知、诊断导出、临时文件和崩溃路径。","source":"web","provider":"websearch","confidence":"MEDIUM","fetched_at":"2026-08-05T07:13:21.097Z","ttl":86400000,"kind":"web"}

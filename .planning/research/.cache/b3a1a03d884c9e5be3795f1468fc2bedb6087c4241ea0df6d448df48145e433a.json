@@ -1,1 +1,0 @@
-{"content":"WCAG/WAI 要求键盘可操作、文本缩放与 Reflow、错误识别/建议、焦点可见、状态消息可由辅助技术感知。GPTEasy 的异步供应商验证、重启对话框、托盘唤回窗口和动态语言切换必须设置正确 html lang、焦点返回/错误摘要、aria-live 状态节流，并在 200% 缩放、高对比度、减少动态效果、NVDA/VoiceOver 下做真实验收；语言切换还要重建原生托盘菜单。","source":"web","provider":"websearch","confidence":"MEDIUM","fetched_at":"2026-08-05T07:13:24.357Z","ttl":86400000,"kind":"web"}

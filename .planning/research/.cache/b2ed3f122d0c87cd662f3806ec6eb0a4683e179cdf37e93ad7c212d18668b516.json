@@ -1,1 +1,0 @@
-{"content":"Tauri 2 updater 强制要求更新签名，不能禁用；构建需生成对应平台更新包及 .sig，并在应用中配置 pubkey。Windows 安装更新时 Tauri 会因安装器限制自动退出应用，并提供 on_before_exit 清理钩子；因此 GPTEasy 必须在此钩子前完成 SQLite/日志刷盘、托盘退出状态和未完成配置操作处理。","source":"web","provider":"websearch","confidence":"MEDIUM","fetched_at":"2026-08-05T07:13:19.321Z","ttl":86400000,"kind":"docs"}

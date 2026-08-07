@@ -1,1 +1,0 @@
-{"content":"Microsoft WSL 官方命令支持 wsl --list --verbose 查看状态和版本、--list --running/--quiet 获取运行集合与名称、--distribution/--user 指定发行版与用户，以及 --terminate 只停止目标发行版。GPTEasy 可用运行集合快照判断是否临时启动，并在所有成功/失败路径恢复原停止状态；不得使用 --shutdown，因为它会终止全部发行版。","source":"web","provider":"websearch","confidence":"MEDIUM","fetched_at":"2026-08-05T07:13:21.811Z","ttl":86400000,"kind":"web"}

@@ -1,15 +1,16 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
+
 import App from "./App";
 import "./global.css";
 
-const rootElement = document.getElementById("root");
+const root = document.getElementById("root");
 
-if (!rootElement) {
-  throw new Error("GPTEasy root mount not found");
+if (!root) {
+  throw new Error("Missing application root");
 }
 
-createRoot(rootElement).render(
+createRoot(root).render(
   <StrictMode>
     <App />
   </StrictMode>,
