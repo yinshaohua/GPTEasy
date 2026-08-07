@@ -2,7 +2,8 @@ use std::{
     collections::BTreeMap,
     env,
     ffi::OsString,
-    fs,
+    fs::{self, OpenOptions, TryLockError},
+    panic::{self, catch_unwind, AssertUnwindSafe},
     path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
     thread,
@@ -49,10 +50,12 @@ fn snapshot(root: &Path) -> BTreeMap<PathBuf, SnapshotEntry> {
                 entries.insert(relative, SnapshotEntry::Directory);
                 visit(root, &path, entries);
             } else if file_type.is_file() {
-                entries.insert(
-                    relative,
-                    SnapshotEntry::File(fs::read(&path).expect("read snapshot file")),
-                );
+                let bytes = if relative == Path::new(LOCK_FILENAME) {
+                    Vec::new()
+                } else {
+                    fs::read(&path).expect("read snapshot file")
+                };
+                entries.insert(relative, SnapshotEntry::File(bytes));
             } else {
                 panic!("state root contains an unexpected non-file entry");
             }
@@ -98,18 +101,30 @@ fn run_child(role: &str) {
     let root = PathBuf::from(env::var_os(CHILD_ROOT_ENV).expect("child state root"));
     let mut context = mock_context(noop_assets());
     context.config_mut().identifier = root.to_string_lossy().into_owned();
-    let built = configure_builder(mock_builder()).build(context);
+    let mut app = configure_builder(mock_builder())
+        .build(context)
+        .expect("build state concurrency mock app");
 
     if role == "contend" {
+        let panic_hook = panic::take_hook();
+        panic::set_hook(Box::new(|_| {}));
+        let setup = catch_unwind(AssertUnwindSafe(|| app.run_iteration(|_, _| {})));
+        panic::set_hook(panic_hook);
         assert!(
-            built.is_err(),
-            "second production composition open unexpectedly succeeded"
+            setup.is_err(),
+            "second production setup unexpectedly acquired the state coordinator"
         );
+        let panic = setup.unwrap_err();
+        let message = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .expect("production setup panic message");
+        assert!(message.contains("the local state is busy in another process"));
         println!("{OPENED_PREFIX}busy");
         return;
     }
 
-    let mut app = built.expect("open state through production composition");
     app.run_iteration(|_, _| {});
     let webview = WebviewWindowBuilder::new(&app, "main", WebviewUrl::default())
         .build()
@@ -223,6 +238,15 @@ fn os_lock_serializes_writers_releases_after_crash_and_ignores_stale_metadata() 
     let before_contention = snapshot(&state_root);
     assert!(before_contention.contains_key(Path::new(LOCK_FILENAME)));
     assert!(before_contention.contains_key(Path::new(OWNER_FILENAME)));
+    let ownership_probe = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(state_root.join(LOCK_FILENAME))
+        .expect("open fixed lock for OS ownership probe");
+    assert!(matches!(
+        ownership_probe.try_lock(),
+        Err(TryLockError::WouldBlock)
+    ));
 
     let started = Instant::now();
     let contender = run_child_output(&state_root, "contend");

@@ -13,7 +13,10 @@ use uuid::Uuid;
 
 use crate::domain::StateSnapshot;
 
+pub mod coordination;
 pub mod repositories;
+
+use coordination::{CoordinationError, StateCoordinator};
 
 pub const APPLICATION_ID: i64 = 0x4750_5445;
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
@@ -45,6 +48,10 @@ pub enum StoreError {
     IntegrityCheckFailed,
     #[error("the local state service is unavailable")]
     Unavailable,
+    #[error("the local state is busy in another process")]
+    StateBusy,
+    #[error("the local state coordinator is unavailable")]
+    Coordination(#[source] CoordinationError),
 }
 
 impl From<rusqlite::Error> for StoreError {
@@ -55,11 +62,27 @@ impl From<rusqlite::Error> for StoreError {
 
 pub struct StateStore {
     connection: Mutex<Connection>,
+    _coordinator: StateCoordinator,
 }
 
 impl StateStore {
     pub fn open(state_root: &Path) -> Result<Self, StoreError> {
+        Self::open_with_owner_run_id(state_root, None)
+    }
+
+    pub(crate) fn open_with_run_id(state_root: &Path, run_id: &str) -> Result<Self, StoreError> {
+        Self::open_with_owner_run_id(state_root, Some(run_id))
+    }
+
+    fn open_with_owner_run_id(state_root: &Path, run_id: Option<&str>) -> Result<Self, StoreError> {
         fs::create_dir_all(state_root).map_err(StoreError::PrepareDirectory)?;
+        let coordinator = StateCoordinator::acquire(state_root, run_id).map_err(|error| {
+            if matches!(error, CoordinationError::Busy) {
+                StoreError::StateBusy
+            } else {
+                StoreError::Coordination(error)
+            }
+        })?;
         let database_path = state_root.join(DATABASE_FILENAME);
         let is_new = !database_path.exists();
 
@@ -75,6 +98,7 @@ impl StateStore {
 
         Ok(Self {
             connection: Mutex::new(connection),
+            _coordinator: coordinator,
         })
     }
 

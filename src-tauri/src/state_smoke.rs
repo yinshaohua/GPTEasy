@@ -157,7 +157,7 @@ fn seed(app_root: &Path, run_id: &str) -> Result<StateSmokeReport, StateSmokeErr
     let run_root = create_run_root(app_root, run_id)?;
     ensure_marker(&run_root, run_id)?;
     let expected = fixed_snapshot()?;
-    let store = StateStore::open(&run_root).map_err(StateSmokeError::Store)?;
+    let store = StateStore::open_with_run_id(&run_root, run_id).map_err(StateSmokeError::Store)?;
     let stored = store
         .replace_snapshot(&expected)
         .map_err(StateSmokeError::Store)?;
@@ -175,7 +175,7 @@ fn verify(app_root: &Path, run_id: &str) -> Result<StateSmokeReport, StateSmokeE
     let run_root = existing_run_root(app_root, run_id)?;
     read_matching_marker(&run_root, run_id)?;
     let expected = fixed_snapshot()?;
-    let store = StateStore::open(&run_root).map_err(StateSmokeError::Store)?;
+    let store = StateStore::open_with_run_id(&run_root, run_id).map_err(StateSmokeError::Store)?;
     let observed = store.snapshot().map_err(StateSmokeError::Store)?;
     if observed != expected || observed.digest() != EXPECTED_STATE_DIGEST {
         return Err(StateSmokeError::VerificationMismatch);
