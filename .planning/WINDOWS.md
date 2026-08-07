@@ -2,9 +2,9 @@
 schema_version: 1
 open_count: 1
 waived_count: 0
-fixed_count: 14
-total_count: 15
-last_updated: 2026-08-06T08:41:56.928Z
+fixed_count: 17
+total_count: 18
+last_updated: 2026-08-07T08:52:07.768Z
 ---
 
 # Broken Windows Ledger
@@ -30,6 +30,9 @@ last_updated: 2026-08-06T08:41:56.928Z
 | 13 | 01 | deviation | scripts/contracts/run-macos.zsh |  | 解包最终 attested archive 并与签名 app 建立 fail-closed 关联 | fixed |  | 2026-08-06T08:41:39.654Z | 2026-08-06T08:41:42.914Z |
 | 14 | 01 | deviation | scripts/contracts/assert-macos-job-lifecycle.zsh |  | 补齐 runner 身份、调用者所有权、半创建账户回滚与 finalized cleanup 硬化 | fixed |  | 2026-08-06T08:41:46.893Z | 2026-08-06T08:41:49.935Z |
 | 15 | 01 | deviation | .github/workflows/phase1-macos-evidence.yml |  | 将当前用户 Gatekeeper 与 path smoke OS/原生架构事实纳入 strict predicate | fixed |  | 2026-08-06T08:41:53.671Z | 2026-08-06T08:41:56.928Z |
+| 16 | 01 | deviation | .gitignore | 1 | 忽略首次 Cargo/Tauri 构建产物，避免未跟踪生成目录污染工作树 | fixed |  | 2026-08-07T08:51:44.867Z | 2026-08-07T08:52:05.772Z |
+| 17 | 01 | deviation | scripts/contracts/verify-migration-history.ps1 | 106 | 兼容 Windows PowerShell 5.1 的 git 原始 blob 字节读取 | fixed |  | 2026-08-07T08:52:03.854Z | 2026-08-07T08:52:06.729Z |
+| 18 | 01 | deviation | scripts/contracts/verify-migration-policy.ps1 | 329 | 阻断 grouped std::fs alias 绕过 | fixed |  | 2026-08-07T08:52:04.781Z | 2026-08-07T08:52:07.768Z |
 
 ````json
 [
@@ -212,6 +215,42 @@ last_updated: 2026-08-06T08:41:56.928Z
     "reason": "",
     "recorded_at": "2026-08-06T08:41:53.671Z",
     "resolved_at": "2026-08-06T08:41:56.928Z"
+  },
+  {
+    "id": 16,
+    "kind": "deviation",
+    "phase": "01",
+    "file": ".gitignore",
+    "line": 1,
+    "description": "忽略首次 Cargo/Tauri 构建产物，避免未跟踪生成目录污染工作树",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-08-07T08:51:44.867Z",
+    "resolved_at": "2026-08-07T08:52:05.772Z"
+  },
+  {
+    "id": 17,
+    "kind": "deviation",
+    "phase": "01",
+    "file": "scripts/contracts/verify-migration-history.ps1",
+    "line": 106,
+    "description": "兼容 Windows PowerShell 5.1 的 git 原始 blob 字节读取",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-08-07T08:52:03.854Z",
+    "resolved_at": "2026-08-07T08:52:06.729Z"
+  },
+  {
+    "id": 18,
+    "kind": "deviation",
+    "phase": "01",
+    "file": "scripts/contracts/verify-migration-policy.ps1",
+    "line": 329,
+    "description": "阻断 grouped std::fs alias 绕过",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-08-07T08:52:04.781Z",
+    "resolved_at": "2026-08-07T08:52:07.768Z"
   }
 ]
 ````
