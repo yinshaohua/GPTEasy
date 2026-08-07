@@ -54,6 +54,7 @@ impl StateCoordinator {
         reject_non_file_if_present(&lock_path)?;
         let lock_file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&lock_path)
