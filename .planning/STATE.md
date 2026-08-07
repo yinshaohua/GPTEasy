@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 01
 current_phase_name: trusted-local-state-contract
 status: executing
-stopped_at: Completed 01-19-PLAN.md; next 01-20-PLAN.md
-last_updated: "2026-08-07T06:42:12.842Z"
+stopped_at: Completed 01-20-PLAN.md; next 01-21-PLAN.md
+last_updated: "2026-08-07T08:03:16.945Z"
 last_activity: 2026-08-07
-last_activity_desc: 完成 01-19 installed state smoke、本地边界与跨进程协调
+last_activity_desc: 完成 01-20 确定性 v001 fixture 与单一迁移注册表
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 28
-  completed_plans: 19
+  completed_plans: 20
 ---
 
 # Project State
@@ -28,29 +28,29 @@ See: .planning/PROJECT.md (updated 2026-08-05)
 ## Current Position
 
 Phase: 01 (trusted-local-state-contract) — EXECUTING
-Plan: 20 of 28
+Plan: 21 of 28
 Status: Ready to execute
-Last activity: 2026-08-07 — 完成 01-19 installed state smoke、本地边界与跨进程协调
+Last activity: 2026-08-07 — 完成 01-20 确定性 v001 fixture 与单一迁移注册表
 
-Progress: [███████░░░] 68%
+Progress: [███████░░░] 71%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 19
-- Average duration: 36m
-- Total execution time: 11h 26m
+- Total plans completed: 20
+- Average duration: 38m
+- Total execution time: 12h 34m
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| Phase 01 | 19 | 11h 26m | 36m |
+| Phase 01 | 20 | 12h 34m | 38m |
 
 **Recent Trend:**
 
-- Last 5 plans: 1h 25m, 1h 14m, 33m, 25m, 1h 06m
+- Last 5 plans: 1h 14m, 33m, 25m, 1h 06m, 1h 08m
 - Trend: Variable due to TDD cold builds and cross-process coordination coverage
 
 *Updated after each plan completion*
@@ -77,6 +77,7 @@ Progress: [███████░░░] 68%
 | Phase 01 P17 | 33m | 1 tasks | 5 files |
 | Phase 01 P18 | 25m | 1 tasks | 6 files |
 | Phase 01 P19 | 1h 06m | 2 tasks | 7 files |
+| Phase 01 P20 | 1h 08m | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -136,6 +137,9 @@ Recent decisions affecting current work:
 - [Phase 01]: 01-19：StateStore 在任何 DB/WAL/backup 写 seam 前取得 OS exclusive File lock，并持有到 SQLite Connection 销毁。
 - [Phase 01]: 01-19：owner metadata 仅含 PID、进程启动 token 与 run ID 摘要，ownership 只由 File::try_lock 决定。
 - [Phase 01]: 01-19：local-only gate 对依赖、capability、注册 command、公开 DTO 与前端 API surface 使用精确允许清单。
+- [Phase 01]: 01-20：APPLICATION_ID 与 CURRENT_SCHEMA_VERSION 由 append-only migration registry 导出；StateStore 不保留第二份 migration metadata。
+- [Phase 01]: 01-20：v001 generator 固定 SQLite 配置、UUID、UTC 与纯假凭据，DB 或 manifest 任一存在时 fail-closed 且不覆盖。
+- [Phase 01]: 01-20：fixture 分开记录 file、schema、data 与 logical digest；manifest 只声明 synthetic-only，不记录凭据字节。
 
 ### Pending Todos
 
@@ -157,7 +161,7 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-07T06:42:12.828Z
-Stopped at: Completed 01-19-PLAN.md; next 01-20-PLAN.md
+Last session: 2026-08-07T08:03:16.896Z
+Stopped at: Completed 01-20-PLAN.md; next 01-21-PLAN.md
 Resume file: None
 Previous resume context: 2026-08-07T05:20:18.248Z — Session resumed, proceeding to execute 01-19-PLAN.md (`.planning/phases/01-trusted-local-state-contract/.continue-here.md`)
