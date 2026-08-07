@@ -93,6 +93,7 @@ fn invoke_command(
     .expect("deserialize command response")
 }
 
+#[allow(deprecated)] // Tauri mock build defers production setup until this one test iteration.
 fn run_child(command: &str, body: Value) {
     if env::var_os(CHILD_MODE_ENV).is_none() {
         return;
@@ -102,9 +103,10 @@ fn run_child(command: &str, body: Value) {
     let run_id = env::var(CHILD_RUN_ID_ENV).expect("child run ID");
     let mut context = mock_context(noop_assets());
     context.config_mut().identifier = root.to_string_lossy().into_owned();
-    let app = configure_builder(mock_builder())
+    let mut app = configure_builder(mock_builder())
         .build(context)
         .expect("build child mock app through production composition");
+    app.run_iteration(|_, _| {});
     let webview = WebviewWindowBuilder::new(&app, "main", WebviewUrl::default())
         .build()
         .expect("build child mock webview");
