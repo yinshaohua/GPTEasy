@@ -5,15 +5,15 @@ milestone_name: milestone
 current_phase: 01
 current_phase_name: 可信本地状态与实现契约
 status: executing
-stopped_at: Completed 01-17-PLAN.md; next 01-18-PLAN.md
-last_updated: "2026-08-07T03:03:32.352Z"
+stopped_at: Completed 01-18-PLAN.md; next 01-19-PLAN.md
+last_updated: "2026-08-07T04:21:23.676Z"
 last_activity: 2026-08-07
-last_activity_desc: 完成 01-17 Tauri command 到 SQLite 的跨进程状态重开 tracer
+last_activity_desc: 完成 01-18 完整权威状态持久化与公开脱敏投影
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 28
-  completed_plans: 17
+  completed_plans: 18
 ---
 
 # Project State
@@ -28,30 +28,30 @@ See: .planning/PROJECT.md (updated 2026-08-05)
 ## Current Position
 
 Phase: 01 (可信本地状态与实现契约) — EXECUTING
-Plan: 18 of 28
+Plan: 19 of 28
 Status: Ready to execute
-Last activity: 2026-08-07 — 完成 01-17 Tauri command 到 SQLite 的跨进程状态重开 tracer
+Last activity: 2026-08-07 — 完成 01-18 完整权威状态持久化与公开脱敏投影
 
-Progress: [██████░░░░] 61%
+Progress: [██████░░░░] 64%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 17
-- Average duration: 35m
-- Total execution time: 9h 55m
+- Total plans completed: 18
+- Average duration: 34m
+- Total execution time: 10h 20m
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| Phase 01 | 17 | 9h 55m | 35m |
+| Phase 01 | 18 | 10h 20m | 34m |
 
 **Recent Trend:**
 
-- Last 5 plans: 31m, 49m, 1h 25m, 1h 14m, 33m
-- Trend: Variable (01-15/01-16 included full contract rebuild and blocking approvals; 01-17 returned to tracer scope)
+- Last 5 plans: 49m, 1h 25m, 1h 14m, 33m, 25m
+- Trend: Improving after 01-15/01-16 contract rebuild and blocking approvals
 
 *Updated after each plan completion*
 **Per-Plan Metrics:**
@@ -75,6 +75,7 @@ Progress: [██████░░░░] 61%
 | Phase 01 P15 | 1h 25m | 2 tasks | 5 files |
 | Phase 01 P16 | 1h 14m | 3 tasks | 1 files |
 | Phase 01 P17 | 33m | 1 tasks | 5 files |
+| Phase 01 P18 | 25m | 1 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -126,6 +127,10 @@ Recent decisions affecting current work:
 - [Phase 01]: 01-15：-Matrix 只用于负例自测，结果固定 test_only=true、strict_gate_eligible=false、release_ready=false。 — 防止测试矩阵成为正式发布旁路。
 - [Phase 01]: 01-16：用户明确批准 freeze-approved、approve-schema-version-1 与 approve-db-backup-contract；六表 schema v1 和 verified backup/quarantine 合同成为后续 one-way 实现前置。 — 正式 Windows/macOS 签名与公证继续延期到 01-26/01-27，release_ready=false 且 PhaseComplete 仍 blocked。
 - [Phase 01]: 01-17：APPLICATION_ID 固定为 0x47505445（ASCII GPTE），schema fingerprint 绑定版本化域、application ID、user_version 与 0001 checksum。 — 两个独立 OS 子进程均按注册 command 名走 Tauri mock IPC；run ID 只用于测试关联，不进入永久 schema。
+- [Phase 01]: 01-18：ProviderId 与 EnvironmentId 只接受 UUID，显示名、地址、模型、Key 和平台身份都不承担主键语义。 — 确保可编辑字段不会破坏供应商或环境引用。
+- [Phase 01]: 01-18：组合指纹绑定 base URL、默认模型与 API Key，验证记录不匹配时在写入前拒绝。 — 确保验证证据只能用于同一关键配置组合。
+- [Phase 01]: 01-18：公开 state digest 使用版本化 canonical 编码覆盖完整 secret-bearing snapshot。 — 无需公开秘密即可证明跨进程恢复的内部状态逐字段一致。
+- [Phase 01]: 01-18：完整 snapshot 在单个 SQLite IMMEDIATE transaction 内整体替换并提交后权威重读。 — 任何约束或完整性失败都回滚，避免部分新状态。
 
 ### Pending Todos
 
@@ -147,6 +152,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-08-07T03:03:32.352Z
-Stopped at: Completed 01-17-PLAN.md; next 01-18-PLAN.md
+Last session: 2026-08-07T04:21:23.643Z
+Stopped at: Completed 01-18-PLAN.md; next 01-19-PLAN.md
 Resume file: None
