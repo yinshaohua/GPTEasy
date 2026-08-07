@@ -306,3 +306,85 @@ fn read_settings(connection: &Connection) -> Result<AppSettingsRecord, StoreErro
         })
         .map_err(Into::into)
 }
+
+#[cfg(test)]
+mod tests {
+    use rusqlite::{params, Connection};
+    use tempfile::tempdir;
+
+    use super::{migrations::MIGRATIONS, StateStore, StoreError, DATABASE_FILENAME};
+
+    #[test]
+    fn state_store_writes_the_exact_registry_identity() {
+        let root = tempdir().expect("create state registry tempdir");
+        let store = StateStore::open(root.path()).expect("initialize state store");
+        drop(store);
+
+        let connection = Connection::open(root.path().join(DATABASE_FILENAME))
+            .expect("open initialized state database");
+        let rows = connection
+            .prepare(
+                "SELECT version, name, checksum
+                 FROM schema_migrations
+                 ORDER BY version",
+            )
+            .expect("prepare migration ledger query")
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, u32>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .expect("query migration ledger")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect migration ledger");
+        let expected = MIGRATIONS
+            .iter()
+            .map(|migration| {
+                (
+                    migration.version,
+                    migration.name.to_owned(),
+                    migration.checksum.to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(rows, expected);
+
+        let observed_fingerprint: String = connection
+            .query_row(
+                "SELECT schema_fingerprint FROM state_metadata WHERE singleton_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read state schema fingerprint");
+        assert_eq!(
+            observed_fingerprint,
+            MIGRATIONS
+                .last()
+                .expect("current migration")
+                .schema_fingerprint
+        );
+    }
+
+    #[test]
+    fn state_store_rejects_unregistered_ledger_rows() {
+        let root = tempdir().expect("create tampered registry tempdir");
+        let store = StateStore::open(root.path()).expect("initialize state store");
+        drop(store);
+
+        let connection = Connection::open(root.path().join(DATABASE_FILENAME))
+            .expect("open initialized state database");
+        connection
+            .execute(
+                "INSERT INTO schema_migrations (version, name, checksum, applied_at)
+                 VALUES (2, '0002_unregistered', ?1, '2026-08-01T00:00:00.000Z')",
+                params!["0".repeat(64)],
+            )
+            .expect("inject unregistered ledger row");
+        drop(connection);
+
+        let reopened = StateStore::open(root.path());
+        assert!(matches!(reopened, Err(StoreError::ContractMismatch)));
+    }
+}
