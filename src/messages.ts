@@ -9,6 +9,13 @@ import type {
   PendingOperationResolution,
 } from "./contracts/startup";
 
+export const accessibilityMessages = {
+  skipToMain: "跳转到主要内容",
+  pageNavigation: "页面导航",
+  refresh: "重新检查状态",
+  refreshing: "正在重新检查状态",
+} as const;
+
 export const databaseStatusMessages: Record<DatabaseStatus, string> = {
   initialized: "本地状态已初始化",
   ready: "本地状态正常",

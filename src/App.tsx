@@ -23,6 +23,7 @@ import {
   loginStatusMessages,
   pendingResolutionMessages,
   startupBlockMessages,
+  accessibilityMessages,
 } from "./messages";
 
 type ViewState =
@@ -34,6 +35,7 @@ export default function App() {
   const [state, setState] = useState<ViewState>({ kind: "loading" });
   const [refreshing, setRefreshing] = useState(false);
   const isBusy = state.kind === "loading" || refreshing;
+  const isReady = state.kind === "loaded" && state.snapshot.mode === "ready";
 
   const load = useCallback(async (refresh: boolean) => {
     if (refresh) {
@@ -58,7 +60,7 @@ export default function App() {
   return (
     <div className="app-shell">
       <a className="skip-link" href="#main-content">
-        跳转到主要内容
+        {accessibilityMessages.skipToMain}
       </a>
       <aside className="sidebar" aria-label="应用导航">
         <div className="brand">
@@ -68,13 +70,20 @@ export default function App() {
             <span>Windows x64</span>
           </div>
         </div>
-        <nav aria-label="页面导航">
+        <nav aria-label={accessibilityMessages.pageNavigation}>
           <ul className="nav-list">
             <li>
-              <a className="nav-item" href="#local-state-heading" aria-current="page">
-                <Database size={18} aria-hidden="true" />
-                本地状态
-              </a>
+              {isReady ? (
+                <a className="nav-item" href="#local-state-heading" aria-current="page">
+                  <Database size={18} aria-hidden="true" />
+                  本地状态
+                </a>
+              ) : (
+                <div className="nav-item" aria-current="page">
+                  <Database size={18} aria-hidden="true" />
+                  本地状态
+                </div>
+              )}
             </li>
           </ul>
         </nav>
@@ -97,16 +106,16 @@ export default function App() {
             className="icon-button"
             type="button"
             onClick={() => void load(true)}
-            disabled={refreshing}
-            aria-label="重新检查状态"
+            disabled={isBusy}
+            aria-label={accessibilityMessages.refresh}
             aria-describedby="refresh-status"
-            title="重新检查状态"
+            title={accessibilityMessages.refresh}
           >
             <RefreshCw className={refreshing ? "is-spinning" : undefined} size={19} />
           </button>
         </header>
         <p id="refresh-status" className="sr-only" role="status" aria-live="polite" aria-atomic="true">
-          {refreshing ? "正在重新检查状态" : ""}
+          {refreshing ? accessibilityMessages.refreshing : ""}
         </p>
 
         {state.kind === "loading" && <LoadingState />}
