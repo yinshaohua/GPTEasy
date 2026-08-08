@@ -23,7 +23,6 @@ import {
   loginStatusMessages,
   pendingResolutionMessages,
   startupBlockMessages,
-  accessibilityMessages,
 } from "./messages";
 
 type ViewState =
@@ -34,8 +33,6 @@ type ViewState =
 export default function App() {
   const [state, setState] = useState<ViewState>({ kind: "loading" });
   const [refreshing, setRefreshing] = useState(false);
-  const isBusy = state.kind === "loading" || refreshing;
-  const isReady = state.kind === "loaded" && state.snapshot.mode === "ready";
 
   const load = useCallback(async (refresh: boolean) => {
     if (refresh) {
@@ -59,12 +56,6 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <a className="skip-link" href="#main-content">
-        {accessibilityMessages.skipToMain}
-      </a>
-      <p id="refresh-status" className="sr-only" role="status" aria-live="polite" aria-atomic="true">
-        {refreshing ? accessibilityMessages.refreshing : ""}
-      </p>
       <aside className="sidebar" aria-label="应用导航">
         <div className="brand">
           <img src="/icon.png" alt="" width="36" height="36" />
@@ -73,60 +64,37 @@ export default function App() {
             <span>Windows x64</span>
           </div>
         </div>
-        <nav aria-label={accessibilityMessages.pageNavigation}>
-          <ul className="nav-list">
-            <li>
-              {isReady ? (
-                <a className="nav-item" href="#local-state-heading" aria-current="page">
-                  <Database size={18} aria-hidden="true" />
-                  本地状态
-                </a>
-              ) : (
-                <div className="nav-item" aria-current="page">
-                  <Database size={18} aria-hidden="true" />
-                  本地状态
-                </div>
-              )}
-            </li>
-          </ul>
+        <nav>
+          <div className="nav-item" aria-current="page">
+            <Database size={18} aria-hidden="true" />
+            本地状态
+          </div>
         </nav>
         <div className="sidebar-meta">当前用户</div>
       </aside>
 
-      <main
-        id="main-content"
-        className="main-content"
-        tabIndex={-1}
-        aria-labelledby="page-title"
-        aria-busy={isBusy}
-      >
+      <main className="main-content">
         <header className="page-header">
           <div>
-            <h1 id="page-title">启动状态</h1>
+            <h1>启动状态</h1>
             <p>当前用户的 GPTEasy 与 Codex 环境</p>
           </div>
           <button
             className="icon-button"
             type="button"
             onClick={() => void load(true)}
-            disabled={isBusy}
-            aria-label={accessibilityMessages.refresh}
-            aria-describedby="refresh-status"
-            title={accessibilityMessages.refresh}
+            disabled={refreshing}
+            aria-label="重新检查状态"
+            title="重新检查状态"
           >
-            <RefreshCw size={19} aria-hidden="true" />
+            <RefreshCw className={refreshing ? "is-spinning" : undefined} size={19} />
           </button>
         </header>
+
         {state.kind === "loading" && <LoadingState />}
-        {state.kind === "error" && (
-          <UnavailableState retrying={refreshing} onRetry={() => void load(true)} />
-        )}
+        {state.kind === "error" && <UnavailableState onRetry={() => void load(true)} />}
         {state.kind === "loaded" && state.snapshot.mode === "blocked" && (
-          <BlockedState
-            snapshot={state.snapshot}
-            retrying={refreshing}
-            onRetry={() => void load(true)}
-          />
+          <BlockedState snapshot={state.snapshot} onRetry={() => void load(true)} />
         )}
         {state.kind === "loaded" && state.snapshot.mode === "ready" && (
           <ReadyState snapshot={state.snapshot} />
@@ -138,27 +106,21 @@ export default function App() {
 
 function LoadingState() {
   return (
-    <div className="loading-state" role="status" aria-live="polite" aria-atomic="true">
-      <LoaderCircle size={22} aria-hidden="true" />
+    <div className="loading-state" role="status">
+      <LoaderCircle className="is-spinning" size={22} aria-hidden="true" />
       <span>正在检查本地状态</span>
     </div>
   );
 }
 
-function UnavailableState({
-  retrying,
-  onRetry,
-}: {
-  retrying: boolean;
-  onRetry: () => void;
-}) {
+function UnavailableState({ onRetry }: { onRetry: () => void }) {
   return (
-    <section className="blocked-state" role="alert" aria-labelledby="startup-unavailable-heading">
+    <section className="blocked-state" role="alert">
       <ShieldAlert size={26} aria-hidden="true" />
       <div>
-        <h2 id="startup-unavailable-heading">无法读取启动状态</h2>
+        <h2>无法读取启动状态</h2>
         <p>Rust 后端暂时无法返回可信状态。</p>
-        <button className="command-button" type="button" onClick={onRetry} disabled={retrying}>
+        <button className="command-button" type="button" onClick={onRetry}>
           <RefreshCw size={17} aria-hidden="true" />
           重新检查
         </button>
@@ -169,11 +131,9 @@ function UnavailableState({
 
 function BlockedState({
   snapshot,
-  retrying,
   onRetry,
 }: {
   snapshot: StartupSnapshot;
-  retrying: boolean;
   onRetry: () => void;
 }) {
   const reason = snapshot.database.reason;
@@ -185,17 +145,17 @@ function BlockedState({
         ? startupBlockMessages[blockReason]
         : "启动状态无法确认。";
   return (
-    <section className="blocked-state" role="alert" aria-labelledby="startup-blocked-heading">
+    <section className="blocked-state" role="alert">
       <ShieldAlert size={26} aria-hidden="true" />
       <div>
-        <h2 id="startup-blocked-heading">无法安全打开本地状态</h2>
+        <h2>无法安全打开本地状态</h2>
         <p>{message}</p>
         {snapshot.pendingOperationResolution && (
           <p className="secondary-note">
             {pendingResolutionMessages[snapshot.pendingOperationResolution]}
           </p>
         )}
-        <button className="command-button" type="button" onClick={onRetry} disabled={retrying}>
+        <button className="command-button" type="button" onClick={onRetry}>
           <RefreshCw size={17} aria-hidden="true" />
           重新检查
         </button>
@@ -208,13 +168,7 @@ function ReadyState({ snapshot }: { snapshot: StartupSnapshot }) {
   const contents = snapshot.database.contents;
   return (
     <div className="status-content">
-      <section
-        className="summary-band"
-        aria-labelledby="database-summary"
-        role="status"
-        aria-live="polite"
-        aria-atomic="true"
-      >
+      <section className="summary-band" aria-labelledby="database-summary">
         <CheckCircle2 size={24} aria-hidden="true" />
         <div>
           <h2 id="database-summary">{databaseStatusMessages[snapshot.database.status]}</h2>
