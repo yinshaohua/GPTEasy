@@ -175,6 +175,88 @@ fn confirmed_takeover_preserves_external_fields_and_records_the_applied_provider
 }
 
 #[test]
+fn managed_environment_accepts_and_preserves_changes_outside_the_managed_block() {
+    let (temp, _, application) = fixture();
+    let codex_home = temp.path().join(".codex");
+    application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("establish managed environment");
+    let config_path = codex_home.join("config.toml");
+    let mut externally_edited = fs::read_to_string(&config_path).expect("read managed config");
+    externally_edited.push_str("\n[projects.external]\ntrust_level = \"trusted\"\n");
+    fs::write(&config_path, &externally_edited).expect("write outside managed block");
+
+    let snapshot = application.inspect().expect("inspect external edit");
+    assert_eq!(snapshot.state, EnvironmentState::Managed);
+    application
+        .apply_provider(PROVIDER_ID, false)
+        .expect("reapply after compatible external edit");
+
+    let reapplied = fs::read_to_string(config_path).expect("read reapplied config");
+    assert!(reapplied.ends_with("\n[projects.external]\ntrust_level = \"trusted\"\n"));
+}
+
+#[test]
+fn renaming_the_current_provider_does_not_create_a_management_conflict() {
+    let (_temp, store, application) = fixture();
+    application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("establish managed environment");
+    let connection = Connection::open(store.paths().database()).expect("open state database");
+    connection
+        .execute(
+            "UPDATE providers SET name = 'Renamed Fixture' WHERE id = ?1",
+            [PROVIDER_ID],
+        )
+        .expect("rename current provider");
+
+    let snapshot = application.inspect().expect("inspect renamed provider");
+    assert_eq!(snapshot.state, EnvironmentState::Managed);
+    assert_eq!(
+        snapshot
+            .current_provider
+            .as_ref()
+            .map(|provider| provider.name.as_str()),
+        Some("Renamed Fixture")
+    );
+}
+
+#[test]
+fn confirmed_retakeover_repairs_a_drifted_but_well_formed_managed_block() {
+    let (temp, _, application) = fixture();
+    let codex_home = temp.path().join(".codex");
+    application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("establish managed environment");
+    let config_path = codex_home.join("config.toml");
+    let drifted = fs::read_to_string(&config_path)
+        .expect("read managed config")
+        .replace("https://fixture.example/v1", "https://drifted.example/v1");
+    fs::write(&config_path, drifted).expect("write managed drift");
+
+    let snapshot = application.inspect().expect("inspect managed drift");
+    assert_eq!(snapshot.state, EnvironmentState::Conflict);
+    assert!(snapshot.requires_takeover_confirmation);
+    let unconfirmed = application
+        .apply_provider(PROVIDER_ID, false)
+        .expect_err("retakeover requires confirmation");
+    assert_eq!(
+        unconfirmed.category,
+        EnvironmentFailureCategory::TakeoverConfirmationRequired
+    );
+
+    let repaired = application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("confirm safe retakeover");
+    assert_eq!(repaired.state, EnvironmentState::Managed);
+    assert!(
+        fs::read_to_string(config_path)
+            .expect("read repaired config")
+            .contains("https://fixture.example/v1")
+    );
+}
+
+#[test]
 fn confirmed_switch_creates_the_file_credential_carrier() {
     let (temp, _, application) = fixture();
 
@@ -322,6 +404,105 @@ fn recovery_completes_the_database_commit_when_both_new_artifacts_are_present() 
 }
 
 #[test]
+fn recovery_uses_the_operation_backup_to_restore_a_mixed_artifact_state() {
+    let (temp, store, application) = fixture();
+    let codex_home = temp.path().join(".codex");
+    let old = application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("apply old provider");
+    let old_config = fs::read(codex_home.join("config.toml")).expect("read old config");
+    let old_credentials = fs::read(codex_home.join("auth.json")).expect("read old credentials");
+    let old_fingerprints = last_applied_fingerprints(&store);
+    let next_id = "924b6c4b-889c-44af-9bd3-e4892e42dac1";
+    insert_provider_values(
+        &store,
+        next_id,
+        "Next Provider",
+        "https://next.example/v1",
+        "next-key-not-real",
+        "next-model",
+        "next-verification-fingerprint",
+    );
+    application
+        .apply_provider(next_id, false)
+        .expect("apply next provider");
+    let new_fingerprints = last_applied_fingerprints(&store);
+    let backup = latest_backup_path(&codex_home);
+    let backup_manifest: Value = serde_json::from_slice(
+        &fs::read(backup.join("manifest.json")).expect("read backup manifest"),
+    )
+    .expect("parse backup manifest");
+    let operation_id = backup_manifest["operationId"]
+        .as_str()
+        .expect("operation id in backup manifest");
+
+    fs::write(codex_home.join("auth.json"), &old_credentials)
+        .expect("simulate crash between artifact replacements");
+    let connection = Connection::open(store.paths().database()).expect("open state database");
+    connection
+        .execute(
+            "UPDATE last_applied_state SET provider_id = ?1,
+                config_fingerprint = ?2, credentials_fingerprint = ?3
+             WHERE singleton = 1",
+            params![PROVIDER_ID, old_fingerprints.0, old_fingerprints.1],
+        )
+        .expect("restore pre-crash database state");
+    let target_snapshot = serde_json::json!({
+        "id": next_id,
+        "name": "Next Provider",
+        "baseUrl": "https://next.example/v1",
+        "apiKey": "next-key-not-real",
+        "defaultModel": "next-model",
+        "verifiedAtEpochSeconds": 1_775_606_400_u64,
+        "verificationFingerprint": "next-verification-fingerprint",
+    });
+    connection
+        .execute(
+            "INSERT INTO pending_config_operation (
+                singleton, operation_id, operation_kind, stage, target_provider_id,
+                old_config_fingerprint, new_config_fingerprint,
+                old_credentials_fingerprint, new_credentials_fingerprint,
+                backup_reference, target_snapshot_json, started_at
+             ) VALUES (1, ?1, 'switch_provider', 'prepared', ?2, ?3, ?4, ?5, ?6, ?7, ?8, '1')",
+            params![
+                operation_id,
+                next_id,
+                old_fingerprints.0,
+                new_fingerprints.0,
+                old_fingerprints.1,
+                new_fingerprints.1,
+                backup.to_string_lossy(),
+                target_snapshot.to_string(),
+            ],
+        )
+        .expect("record mixed crash fixture");
+    drop(connection);
+
+    let recovery = application
+        .recover_pending()
+        .expect("recover mixed pending switch");
+
+    assert_eq!(recovery, EnvironmentRecovery::RestoredOldState);
+    assert_eq!(
+        fs::read(codex_home.join("config.toml")).expect("read restored config"),
+        old_config
+    );
+    assert_eq!(
+        fs::read(codex_home.join("auth.json")).expect("read restored credentials"),
+        old_credentials
+    );
+    let restored = application.inspect().expect("inspect restored environment");
+    assert_eq!(restored.current_provider, old.current_provider);
+    assert!(
+        !store
+            .bootstrap()
+            .contents
+            .expect("database contents")
+            .has_pending_config_operation
+    );
+}
+
+#[test]
 fn configuration_backups_keep_the_latest_five_operations() {
     let (temp, _, application) = fixture();
     for _ in 0..7 {
@@ -361,6 +542,55 @@ fn malformed_managed_markers_stop_before_backup_or_write() {
     assert!(!codex_home.join(".gpteasy-backups").exists());
 }
 
+#[test]
+fn managed_markers_inside_a_multiline_string_are_never_treated_as_a_block() {
+    let (temp, _, application) = fixture();
+    let codex_home = temp.path().join(".codex");
+    fs::create_dir_all(&codex_home).expect("create Codex fixture");
+    let original = concat!(
+        "note = \"\"\"\n",
+        "# >>> GPTEasy managed provider >>>\n",
+        "# GPTEasy provider-id: 9f319739-f219-48ee-be35-22e08d5402d7\n",
+        "# <<< GPTEasy managed provider <<<\n",
+        "\"\"\"\n",
+    );
+    fs::write(codex_home.join("config.toml"), original).expect("write multiline fixture");
+
+    let snapshot = application.inspect().expect("inspect multiline fixture");
+    assert_eq!(snapshot.state, EnvironmentState::Conflict);
+    let failure = application
+        .apply_provider(PROVIDER_ID, true)
+        .expect_err("multiline markers must be rejected");
+    assert_eq!(
+        failure.category,
+        EnvironmentFailureCategory::ManagedConflict
+    );
+    assert_eq!(
+        fs::read_to_string(codex_home.join("config.toml")).expect("read preserved config"),
+        original
+    );
+    assert!(!codex_home.join(".gpteasy-backups").exists());
+}
+
+#[test]
+fn non_string_credential_store_shape_stops_before_backup_or_write() {
+    let (temp, _, application) = fixture();
+    let codex_home = temp.path().join(".codex");
+    fs::create_dir_all(&codex_home).expect("create Codex fixture");
+    let original = b"cli_auth_credentials_store = { kind = 'file' }\ncustom_flag = true\n";
+    fs::write(codex_home.join("config.toml"), original).expect("write unsupported config");
+
+    let failure = application
+        .apply_provider(PROVIDER_ID, true)
+        .expect_err("non-string credential store must be rejected");
+    assert_eq!(failure.category, EnvironmentFailureCategory::InvalidConfig);
+    assert_eq!(
+        fs::read(codex_home.join("config.toml")).expect("read preserved config"),
+        original
+    );
+    assert!(!codex_home.join(".gpteasy-backups").exists());
+}
+
 fn last_applied_fingerprints(store: &StateStore) -> (String, String) {
     let connection = Connection::open(store.paths().database()).expect("open state database");
     connection
@@ -371,6 +601,17 @@ fn last_applied_fingerprints(store: &StateStore) -> (String, String) {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .expect("last applied fingerprints")
+}
+
+fn latest_backup_path(codex_home: &std::path::Path) -> std::path::PathBuf {
+    let mut backups = fs::read_dir(codex_home.join(".gpteasy-backups"))
+        .expect("read backup root")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    backups.sort();
+    backups.pop().expect("latest operation backup")
 }
 
 struct FailBeforeCredentials;

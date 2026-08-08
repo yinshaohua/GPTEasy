@@ -88,7 +88,7 @@ export default function EnvironmentPage({ startup }: { startup: StartupSnapshot 
   }, [load]);
 
   async function applySelected() {
-    if (view.kind !== "loaded" || !selectedId || view.snapshot.state === "conflict") return;
+    if (view.kind !== "loaded" || !selectedId) return;
     const confirmTakeover = view.snapshot.requiresTakeoverConfirmation;
     if (
       confirmTakeover &&
@@ -248,7 +248,7 @@ export default function EnvironmentPage({ startup }: { startup: StartupSnapshot 
                 className="command-button"
                 type="button"
                 onClick={() => void applySelected()}
-                disabled={applying || !selectedId || view.snapshot.state === "conflict"}
+                disabled={applying || !selectedId}
               >
                 {applying ? (
                   <LoaderCircle className="is-spinning" size={17} aria-hidden="true" />

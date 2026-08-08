@@ -494,6 +494,67 @@ describe("Codex 环境接管", () => {
     });
     expect(await screen.findByText("当前供应商：Applied Provider")).toBeInTheDocument();
   });
+
+  it("允许用户确认后重新接管管理冲突", async () => {
+    const provider = {
+      id: "90f00c5a-59a7-4936-a791-583d90b81b73",
+      name: "Recovery Provider",
+      baseUrl: "https://recovery.example/v1",
+      defaultModel: "model-a",
+      verifiedAtEpochSeconds: 1_786_140_900,
+      isCurrent: false,
+    };
+    const conflict = {
+      state: "conflict",
+      messageId: "environment.managed_conflict",
+      requiresTakeoverConfirmation: true,
+      impacts: [
+        {
+          artifact: "config",
+          action: "update",
+          fields: ["model", "model_provider", "model_providers.<provider-id>"],
+        },
+        {
+          artifact: "credentials",
+          action: "update",
+          fields: ["auth_mode", "OPENAI_API_KEY"],
+        },
+      ],
+      currentProvider: null,
+    };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([provider]);
+      if (command === "get_environment_snapshot") return Promise.resolve(conflict);
+      if (command === "apply_environment_provider") {
+        return Promise.resolve({
+          ...conflict,
+          state: "managed",
+          messageId: "environment.managed",
+          requiresTakeoverConfirmation: false,
+          currentProvider: { ...provider, isCurrent: true },
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Codex 环境" }));
+    fireEvent.change(await screen.findByLabelText("要应用的供应商"), {
+      target: { value: provider.id },
+    });
+    const takeover = screen.getByRole("button", { name: "确认接管并应用" });
+    expect(takeover).toBeEnabled();
+    fireEvent.click(takeover);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("apply_environment_provider", {
+        providerId: provider.id,
+        confirmTakeover: true,
+      });
+    });
+  });
 });
 
 describe("启动状态", () => {
