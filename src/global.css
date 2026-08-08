@@ -325,6 +325,11 @@ a {
   cursor: pointer;
 }
 
+.command-button:disabled {
+  opacity: 0.65;
+  cursor: wait;
+}
+
 @media (prefers-color-scheme: dark) {
   :root {
     color: #edf0f3;

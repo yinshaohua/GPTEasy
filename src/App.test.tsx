@@ -34,6 +34,26 @@ const readySnapshot: StartupSnapshot = {
   },
 };
 
+const blockedSnapshot: StartupSnapshot = {
+  mode: "blocked",
+  messageId: "startup.database_blocked",
+  blockReason: "database_unavailable",
+  pendingOperationResolution: null,
+  database: {
+    status: "blocked",
+    schemaVersion: null,
+    reason: "future_schema",
+    contents: null,
+  },
+  codex: {
+    configStatus: "valid",
+    configFingerprint: "0123456789abcdef",
+    credentialStore: "file",
+    credentialFileStatus: "missing",
+    loginStatus: "not_logged_in",
+  },
+};
+
 describe("启动状态", () => {
   afterEach(() => {
     cleanup();
@@ -57,31 +77,36 @@ describe("启动状态", () => {
   });
 
   it("数据库来自更高版本时只显示阻断状态", async () => {
-    invoke.mockResolvedValue({
-      mode: "blocked",
-      messageId: "startup.database_blocked",
-      blockReason: "database_unavailable",
-      pendingOperationResolution: null,
-      database: {
-        status: "blocked",
-        schemaVersion: null,
-        reason: "future_schema",
-        contents: null,
-      },
-      codex: {
-        configStatus: "valid",
-        configFingerprint: "0123456789abcdef",
-        credentialStore: "file",
-        credentialFileStatus: "missing",
-        loginStatus: "not_logged_in",
-      },
-    });
+    invoke.mockResolvedValue(blockedSnapshot);
 
     render(<App />);
 
     expect(await screen.findByRole("alert")).toHaveTextContent("无法安全打开本地状态");
     expect(screen.getByText("数据库由更高版本的 GPTEasy 创建，当前版本不会改写它。")).toBeInTheDocument();
     expect(screen.queryByText("Codex 环境")).not.toBeInTheDocument();
+  });
+
+  it("阻断页重新检查期间禁止重复请求", async () => {
+    let resolveRefresh: (snapshot: StartupSnapshot) => void;
+    const refreshPromise = new Promise<StartupSnapshot>((resolve) => {
+      resolveRefresh = resolve;
+    });
+    invoke.mockResolvedValueOnce(blockedSnapshot).mockReturnValueOnce(refreshPromise);
+
+    render(<App />);
+
+    const retryButton = await screen.findByRole("button", { name: "重新检查" });
+    fireEvent.click(retryButton);
+
+    expect(retryButton).toBeDisabled();
+    fireEvent.click(retryButton);
+    expect(invoke).toHaveBeenCalledTimes(2);
+
+    resolveRefresh!(blockedSnapshot);
+
+    await waitFor(() => {
+      expect(retryButton).toBeEnabled();
+    });
   });
 
   it("提供键盘跳过入口、具名地标和可聚焦导航", async () => {

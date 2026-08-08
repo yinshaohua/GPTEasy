@@ -119,9 +119,15 @@ export default function App() {
         </p>
 
         {state.kind === "loading" && <LoadingState />}
-        {state.kind === "error" && <UnavailableState onRetry={() => void load(true)} />}
+        {state.kind === "error" && (
+          <UnavailableState retrying={refreshing} onRetry={() => void load(true)} />
+        )}
         {state.kind === "loaded" && state.snapshot.mode === "blocked" && (
-          <BlockedState snapshot={state.snapshot} onRetry={() => void load(true)} />
+          <BlockedState
+            snapshot={state.snapshot}
+            retrying={refreshing}
+            onRetry={() => void load(true)}
+          />
         )}
         {state.kind === "loaded" && state.snapshot.mode === "ready" && (
           <ReadyState snapshot={state.snapshot} />
@@ -140,14 +146,20 @@ function LoadingState() {
   );
 }
 
-function UnavailableState({ onRetry }: { onRetry: () => void }) {
+function UnavailableState({
+  retrying,
+  onRetry,
+}: {
+  retrying: boolean;
+  onRetry: () => void;
+}) {
   return (
     <section className="blocked-state" role="alert" aria-labelledby="startup-unavailable-heading">
       <ShieldAlert size={26} aria-hidden="true" />
       <div>
         <h2 id="startup-unavailable-heading">无法读取启动状态</h2>
         <p>Rust 后端暂时无法返回可信状态。</p>
-        <button className="command-button" type="button" onClick={onRetry}>
+        <button className="command-button" type="button" onClick={onRetry} disabled={retrying}>
           <RefreshCw size={17} aria-hidden="true" />
           重新检查
         </button>
@@ -158,9 +170,11 @@ function UnavailableState({ onRetry }: { onRetry: () => void }) {
 
 function BlockedState({
   snapshot,
+  retrying,
   onRetry,
 }: {
   snapshot: StartupSnapshot;
+  retrying: boolean;
   onRetry: () => void;
 }) {
   const reason = snapshot.database.reason;
@@ -182,7 +196,7 @@ function BlockedState({
             {pendingResolutionMessages[snapshot.pendingOperationResolution]}
           </p>
         )}
-        <button className="command-button" type="button" onClick={onRetry}>
+        <button className="command-button" type="button" onClick={onRetry} disabled={retrying}>
           <RefreshCw size={17} aria-hidden="true" />
           重新检查
         </button>
