@@ -710,6 +710,10 @@ select:focus-visible {
   .is-spinning {
     animation-duration: 2s;
   }
+
+  .command-button .is-spinning {
+    animation: none;
+  }
 }
 
 @media (forced-colors: active) {

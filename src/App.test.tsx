@@ -1,11 +1,12 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "./App";
 
-const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
+const { invoke, listen } = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn() }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
+vi.mock("@tauri-apps/api/event", () => ({ listen }));
 
 const readySnapshot = {
   mode: "ready",
@@ -40,6 +41,8 @@ describe("供应商创建", () => {
 
   beforeEach(() => {
     invoke.mockReset();
+    listen.mockReset();
+    listen.mockResolvedValue(() => undefined);
   });
 
   it("完整验证后仍需用户明确保存，且保存边界不接收 API Key", async () => {
@@ -101,6 +104,69 @@ describe("供应商创建", () => {
     expect(JSON.stringify(saveCall?.[1])).not.toContain("secret-provider-key");
   }, 10_000);
 
+  it("按后端进度依次展示 Responses 与工具闭环", async () => {
+    let finishValidation: (value: object) => void = () => undefined;
+    const validation = new Promise<object>((resolve) => {
+      finishValidation = resolve;
+    });
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([]);
+      if (command === "discover_provider_models") {
+        return Promise.resolve({
+          normalizedBaseUrl: "https://provider.example/v1",
+          models: ["model-a"],
+        });
+      }
+      if (command === "validate_provider") return validation;
+      return Promise.resolve(undefined);
+    });
+    render(<App />);
+
+    await screen.findByLabelText("服务地址");
+    fireEvent.change(screen.getByLabelText("服务地址"), {
+      target: { value: "https://provider.example/v1" },
+    });
+    fireEvent.change(screen.getByLabelText("API Key"), { target: { value: "test-key" } });
+    fireEvent.click(screen.getByRole("button", { name: "获取模型" }));
+    await screen.findByRole("option", { name: "model-a" });
+    fireEvent.change(screen.getByLabelText("默认模型"), { target: { value: "model-a" } });
+    fireEvent.click(screen.getByRole("button", { name: "验证供应商" }));
+
+    await waitFor(() => expect(listen).toHaveBeenCalled());
+    const validationCall = invoke.mock.calls.find(([command]) => command === "validate_provider");
+    const requestId = validationCall?.[1]?.requestId as string;
+    const progressListener = listen.mock.calls[0][1] as (event: {
+      payload: { requestId: string; stage: string };
+    }) => void;
+    act(() => {
+      progressListener({ payload: { requestId, stage: "responses_stream" } });
+    });
+    expect(screen.getByText("Responses 流式响应").closest("li")).toHaveAttribute(
+      "aria-current",
+      "step",
+    );
+    expect(screen.getByText("工具调用闭环").closest("li")).not.toHaveAttribute("aria-current");
+
+    act(() => {
+      progressListener({ payload: { requestId, stage: "tool_round_trip" } });
+    });
+    expect(screen.getByText("工具调用闭环").closest("li")).toHaveAttribute(
+      "aria-current",
+      "step",
+    );
+    act(() => {
+      finishValidation({
+        validationId: "validation-progress",
+        normalizedBaseUrl: "https://provider.example/v1",
+        defaultModel: "model-a",
+        combinationFingerprint: "b".repeat(64),
+        verifiedAtEpochSeconds: 1_786_140_000,
+      });
+    });
+    expect(await screen.findByText("完整验证已通过")).toBeInTheDocument();
+  }, 10_000);
+
   it("离开供应商页会丢弃未保存输入", async () => {
     invoke.mockImplementation((command: string) => {
       if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
@@ -126,6 +192,8 @@ describe("启动状态", () => {
 
   beforeEach(() => {
     invoke.mockReset();
+    listen.mockReset();
+    listen.mockResolvedValue(() => undefined);
   });
 
   it("向用户说明全新状态已初始化且不会创建 Codex 配置", async () => {

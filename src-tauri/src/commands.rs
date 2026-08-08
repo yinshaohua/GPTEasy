@@ -1,11 +1,11 @@
 use std::sync::Mutex;
 
 use serde::Serialize;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
 use crate::provider::{
     DiscoveryInput, ModelDiscovery, ProviderApplication, ProviderFailure, ProviderSummary,
-    ProviderValidationInput, ProviderValidationReceipt,
+    ProviderValidationInput, ProviderValidationReceipt, ProviderValidationStage,
 };
 use crate::startup::{StartupCoordinator, StartupSnapshot};
 
@@ -78,11 +78,31 @@ pub(crate) async fn discover_provider_models(
 
 #[tauri::command]
 pub(crate) async fn validate_provider(
+    app: AppHandle,
     state: State<'_, ProviderRuntime>,
     request_id: String,
     input: ProviderValidationInput,
 ) -> Result<ProviderValidationReceipt, ProviderFailure> {
-    state.application.validate_provider(request_id, input).await
+    let progress_request_id = request_id.clone();
+    state
+        .application
+        .validate_provider_with_progress(request_id, input, move |stage| {
+            let _ = app.emit(
+                "provider-validation-progress",
+                ProviderValidationProgress {
+                    request_id: progress_request_id.clone(),
+                    stage,
+                },
+            );
+        })
+        .await
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderValidationProgress {
+    request_id: String,
+    stage: ProviderValidationStage,
 }
 
 #[tauri::command]

@@ -49,6 +49,37 @@ async fn model_discovery_enforces_the_provider_url_policy_before_network_access(
 }
 
 #[tokio::test]
+async fn model_discovery_allows_http_for_each_loopback_host_form() {
+    for (bind_host, url_host) in [
+        ("127.0.0.1", "127.0.0.1"),
+        ("localhost", "localhost"),
+        ("::1", "[::1]"),
+    ] {
+        let server = ModelServer::start_on(
+            bind_host,
+            url_host,
+            "200 OK",
+            r#"{"object":"list","data":[{"id":"model-a"}]}"#,
+        );
+
+        let discovery = validator()
+            .discover_models(
+                DiscoveryInput {
+                    base_url: server.base_url,
+                    api_key: "test-provider-key".to_owned(),
+                },
+                Default::default(),
+            )
+            .await
+            .unwrap_or_else(|failure| {
+                panic!("loopback HTTP must be allowed for {url_host}: {failure:?}")
+            });
+
+        assert_eq!(discovery.models, ["model-a"]);
+    }
+}
+
+#[tokio::test]
 async fn model_discovery_preserves_the_path_prefix_and_returns_actual_models() {
     let server = ModelServer::start(
         "200 OK",
@@ -120,6 +151,7 @@ async fn model_discovery_rejects_empty_or_malformed_model_lists() {
     for body in [
         r#"{"object":"list","data":[]}"#,
         r#"{"object":"list"}"#,
+        r#"{"object":"list","data":[{"id":"model-a"},{"name":"missing-id"}]}"#,
         "not-json",
     ] {
         let server = ModelServer::start("200 OK", body);
@@ -156,6 +188,14 @@ async fn validation_rejects_broken_streams_and_nonce_or_schema_mismatches() {
         ),
         (
             ValidationScenario::WrongFinalNonce,
+            ProviderFailureCategory::ToolResult,
+        ),
+        (
+            ValidationScenario::MultipleToolCalls,
+            ProviderFailureCategory::ToolCall,
+        ),
+        (
+            ValidationScenario::SecondRoundToolCall,
             ProviderFailureCategory::ToolResult,
         ),
     ] {
@@ -377,6 +417,34 @@ async fn failed_cancelled_or_discarded_validation_never_changes_persistent_state
         store.bootstrap().contents.expect("state after discard"),
         before
     );
+
+    let cancelled_receipt_server = ValidationServer::start(ValidationScenario::Success);
+    let cancelled_receipt = application
+        .validate_provider(
+            "cancelled-after-success".to_owned(),
+            ProviderValidationInput {
+                base_url: cancelled_receipt_server.base_url,
+                api_key: "test-provider-key".to_owned(),
+                default_model: "model-a".to_owned(),
+            },
+        )
+        .await
+        .expect("provider validates before its request is cancelled");
+    assert!(application.cancel_request("cancelled-after-success"));
+    let cancelled_after_success = application
+        .save_verified_provider(&cancelled_receipt.validation_id, "Cancelled after success")
+        .expect_err("cancelling the originating request invalidates its receipt");
+    assert_eq!(
+        cancelled_after_success.category,
+        ProviderFailureCategory::VerificationExpired
+    );
+    assert_eq!(
+        store
+            .bootstrap()
+            .contents
+            .expect("state after post-success cancellation"),
+        before
+    );
 }
 
 struct ModelServer {
@@ -386,7 +454,11 @@ struct ModelServer {
 
 impl ModelServer {
     fn start(status: &'static str, body: &'static str) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock provider");
+        Self::start_on("127.0.0.1", "127.0.0.1", status, body)
+    }
+
+    fn start_on(bind_host: &str, url_host: &str, status: &'static str, body: &'static str) -> Self {
+        let listener = TcpListener::bind((bind_host, 0)).expect("bind mock provider");
         let address = listener.local_addr().expect("mock provider address");
         let (sender, request) = mpsc::channel();
         thread::spawn(move || {
@@ -412,7 +484,7 @@ impl ModelServer {
             stream.flush().expect("flush models response");
         });
         Self {
-            base_url: format!("http://{address}"),
+            base_url: format!("http://{url_host}:{}", address.port()),
             request,
         }
     }
@@ -425,6 +497,8 @@ enum ValidationScenario {
     ExtraArgument,
     WrongNonce,
     WrongFinalNonce,
+    MultipleToolCalls,
+    SecondRoundToolCall,
     IdleBeforeFirstEvent,
 }
 
@@ -444,8 +518,11 @@ impl ValidationServer {
                 ValidationScenario::Truncated
                 | ValidationScenario::ExtraArgument
                 | ValidationScenario::WrongNonce
+                | ValidationScenario::MultipleToolCalls
                 | ValidationScenario::IdleBeforeFirstEvent => 2,
-                ValidationScenario::Success | ValidationScenario::WrongFinalNonce => 3,
+                ValidationScenario::Success
+                | ValidationScenario::WrongFinalNonce
+                | ValidationScenario::SecondRoundToolCall => 3,
             };
             for index in 0..request_count {
                 let (mut stream, _) = listener.accept().expect("accept validation request");
@@ -567,6 +644,14 @@ fn write_validation_sse(
                 "response.output_text.delta",
                 json!({"delta": format!("validated {nonce}")}),
             ),
+            if matches!(scenario, ValidationScenario::SecondRoundToolCall) {
+                sse_event(
+                    "response.output_item.done",
+                    json!({"item":{"type":"function_call","id":"unexpected-call-item","call_id":"unexpected-call-001","name":"gpteasy_probe","arguments":output.to_string()}}),
+                )
+            } else {
+                String::new()
+            },
             sse_event(
                 "response.completed",
                 json!({"response":{"id":"response-final"}}),
@@ -595,6 +680,12 @@ fn write_validation_sse(
             ),
         ];
         if !matches!(scenario, ValidationScenario::Truncated) {
+            if matches!(scenario, ValidationScenario::MultipleToolCalls) {
+                events.push(sse_event(
+                    "response.output_item.done",
+                    json!({"item":{"type":"function_call","id":"call-item-2","call_id":"call-002","name":"gpteasy_probe","arguments":arguments}}),
+                ));
+            }
             events.push(sse_event(
                 "response.completed",
                 json!({"response":{"id":"response-tool"}}),

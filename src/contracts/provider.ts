@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export type ProviderFailureCategory =
   | "security_policy"
@@ -36,6 +37,16 @@ export interface ProviderValidationReceipt {
   defaultModel: string;
   combinationFingerprint: string;
   verifiedAtEpochSeconds: number;
+}
+
+export type ProviderValidationStage =
+  | "models_confirmed"
+  | "responses_stream"
+  | "tool_round_trip";
+
+export interface ProviderValidationProgress {
+  requestId: string;
+  stage: ProviderValidationStage;
 }
 
 export interface ProviderSummary {
@@ -92,6 +103,15 @@ export function saveVerifiedProvider(
 export function discardProviderValidation(validationId: string): Promise<void> {
   if (isBrowserPreview()) return Promise.resolve();
   return invoke<void>("discard_provider_validation", { validationId });
+}
+
+export function onProviderValidationProgress(
+  handler: (progress: ProviderValidationProgress) => void,
+): Promise<UnlistenFn> {
+  if (isBrowserPreview()) return Promise.resolve(() => undefined);
+  return listen<ProviderValidationProgress>("provider-validation-progress", (event) => {
+    handler(event.payload);
+  });
 }
 
 export function asProviderFailure(error: unknown): ProviderFailure {

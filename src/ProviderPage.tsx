@@ -19,13 +19,15 @@ import {
   discoverProviderModels,
   discardProviderValidation,
   listProviders,
+  onProviderValidationProgress,
   saveVerifiedProvider,
   validateProvider,
   type ProviderFailure,
   type ProviderSummary,
   type ProviderValidationReceipt,
+  type ProviderValidationStage,
 } from "./contracts/provider";
-import { providerFailureMessages } from "./messages";
+import { providerFailureMessages, providerMessages } from "./messages";
 
 type Operation = "idle" | "discovering" | "validating" | "verified" | "saving";
 
@@ -41,6 +43,7 @@ export default function ProviderPage() {
   const [operation, setOperation] = useState<Operation>("idle");
   const [failure, setFailure] = useState<ProviderFailure | null>(null);
   const [receipt, setReceipt] = useState<ProviderValidationReceipt | null>(null);
+  const [validationStage, setValidationStage] = useState<ProviderValidationStage | "idle" | "complete">("idle");
   const [copyStatus, setCopyStatus] = useState("");
   const activeRequest = useRef<string | null>(null);
   const receiptRef = useRef<string | null>(null);
@@ -64,17 +67,36 @@ export default function ProviderPage() {
     };
   }, []);
 
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void onProviderValidationProgress((progress) => {
+      if (progress.requestId === activeRequest.current) setValidationStage(progress.stage);
+    })
+      .then((stopListening) => {
+        if (disposed) stopListening();
+        else unlisten = stopListening;
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
   function clearReceipt() {
     if (receiptRef.current) void discardProviderValidation(receiptRef.current);
     receiptRef.current = null;
     setReceipt(null);
     setOperation("idle");
+    setValidationStage(models.length > 0 ? "models_confirmed" : "idle");
   }
 
   function changeConnection(field: "baseUrl" | "apiKey", value: string) {
     clearReceipt();
     setModels([]);
     setDefaultModel("");
+    setValidationStage("idle");
     setFailure(null);
     if (field === "baseUrl") setBaseUrl(value);
     else setApiKey(value);
@@ -88,6 +110,9 @@ export default function ProviderPage() {
 
   async function discoverModels() {
     clearReceipt();
+    setModels([]);
+    setDefaultModel("");
+    setValidationStage("idle");
     const requestId = createRequestId();
     activeRequest.current = requestId;
     setOperation("discovering");
@@ -98,10 +123,12 @@ export default function ProviderPage() {
       setModels(result.models);
       setDefaultModel("");
       setOperation("idle");
+      setValidationStage("models_confirmed");
     } catch (error) {
       setFailure(asProviderFailure(error));
       setModels([]);
       setDefaultModel("");
+      setValidationStage("idle");
       setOperation("idle");
     } finally {
       activeRequest.current = null;
@@ -119,9 +146,11 @@ export default function ProviderPage() {
       receiptRef.current = result.validationId;
       setReceipt(result);
       setOperation("verified");
+      setValidationStage("complete");
     } catch (error) {
       setFailure(asProviderFailure(error));
       setOperation("idle");
+      setValidationStage("models_confirmed");
     } finally {
       activeRequest.current = null;
     }
@@ -149,6 +178,8 @@ export default function ProviderPage() {
   }
 
   function resetEditor() {
+    if (receiptRef.current) void discardProviderValidation(receiptRef.current);
+    receiptRef.current = null;
     setName("");
     setBaseUrl("");
     setApiKey("");
@@ -158,14 +189,15 @@ export default function ProviderPage() {
     setReceipt(null);
     setFailure(null);
     setOperation("idle");
+    setValidationStage("idle");
   }
 
   async function copyApiKey() {
     try {
       await navigator.clipboard.writeText(apiKey);
-      setCopyStatus("已复制");
+      setCopyStatus(providerMessages.copied);
     } catch {
-      setCopyStatus("复制失败");
+      setCopyStatus(providerMessages.copyFailed);
     }
   }
 
@@ -173,32 +205,33 @@ export default function ProviderPage() {
   const canDiscover = baseUrl.trim().length > 0 && apiKey.length > 0 && !busy;
   const canValidate = models.length > 0 && defaultModel.length > 0 && !busy;
   const canSave = operation === "verified" && name.trim().length > 0;
+  const errorId = failure ? "provider-validation-error" : undefined;
 
   return (
     <>
       <header className="page-header">
         <div>
-          <h1>供应商</h1>
-          <p>创建并保存通过完整验证的供应商</p>
+          <h1>{providerMessages.pageTitle}</h1>
+          <p>{providerMessages.pageSubtitle}</p>
         </div>
         <button className="command-button compact" type="button" onClick={resetEditor} disabled={busy}>
           <Plus size={17} aria-hidden="true" />
-          新建供应商
+          {providerMessages.newProvider}
         </button>
       </header>
 
       <div className="provider-workspace">
         <section className="provider-list-pane" aria-labelledby="provider-list-heading">
           <div className="pane-heading">
-            <h2 id="provider-list-heading">已验证供应商</h2>
+            <h2 id="provider-list-heading">{providerMessages.verifiedProviders}</h2>
             <span>{providers.length}</span>
           </div>
-          {listState === "loading" && <p className="pane-note">正在读取供应商目录</p>}
-          {listState === "error" && <p className="inline-error">无法读取供应商目录。</p>}
+          {listState === "loading" && <p className="pane-note">{providerMessages.loadingCatalog}</p>}
+          {listState === "error" && <p className="inline-error">{providerMessages.catalogUnavailable}</p>}
           {listState === "ready" && providers.length === 0 && (
             <div className="empty-list">
               <Server size={22} aria-hidden="true" />
-              <p>尚无已验证供应商</p>
+              <p>{providerMessages.emptyCatalog}</p>
             </div>
           )}
           <div className="provider-list">
@@ -217,28 +250,34 @@ export default function ProviderPage() {
         <section className="provider-editor" aria-labelledby="provider-editor-heading">
           <div className="pane-heading editor-heading">
             <div>
-              <h2 id="provider-editor-heading">新建供应商</h2>
-              <span>验证成功后再保存</span>
+              <h2 id="provider-editor-heading">{providerMessages.newProvider}</h2>
+              <span>{providerMessages.editorSubtitle}</span>
             </div>
           </div>
 
           <div className="field-grid">
             <label className="form-field full-width">
-              <span>供应商名称</span>
-              <input value={name} onChange={(event) => setName(event.target.value)} disabled={operation === "saving"} />
+              <span>{providerMessages.providerName}</span>
+              <input
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+                disabled={operation === "saving"}
+                aria-describedby={errorId}
+              />
             </label>
             <label className="form-field full-width">
-              <span>服务地址</span>
+              <span>{providerMessages.baseUrl}</span>
               <input
                 type="url"
                 value={baseUrl}
                 onChange={(event) => changeConnection("baseUrl", event.target.value)}
                 placeholder="https://provider.example/v1"
                 disabled={busy}
+                aria-describedby={errorId}
               />
             </label>
             <div className="form-field full-width">
-              <label htmlFor="provider-api-key">API Key</label>
+              <label htmlFor="provider-api-key">{providerMessages.apiKey}</label>
               <div className="secret-input">
                 <input
                   id="provider-api-key"
@@ -247,13 +286,14 @@ export default function ProviderPage() {
                   onChange={(event) => changeConnection("apiKey", event.target.value)}
                   autoComplete="off"
                   disabled={busy}
+                  aria-describedby={errorId}
                 />
                 <button
                   className="field-icon-button"
                   type="button"
                   onClick={() => setShowKey((current) => !current)}
-                  aria-label={showKey ? "隐藏 API Key" : "显示 API Key"}
-                  title={showKey ? "隐藏 API Key" : "显示 API Key"}
+                  aria-label={showKey ? providerMessages.hideApiKey : providerMessages.showApiKey}
+                  title={showKey ? providerMessages.hideApiKey : providerMessages.showApiKey}
                   disabled={!apiKey}
                 >
                   {showKey ? <EyeOff size={17} /> : <Eye size={17} />}
@@ -262,8 +302,8 @@ export default function ProviderPage() {
                   className="field-icon-button"
                   type="button"
                   onClick={() => void copyApiKey()}
-                  aria-label="复制 API Key"
-                  title="复制 API Key"
+                  aria-label={providerMessages.copyApiKey}
+                  title={providerMessages.copyApiKey}
                   disabled={!apiKey}
                 >
                   <Copy size={17} />
@@ -275,13 +315,14 @@ export default function ProviderPage() {
 
           <div className="model-row">
             <label className="form-field model-select">
-              <span>默认模型</span>
+              <span>{providerMessages.defaultModel}</span>
               <select
                 value={defaultModel}
                 onChange={(event) => changeModel(event.target.value)}
                 disabled={models.length === 0 || busy}
+                aria-describedby={errorId}
               >
-                <option value="">请选择模型</option>
+                <option value="">{providerMessages.chooseModel}</option>
                 {models.map((model) => (
                   <option key={model} value={model}>{model}</option>
                 ))}
@@ -298,17 +339,22 @@ export default function ProviderPage() {
               ) : (
                 <Server size={17} aria-hidden="true" />
               )}
-              获取模型
+              {providerMessages.discoverModels}
             </button>
           </div>
 
-          <ValidationStatus modelsReady={models.length > 0} operation={operation} failure={failure} />
+          <ValidationStatus
+            modelsReady={models.length > 0}
+            operation={operation}
+            stage={validationStage}
+            failure={failure}
+          />
 
           <div className="editor-actions">
             {operation === "discovering" || operation === "validating" ? (
               <button className="secondary-button" type="button" onClick={() => void cancelCurrentRequest()}>
                 <X size={17} aria-hidden="true" />
-                取消请求
+                {providerMessages.cancelRequest}
               </button>
             ) : (
               <button
@@ -318,7 +364,7 @@ export default function ProviderPage() {
                 disabled={!canValidate}
               >
                 <ShieldCheck size={17} aria-hidden="true" />
-                验证供应商
+                {providerMessages.validateProvider}
               </button>
             )}
             <button
@@ -332,7 +378,7 @@ export default function ProviderPage() {
               ) : (
                 <Check size={17} aria-hidden="true" />
               )}
-              保存
+              {providerMessages.save}
             </button>
           </div>
         </section>
@@ -344,10 +390,12 @@ export default function ProviderPage() {
 function ValidationStatus({
   modelsReady,
   operation,
+  stage,
   failure,
 }: {
   modelsReady: boolean;
   operation: Operation;
+  stage: ProviderValidationStage | "idle" | "complete";
   failure: ProviderFailure | null;
 }) {
   const verified = operation === "verified" || operation === "saving";
@@ -355,18 +403,34 @@ function ValidationStatus({
     <div className="validation-panel" aria-live="polite">
       <div className="validation-title">
         <KeyRound size={18} aria-hidden="true" />
-        <strong>{verified ? "完整验证已通过" : "供应商验证"}</strong>
+        <strong>
+          {verified ? providerMessages.validationPassed : providerMessages.validationTitle}
+        </strong>
       </div>
       <ol className="validation-steps">
-        <ValidationStep complete={modelsReady} active={operation === "discovering"} label="模型确认" />
-        <ValidationStep complete={verified} active={operation === "validating"} label="Responses 流式响应" />
-        <ValidationStep complete={verified} active={operation === "validating"} label="工具调用闭环" />
+        <ValidationStep
+          complete={modelsReady}
+          active={operation === "discovering"}
+          label={providerMessages.modelsConfirmed}
+        />
+        <ValidationStep
+          complete={stage === "tool_round_trip" || stage === "complete"}
+          active={stage === "responses_stream"}
+          label={providerMessages.responsesStream}
+        />
+        <ValidationStep
+          complete={stage === "complete"}
+          active={stage === "tool_round_trip"}
+          label={providerMessages.toolRoundTrip}
+        />
       </ol>
       {failure && (
-        <div className="validation-error" role="alert">
-          <p>{providerFailureMessages[failure.messageId] ?? "验证未完成，请检查输入后重试。"}</p>
+        <div className="validation-error" id="provider-validation-error" role="alert">
+          <p>
+            {providerFailureMessages[failure.messageId] ?? providerMessages.validationFallback}
+          </p>
           <details>
-            <summary>技术详情</summary>
+            <summary>{providerMessages.technicalDetails}</summary>
             <code>{failure.category}</code>
           </details>
         </div>
@@ -377,7 +441,10 @@ function ValidationStatus({
 
 function ValidationStep({ complete, active, label }: { complete: boolean; active: boolean; label: string }) {
   return (
-    <li className={complete ? "is-complete" : active ? "is-active" : undefined}>
+    <li
+      className={complete ? "is-complete" : active ? "is-active" : undefined}
+      aria-current={active ? "step" : undefined}
+    >
       {complete ? (
         <Check size={15} aria-hidden="true" />
       ) : active ? (
