@@ -3,10 +3,24 @@ use std::sync::Mutex;
 use serde::Serialize;
 use tauri::State;
 
+use crate::provider::{
+    DiscoveryInput, ModelDiscovery, ProviderApplication, ProviderFailure, ProviderSummary,
+    ProviderValidationInput, ProviderValidationReceipt,
+};
 use crate::startup::{StartupCoordinator, StartupSnapshot};
 
 pub(crate) struct StartupRuntime {
     coordinator: Mutex<StartupCoordinator>,
+}
+
+pub(crate) struct ProviderRuntime {
+    application: ProviderApplication,
+}
+
+impl ProviderRuntime {
+    pub(crate) fn new(application: ProviderApplication) -> Self {
+        Self { application }
+    }
 }
 
 impl StartupRuntime {
@@ -44,4 +58,56 @@ pub(crate) fn refresh_startup_snapshot(
     state: State<'_, StartupRuntime>,
 ) -> Result<StartupSnapshot, CommandFailure> {
     state.inspect()
+}
+
+#[tauri::command]
+pub(crate) fn list_providers(
+    state: State<'_, ProviderRuntime>,
+) -> Result<Vec<ProviderSummary>, ProviderFailure> {
+    state.application.list_providers()
+}
+
+#[tauri::command]
+pub(crate) async fn discover_provider_models(
+    state: State<'_, ProviderRuntime>,
+    request_id: String,
+    input: DiscoveryInput,
+) -> Result<ModelDiscovery, ProviderFailure> {
+    state.application.discover_models(request_id, input).await
+}
+
+#[tauri::command]
+pub(crate) async fn validate_provider(
+    state: State<'_, ProviderRuntime>,
+    request_id: String,
+    input: ProviderValidationInput,
+) -> Result<ProviderValidationReceipt, ProviderFailure> {
+    state.application.validate_provider(request_id, input).await
+}
+
+#[tauri::command]
+pub(crate) fn cancel_provider_request(
+    state: State<'_, ProviderRuntime>,
+    request_id: String,
+) -> bool {
+    state.application.cancel_request(&request_id)
+}
+
+#[tauri::command]
+pub(crate) fn save_verified_provider(
+    state: State<'_, ProviderRuntime>,
+    validation_id: String,
+    name: String,
+) -> Result<ProviderSummary, ProviderFailure> {
+    state
+        .application
+        .save_verified_provider(&validation_id, &name)
+}
+
+#[tauri::command]
+pub(crate) fn discard_provider_validation(
+    state: State<'_, ProviderRuntime>,
+    validation_id: String,
+) {
+    state.application.discard_validation(&validation_id);
 }
