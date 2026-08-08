@@ -62,6 +62,9 @@ export default function App() {
       <a className="skip-link" href="#main-content">
         {accessibilityMessages.skipToMain}
       </a>
+      <p id="refresh-status" className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {refreshing ? accessibilityMessages.refreshing : ""}
+      </p>
       <aside className="sidebar" aria-label="应用导航">
         <div className="brand">
           <img src="/icon.png" alt="" width="36" height="36" />
@@ -114,10 +117,6 @@ export default function App() {
             <RefreshCw size={19} aria-hidden="true" />
           </button>
         </header>
-        <p id="refresh-status" className="sr-only" role="status" aria-live="polite" aria-atomic="true">
-          {refreshing ? accessibilityMessages.refreshing : ""}
-        </p>
-
         {state.kind === "loading" && <LoadingState />}
         {state.kind === "error" && (
           <UnavailableState retrying={refreshing} onRetry={() => void load(true)} />

@@ -146,8 +146,12 @@ describe("启动状态", () => {
     const refreshButton = await screen.findByRole("button", { name: "重新检查状态" });
     fireEvent.click(refreshButton);
 
-    expect(screen.getByRole("main", { name: "启动状态" })).toHaveAttribute("aria-busy", "true");
-    expect(screen.getByText("正在重新检查状态")).toHaveAttribute("role", "status");
+    const main = screen.getByRole("main", { name: "启动状态" });
+    const refreshStatus = screen.getByText("正在重新检查状态");
+
+    expect(main).toHaveAttribute("aria-busy", "true");
+    expect(refreshStatus).toHaveAttribute("role", "status");
+    expect(main).not.toContainElement(refreshStatus);
     expect(refreshButton).toBeDisabled();
 
     resolveRefresh!(readySnapshot);
