@@ -111,7 +111,7 @@ export default function App() {
             aria-describedby="refresh-status"
             title={accessibilityMessages.refresh}
           >
-            <RefreshCw className={refreshing ? "is-spinning" : undefined} size={19} />
+            <RefreshCw size={19} aria-hidden="true" />
           </button>
         </header>
         <p id="refresh-status" className="sr-only" role="status" aria-live="polite" aria-atomic="true">
@@ -134,7 +134,7 @@ export default function App() {
 function LoadingState() {
   return (
     <div className="loading-state" role="status" aria-live="polite" aria-atomic="true">
-      <LoaderCircle className="is-spinning" size={22} aria-hidden="true" />
+      <LoaderCircle size={22} aria-hidden="true" />
       <span>正在检查本地状态</span>
     </div>
   );

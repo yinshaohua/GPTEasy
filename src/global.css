@@ -325,16 +325,6 @@ a {
   cursor: pointer;
 }
 
-.is-spinning {
-  animation: spin 1s linear infinite;
-}
-
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
 @media (prefers-color-scheme: dark) {
   :root {
     color: #edf0f3;
@@ -388,12 +378,6 @@ a {
   .status-row {
     grid-template-columns: minmax(0, 1fr);
     gap: 3px;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .is-spinning {
-    animation: none;
   }
 }
 
