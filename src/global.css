@@ -187,7 +187,9 @@ select {
 .icon-button:focus-visible,
 .command-button:focus-visible,
 .secondary-button:focus-visible,
+.danger-button:focus-visible,
 .field-icon-button:focus-visible,
+.provider-list-row:focus-visible,
 .nav-item:focus-visible,
 input:focus-visible,
 select:focus-visible {
@@ -315,6 +317,7 @@ select:focus-visible {
 
 .command-button:disabled,
 .secondary-button:disabled,
+.danger-button:disabled,
 .field-icon-button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
@@ -401,9 +404,31 @@ select:focus-visible {
 .provider-list-row {
   display: grid;
   gap: 3px;
+  width: 100%;
   min-width: 0;
   padding: 12px 4px;
+  color: var(--text);
+  background: transparent;
+  border: 0;
   border-bottom: 1px solid var(--border);
+  text-align: left;
+  cursor: pointer;
+}
+
+.provider-list-row:hover:not(:disabled),
+.provider-list-row[aria-pressed="true"] {
+  background: var(--surface-muted);
+}
+
+.provider-list-row:disabled {
+  cursor: default;
+}
+
+.provider-list-name {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 
 .provider-list-row strong,
@@ -416,6 +441,18 @@ select:focus-visible {
   color: var(--text);
   font-size: 14px;
   line-height: 1.4;
+}
+
+.current-badge {
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, transparent);
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.35;
 }
 
 .field-grid {
@@ -500,6 +537,32 @@ select:focus-visible {
   border: 1px solid var(--border);
   border-radius: 6px;
   cursor: pointer;
+}
+
+.danger-button {
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 7px 12px;
+  color: var(--danger);
+  background: var(--surface);
+  border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border));
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.danger-button:hover:not(:disabled) {
+  background: var(--danger-soft);
+}
+
+.record-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 12px;
 }
 
 .secondary-button:hover:not(:disabled),

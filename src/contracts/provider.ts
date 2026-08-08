@@ -18,6 +18,10 @@ export type ProviderFailureCategory =
   | "tool_result"
   | "invalid_input"
   | "duplicate_name"
+  | "provider_not_found"
+  | "current_provider_protected"
+  | "save_and_apply_required"
+  | "clipboard_unavailable"
   | "verification_expired"
   | "state_unavailable";
 
@@ -55,6 +59,11 @@ export interface ProviderSummary {
   baseUrl: string;
   defaultModel: string;
   verifiedAtEpochSeconds: number;
+  isCurrent: boolean;
+}
+
+export interface ProviderApiKey {
+  value: string;
 }
 
 export function listProviders(): Promise<ProviderSummary[]> {
@@ -74,6 +83,19 @@ export function discoverProviderModels(
   });
 }
 
+export function discoverProviderModelsForUpdate(
+  requestId: string,
+  providerId: string,
+  baseUrl: string,
+  apiKey: string | null,
+): Promise<ModelDiscovery> {
+  if (isBrowserPreview()) return Promise.reject(previewFailure);
+  return invoke<ModelDiscovery>("discover_provider_models_for_update", {
+    requestId,
+    input: { providerId, baseUrl, apiKey },
+  });
+}
+
 export function validateProvider(
   requestId: string,
   baseUrl: string,
@@ -87,6 +109,28 @@ export function validateProvider(
   });
 }
 
+export function validateProviderUpdate(
+  requestId: string,
+  providerId: string,
+  baseUrl: string,
+  apiKey: string | null,
+  defaultModel: string,
+): Promise<ProviderValidationReceipt> {
+  if (isBrowserPreview()) return Promise.reject(previewFailure);
+  return invoke<ProviderValidationReceipt>("validate_provider_update", {
+    requestId,
+    input: { providerId, baseUrl, apiKey, defaultModel },
+  });
+}
+
+export function revalidateProvider(
+  requestId: string,
+  providerId: string,
+): Promise<ProviderSummary> {
+  if (isBrowserPreview()) return Promise.reject(previewFailure);
+  return invoke<ProviderSummary>("revalidate_provider", { requestId, providerId });
+}
+
 export function cancelProviderRequest(requestId: string): Promise<boolean> {
   if (isBrowserPreview()) return Promise.resolve(true);
   return invoke<boolean>("cancel_provider_request", { requestId });
@@ -98,6 +142,35 @@ export function saveVerifiedProvider(
 ): Promise<ProviderSummary> {
   if (isBrowserPreview()) return Promise.reject(previewFailure);
   return invoke<ProviderSummary>("save_verified_provider", { validationId, name });
+}
+
+export function renameProvider(providerId: string, name: string): Promise<ProviderSummary> {
+  if (isBrowserPreview()) return Promise.reject(previewFailure);
+  return invoke<ProviderSummary>("rename_provider", { providerId, name });
+}
+
+export function saveProviderUpdate(
+  validationId: string,
+  providerId: string,
+  name: string,
+): Promise<ProviderSummary> {
+  if (isBrowserPreview()) return Promise.reject(previewFailure);
+  return invoke<ProviderSummary>("save_provider_update", { validationId, providerId, name });
+}
+
+export function deleteProvider(providerId: string): Promise<void> {
+  if (isBrowserPreview()) return Promise.reject(previewFailure);
+  return invoke<void>("delete_provider", { providerId });
+}
+
+export function revealProviderApiKey(providerId: string): Promise<ProviderApiKey> {
+  if (isBrowserPreview()) return Promise.reject(previewFailure);
+  return invoke<ProviderApiKey>("reveal_provider_api_key", { providerId });
+}
+
+export function copyProviderApiKey(providerId: string): Promise<void> {
+  if (isBrowserPreview()) return Promise.reject(previewFailure);
+  return invoke<void>("copy_provider_api_key", { providerId });
 }
 
 export function discardProviderValidation(validationId: string): Promise<void> {

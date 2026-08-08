@@ -34,10 +34,50 @@ impl fmt::Debug for DiscoveryInput {
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ProviderUpdateDiscoveryInput {
+    pub provider_id: String,
+    pub base_url: String,
+    pub api_key: Option<String>,
+}
+
+impl fmt::Debug for ProviderUpdateDiscoveryInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderUpdateDiscoveryInput")
+            .field("provider_id", &self.provider_id)
+            .field("base_url", &self.base_url)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[redacted]"))
+            .finish()
+    }
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProviderValidationInput {
     pub base_url: String,
     pub api_key: String,
     pub default_model: String,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderUpdateValidationInput {
+    pub provider_id: String,
+    pub base_url: String,
+    pub api_key: Option<String>,
+    pub default_model: String,
+}
+
+impl fmt::Debug for ProviderUpdateValidationInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderUpdateValidationInput")
+            .field("provider_id", &self.provider_id)
+            .field("base_url", &self.base_url)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[redacted]"))
+            .field("default_model", &self.default_model)
+            .finish()
+    }
 }
 
 impl fmt::Debug for ProviderValidationInput {
@@ -93,6 +133,28 @@ pub struct ProviderSummary {
     pub base_url: String,
     pub default_model: String,
     pub verified_at_epoch_seconds: u64,
+    pub is_current: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderApiKey {
+    value: String,
+}
+
+impl fmt::Debug for ProviderApiKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderApiKey")
+            .field("value", &"[redacted]")
+            .finish()
+    }
+}
+
+impl ProviderApiKey {
+    pub(crate) fn expose(&self) -> &str {
+        &self.value
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -133,6 +195,10 @@ pub enum ProviderFailureCategory {
     ToolResult,
     InvalidInput,
     DuplicateName,
+    ProviderNotFound,
+    CurrentProviderProtected,
+    SaveAndApplyRequired,
+    ClipboardUnavailable,
     VerificationExpired,
     StateUnavailable,
 }
@@ -145,7 +211,7 @@ pub struct ProviderFailure {
 }
 
 impl ProviderFailure {
-    fn new(category: ProviderFailureCategory, message_id: &'static str) -> Self {
+    pub(crate) fn new(category: ProviderFailureCategory, message_id: &'static str) -> Self {
         Self {
             category,
             message_id,
@@ -165,6 +231,17 @@ struct VerifiedCandidate {
     request_id: String,
     input: ProviderValidationInput,
     evidence: ValidationEvidence,
+    target: ValidationTarget,
+}
+
+#[derive(Clone)]
+enum ValidationTarget {
+    NewProvider,
+    ExistingProvider {
+        provider_id: String,
+        original_name: String,
+        original_fingerprint: String,
+    },
 }
 
 impl ProviderApplication {
@@ -184,6 +261,34 @@ impl ProviderApplication {
     ) -> Result<ModelDiscovery, ProviderFailure> {
         let cancellation = self.begin_request(&request_id)?;
         let result = self.validator.discover_models(input, cancellation).await;
+        self.finish_request(&request_id);
+        result
+    }
+
+    pub async fn discover_models_for_update(
+        &self,
+        request_id: String,
+        input: ProviderUpdateDiscoveryInput,
+    ) -> Result<ModelDiscovery, ProviderFailure> {
+        let cancellation = self.begin_request(&request_id)?;
+        let record = match catalog::get_provider(&self.state_store, &input.provider_id) {
+            Ok(record) => record,
+            Err(failure) => {
+                self.finish_request(&request_id);
+                return Err(failure);
+            }
+        };
+        let discovery_input = DiscoveryInput {
+            base_url: input.base_url,
+            api_key: input
+                .api_key
+                .filter(|api_key| !api_key.is_empty())
+                .unwrap_or(record.api_key),
+        };
+        let result = self
+            .validator
+            .discover_models(discovery_input, cancellation)
+            .await;
         self.finish_request(&request_id);
         result
     }
@@ -218,6 +323,85 @@ impl ProviderApplication {
                 return Err(failure);
             }
         };
+        self.remember_verified_candidate(
+            request_id,
+            cancellation,
+            input,
+            evidence,
+            ValidationTarget::NewProvider,
+        )
+    }
+
+    pub async fn validate_provider_update(
+        &self,
+        request_id: String,
+        input: ProviderUpdateValidationInput,
+    ) -> Result<ProviderValidationReceipt, ProviderFailure> {
+        self.validate_provider_update_with_progress(request_id, input, |_| {})
+            .await
+    }
+
+    pub async fn validate_provider_update_with_progress<F>(
+        &self,
+        request_id: String,
+        input: ProviderUpdateValidationInput,
+        progress: F,
+    ) -> Result<ProviderValidationReceipt, ProviderFailure>
+    where
+        F: Fn(ProviderValidationStage),
+    {
+        let cancellation = self.begin_request(&request_id)?;
+        let record = match catalog::get_provider(&self.state_store, &input.provider_id) {
+            Ok(record) => record,
+            Err(failure) => {
+                self.finish_request(&request_id);
+                return Err(failure);
+            }
+        };
+        let validation_input = ProviderValidationInput {
+            base_url: input.base_url,
+            api_key: input
+                .api_key
+                .filter(|api_key| !api_key.is_empty())
+                .unwrap_or(record.api_key),
+            default_model: input.default_model,
+        };
+        let evidence = self
+            .validator
+            .validate_provider_with_progress(
+                validation_input.clone(),
+                cancellation.clone(),
+                progress,
+            )
+            .await;
+        let evidence = match evidence {
+            Ok(evidence) => evidence,
+            Err(failure) => {
+                self.finish_request(&request_id);
+                return Err(failure);
+            }
+        };
+        self.remember_verified_candidate(
+            request_id,
+            cancellation,
+            validation_input,
+            evidence,
+            ValidationTarget::ExistingProvider {
+                provider_id: input.provider_id,
+                original_name: record.summary.name,
+                original_fingerprint: record.verification_fingerprint,
+            },
+        )
+    }
+
+    fn remember_verified_candidate(
+        &self,
+        request_id: String,
+        cancellation: CancellationToken,
+        input: ProviderValidationInput,
+        evidence: ValidationEvidence,
+        target: ValidationTarget,
+    ) -> Result<ProviderValidationReceipt, ProviderFailure> {
         let validation_id = Uuid::new_v4().to_string();
         let mut requests = self
             .active_requests
@@ -240,6 +424,7 @@ impl ProviderApplication {
                 request_id: request_id.clone(),
                 input,
                 evidence: evidence.clone(),
+                target,
             },
         );
         requests.remove(&request_id);
@@ -300,6 +485,9 @@ impl ProviderApplication {
             .get(validation_id)
             .cloned()
             .ok_or_else(verification_expired)?;
+        if !matches!(candidate.target, ValidationTarget::NewProvider) {
+            return Err(verification_expired());
+        }
         let actual_fingerprint = combination_fingerprint(
             &candidate.evidence.normalized_base_url,
             &candidate.input.api_key,
@@ -315,8 +503,137 @@ impl ProviderApplication {
         Ok(summary)
     }
 
+    pub fn save_provider_update(
+        &self,
+        validation_id: &str,
+        provider_id: &str,
+        name: &str,
+    ) -> Result<ProviderSummary, ProviderFailure> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(ProviderFailure::new(
+                ProviderFailureCategory::InvalidInput,
+                "provider.name_required",
+            ));
+        }
+        let candidate = self
+            .verified_candidates
+            .lock()
+            .map_err(|_| state_unavailable())?
+            .get(validation_id)
+            .cloned()
+            .ok_or_else(verification_expired)?;
+        let (original_name, original_fingerprint) = match &candidate.target {
+            ValidationTarget::ExistingProvider {
+                provider_id: target_id,
+                original_name,
+                original_fingerprint,
+            } if target_id == provider_id => (original_name, original_fingerprint),
+            _ => return Err(verification_expired()),
+        };
+        let actual_fingerprint = combination_fingerprint(
+            &candidate.evidence.normalized_base_url,
+            &candidate.input.api_key,
+            &candidate.input.default_model,
+        );
+        if actual_fingerprint != candidate.evidence.combination_fingerprint {
+            self.discard_validation(validation_id);
+            return Err(verification_expired());
+        }
+
+        let summary = catalog::replace_provider(
+            &self.state_store,
+            provider_id,
+            name,
+            original_name,
+            original_fingerprint,
+            &candidate,
+        )?;
+        self.discard_validation(validation_id);
+        Ok(summary)
+    }
+
+    pub async fn revalidate_provider(
+        &self,
+        request_id: String,
+        provider_id: String,
+    ) -> Result<ProviderSummary, ProviderFailure> {
+        self.revalidate_provider_with_progress(request_id, provider_id, |_| {})
+            .await
+    }
+
+    pub async fn revalidate_provider_with_progress<F>(
+        &self,
+        request_id: String,
+        provider_id: String,
+        progress: F,
+    ) -> Result<ProviderSummary, ProviderFailure>
+    where
+        F: Fn(ProviderValidationStage),
+    {
+        let cancellation = self.begin_request(&request_id)?;
+        let record = match catalog::get_provider(&self.state_store, &provider_id) {
+            Ok(record) => record,
+            Err(failure) => {
+                self.finish_request(&request_id);
+                return Err(failure);
+            }
+        };
+        let input = ProviderValidationInput {
+            base_url: record.summary.base_url.clone(),
+            api_key: record.api_key,
+            default_model: record.summary.default_model.clone(),
+        };
+        let result = self
+            .validator
+            .validate_provider_with_progress(input, cancellation.clone(), progress)
+            .await
+            .and_then(|evidence| {
+                if cancellation.is_cancelled() {
+                    Err(cancelled())
+                } else {
+                    catalog::record_revalidation(
+                        &self.state_store,
+                        &provider_id,
+                        &record.verification_fingerprint,
+                        &evidence,
+                    )
+                }
+            });
+        self.finish_request(&request_id);
+        result
+    }
+
+    pub fn reveal_provider_api_key(
+        &self,
+        provider_id: &str,
+    ) -> Result<ProviderApiKey, ProviderFailure> {
+        catalog::get_provider(&self.state_store, provider_id).map(|record| ProviderApiKey {
+            value: record.api_key,
+        })
+    }
+
     pub fn list_providers(&self) -> Result<Vec<ProviderSummary>, ProviderFailure> {
         catalog::list_providers(&self.state_store)
+    }
+
+    pub fn rename_provider(
+        &self,
+        provider_id: &str,
+        name: &str,
+    ) -> Result<ProviderSummary, ProviderFailure> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(ProviderFailure::new(
+                ProviderFailureCategory::InvalidInput,
+                "provider.name_required",
+            ));
+        }
+        catalog::rename_provider(&self.state_store, provider_id, name)
+    }
+
+    pub fn delete_provider(&self, provider_id: &str) -> Result<(), ProviderFailure> {
+        catalog::delete_provider(&self.state_store, provider_id)
     }
 
     fn begin_request(&self, request_id: &str) -> Result<CancellationToken, ProviderFailure> {

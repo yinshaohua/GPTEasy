@@ -8,20 +8,30 @@ import {
   KeyRound,
   LoaderCircle,
   Plus,
+  RefreshCw,
   Server,
   ShieldCheck,
+  Trash2,
   X,
 } from "lucide-react";
 
 import {
   asProviderFailure,
   cancelProviderRequest,
+  copyProviderApiKey,
+  deleteProvider,
   discoverProviderModels,
+  discoverProviderModelsForUpdate,
   discardProviderValidation,
   listProviders,
   onProviderValidationProgress,
+  renameProvider,
+  revealProviderApiKey,
+  revalidateProvider,
+  saveProviderUpdate,
   saveVerifiedProvider,
   validateProvider,
+  validateProviderUpdate,
   type ProviderFailure,
   type ProviderSummary,
   type ProviderValidationReceipt,
@@ -29,24 +39,37 @@ import {
 } from "./contracts/provider";
 import { providerFailureMessages, providerMessages } from "./messages";
 
-type Operation = "idle" | "discovering" | "validating" | "verified" | "saving";
+type Operation =
+  | "idle"
+  | "discovering"
+  | "validating"
+  | "revalidating"
+  | "verified"
+  | "saving"
+  | "deleting";
 
 export default function ProviderPage() {
   const [providers, setProviders] = useState<ProviderSummary[]>([]);
   const [listState, setListState] = useState<"loading" | "ready" | "error">("loading");
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
-  const [apiKey, setApiKey] = useState("");
+  const [apiKeyPresent, setApiKeyPresent] = useState(false);
+  const [apiKeyReplacement, setApiKeyReplacement] = useState(false);
   const [showKey, setShowKey] = useState(false);
   const [models, setModels] = useState<string[]>([]);
   const [defaultModel, setDefaultModel] = useState("");
   const [operation, setOperation] = useState<Operation>("idle");
   const [failure, setFailure] = useState<ProviderFailure | null>(null);
   const [receipt, setReceipt] = useState<ProviderValidationReceipt | null>(null);
-  const [validationStage, setValidationStage] = useState<ProviderValidationStage | "idle" | "complete">("idle");
+  const [validationStage, setValidationStage] = useState<
+    ProviderValidationStage | "idle" | "complete"
+  >("idle");
   const [copyStatus, setCopyStatus] = useState("");
+  const apiKeyRef = useRef<HTMLInputElement | null>(null);
   const activeRequest = useRef<string | null>(null);
   const receiptRef = useRef<string | null>(null);
+  const selected = providers.find((provider) => provider.id === selectedId) ?? null;
 
   useEffect(() => {
     let mounted = true;
@@ -84,41 +107,87 @@ export default function ProviderPage() {
     };
   }, []);
 
-  function clearReceipt() {
+  function discardReceipt(nextStage: ProviderValidationStage | "idle" = "idle") {
     if (receiptRef.current) void discardProviderValidation(receiptRef.current);
     receiptRef.current = null;
     setReceipt(null);
     setOperation("idle");
-    setValidationStage(models.length > 0 ? "models_confirmed" : "idle");
+    setValidationStage(nextStage);
+  }
+
+  function clearSecretInput() {
+    if (apiKeyRef.current) apiKeyRef.current.value = "";
+    setApiKeyPresent(false);
+    setApiKeyReplacement(false);
+    setShowKey(false);
+    setCopyStatus("");
+  }
+
+  function selectProvider(provider: ProviderSummary) {
+    discardReceipt("models_confirmed");
+    setSelectedId(provider.id);
+    setName(provider.name);
+    setBaseUrl(provider.baseUrl);
+    setModels([provider.defaultModel]);
+    setDefaultModel(provider.defaultModel);
+    setFailure(null);
+    clearSecretInput();
+  }
+
+  function resetEditor() {
+    discardReceipt();
+    setSelectedId(null);
+    setName("");
+    setBaseUrl("");
+    setModels([]);
+    setDefaultModel("");
+    setFailure(null);
+    clearSecretInput();
   }
 
   function changeConnection(field: "baseUrl" | "apiKey", value: string) {
-    clearReceipt();
+    discardReceipt();
     setModels([]);
     setDefaultModel("");
-    setValidationStage("idle");
     setFailure(null);
-    if (field === "baseUrl") setBaseUrl(value);
-    else setApiKey(value);
+    if (field === "baseUrl") {
+      setBaseUrl(value);
+    } else {
+      setApiKeyPresent(value.length > 0);
+      setApiKeyReplacement(selected !== null && value.length > 0);
+    }
   }
 
   function changeModel(value: string) {
-    clearReceipt();
+    discardReceipt("models_confirmed");
     setDefaultModel(value);
     setFailure(null);
   }
 
+  function apiKeyForRequest(): string | null {
+    const value = apiKeyRef.current?.value ?? "";
+    if (!selected) return value;
+    return apiKeyReplacement ? value : null;
+  }
+
   async function discoverModels() {
-    clearReceipt();
+    discardReceipt();
     setModels([]);
     setDefaultModel("");
-    setValidationStage("idle");
     const requestId = createRequestId();
     activeRequest.current = requestId;
     setOperation("discovering");
     setFailure(null);
     try {
-      const result = await discoverProviderModels(requestId, baseUrl, apiKey);
+      const apiKey = apiKeyForRequest();
+      const result = selected
+        ? await discoverProviderModelsForUpdate(
+            requestId,
+            selected.id,
+            baseUrl,
+            apiKey,
+          )
+        : await discoverProviderModels(requestId, baseUrl, apiKey ?? "");
       setBaseUrl(result.normalizedBaseUrl);
       setModels(result.models);
       setDefaultModel("");
@@ -136,16 +205,46 @@ export default function ProviderPage() {
   }
 
   async function runValidation() {
-    clearReceipt();
+    discardReceipt("models_confirmed");
     const requestId = createRequestId();
     activeRequest.current = requestId;
     setOperation("validating");
     setFailure(null);
     try {
-      const result = await validateProvider(requestId, baseUrl, apiKey, defaultModel);
+      const apiKey = apiKeyForRequest();
+      const result = selected
+        ? await validateProviderUpdate(
+            requestId,
+            selected.id,
+            baseUrl,
+            apiKey,
+            defaultModel,
+          )
+        : await validateProvider(requestId, baseUrl, apiKey ?? "", defaultModel);
       receiptRef.current = result.validationId;
       setReceipt(result);
       setOperation("verified");
+      setValidationStage("complete");
+    } catch (error) {
+      setFailure(asProviderFailure(error));
+      setOperation("idle");
+      setValidationStage("models_confirmed");
+    } finally {
+      activeRequest.current = null;
+    }
+  }
+
+  async function runRevalidation() {
+    if (!selected) return;
+    discardReceipt("models_confirmed");
+    const requestId = createRequestId();
+    activeRequest.current = requestId;
+    setOperation("revalidating");
+    setFailure(null);
+    try {
+      const updated = await revalidateProvider(requestId, selected.id);
+      replaceProvider(updated);
+      setOperation("idle");
       setValidationStage("complete");
     } catch (error) {
       setFailure(asProviderFailure(error));
@@ -161,50 +260,117 @@ export default function ProviderPage() {
   }
 
   async function saveProvider() {
-    if (!receipt) return;
     setOperation("saving");
     setFailure(null);
     try {
-      const saved = await saveVerifiedProvider(receipt.validationId, name);
-      receiptRef.current = null;
-      setProviders((current) =>
-        [...current, saved].sort((left, right) => left.name.localeCompare(right.name, "zh-CN")),
-      );
-      resetEditor();
+      let saved: ProviderSummary;
+      if (!selected) {
+        if (!receipt) return;
+        saved = await saveVerifiedProvider(receipt.validationId, name);
+        receiptRef.current = null;
+        setProviders((current) => sortProviders([...current, saved]));
+        resetEditor();
+        return;
+      }
+      if (criticalDirty) {
+        if (!receipt) return;
+        saved = await saveProviderUpdate(receipt.validationId, selected.id, name);
+        receiptRef.current = null;
+      } else {
+        saved = await renameProvider(selected.id, name);
+      }
+      replaceProvider(saved);
+      setName(saved.name);
+      setBaseUrl(saved.baseUrl);
+      setModels([saved.defaultModel]);
+      setDefaultModel(saved.defaultModel);
+      clearSecretInput();
+      setReceipt(null);
+      setOperation("idle");
+      setValidationStage("models_confirmed");
     } catch (error) {
       setFailure(asProviderFailure(error));
-      setOperation("verified");
+      setOperation(receipt ? "verified" : "idle");
     }
   }
 
-  function resetEditor() {
-    if (receiptRef.current) void discardProviderValidation(receiptRef.current);
-    receiptRef.current = null;
-    setName("");
-    setBaseUrl("");
-    setApiKey("");
-    setShowKey(false);
-    setModels([]);
-    setDefaultModel("");
-    setReceipt(null);
+  async function deleteSelectedProvider() {
+    if (!selected || selected.isCurrent || !window.confirm(providerMessages.deleteConfirmation)) {
+      return;
+    }
+    setOperation("deleting");
     setFailure(null);
-    setOperation("idle");
-    setValidationStage("idle");
+    try {
+      await deleteProvider(selected.id);
+      setProviders((current) => current.filter((provider) => provider.id !== selected.id));
+      resetEditor();
+    } catch (error) {
+      setFailure(asProviderFailure(error));
+      setOperation("idle");
+    }
+  }
+
+  async function toggleApiKey() {
+    if (showKey) {
+      setShowKey(false);
+      return;
+    }
+    if (selected && !apiKeyReplacement && !apiKeyRef.current?.value) {
+      try {
+        const secret = await revealProviderApiKey(selected.id);
+        if (apiKeyRef.current) apiKeyRef.current.value = secret.value;
+      } catch (error) {
+        setFailure(asProviderFailure(error));
+        return;
+      }
+    }
+    setShowKey(true);
   }
 
   async function copyApiKey() {
     try {
-      await navigator.clipboard.writeText(apiKey);
+      if (selected && !apiKeyReplacement) {
+        await copyProviderApiKey(selected.id);
+      } else {
+        await navigator.clipboard.writeText(apiKeyRef.current?.value ?? "");
+      }
       setCopyStatus(providerMessages.copied);
     } catch {
       setCopyStatus(providerMessages.copyFailed);
     }
   }
 
-  const busy = operation === "discovering" || operation === "validating" || operation === "saving";
-  const canDiscover = baseUrl.trim().length > 0 && apiKey.length > 0 && !busy;
-  const canValidate = models.length > 0 && defaultModel.length > 0 && !busy;
-  const canSave = operation === "verified" && name.trim().length > 0;
+  function replaceProvider(updated: ProviderSummary) {
+    setProviders((current) =>
+      sortProviders(current.map((provider) => (provider.id === updated.id ? updated : provider))),
+    );
+  }
+
+  const busy = ["discovering", "validating", "revalidating", "saving", "deleting"].includes(
+    operation,
+  );
+  const nameDirty = selected !== null && name.trim() !== selected.name;
+  const criticalDirty =
+    selected !== null &&
+    (baseUrl.trim() !== selected.baseUrl ||
+      defaultModel !== selected.defaultModel ||
+      apiKeyReplacement);
+  const canDiscover =
+    baseUrl.trim().length > 0 && (selected !== null || apiKeyPresent) && !busy;
+  const canValidate =
+    models.length > 0 &&
+    defaultModel.length > 0 &&
+    (!selected || criticalDirty) &&
+    !busy;
+  const canSave =
+    name.trim().length > 0 &&
+    !busy &&
+    (selected
+      ? criticalDirty
+        ? operation === "verified"
+        : nameDirty
+      : operation === "verified");
+  const canRevalidate = selected !== null && !nameDirty && !criticalDirty && !busy;
   const errorId = failure ? "provider-validation-error" : undefined;
 
   return (
@@ -236,13 +402,24 @@ export default function ProviderPage() {
           )}
           <div className="provider-list">
             {providers.map((provider) => (
-              <div className="provider-list-row" key={provider.id}>
-                <strong>{provider.name}</strong>
+              <button
+                className="provider-list-row"
+                type="button"
+                key={provider.id}
+                onClick={() => selectProvider(provider)}
+                aria-label={`编辑 ${provider.name}`}
+                aria-pressed={selectedId === provider.id}
+                disabled={busy}
+              >
+                <span className="provider-list-name">
+                  <strong>{provider.name}</strong>
+                  {provider.isCurrent && <span className="current-badge">{providerMessages.currentProvider}</span>}
+                </span>
                 <span title={provider.defaultModel}>{provider.defaultModel}</span>
                 <time dateTime={new Date(provider.verifiedAtEpochSeconds * 1000).toISOString()}>
                   {formatVerificationTime(provider.verifiedAtEpochSeconds)}
                 </time>
-              </div>
+              </button>
             ))}
           </div>
         </section>
@@ -250,9 +427,10 @@ export default function ProviderPage() {
         <section className="provider-editor" aria-labelledby="provider-editor-heading">
           <div className="pane-heading editor-heading">
             <div>
-              <h2 id="provider-editor-heading">{providerMessages.newProvider}</h2>
-              <span>{providerMessages.editorSubtitle}</span>
+              <h2 id="provider-editor-heading">{selected?.name ?? providerMessages.newProvider}</h2>
+              <span>{selected ? providerMessages.detailsSubtitle : providerMessages.editorSubtitle}</span>
             </div>
+            {selected?.isCurrent && <span className="current-badge">{providerMessages.currentProvider}</span>}
           </div>
 
           <div className="field-grid">
@@ -261,7 +439,7 @@ export default function ProviderPage() {
               <input
                 value={name}
                 onChange={(event) => setName(event.target.value)}
-                disabled={operation === "saving"}
+                disabled={operation === "saving" || operation === "deleting"}
                 aria-describedby={errorId}
               />
             </label>
@@ -280,10 +458,12 @@ export default function ProviderPage() {
               <label htmlFor="provider-api-key">{providerMessages.apiKey}</label>
               <div className="secret-input">
                 <input
+                  ref={apiKeyRef}
                   id="provider-api-key"
                   type={showKey ? "text" : "password"}
-                  value={apiKey}
+                  defaultValue=""
                   onChange={(event) => changeConnection("apiKey", event.target.value)}
+                  placeholder={selected ? providerMessages.savedApiKey : undefined}
                   autoComplete="off"
                   disabled={busy}
                   aria-describedby={errorId}
@@ -291,10 +471,10 @@ export default function ProviderPage() {
                 <button
                   className="field-icon-button"
                   type="button"
-                  onClick={() => setShowKey((current) => !current)}
+                  onClick={() => void toggleApiKey()}
                   aria-label={showKey ? providerMessages.hideApiKey : providerMessages.showApiKey}
                   title={showKey ? providerMessages.hideApiKey : providerMessages.showApiKey}
-                  disabled={!apiKey}
+                  disabled={!selected && !apiKeyPresent}
                 >
                   {showKey ? <EyeOff size={17} /> : <Eye size={17} />}
                 </button>
@@ -304,7 +484,7 @@ export default function ProviderPage() {
                   onClick={() => void copyApiKey()}
                   aria-label={providerMessages.copyApiKey}
                   title={providerMessages.copyApiKey}
-                  disabled={!apiKey}
+                  disabled={!selected && !apiKeyPresent}
                 >
                   <Copy size={17} />
                 </button>
@@ -350,8 +530,35 @@ export default function ProviderPage() {
             failure={failure}
           />
 
+          {selected && (
+            <div className="record-actions">
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={() => void runRevalidation()}
+                disabled={!canRevalidate}
+              >
+                <RefreshCw
+                  className={operation === "revalidating" ? "is-spinning" : undefined}
+                  size={17}
+                  aria-hidden="true"
+                />
+                {providerMessages.revalidate}
+              </button>
+              <button
+                className="danger-button"
+                type="button"
+                onClick={() => void deleteSelectedProvider()}
+                disabled={selected.isCurrent || busy}
+              >
+                <Trash2 size={17} aria-hidden="true" />
+                {providerMessages.deleteProvider}
+              </button>
+            </div>
+          )}
+
           <div className="editor-actions">
-            {operation === "discovering" || operation === "validating" ? (
+            {operation === "discovering" || operation === "validating" || operation === "revalidating" ? (
               <button className="secondary-button" type="button" onClick={() => void cancelCurrentRequest()}>
                 <X size={17} aria-hidden="true" />
                 {providerMessages.cancelRequest}
@@ -364,7 +571,7 @@ export default function ProviderPage() {
                 disabled={!canValidate}
               >
                 <ShieldCheck size={17} aria-hidden="true" />
-                {providerMessages.validateProvider}
+                {selected ? providerMessages.validateUpdate : providerMessages.validateProvider}
               </button>
             )}
             <button
@@ -378,7 +585,7 @@ export default function ProviderPage() {
               ) : (
                 <Check size={17} aria-hidden="true" />
               )}
-              {providerMessages.save}
+              {selected?.isCurrent && criticalDirty ? providerMessages.saveAndApply : providerMessages.save}
             </button>
           </div>
         </section>
@@ -398,14 +605,12 @@ function ValidationStatus({
   stage: ProviderValidationStage | "idle" | "complete";
   failure: ProviderFailure | null;
 }) {
-  const verified = operation === "verified" || operation === "saving";
+  const verified = stage === "complete" || operation === "verified" || operation === "saving";
   return (
     <div className="validation-panel" aria-live="polite">
       <div className="validation-title">
         <KeyRound size={18} aria-hidden="true" />
-        <strong>
-          {verified ? providerMessages.validationPassed : providerMessages.validationTitle}
-        </strong>
+        <strong>{verified ? providerMessages.validationPassed : providerMessages.validationTitle}</strong>
       </div>
       <ol className="validation-steps">
         <ValidationStep
@@ -426,9 +631,7 @@ function ValidationStatus({
       </ol>
       {failure && (
         <div className="validation-error" id="provider-validation-error" role="alert">
-          <p>
-            {providerFailureMessages[failure.messageId] ?? providerMessages.validationFallback}
-          </p>
+          <p>{providerFailureMessages[failure.messageId] ?? providerMessages.validationFallback}</p>
           <details>
             <summary>{providerMessages.technicalDetails}</summary>
             <code>{failure.category}</code>
@@ -455,6 +658,10 @@ function ValidationStep({ complete, active, label }: { complete: boolean; active
       {label}
     </li>
   );
+}
+
+function sortProviders(providers: ProviderSummary[]): ProviderSummary[] {
+  return [...providers].sort((left, right) => left.name.localeCompare(right.name, "zh-CN"));
 }
 
 let requestSequence = 0;

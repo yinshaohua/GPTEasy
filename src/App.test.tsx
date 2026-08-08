@@ -185,6 +185,235 @@ describe("供应商创建", () => {
   });
 });
 
+describe("供应商目录生命周期", () => {
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  beforeEach(() => {
+    invoke.mockReset();
+    listen.mockReset();
+    listen.mockResolvedValue(() => undefined);
+  });
+
+  it("从详情安全查看凭据，并覆盖改名、重验证和删除限制", async () => {
+    const first = {
+      id: "68bf9ee2-3ba5-4517-b47e-12a11e038de4",
+      name: "Atlas",
+      baseUrl: "https://atlas.example/v1",
+      defaultModel: "model-a",
+      verifiedAtEpochSeconds: 1_786_140_000,
+      isCurrent: false,
+    };
+    const current = {
+      id: "76149f67-0d76-4d41-b606-77ba244bffec",
+      name: "Current Provider",
+      baseUrl: "https://current.example/v1",
+      defaultModel: "model-current",
+      verifiedAtEpochSeconds: 1_786_140_100,
+      isCurrent: true,
+    };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([first, current]);
+      if (command === "reveal_provider_api_key") {
+        return Promise.resolve({ value: "catalog-secret-key" });
+      }
+      if (command === "copy_provider_api_key") return Promise.resolve(undefined);
+      if (command === "rename_provider") {
+        return Promise.resolve({ ...first, name: "Atlas Renamed" });
+      }
+      if (command === "revalidate_provider") {
+        return Promise.resolve({ ...first, name: "Atlas Renamed", verifiedAtEpochSeconds: 1_786_140_500 });
+      }
+      if (command === "delete_provider") return Promise.resolve(undefined);
+      return Promise.resolve(undefined);
+    });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<App />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "编辑 Atlas" }, { timeout: 5_000 }),
+    );
+    expect(screen.getByRole("heading", { name: "Atlas" })).toBeInTheDocument();
+    const apiKey = screen.getByLabelText("API Key") as HTMLInputElement;
+    expect(apiKey).toHaveAttribute("type", "password");
+    expect(apiKey).toHaveValue("");
+
+    fireEvent.click(screen.getByRole("button", { name: "显示 API Key" }));
+    await waitFor(() => expect(apiKey).toHaveValue("catalog-secret-key"));
+    expect(apiKey).toHaveAttribute("type", "text");
+    expect(invoke).toHaveBeenCalledWith("reveal_provider_api_key", { providerId: first.id });
+    fireEvent.click(screen.getByRole("button", { name: "复制 API Key" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("copy_provider_api_key", { providerId: first.id });
+    });
+
+    fireEvent.change(screen.getByLabelText("供应商名称"), {
+      target: { value: "  Atlas Renamed  " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("rename_provider", {
+        providerId: first.id,
+        name: "  Atlas Renamed  ",
+      });
+    });
+    expect(invoke.mock.calls.some(([command]) => command === "validate_provider_update")).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "重新验证" }));
+    await waitFor(() => {
+      expect(invoke.mock.calls.some(([command]) => command === "revalidate_provider")).toBe(true);
+    });
+    fireEvent.click(screen.getByRole("button", { name: "删除供应商" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("delete_provider", { providerId: first.id });
+    });
+    expect(screen.queryByRole("button", { name: "编辑 Atlas Renamed" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "编辑 Current Provider" }));
+    expect(screen.getAllByText("当前供应商")).not.toHaveLength(0);
+    expect(screen.getByRole("button", { name: "删除供应商" })).toBeDisabled();
+  }, 10_000);
+
+  it("非当前供应商关键字段在重新验证前不会更新目录", async () => {
+    const provider = {
+      id: "68bf9ee2-3ba5-4517-b47e-12a11e038de4",
+      name: "Atlas",
+      baseUrl: "https://atlas.example/v1",
+      defaultModel: "model-a",
+      verifiedAtEpochSeconds: 1_786_140_000,
+      isCurrent: false,
+    };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([provider]);
+      if (command === "discover_provider_models_for_update") {
+        return Promise.resolve({
+          normalizedBaseUrl: "https://atlas.example/next/v1",
+          models: ["model-b"],
+        });
+      }
+      if (command === "validate_provider_update") {
+        return Promise.resolve({
+          validationId: "update-validation",
+          normalizedBaseUrl: "https://atlas.example/next/v1",
+          defaultModel: "model-b",
+          combinationFingerprint: "c".repeat(64),
+          verifiedAtEpochSeconds: 1_786_140_600,
+        });
+      }
+      if (command === "save_provider_update") {
+        return Promise.resolve({
+          ...provider,
+          baseUrl: "https://atlas.example/next/v1",
+          defaultModel: "model-b",
+          verifiedAtEpochSeconds: 1_786_140_600,
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "编辑 Atlas" }, { timeout: 5_000 }),
+    );
+    fireEvent.change(screen.getByLabelText("服务地址"), {
+      target: { value: "https://atlas.example/next/v1" },
+    });
+    expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "获取模型" }));
+    expect(await screen.findByRole("option", { name: "model-b" })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("默认模型"), { target: { value: "model-b" } });
+    fireEvent.click(screen.getByRole("button", { name: "验证更新" }));
+    expect(await screen.findByText("完整验证已通过")).toBeInTheDocument();
+    expect(invoke.mock.calls.some(([command]) => command === "save_provider_update")).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("save_provider_update", {
+        validationId: "update-validation",
+        providerId: provider.id,
+        name: "Atlas",
+      });
+    });
+    const discoveryCall = invoke.mock.calls.find(
+      ([command]) => command === "discover_provider_models_for_update",
+    );
+    expect(discoveryCall?.[1]?.input).toEqual({
+      providerId: provider.id,
+      baseUrl: "https://atlas.example/next/v1",
+      apiKey: null,
+    });
+  }, 10_000);
+
+  it("当前供应商关键字段更新进入保存并应用门禁", async () => {
+    const current = {
+      id: "76149f67-0d76-4d41-b606-77ba244bffec",
+      name: "Current Provider",
+      baseUrl: "https://current.example/v1",
+      defaultModel: "model-a",
+      verifiedAtEpochSeconds: 1_786_140_100,
+      isCurrent: true,
+    };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([current]);
+      if (command === "discover_provider_models_for_update") {
+        return Promise.resolve({
+          normalizedBaseUrl: "https://current.example/next/v1",
+          models: ["model-b"],
+        });
+      }
+      if (command === "validate_provider_update") {
+        return Promise.resolve({
+          validationId: "current-update-validation",
+          normalizedBaseUrl: "https://current.example/next/v1",
+          defaultModel: "model-b",
+          combinationFingerprint: "d".repeat(64),
+          verifiedAtEpochSeconds: 1_786_140_700,
+        });
+      }
+      if (command === "save_provider_update") {
+        return Promise.reject({
+          category: "save_and_apply_required",
+          messageId: "provider.save_and_apply_required",
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+    fireEvent.click(
+      await screen.findByRole(
+        "button",
+        { name: "编辑 Current Provider" },
+        { timeout: 5_000 },
+      ),
+    );
+    fireEvent.change(screen.getByLabelText("服务地址"), {
+      target: { value: "https://current.example/next/v1" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "获取模型" }));
+    await screen.findByRole("option", { name: "model-b" });
+    fireEvent.change(screen.getByLabelText("默认模型"), { target: { value: "model-b" } });
+    fireEvent.click(screen.getByRole("button", { name: "验证更新" }));
+
+    const saveAndApply = await screen.findByRole("button", { name: "保存并应用" });
+    fireEvent.click(saveAndApply);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "当前供应商的访问配置必须通过“保存并应用”同时更新 Codex 环境。",
+    );
+    expect(invoke).toHaveBeenCalledWith("save_provider_update", {
+      validationId: "current-update-validation",
+      providerId: current.id,
+      name: current.name,
+    });
+  }, 10_000);
+});
+
 describe("启动状态", () => {
   afterEach(() => {
     cleanup();
