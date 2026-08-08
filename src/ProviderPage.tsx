@@ -29,6 +29,7 @@ import {
   revealProviderApiKey,
   revalidateProvider,
   saveProviderUpdate,
+  saveAndApplyProviderUpdate,
   saveVerifiedProvider,
   validateProvider,
   validateProviderUpdate,
@@ -274,7 +275,9 @@ export default function ProviderPage() {
       }
       if (criticalDirty) {
         if (!receipt) return;
-        saved = await saveProviderUpdate(receipt.validationId, selected.id, name);
+        saved = selected.isCurrent
+          ? await saveAndApplyProviderUpdate(receipt.validationId, selected.id, name)
+          : await saveProviderUpdate(receipt.validationId, selected.id, name);
         receiptRef.current = null;
       } else {
         saved = await renameProvider(selected.id, name);

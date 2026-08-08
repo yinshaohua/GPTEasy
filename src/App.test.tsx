@@ -178,7 +178,7 @@ describe("供应商创建", () => {
     const name = await screen.findByLabelText("供应商名称");
     fireEvent.change(name, { target: { value: "Unsaved" } });
     fireEvent.click(screen.getByRole("button", { name: "Codex 环境" }));
-    expect(await screen.findByRole("heading", { name: "启动状态" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Codex 环境" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "供应商" }));
 
     expect(await screen.findByLabelText("供应商名称")).toHaveValue("");
@@ -349,7 +349,7 @@ describe("供应商目录生命周期", () => {
     });
   }, 10_000);
 
-  it("当前供应商关键字段更新进入保存并应用门禁", async () => {
+  it("当前供应商关键字段更新调用完整保存并应用用例", async () => {
     const current = {
       id: "76149f67-0d76-4d41-b606-77ba244bffec",
       name: "Current Provider",
@@ -376,10 +376,12 @@ describe("供应商目录生命周期", () => {
           verifiedAtEpochSeconds: 1_786_140_700,
         });
       }
-      if (command === "save_provider_update") {
-        return Promise.reject({
-          category: "save_and_apply_required",
-          messageId: "provider.save_and_apply_required",
+      if (command === "save_and_apply_provider_update") {
+        return Promise.resolve({
+          ...current,
+          baseUrl: "https://current.example/next/v1",
+          defaultModel: "model-b",
+          verifiedAtEpochSeconds: 1_786_140_700,
         });
       }
       return Promise.resolve(undefined);
@@ -403,15 +405,95 @@ describe("供应商目录生命周期", () => {
 
     const saveAndApply = await screen.findByRole("button", { name: "保存并应用" });
     fireEvent.click(saveAndApply);
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "当前供应商的访问配置必须通过“保存并应用”同时更新 Codex 环境。",
-    );
-    expect(invoke).toHaveBeenCalledWith("save_provider_update", {
-      validationId: "current-update-validation",
-      providerId: current.id,
-      name: current.name,
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("save_and_apply_provider_update", {
+        validationId: "current-update-validation",
+        providerId: current.id,
+        name: current.name,
+      });
     });
+    expect(
+      invoke.mock.calls.some(([command]) => command === "save_provider_update"),
+    ).toBe(false);
   }, 10_000);
+});
+
+describe("Codex 环境接管", () => {
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  beforeEach(() => {
+    invoke.mockReset();
+    listen.mockReset();
+    listen.mockResolvedValue(() => undefined);
+  });
+
+  it("先展示替换范围，再由用户确认接管外部配置", async () => {
+    const provider = {
+      id: "90f00c5a-59a7-4936-a791-583d90b81b73",
+      name: "Applied Provider",
+      baseUrl: "https://applied.example/v1",
+      defaultModel: "model-a",
+      verifiedAtEpochSeconds: 1_786_140_900,
+      isCurrent: false,
+    };
+    const external = {
+      state: "external",
+      messageId: "environment.external",
+      requiresTakeoverConfirmation: true,
+      impacts: [
+        {
+          artifact: "config",
+          action: "create",
+          fields: ["model", "model_provider", "model_providers.<provider-id>"],
+        },
+        {
+          artifact: "credentials",
+          action: "create",
+          fields: ["auth_mode", "OPENAI_API_KEY"],
+        },
+      ],
+      currentProvider: null,
+    };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([provider]);
+      if (command === "get_environment_snapshot") return Promise.resolve(external);
+      if (command === "apply_environment_provider") {
+        return Promise.resolve({
+          ...external,
+          state: "managed",
+          messageId: "environment.managed",
+          requiresTakeoverConfirmation: false,
+          currentProvider: { ...provider, isCurrent: true },
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Codex 环境" }));
+
+    expect(await screen.findByRole("heading", { name: "Codex 环境" })).toBeInTheDocument();
+    expect(screen.getByText("外部配置")).toBeInTheDocument();
+    expect(screen.getByText("config.toml")).toBeInTheDocument();
+    expect(screen.getByText("auth.json")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("要应用的供应商"), {
+      target: { value: provider.id },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "确认接管并应用" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("apply_environment_provider", {
+        providerId: provider.id,
+        confirmTakeover: true,
+      });
+    });
+    expect(await screen.findByText("当前供应商：Applied Provider")).toBeInTheDocument();
+  });
 });
 
 describe("启动状态", () => {

@@ -5,6 +5,9 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+use gpteasy_lib::environment::{
+    EnvironmentApplication, EnvironmentFailurePoint, EnvironmentFaultInjector,
+};
 use gpteasy_lib::provider::{
     DiscoveryInput, ProviderApplication, ProviderFailureCategory, ProviderUpdateDiscoveryInput,
     ProviderUpdateValidationInput, ProviderValidationInput, ProviderValidator, ValidationTimeouts,
@@ -615,6 +618,120 @@ async fn provider_updates_replace_only_the_freshly_validated_non_current_record(
     assert_eq!(still_current.len(), 1);
     assert_eq!(still_current[0].id, original.id);
     assert!(still_current[0].is_current);
+}
+
+#[tokio::test]
+async fn current_provider_update_commits_catalog_and_codex_artifacts_together() {
+    let temp = TempDir::new().expect("temp state directory");
+    let store = StateStore::new(StatePaths::from_root(temp.path().join("state")));
+    assert!(store.bootstrap().is_ready());
+    let application = ProviderApplication::new(store.clone(), validator());
+    let creation_server = ValidationServer::start(ValidationScenario::Success);
+    let original = create_provider(
+        &application,
+        "create-current-target",
+        creation_server.base_url,
+        "Current Provider",
+        "original-current-key",
+    )
+    .await;
+    let codex_home = temp.path().join(".codex");
+    let environment = EnvironmentApplication::new(store.clone(), &codex_home);
+    environment
+        .apply_provider(&original.id, true)
+        .expect("apply original provider");
+    let original_config = std::fs::read(codex_home.join("config.toml")).expect("read old config");
+    let original_auth = std::fs::read(codex_home.join("auth.json")).expect("read old auth");
+
+    let update_server = ValidationServer::start(ValidationScenario::Success);
+    let receipt = application
+        .validate_provider_update(
+            "validate-current-update".to_owned(),
+            ProviderUpdateValidationInput {
+                provider_id: original.id.clone(),
+                base_url: update_server.base_url.clone(),
+                api_key: Some("replacement-current-key".to_owned()),
+                default_model: "model-a".to_owned(),
+            },
+        )
+        .await
+        .expect("updated current combination validates");
+    let failing_environment = EnvironmentApplication::with_fault_injector(
+        store.clone(),
+        &codex_home,
+        Arc::new(FailBeforeDatabaseCommit),
+    );
+
+    let failure = application
+        .save_and_apply_provider_update(
+            &failing_environment,
+            &receipt.validation_id,
+            &original.id,
+            "Updated Current Provider",
+        )
+        .expect_err("database commit failure must roll back the whole update");
+
+    assert_eq!(
+        failure.category,
+        ProviderFailureCategory::SaveAndApplyFailed
+    );
+    assert_eq!(
+        std::fs::read(codex_home.join("config.toml")).expect("read rolled back config"),
+        original_config
+    );
+    assert_eq!(
+        std::fs::read(codex_home.join("auth.json")).expect("read rolled back auth"),
+        original_auth
+    );
+    let unchanged = application
+        .list_providers()
+        .expect("list unchanged provider");
+    assert_eq!(unchanged.len(), 1);
+    assert_eq!(unchanged[0].id, original.id);
+    assert_eq!(unchanged[0].name, original.name);
+    assert_eq!(unchanged[0].base_url, original.base_url);
+    assert_eq!(unchanged[0].default_model, original.default_model);
+    assert_eq!(
+        unchanged[0].verified_at_epoch_seconds,
+        original.verified_at_epoch_seconds
+    );
+    assert!(unchanged[0].is_current);
+
+    let updated = application
+        .save_and_apply_provider_update(
+            &environment,
+            &receipt.validation_id,
+            &original.id,
+            "Updated Current Provider",
+        )
+        .expect("retry save and apply");
+
+    assert_eq!(updated.id, original.id);
+    assert_eq!(updated.name, "Updated Current Provider");
+    assert_eq!(updated.base_url, format!("{}/", update_server.base_url));
+    assert!(updated.is_current);
+    let config =
+        std::fs::read_to_string(codex_home.join("config.toml")).expect("read updated config");
+    let document = config
+        .parse::<toml_edit::DocumentMut>()
+        .expect("updated config is TOML");
+    assert_eq!(
+        document["model_providers"][&original.id]["base_url"].as_str(),
+        Some(updated.base_url.as_str())
+    );
+    let auth: Value = serde_json::from_slice(
+        &std::fs::read(codex_home.join("auth.json")).expect("read updated auth"),
+    )
+    .expect("updated auth is JSON");
+    assert_eq!(auth["OPENAI_API_KEY"], "replacement-current-key");
+}
+
+struct FailBeforeDatabaseCommit;
+
+impl EnvironmentFaultInjector for FailBeforeDatabaseCommit {
+    fn fails_at(&self, point: EnvironmentFailurePoint) -> bool {
+        point == EnvironmentFailurePoint::BeforeDatabaseCommit
+    }
 }
 
 #[tokio::test]

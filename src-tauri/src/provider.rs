@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::environment::{EnvironmentApplication, ProviderTarget, VerifiedProviderUpdate};
 use crate::state::StateStore;
 
 pub use validation::ProviderValidator;
@@ -198,6 +199,7 @@ pub enum ProviderFailureCategory {
     ProviderNotFound,
     CurrentProviderProtected,
     SaveAndApplyRequired,
+    SaveAndApplyFailed,
     ClipboardUnavailable,
     VerificationExpired,
     StateUnavailable,
@@ -549,6 +551,73 @@ impl ProviderApplication {
             original_fingerprint,
             &candidate,
         )?;
+        self.discard_validation(validation_id);
+        Ok(summary)
+    }
+
+    pub fn save_and_apply_provider_update(
+        &self,
+        environment: &EnvironmentApplication,
+        validation_id: &str,
+        provider_id: &str,
+        name: &str,
+    ) -> Result<ProviderSummary, ProviderFailure> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(ProviderFailure::new(
+                ProviderFailureCategory::InvalidInput,
+                "provider.name_required",
+            ));
+        }
+        let candidate = self
+            .verified_candidates
+            .lock()
+            .map_err(|_| state_unavailable())?
+            .get(validation_id)
+            .cloned()
+            .ok_or_else(verification_expired)?;
+        let (original_name, original_fingerprint) = match &candidate.target {
+            ValidationTarget::ExistingProvider {
+                provider_id: target_id,
+                original_name,
+                original_fingerprint,
+            } if target_id == provider_id => (original_name.clone(), original_fingerprint.clone()),
+            _ => return Err(verification_expired()),
+        };
+        let actual_fingerprint = combination_fingerprint(
+            &candidate.evidence.normalized_base_url,
+            &candidate.input.api_key,
+            &candidate.input.default_model,
+        );
+        if actual_fingerprint != candidate.evidence.combination_fingerprint {
+            self.discard_validation(validation_id);
+            return Err(verification_expired());
+        }
+
+        let provider = ProviderTarget::new(
+            provider_id.to_owned(),
+            name.to_owned(),
+            candidate.evidence.normalized_base_url.clone(),
+            candidate.input.api_key.clone(),
+            candidate.input.default_model.clone(),
+            candidate.evidence.verified_at_epoch_seconds,
+            candidate.evidence.combination_fingerprint.clone(),
+        );
+        let update = VerifiedProviderUpdate::new(provider, original_name, original_fingerprint);
+        let snapshot = environment
+            .save_and_apply_provider_update(update)
+            .map_err(|failure| {
+                ProviderFailure::new(
+                    ProviderFailureCategory::SaveAndApplyFailed,
+                    failure.message_id,
+                )
+            })?;
+        let summary = snapshot.current_provider.ok_or_else(|| {
+            ProviderFailure::new(
+                ProviderFailureCategory::SaveAndApplyFailed,
+                "environment.state_unavailable",
+            )
+        })?;
         self.discard_validation(validation_id);
         Ok(summary)
     }

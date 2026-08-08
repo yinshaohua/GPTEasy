@@ -4,6 +4,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
+use crate::environment::{EnvironmentApplication, EnvironmentFailure, EnvironmentSnapshot};
 use crate::provider::{
     DiscoveryInput, ModelDiscovery, ProviderApiKey, ProviderApplication, ProviderFailure,
     ProviderFailureCategory, ProviderSummary, ProviderUpdateDiscoveryInput,
@@ -20,8 +21,18 @@ pub(crate) struct ProviderRuntime {
     application: ProviderApplication,
 }
 
+pub(crate) struct EnvironmentRuntime {
+    application: EnvironmentApplication,
+}
+
 impl ProviderRuntime {
     pub(crate) fn new(application: ProviderApplication) -> Self {
+        Self { application }
+    }
+}
+
+impl EnvironmentRuntime {
+    pub(crate) fn new(application: EnvironmentApplication) -> Self {
         Self { application }
     }
 }
@@ -68,6 +79,24 @@ pub(crate) fn list_providers(
     state: State<'_, ProviderRuntime>,
 ) -> Result<Vec<ProviderSummary>, ProviderFailure> {
     state.application.list_providers()
+}
+
+#[tauri::command]
+pub(crate) fn get_environment_snapshot(
+    state: State<'_, EnvironmentRuntime>,
+) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
+    state.application.inspect()
+}
+
+#[tauri::command]
+pub(crate) fn apply_environment_provider(
+    state: State<'_, EnvironmentRuntime>,
+    provider_id: String,
+    confirm_takeover: bool,
+) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
+    state
+        .application
+        .apply_provider(&provider_id, confirm_takeover)
 }
 
 #[tauri::command]
@@ -202,6 +231,22 @@ pub(crate) fn save_provider_update(
     state
         .application
         .save_provider_update(&validation_id, &provider_id, &name)
+}
+
+#[tauri::command]
+pub(crate) fn save_and_apply_provider_update(
+    provider_state: State<'_, ProviderRuntime>,
+    environment_state: State<'_, EnvironmentRuntime>,
+    validation_id: String,
+    provider_id: String,
+    name: String,
+) -> Result<ProviderSummary, ProviderFailure> {
+    provider_state.application.save_and_apply_provider_update(
+        &environment_state.application,
+        &validation_id,
+        &provider_id,
+        &name,
+    )
 }
 
 #[tauri::command]

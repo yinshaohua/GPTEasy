@@ -21,6 +21,7 @@ export type ProviderFailureCategory =
   | "provider_not_found"
   | "current_provider_protected"
   | "save_and_apply_required"
+  | "save_and_apply_failed"
   | "clipboard_unavailable"
   | "verification_expired"
   | "state_unavailable";
@@ -156,6 +157,19 @@ export function saveProviderUpdate(
 ): Promise<ProviderSummary> {
   if (isBrowserPreview()) return Promise.reject(previewFailure);
   return invoke<ProviderSummary>("save_provider_update", { validationId, providerId, name });
+}
+
+export function saveAndApplyProviderUpdate(
+  validationId: string,
+  providerId: string,
+  name: string,
+): Promise<ProviderSummary> {
+  if (isBrowserPreview()) return Promise.reject(previewFailure);
+  return invoke<ProviderSummary>("save_and_apply_provider_update", {
+    validationId,
+    providerId,
+    name,
+  });
 }
 
 export function deleteProvider(providerId: string): Promise<void> {

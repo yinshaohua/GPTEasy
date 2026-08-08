@@ -279,6 +279,82 @@ select:focus-visible {
   font-weight: 600;
 }
 
+.environment-summary.is-external {
+  color: #8a5a00;
+  background: #fff8df;
+  border-left-color: #c58a17;
+}
+
+.environment-summary.is-conflict {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-left-color: var(--danger);
+}
+
+.impact-list {
+  border-top: 1px solid var(--border);
+}
+
+.impact-row {
+  display: grid;
+  grid-template-columns: 24px minmax(130px, 28%) minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  min-height: 62px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.impact-row > svg {
+  color: var(--text-muted);
+}
+
+.impact-row div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.impact-row strong,
+.impact-row span,
+.impact-row code {
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.impact-row span,
+.impact-row code {
+  color: var(--text-muted);
+}
+
+.impact-row code {
+  font-family: "Cascadia Code", Consolas, monospace;
+}
+
+.environment-apply-row {
+  display: grid;
+  grid-template-columns: minmax(130px, 22%) minmax(220px, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.environment-apply-row label {
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.environment-apply-row select {
+  width: 100%;
+  min-width: 0;
+  min-height: 38px;
+  padding: 7px 10px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+}
+
 .blocked-state {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
@@ -687,6 +763,12 @@ select:focus-visible {
     --danger-soft: #402321;
     --focus: #58a6ff;
   }
+
+  .environment-summary.is-external {
+    color: #f0c56b;
+    background: #332b18;
+    border-left-color: #d3a23d;
+  }
 }
 
 @media (max-width: 720px) {
@@ -743,6 +825,10 @@ select:focus-visible {
   .provider-editor {
     padding-left: 0;
   }
+
+  .environment-apply-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 @media (max-width: 440px) {
@@ -764,7 +850,8 @@ select:focus-visible {
   }
 
   .model-row,
-  .validation-steps {
+  .validation-steps,
+  .impact-row {
     grid-template-columns: minmax(0, 1fr);
   }
 }
