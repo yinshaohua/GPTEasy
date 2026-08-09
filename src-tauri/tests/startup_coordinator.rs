@@ -6,6 +6,7 @@ use gpteasy_lib::codex::{
     CodexConfigStatus, CodexInspector, CredentialFileStatus, CredentialStore, LoginStatus,
     LoginStatusCommand,
 };
+use gpteasy_lib::environment::EnvironmentApplication;
 use gpteasy_lib::startup::{ApplicationMode, StartupBlockReason, StartupCoordinator};
 use gpteasy_lib::state::{StatePaths, StateStore};
 use sha2::{Digest, Sha256};
@@ -363,6 +364,47 @@ fn matching_provider_config_and_credential_evidence_is_ready() {
 
     assert_eq!(snapshot.mode, ApplicationMode::Ready);
     assert_eq!(snapshot.block_reason, None);
+}
+
+#[test]
+fn provider_startup_accepts_outside_edits_but_blocks_managed_block_drift() {
+    let app_data = TempDir::new().expect("app data");
+    let codex_home = TempDir::new().expect("codex home");
+    let store = StateStore::new(StatePaths::from_root(app_data.path()));
+    assert!(store.bootstrap().is_ready());
+    let provider_id = "9f319739-f219-48ee-be35-22e08d5402d7";
+    let connection = rusqlite::Connection::open(store.paths().database()).expect("open state");
+    connection
+        .execute(
+            "INSERT INTO providers (id, name, base_url, api_key, default_model, verified_at, verification_fingerprint) \
+             VALUES (?1, 'Provider', 'https://provider.example/v1', 'test-key', 'model', '1775606400', 'verification')",
+            [provider_id],
+        )
+        .expect("insert provider evidence");
+    EnvironmentApplication::new(store.clone(), codex_home.path())
+        .apply_provider(provider_id, true)
+        .expect("establish managed environment");
+    let config_path = codex_home.path().join("config.toml");
+    let mut outside_edit = fs::read_to_string(&config_path).expect("read managed config");
+    outside_edit.push_str("\n[projects.external]\ntrust_level = 'trusted'\n");
+    fs::write(&config_path, &outside_edit).expect("write outside edit");
+    let coordinator = StartupCoordinator::new(
+        store,
+        CodexInspector::new(codex_home.path(), login_command(0)),
+    );
+
+    let compatible = coordinator.inspect();
+    assert_eq!(compatible.mode, ApplicationMode::Ready);
+    assert_eq!(compatible.block_reason, None);
+
+    let drifted = outside_edit.replace("https://provider.example/v1", "https://drifted.example/v1");
+    fs::write(config_path, drifted).expect("write managed block drift");
+    let conflict = coordinator.inspect();
+    assert_eq!(conflict.mode, ApplicationMode::Blocked);
+    assert_eq!(
+        conflict.block_reason,
+        Some(StartupBlockReason::ManagedConfigConflict)
+    );
 }
 
 #[test]

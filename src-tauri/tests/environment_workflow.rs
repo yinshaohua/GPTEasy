@@ -1,4 +1,5 @@
 use std::fs;
+use std::path::Path;
 use std::sync::Arc;
 
 use gpteasy_lib::environment::{
@@ -8,6 +9,7 @@ use gpteasy_lib::environment::{
 use gpteasy_lib::state::{StatePaths, StateStore};
 use rusqlite::{Connection, params};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 const PROVIDER_ID: &str = "9f319739-f219-48ee-be35-22e08d5402d7";
@@ -222,6 +224,40 @@ fn renaming_the_current_provider_does_not_create_a_management_conflict() {
 }
 
 #[test]
+fn losing_the_managed_block_or_changing_its_id_is_a_conflict_after_takeover() {
+    let (temp, _, application) = fixture();
+    let codex_home = temp.path().join(".codex");
+    application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("establish managed environment");
+    let config_path = codex_home.join("config.toml");
+    let without_block = fs::read_to_string(&config_path)
+        .expect("read managed config")
+        .split("# >>> GPTEasy managed provider >>>")
+        .next()
+        .unwrap_or_default()
+        .to_owned();
+    fs::write(&config_path, without_block).expect("remove managed block externally");
+    assert_eq!(
+        application.inspect().expect("inspect missing block").state,
+        EnvironmentState::Conflict
+    );
+
+    application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("explicitly retakeover missing block");
+    let unknown_id = "924b6c4b-889c-44af-9bd3-e4892e42dac1";
+    let changed_id = fs::read_to_string(&config_path)
+        .expect("read retaken config")
+        .replace(PROVIDER_ID, unknown_id);
+    fs::write(&config_path, changed_id).expect("change managed provider id externally");
+    assert_eq!(
+        application.inspect().expect("inspect unknown id").state,
+        EnvironmentState::Conflict
+    );
+}
+
+#[test]
 fn confirmed_retakeover_repairs_a_drifted_but_well_formed_managed_block() {
     let (temp, _, application) = fixture();
     let codex_home = temp.path().join(".codex");
@@ -321,7 +357,7 @@ fn recovery_completes_the_database_commit_when_both_new_artifacts_are_present() 
     let old = application
         .apply_provider(PROVIDER_ID, true)
         .expect("apply old provider");
-    let old_fingerprints = last_applied_fingerprints(&store);
+    let old_fingerprints = artifact_fingerprints(&codex_home);
     let next_id = "924b6c4b-889c-44af-9bd3-e4892e42dac1";
     insert_provider_values(
         &store,
@@ -335,7 +371,7 @@ fn recovery_completes_the_database_commit_when_both_new_artifacts_are_present() 
     let next = application
         .apply_provider(next_id, false)
         .expect("write both new artifacts");
-    let new_fingerprints = last_applied_fingerprints(&store);
+    let new_fingerprints = artifact_fingerprints(&codex_home);
     let connection = Connection::open(store.paths().database()).expect("open state database");
     connection
         .execute(
@@ -404,15 +440,15 @@ fn recovery_completes_the_database_commit_when_both_new_artifacts_are_present() 
 }
 
 #[test]
-fn recovery_uses_the_operation_backup_to_restore_a_mixed_artifact_state() {
+fn recovery_stops_on_a_mixed_artifact_state_without_overwriting_it() {
     let (temp, store, application) = fixture();
     let codex_home = temp.path().join(".codex");
-    let old = application
+    application
         .apply_provider(PROVIDER_ID, true)
         .expect("apply old provider");
     let old_config = fs::read(codex_home.join("config.toml")).expect("read old config");
     let old_credentials = fs::read(codex_home.join("auth.json")).expect("read old credentials");
-    let old_fingerprints = last_applied_fingerprints(&store);
+    let old_fingerprints = artifact_fingerprints(&codex_home);
     let next_id = "924b6c4b-889c-44af-9bd3-e4892e42dac1";
     insert_provider_values(
         &store,
@@ -426,7 +462,7 @@ fn recovery_uses_the_operation_backup_to_restore_a_mixed_artifact_state() {
     application
         .apply_provider(next_id, false)
         .expect("apply next provider");
-    let new_fingerprints = last_applied_fingerprints(&store);
+    let new_fingerprints = artifact_fingerprints(&codex_home);
     let backup = latest_backup_path(&codex_home);
     let backup_manifest: Value = serde_json::from_slice(
         &fs::read(backup.join("manifest.json")).expect("read backup manifest"),
@@ -482,24 +518,21 @@ fn recovery_uses_the_operation_backup_to_restore_a_mixed_artifact_state() {
         .recover_pending()
         .expect("recover mixed pending switch");
 
-    assert_eq!(recovery, EnvironmentRecovery::RestoredOldState);
+    assert_eq!(recovery, EnvironmentRecovery::Conflict);
     assert_eq!(
-        fs::read(codex_home.join("config.toml")).expect("read restored config"),
-        old_config
-    );
-    assert_eq!(
-        fs::read(codex_home.join("auth.json")).expect("read restored credentials"),
+        fs::read(codex_home.join("auth.json")).expect("read mixed credentials"),
         old_credentials
     );
-    let restored = application.inspect().expect("inspect restored environment");
-    assert_eq!(restored.current_provider, old.current_provider);
-    assert!(
-        !store
-            .bootstrap()
-            .contents
-            .expect("database contents")
-            .has_pending_config_operation
+    assert_ne!(
+        fs::read(codex_home.join("config.toml")).expect("read mixed config"),
+        old_config
     );
+    let pending = store
+        .bootstrap()
+        .contents
+        .expect("database contents")
+        .has_pending_config_operation;
+    assert!(pending);
 }
 
 #[test]
@@ -591,16 +624,18 @@ fn non_string_credential_store_shape_stops_before_backup_or_write() {
     assert!(!codex_home.join(".gpteasy-backups").exists());
 }
 
-fn last_applied_fingerprints(store: &StateStore) -> (String, String) {
-    let connection = Connection::open(store.paths().database()).expect("open state database");
-    connection
-        .query_row(
-            "SELECT config_fingerprint, credentials_fingerprint
-             FROM last_applied_state WHERE singleton = 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .expect("last applied fingerprints")
+fn artifact_fingerprints(codex_home: &Path) -> (String, String) {
+    let config = fs::read(codex_home.join("config.toml")).expect("read config fingerprint input");
+    let credentials =
+        fs::read(codex_home.join("auth.json")).expect("read credentials fingerprint input");
+    let config_fingerprint = format!("{:x}", Sha256::digest(&config));
+    let mut credentials_hasher = Sha256::new();
+    credentials_hasher.update(b"file:present:");
+    credentials_hasher.update(credentials);
+    (
+        config_fingerprint,
+        format!("{:x}", credentials_hasher.finalize()),
+    )
 }
 
 fn latest_backup_path(codex_home: &std::path::Path) -> std::path::PathBuf {

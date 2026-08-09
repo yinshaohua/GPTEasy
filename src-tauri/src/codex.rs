@@ -7,6 +7,8 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use toml_edit::DocumentMut;
 
+use crate::environment::managed_config_fingerprint;
+
 #[derive(Debug, Clone)]
 pub struct CodexInspector {
     codex_home: PathBuf,
@@ -81,7 +83,7 @@ impl CodexInspector {
                 );
             }
         };
-        let fingerprint = Some(sha256_hex(&bytes));
+        let fingerprint = managed_config_fingerprint(&bytes).or_else(|| Some(sha256_hex(&bytes)));
         let document = match std::str::from_utf8(&bytes)
             .ok()
             .and_then(|text| text.parse::<DocumentMut>().ok())

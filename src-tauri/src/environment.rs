@@ -102,7 +102,6 @@ pub enum EnvironmentFailurePoint {
 pub enum EnvironmentRecovery {
     NoPendingOperation,
     KeptOldState,
-    RestoredOldState,
     CompletedNewState,
     Conflict,
 }
@@ -161,7 +160,7 @@ impl EnvironmentApplication {
             .query_row(
                 "SELECT operation_id, operation_kind, old_config_fingerprint,
                         new_config_fingerprint, old_credentials_fingerprint,
-                        new_credentials_fingerprint, backup_reference, target_snapshot_json
+                        new_credentials_fingerprint, target_snapshot_json
                  FROM pending_config_operation WHERE singleton = 1",
                 [],
                 |row| {
@@ -172,11 +171,10 @@ impl EnvironmentApplication {
                         new_config_fingerprint: row.get(3)?,
                         old_credentials_fingerprint: row.get(4)?,
                         new_credentials_fingerprint: row.get(5)?,
-                        backup_reference: row.get(6)?,
-                        provider: serde_json::from_str(&row.get::<_, String>(7)?).map_err(
+                        provider: serde_json::from_str(&row.get::<_, String>(6)?).map_err(
                             |error| {
                                 rusqlite::Error::FromSqlConversionFailure(
-                                    7,
+                                    6,
                                     rusqlite::types::Type::Text,
                                     Box::new(error),
                                 )
@@ -200,21 +198,10 @@ impl EnvironmentApplication {
             clear_pending(&connection, &pending.operation_id)?;
             return Ok(EnvironmentRecovery::KeptOldState);
         }
-        let config_is_old = current_config == pending.old_config_fingerprint;
-        let config_is_new = current_config == pending.new_config_fingerprint;
-        let credentials_is_old = current_credentials == pending.old_credentials_fingerprint;
-        let credentials_is_new = current_credentials == pending.new_credentials_fingerprint;
-        if (config_is_old && credentials_is_new) || (config_is_new && credentials_is_old) {
-            if !restore_mixed_state(&self.codex_home, &pending, &config, &credentials)? {
-                return Ok(EnvironmentRecovery::Conflict);
-            }
-            clear_pending(&connection, &pending.operation_id)?;
-            return Ok(EnvironmentRecovery::RestoredOldState);
-        }
         if current_config == pending.new_config_fingerprint
             && current_credentials == pending.new_credentials_fingerprint
         {
-            commit_recovered_state(&mut connection, &pending)?;
+            commit_recovered_state(&mut connection, &pending, &config)?;
             return Ok(EnvironmentRecovery::CompletedNewState);
         }
         Ok(EnvironmentRecovery::Conflict)
@@ -387,7 +374,6 @@ struct PendingRecovery {
     new_config_fingerprint: Option<String>,
     old_credentials_fingerprint: Option<String>,
     new_credentials_fingerprint: Option<String>,
-    backup_reference: String,
     provider: ProviderTarget,
 }
 
@@ -481,36 +467,6 @@ fn inspect_environment(
             fields: vec!["auth_mode", "OPENAI_API_KEY"],
         },
     ];
-
-    let Some(config_bytes) = config.bytes.as_deref() else {
-        return Ok(external_snapshot(impacts));
-    };
-    let config_text = std::str::from_utf8(config_bytes).map_err(|_| invalid_config())?;
-    let document = match config_text.parse::<DocumentMut>() {
-        Ok(document) => document,
-        Err(_) => {
-            return Ok(conflict_snapshot(impacts));
-        }
-    };
-    let managed = match managed_block(config_text) {
-        ManagedBlock::None => return Ok(external_snapshot(impacts)),
-        ManagedBlock::Conflict => return Ok(conflict_snapshot(impacts)),
-        ManagedBlock::Valid(block) => block,
-    };
-    let provider = match load_provider(connection, &managed.provider_id) {
-        Ok(provider) => provider,
-        Err(failure) if failure.category == EnvironmentFailureCategory::ProviderNotFound => {
-            return Ok(external_snapshot(impacts));
-        }
-        Err(failure) => return Err(failure),
-    };
-    if !managed_config_matches(&document, &provider) {
-        return Ok(conflict_snapshot(impacts));
-    }
-    if !credentials_match(&credentials, &provider.api_key)? {
-        return Ok(conflict_snapshot(impacts));
-    }
-
     let last_applied = connection
         .query_row(
             "SELECT provider_id, config_fingerprint, credentials_fingerprint
@@ -526,6 +482,50 @@ fn inspect_environment(
         )
         .optional()
         .map_err(|_| state_unavailable())?;
+
+    let Some(config_bytes) = config.bytes.as_deref() else {
+        return Ok(if last_applied.is_some() {
+            conflict_snapshot(impacts)
+        } else {
+            external_snapshot(impacts)
+        });
+    };
+    let config_text = std::str::from_utf8(config_bytes).map_err(|_| invalid_config())?;
+    let document = match config_text.parse::<DocumentMut>() {
+        Ok(document) => document,
+        Err(_) => {
+            return Ok(conflict_snapshot(impacts));
+        }
+    };
+    let managed = match managed_block(config_text) {
+        ManagedBlock::None => {
+            return Ok(if last_applied.is_some() {
+                conflict_snapshot(impacts)
+            } else {
+                external_snapshot(impacts)
+            });
+        }
+        ManagedBlock::Conflict => return Ok(conflict_snapshot(impacts)),
+        ManagedBlock::Valid(block) => block,
+    };
+    let provider = match load_provider(connection, &managed.provider_id) {
+        Ok(provider) => provider,
+        Err(failure) if failure.category == EnvironmentFailureCategory::ProviderNotFound => {
+            return Ok(if last_applied.is_some() {
+                conflict_snapshot(impacts)
+            } else {
+                external_snapshot(impacts)
+            });
+        }
+        Err(failure) => return Err(failure),
+    };
+    if !managed_config_matches(&document, &provider) {
+        return Ok(conflict_snapshot(impacts));
+    }
+    if !credentials_match(&credentials, &provider.api_key)? {
+        return Ok(conflict_snapshot(impacts));
+    }
+
     let Some((applied_provider, _applied_config, _applied_credentials)) = last_applied else {
         return Ok(external_snapshot(impacts));
     };
@@ -842,7 +842,8 @@ fn commit_applied_state(
                 applied_at = excluded.applied_at",
             params![
                 prepared.provider.id,
-                prepared.config.new_fingerprint,
+                managed_config_fingerprint(&prepared.config.new_bytes)
+                    .ok_or_else(state_unavailable)?,
                 prepared.credentials.new_fingerprint,
                 epoch_seconds().to_string(),
             ],
@@ -867,115 +868,15 @@ fn clear_pending(connection: &Connection, operation_id: &str) -> Result<(), Envi
         .map_err(|_| state_unavailable())
 }
 
-fn restore_mixed_state(
-    codex_home: &Path,
-    pending: &PendingRecovery,
-    current_config: &ArtifactBytes,
-    current_credentials: &ArtifactBytes,
-) -> Result<bool, EnvironmentFailure> {
-    let backup_root = codex_home.join(".gpteasy-backups");
-    let backup = PathBuf::from(&pending.backup_reference);
-    if !backup.starts_with(&backup_root) {
-        return Ok(false);
-    }
-    let manifest = match fs::read(backup.join("manifest.json")) {
-        Ok(bytes) => match serde_json::from_slice::<BackupManifest>(&bytes) {
-            Ok(manifest) => manifest,
-            Err(_) => return Ok(false),
-        },
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(_) => return Err(backup_failed()),
-    };
-    if manifest.operation_id != pending.operation_id
-        || manifest.old_config_fingerprint != pending.old_config_fingerprint
-        || manifest.old_credentials_fingerprint != pending.old_credentials_fingerprint
-    {
-        return Ok(false);
-    }
-    let old_config = read_backup_artifact(&backup.join("config.toml"), manifest.config_existed)?;
-    let old_credentials =
-        read_backup_artifact(&backup.join("auth.json"), manifest.credentials_existed)?;
-    if old_config.fingerprint(ArtifactKind::Config) != pending.old_config_fingerprint
-        || old_credentials.fingerprint(ArtifactKind::Credentials)
-            != pending.old_credentials_fingerprint
-    {
-        return Ok(false);
-    }
-
-    let config_recovery = recovery_artifact(
-        codex_home.join("config.toml"),
-        current_config,
-        old_config,
-        ArtifactKind::Config,
-        &pending.old_config_fingerprint,
-        &pending.new_config_fingerprint,
-    );
-    let credentials_recovery = recovery_artifact(
-        codex_home.join("auth.json"),
-        current_credentials,
-        old_credentials,
-        ArtifactKind::Credentials,
-        &pending.old_credentials_fingerprint,
-        &pending.new_credentials_fingerprint,
-    );
-    if config_recovery.is_none() && credentials_recovery.is_none() {
-        return Ok(false);
-    }
-    if let Some(recovery) = credentials_recovery {
-        recovery.restore()?;
-    }
-    if let Some(recovery) = config_recovery {
-        recovery.restore()?;
-    }
-    let restored_config = read_artifact(&codex_home.join("config.toml"))?;
-    let restored_credentials = read_artifact(&codex_home.join("auth.json"))?;
-    Ok(
-        restored_config.fingerprint(ArtifactKind::Config) == pending.old_config_fingerprint
-            && restored_credentials.fingerprint(ArtifactKind::Credentials)
-                == pending.old_credentials_fingerprint,
-    )
-}
-
-fn read_backup_artifact(path: &Path, existed: bool) -> Result<ArtifactBytes, EnvironmentFailure> {
-    match (existed, fs::read(path)) {
-        (true, Ok(bytes)) => Ok(ArtifactBytes { bytes: Some(bytes) }),
-        (true, Err(_)) => Err(backup_failed()),
-        (false, Ok(_)) => Err(backup_failed()),
-        (false, Err(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-            Ok(ArtifactBytes { bytes: None })
-        }
-        (false, Err(_)) => Err(backup_failed()),
-    }
-}
-
-fn recovery_artifact(
-    path: PathBuf,
-    current: &ArtifactBytes,
-    old: ArtifactBytes,
-    kind: ArtifactKind,
-    old_fingerprint: &Option<String>,
-    new_fingerprint: &Option<String>,
-) -> Option<PreparedArtifact> {
-    if current.fingerprint(kind) != *new_fingerprint || old.fingerprint(kind) != *old_fingerprint {
-        return None;
-    }
-    let new_bytes = current.bytes.clone()?;
-    Some(PreparedArtifact {
-        path,
-        old,
-        new_bytes,
-        old_fingerprint: old_fingerprint.clone(),
-        new_fingerprint: new_fingerprint.clone()?,
-    })
-}
-
 fn commit_recovered_state(
     connection: &mut Connection,
     pending: &PendingRecovery,
+    config: &ArtifactBytes,
 ) -> Result<(), EnvironmentFailure> {
-    let config_fingerprint = pending
-        .new_config_fingerprint
+    let config_fingerprint = config
+        .bytes
         .as_deref()
+        .and_then(managed_config_fingerprint)
         .ok_or_else(state_unavailable)?;
     let credentials_fingerprint = pending
         .new_credentials_fingerprint
@@ -1037,14 +938,14 @@ fn commit_recovered_state(
     transaction.commit().map_err(|_| state_unavailable())
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct BackupManifest {
-    operation_id: String,
+struct BackupManifest<'a> {
+    operation_id: &'a str,
     config_existed: bool,
     credentials_existed: bool,
-    old_config_fingerprint: Option<String>,
-    old_credentials_fingerprint: Option<String>,
+    old_config_fingerprint: &'a Option<String>,
+    old_credentials_fingerprint: &'a Option<String>,
 }
 
 fn create_backup(
@@ -1066,11 +967,11 @@ fn create_backup(
             write_new_synced(&operation.join("auth.json"), bytes).map_err(|_| backup_failed())?;
         }
         let manifest = serde_json::to_vec_pretty(&BackupManifest {
-            operation_id: prepared.operation_id.clone(),
+            operation_id: &prepared.operation_id,
             config_existed: prepared.config.old.bytes.is_some(),
             credentials_existed: prepared.credentials.old.bytes.is_some(),
-            old_config_fingerprint: prepared.config.old_fingerprint.clone(),
-            old_credentials_fingerprint: prepared.credentials.old_fingerprint.clone(),
+            old_config_fingerprint: &prepared.config.old_fingerprint,
+            old_credentials_fingerprint: &prepared.credentials.old_fingerprint,
         })
         .map_err(|_| backup_failed())?;
         write_new_synced(&operation.join("manifest.json"), &manifest)
@@ -1287,6 +1188,17 @@ fn managed_block(text: &str) -> ManagedBlock {
         }
         _ => ManagedBlock::Conflict,
     }
+}
+
+pub(crate) fn managed_config_fingerprint(bytes: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let ManagedBlock::Valid(block) = managed_block(text) else {
+        return None;
+    };
+    Some(artifact_hash(
+        ArtifactKind::Config,
+        text.as_bytes().get(block.start..block.end)?,
+    ))
 }
 
 fn is_inside_multiline_string(text: &str, target: usize) -> bool {
