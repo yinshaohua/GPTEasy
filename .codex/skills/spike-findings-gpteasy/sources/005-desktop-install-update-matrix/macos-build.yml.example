@@ -21,9 +21,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - working-directory: .planning/spikes/005-desktop-install-update-matrix
+      - working-directory: .codex/skills/spike-findings-gpteasy/sources/005-desktop-install-update-matrix
         run: npm install
-      - working-directory: .planning/spikes/005-desktop-install-update-matrix
+      - working-directory: .codex/skills/spike-findings-gpteasy/sources/005-desktop-install-update-matrix
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}

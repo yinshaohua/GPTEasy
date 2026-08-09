@@ -72,7 +72,7 @@ model_providers.gpteasy.base_url = "https://provider.example/v1"
 ## How to Run
 
 ```powershell
-.\.planning\spikes\008-external-config-reconciliation\run.ps1
+.\.codex\skills\spike-findings-gpteasy\sources\008-external-config-reconciliation\run.ps1
 ```
 
 `run.ps1` 会从当前 npm Codex 安装中定位原生 `codex.exe`，所有 app-server 场景使用隔离 `CODEX_HOME` 和假凭据。

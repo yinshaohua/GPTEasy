@@ -58,14 +58,14 @@ SHA-256("gpteasy-provider-combination-v1\0" + base_url + "\0" + model + "\0" + a
 ### 完整自动化矩阵和真实供应商
 
 ```powershell
-.\.planning\spikes\012-desktop-provider-switch-e2e\run.ps1
+.\.codex\skills\spike-findings-gpteasy\sources\012-desktop-provider-switch-e2e\run.ps1
 ```
 
 执行：
 
 1. Rust 单元测试。
 2. 15 项确定性端到端矩阵。
-3. 若 `.planning/spikes/.secrets/provider.json` 存在且被 Git 忽略，在同一 Rust 进程运行真实供应商模型发现、Responses SSE、strict function call 和 nonce 回传。
+3. 若 `.codex/skills/spike-findings-gpteasy/.secrets/provider.json` 存在且被 Git 忽略，在同一 Rust 进程运行真实供应商模型发现、Responses SSE、strict function call 和 nonce 回传。
 4. 用真实验证结果写入隔离 Codex 配置和 SQLite。
 5. 调用原生 `codex app-server config/read(cwd, includeLayers=true)` 获取有效模型、provider 和来源。
 6. 扫描当前真实桌面宿主、bundled Codex 和本机 CLI，并把结果送入“稍后重启”边界。
@@ -75,13 +75,13 @@ SHA-256("gpteasy-provider-combination-v1\0" + base_url + "\0" + model + "\0" + a
 跳过真实网络：
 
 ```powershell
-.\.planning\spikes\012-desktop-provider-switch-e2e\run.ps1 -SkipLive
+.\.codex\skills\spike-findings-gpteasy\sources\012-desktop-provider-switch-e2e\run.ps1 -SkipLive
 ```
 
 ### 交互式 Tauri UI
 
 ```powershell
-cd .planning\spikes\012-desktop-provider-switch-e2e
+cd .codex\skills\spike-findings-gpteasy\sources\012-desktop-provider-switch-e2e
 npm run tauri dev
 ```
 

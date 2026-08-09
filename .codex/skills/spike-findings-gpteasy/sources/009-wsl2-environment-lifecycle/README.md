@@ -57,7 +57,7 @@ WSL 内已有 Codex 进程时，只进入待重启，不调用 kill 或 terminat
 ## How to Run
 
 ```powershell
-.\.planning\spikes\009-wsl2-environment-lifecycle\run.ps1
+.\.codex\skills\spike-findings-gpteasy\sources\009-wsl2-environment-lifecycle\run.ps1
 ```
 
 该脚本先执行真实 Windows 只读探针，再运行路径受限 fixture。不会进入、启动或终止真实发行版。

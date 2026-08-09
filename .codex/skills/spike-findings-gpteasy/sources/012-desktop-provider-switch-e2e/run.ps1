@@ -8,7 +8,8 @@ $spike = Split-Path -Parent $MyInvocation.MyCommand.Path
 $run = Join-Path $spike '.run'
 $work = Join-Path $run 'workspace'
 $evidence = Join-Path $run 'evidence'
-$secretPath = Join-Path (Split-Path -Parent $spike) '.secrets/provider.json'
+$skillRoot = Split-Path -Parent (Split-Path -Parent $spike)
+$secretPath = Join-Path $skillRoot '.secrets/provider.json'
 $env:HTTP_PROXY = 'http://127.0.0.1:7897'
 $env:HTTPS_PROXY = 'http://127.0.0.1:7897'
 

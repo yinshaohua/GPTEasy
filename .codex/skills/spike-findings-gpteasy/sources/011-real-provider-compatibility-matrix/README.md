@@ -64,12 +64,12 @@ deterministic 模式使用短截止时间：
 默认位置：
 
 ```text
-.planning/spikes/.secrets/provider.json
+.codex/skills/spike-findings-gpteasy/.secrets/provider.json
 ```
 
 保护规则：
 
-1. `.planning/spikes/.gitignore` 忽略整个 `.secrets/`。
+1. `.gitignore` 忽略整个 `.secrets/`。
 2. PowerShell 和 Rust 两层都执行 `git check-ignore`。
 3. 若项目内文件未被 Git 忽略，验证器拒绝读取。
 4. Key 只从 JSON 读入当前 Rust 进程内存，不进入命令行或环境变量。
@@ -87,16 +87,16 @@ deterministic 模式使用短截止时间：
 }
 ```
 
-保存到 `.planning/spikes/.secrets/provider.json`，然后执行：
+保存到 `.codex/skills/spike-findings-gpteasy/.secrets/provider.json`，然后执行：
 
 ```powershell
-.\.planning\spikes\011-real-provider-compatibility-matrix\run.ps1
+.\.codex\skills\spike-findings-gpteasy\sources\011-real-provider-compatibility-matrix\run.ps1
 ```
 
 只运行 deterministic 矩阵：
 
 ```powershell
-.\.planning\spikes\011-real-provider-compatibility-matrix\run.ps1 -SkipLive
+.\.codex\skills\spike-findings-gpteasy\sources\011-real-provider-compatibility-matrix\run.ps1 -SkipLive
 ```
 
 ## What to Expect
@@ -149,7 +149,7 @@ deterministic 模式使用短截止时间：
 5. **blocking reqwest 没有独立 read timeout builder**：实测 0.12 与 0.13 blocking API 后，改用 reader thread + channel 等待，成功区分首事件、空闲和 overall。
 6. **429 是独立产品状态**：限流不能归到认证或一般协议错误；应保留脱敏 `Retry-After` 供 UI 告知用户何时重试。
 7. **日志不能保存 body excerpt**：兼容供应商的错误正文可能回显输入或服务细节。本 Spike 移除了 Spike 002 的 200 字符摘录，只记录长度。
-8. **项目本地秘密文件更适合临时 Spike**：用户选择把凭据放到可发现、易删除的 `.planning/spikes/.secrets/`，但运行前必须验证 Git ignore，而不能只依赖口头约定。
+8. **项目本地秘密文件更适合临时 Spike**：用户选择把凭据放到可发现、易删除的 `.codex/skills/spike-findings-gpteasy/.secrets/`，但运行前必须验证 Git ignore，而不能只依赖口头约定。
 9. **泄漏扫描是可执行门禁**：真实验证后扫描所有 live 产物，确认 Key 未出现；这比人工查看日志更可靠。
 
 ## Results

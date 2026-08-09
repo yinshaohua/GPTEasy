@@ -51,7 +51,7 @@ tags: [wsl2, windows, linux, credential, config, lifecycle, integration]
 ## How to Run
 
 ```powershell
-.\.planning\spikes\013-wsl2-host-guest-switch-transaction\run.ps1
+.\.codex\skills\spike-findings-gpteasy\sources\013-wsl2-host-guest-switch-transaction\run.ps1
 ```
 
 运行脚本会：
@@ -67,7 +67,7 @@ tags: [wsl2, windows, linux, credential, config, lifecycle, integration]
 默认会注销测试发行版。调试时可使用：
 
 ```powershell
-.\.planning\spikes\013-wsl2-host-guest-switch-transaction\run.ps1 -KeepDistro
+.\.codex\skills\spike-findings-gpteasy\sources\013-wsl2-host-guest-switch-transaction\run.ps1 -KeepDistro
 ```
 
 代码只接受精确的 `GPTEasy-Spike-013` 名称；不会对其他发行版执行写入或注销。

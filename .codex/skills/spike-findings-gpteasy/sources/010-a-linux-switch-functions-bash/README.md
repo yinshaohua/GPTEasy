@@ -38,7 +38,7 @@ tags: [bash, linux, shell, managed-block, backup, comparison]
 ## How to Run
 
 ```powershell
-.\.planning\spikes\010-a-linux-switch-functions-bash\run.ps1
+.\.codex\skills\spike-findings-gpteasy\sources\010-a-linux-switch-functions-bash\run.ps1
 ```
 
 若本地 `.run/` 中没有 Bash 4.4，脚本会下载 GNU Bash 4.4 源码并只安装到 Spike 的 `.run/bash-4.4-install/`，不会修改 WSL 系统。

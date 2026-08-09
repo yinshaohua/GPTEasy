@@ -1,5 +1,0 @@
-.run/
-node_modules/
-package-lock.json
-src-tauri/target/
-src-tauri/Cargo.lock

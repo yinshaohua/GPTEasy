@@ -36,7 +36,7 @@ Spike sessions wrapped: 2026-08-05（001–013、017）
 - WSL2 首版只管理发行版默认用户的 Codex 配置，不主动终止其中运行的 Codex。
 - Linux 导出物分别支持 Bash 4+ 与 Zsh 5+，不依赖 Python、Node.js、第三方解析器或 GPTEasy 可执行文件。
 - Linux 切换脚本 source 时不得修改配置；只有用户调用交互式 function 并选择供应商后才写入。
-- 真实供应商凭据只从 Git 忽略的 `.planning/spikes/.secrets/provider.json` 读取，不进入命令行、日志、诊断或 Git。
+- 真实供应商凭据只从 Git 忽略的 `.codex/skills/spike-findings-gpteasy/.secrets/provider.json` 读取，不进入命令行、日志、诊断或 Git。
 </requirements>
 
 <findings_index>

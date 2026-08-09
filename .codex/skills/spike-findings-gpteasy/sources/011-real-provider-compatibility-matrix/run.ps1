@@ -107,8 +107,8 @@ $liveSummary = [ordered]@{
 }
 
 if (-not $SkipLive) {
-    $spikesRoot = Split-Path -Parent $root
-    $secret = Join-Path $spikesRoot '.secrets\provider.json'
+    $skillRoot = Split-Path -Parent (Split-Path -Parent $root)
+    $secret = Join-Path $skillRoot '.secrets\provider.json'
     if (-not (Test-Path -LiteralPath $secret -PathType Leaf)) {
         throw "缺少真实供应商文件：$secret"
     }

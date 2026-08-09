@@ -1,6 +1,6 @@
 # Architecture Decisions
 
-ADR 记录难以逆转且有真实取舍的决定。重建遵循 ADR-0009 的“证据继承、决策重审”：旧 Spike 可以作为事实证据，但只有当前 ADR、`CONTEXT.md`、`docs/ui/UI-SPEC.md` 和活动 GSD 规划定义实现范围。
+ADR 记录难以逆转且有真实取舍的决定。重建遵循 ADR-0009 的“证据继承、决策重审”：旧 Spike 可以作为事实证据，但只有当前 ADR、`CONTEXT.md`、`docs/ui/UI-SPEC.md`、GitHub Issues 和 grilling 结论定义实现范围。
 
 ## Current Baseline
 
@@ -15,4 +15,4 @@ ADR 记录难以逆转且有真实取舍的决定。重建遵循 ADR-0009 的“
 - ADR-0001 已被 ADR-0013 取代。
 - ADR-0003 的 Linux function 属于后续候选，不进入当前路线图。
 - ADR-0008 已被 ADR-0011 取代。
-- `.planning/archive/pre-rebuild-2026-08-07/` 保存旧 GSD 研究和阶段执行记录，只作证据，不表示完成状态。
+- 旧 GSD 管理文件已删除；当前代码曾交付的能力摘要见 [`docs/archive/implemented-features-2026-08-09.md`](../archive/implemented-features-2026-08-09.md)。

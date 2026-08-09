@@ -57,8 +57,8 @@ tags: [codex, config, windows, macos, desktop, cli]
 在项目根目录执行：
 
 ```powershell
-.\.planning\spikes\001-codex-native-config-contract\inspect-windows.ps1
-.\.planning\spikes\001-codex-native-config-contract\run.ps1
+.\.codex\skills\spike-findings-gpteasy\sources\001-codex-native-config-contract\inspect-windows.ps1
+.\.codex\skills\spike-findings-gpteasy\sources\001-codex-native-config-contract\run.ps1
 ```
 
 `run.ps1` 会：
@@ -71,8 +71,8 @@ tags: [codex, config, windows, macos, desktop, cli]
 ### macOS
 
 ```bash
-chmod +x .planning/spikes/001-codex-native-config-contract/inspect-macos.sh
-./.planning/spikes/001-codex-native-config-contract/inspect-macos.sh
+chmod +x .codex/skills/spike-findings-gpteasy/sources/001-codex-native-config-contract/inspect-macos.sh
+./.codex/skills/spike-findings-gpteasy/sources/001-codex-native-config-contract/inspect-macos.sh
 ```
 
 该脚本只生成路径、架构、CLI 版本和进程命令行摘要，不修改配置。

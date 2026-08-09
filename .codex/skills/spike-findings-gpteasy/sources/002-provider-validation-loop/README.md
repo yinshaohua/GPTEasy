@@ -56,16 +56,16 @@ tags: [responses-api, sse, tools, provider, validation]
 ### 完整场景矩阵
 
 ```powershell
-.\.planning\spikes\002-provider-validation-loop\run.ps1
+.\.codex\skills\spike-findings-gpteasy\sources\002-provider-validation-loop\run.ps1
 ```
 
 ### 验证真实供应商
 
 ```powershell
 $env:GPTEASY_PROVIDER_KEY = '<API Key>'
-cargo run --manifest-path .planning/spikes/002-provider-validation-loop/Cargo.toml -- `
+cargo run --manifest-path .codex/skills/spike-findings-gpteasy/sources/002-provider-validation-loop/Cargo.toml -- `
   validate 'https://provider.example/v1' 'provider-model-id' `
-  '.planning/spikes/002-provider-validation-loop/.run/live-provider.jsonl'
+  '.codex/skills/spike-findings-gpteasy/sources/002-provider-validation-loop/.run/live-provider.jsonl'
 Remove-Item Env:GPTEASY_PROVIDER_KEY
 ```
 

@@ -43,14 +43,14 @@ model_providers.gpteasy.experimental_bearer_token = "..."
 ## How to Run
 
 ```powershell
-.\.planning\spikes\003-b-managed-block-edit\run.ps1
+.\.codex\skills\spike-findings-gpteasy\sources\003-b-managed-block-edit\run.ps1
 ```
 
 macOS 两种目标的编译检查：
 
 ```powershell
-cargo check --manifest-path .planning/spikes/003-b-managed-block-edit/Cargo.toml --target x86_64-apple-darwin
-cargo check --manifest-path .planning/spikes/003-b-managed-block-edit/Cargo.toml --target aarch64-apple-darwin
+cargo check --manifest-path .codex/skills/spike-findings-gpteasy/sources/003-b-managed-block-edit/Cargo.toml --target x86_64-apple-darwin
+cargo check --manifest-path .codex/skills/spike-findings-gpteasy/sources/003-b-managed-block-edit/Cargo.toml --target aarch64-apple-darwin
 ```
 
 ## What to Expect

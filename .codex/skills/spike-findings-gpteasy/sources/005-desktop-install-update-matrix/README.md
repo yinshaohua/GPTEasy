@@ -44,7 +44,7 @@ tags: [tauri, installer, updater, windows, macos]
 ### 构建 Windows NSIS 与 updater 签名
 
 ```powershell
-.\.planning\spikes\005-desktop-install-update-matrix\run-build.ps1
+.\.codex\skills\spike-findings-gpteasy\sources\005-desktop-install-update-matrix\run-build.ps1
 ```
 
 脚本会：
@@ -58,7 +58,7 @@ tags: [tauri, installer, updater, windows, macos]
 ### 安装、验证并卸载
 
 ```powershell
-.\.planning\spikes\005-desktop-install-update-matrix\verify-current-user-install.ps1
+.\.codex\skills\spike-findings-gpteasy\sources\005-desktop-install-update-matrix\verify-current-user-install.ps1
 ```
 
 测试静默安装唯一标识的 Spike 应用，确认安装位置位于当前用户 `%LOCALAPPDATA%`，随后调用其卸载程序清理。
@@ -66,7 +66,7 @@ tags: [tauri, installer, updater, windows, macos]
 ### 生成 updater manifest
 
 ```powershell
-.\.planning\spikes\005-desktop-install-update-matrix\make-update-manifest.ps1
+.\.codex\skills\spike-findings-gpteasy\sources\005-desktop-install-update-matrix\make-update-manifest.ps1
 ```
 
 ### macOS CI 模板

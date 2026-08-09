@@ -49,7 +49,7 @@ SQLite 保证数据库自身的原子提交，但不能与外部 TOML 文件和�
 ## How to Run
 
 ```powershell
-.\.planning\spikes\007-provider-switch-saga\run.ps1
+.\.codex\skills\spike-findings-gpteasy\sources\007-provider-switch-saga\run.ps1
 ```
 
 ## What to Expect

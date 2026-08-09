@@ -22,12 +22,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - working-directory: .planning/spikes/017-macos-real-host-contract
+      - working-directory: .codex/skills/spike-findings-gpteasy/sources/017-macos-real-host-contract
         run: npm install
-      - working-directory: .planning/spikes/017-macos-real-host-contract
+      - working-directory: .codex/skills/spike-findings-gpteasy/sources/017-macos-real-host-contract
         run: npm run tauri build -- --target ${{ matrix.target }} --bundles app
       - name: Inspect app metadata and signature
-        working-directory: .planning/spikes/017-macos-real-host-contract
+        working-directory: .codex/skills/spike-findings-gpteasy/sources/017-macos-real-host-contract
         shell: zsh {0}
         run: |
           app=$(find src-tauri/target -type d -path '*/bundle/macos/GPTEasy Spike 017.app' -print -quit)

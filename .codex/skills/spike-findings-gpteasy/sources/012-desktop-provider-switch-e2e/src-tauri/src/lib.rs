@@ -77,7 +77,7 @@ async fn run_demo(
                 let secret_path =
                     find_project_secret(&std::env::current_dir().map_err(|e| e.to_string())?)
                         .ok_or_else(|| {
-                            "未找到 .planning/spikes/.secrets/provider.json".to_string()
+                            "未找到 .codex/skills/spike-findings-gpteasy/.secrets/provider.json".to_string()
                         })?;
                 let input = load_secret(&secret_path).map_err(|error| error.to_string())?;
                 validation::validate_live(input).map_err(|error| error.to_string())?
@@ -127,7 +127,7 @@ fn export_latest_report(state: State<'_, UiState>) -> Result<serde_json::Value, 
 
 fn find_project_secret(start: &Path) -> Option<PathBuf> {
     for ancestor in start.ancestors() {
-        let candidate = ancestor.join(".planning/spikes/.secrets/provider.json");
+        let candidate = ancestor.join(".codex/skills/spike-findings-gpteasy/.secrets/provider.json");
         if candidate.exists() {
             return Some(candidate);
         }

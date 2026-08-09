@@ -37,7 +37,7 @@ tags: [zsh, linux, shell, managed-block, backup, comparison]
 ## How to Run
 
 ```powershell
-.\.planning\spikes\010-b-linux-switch-functions-zsh\run.ps1
+.\.codex\skills\spike-findings-gpteasy\sources\010-b-linux-switch-functions-zsh\run.ps1
 ```
 
 当前 Ubuntu WSL 未安装系统 Zsh。运行脚本会用 `apt download` 获取 Ubuntu Zsh 5.9 包并只解压到 `.run/zsh-root/`，不会执行系统安装或要求 root。

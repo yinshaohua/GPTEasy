@@ -54,7 +54,7 @@ Microsoft 当前文档将 `REPLACEFILE_WRITE_THROUGH` 标记为“不支持”�
 ## How to Run
 
 ```powershell
-.\.planning\spikes\006-first-takeover-managed-block-transaction\run.ps1
+.\.codex\skills\spike-findings-gpteasy\sources\006-first-takeover-managed-block-transaction\run.ps1
 ```
 
 ## What to Expect

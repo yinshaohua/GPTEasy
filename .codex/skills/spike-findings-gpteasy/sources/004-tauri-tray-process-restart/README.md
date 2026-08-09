@@ -46,8 +46,8 @@ tags: [tauri, tray, process, restart, windows, macos]
 ### 自动化进程与状态机矩阵
 
 ```powershell
-.\.planning\spikes\004-tauri-tray-process-restart\run-process-tests.ps1
-.\.planning\spikes\004-tauri-tray-process-restart\run-tauri-smoke.ps1
+.\.codex\skills\spike-findings-gpteasy\sources\004-tauri-tray-process-restart\run-process-tests.ps1
+.\.codex\skills\spike-findings-gpteasy\sources\004-tauri-tray-process-restart\run-tauri-smoke.ps1
 ```
 
 测试使用自己编译的 fixture `ChatGPT.exe` 和 `codex.exe`，只终止 `.run/` 下的 fixture，不会终止真实 Codex。
@@ -55,7 +55,7 @@ tags: [tauri, tray, process, restart, windows, macos]
 ### 交互式体验
 
 ```powershell
-cd .planning/spikes/004-tauri-tray-process-restart
+cd .codex/skills/spike-findings-gpteasy/sources/004-tauri-tray-process-restart
 npm install
 npm run tauri dev
 ```

@@ -52,7 +52,7 @@ tags: [macos, tauri, codex, process, install, updater, integration, live]
 ### 当前 Windows 主机：契约和构建门禁
 
 ```powershell
-.\.planning\spikes\017-macos-real-host-contract\run.ps1
+.\.codex\skills\spike-findings-gpteasy\sources\017-macos-real-host-contract\run.ps1
 ```
 
 执行：
@@ -64,8 +64,8 @@ tags: [macos, tauri, codex, process, install, updater, integration, live]
 ### 真实 macOS 14+
 
 ```zsh
-chmod +x .planning/spikes/017-macos-real-host-contract/run-macos.sh
-./.planning/spikes/017-macos-real-host-contract/run-macos.sh
+chmod +x .codex/skills/spike-findings-gpteasy/sources/017-macos-real-host-contract/run-macos.sh
+./.codex/skills/spike-findings-gpteasy/sources/017-macos-real-host-contract/run-macos.sh
 ```
 
 脚本会：
