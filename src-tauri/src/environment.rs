@@ -136,7 +136,7 @@ pub struct EnvironmentFailure {
 }
 
 impl EnvironmentFailure {
-    fn new(category: EnvironmentFailureCategory, message_id: &'static str) -> Self {
+    pub(crate) fn new(category: EnvironmentFailureCategory, message_id: &'static str) -> Self {
         Self {
             category,
             message_id,

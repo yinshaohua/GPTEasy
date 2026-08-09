@@ -1,10 +1,12 @@
 use std::sync::Mutex;
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
-use crate::environment::{EnvironmentApplication, EnvironmentFailure, EnvironmentSnapshot};
+use crate::environment::{
+    EnvironmentApplication, EnvironmentFailure, EnvironmentFailureCategory, EnvironmentSnapshot,
+};
 use crate::provider::{
     DiscoveryInput, ModelDiscovery, ProviderApiKey, ProviderApplication, ProviderFailure,
     ProviderFailureCategory, ProviderSummary, ProviderUpdateDiscoveryInput,
@@ -104,51 +106,65 @@ pub(crate) fn list_providers(
 }
 
 #[tauri::command]
-pub(crate) fn get_environment_snapshot(
+pub(crate) async fn get_environment_snapshot(
     state: State<'_, EnvironmentRuntime>,
 ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
-    state.application.inspect()
+    let application = state.application.clone();
+    tauri::async_runtime::spawn_blocking(move || application.inspect())
+        .await
+        .map_err(|_| environment_task_failed())?
 }
 
 #[tauri::command]
-pub(crate) fn apply_environment_provider(
+pub(crate) async fn apply_environment_provider(
     app: AppHandle,
     state: State<'_, EnvironmentRuntime>,
     provider_id: String,
     confirm_switch_risk: bool,
     expected_revision: String,
 ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
-    let result = state.application.apply_provider_at_revision(
-        &provider_id,
-        confirm_switch_risk,
-        &expected_revision,
-    );
+    let application = state.application.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        application.apply_provider_at_revision(
+            &provider_id,
+            confirm_switch_risk,
+            &expected_revision,
+        )
+    })
+    .await
+    .map_err(|_| environment_task_failed())?;
     refresh_environment_tray_after(&app, result)
 }
 
 #[tauri::command]
-pub(crate) fn restore_last_environment_config(
+pub(crate) async fn restore_last_environment_config(
     app: AppHandle,
     state: State<'_, EnvironmentRuntime>,
     confirm_restore: bool,
     expected_revision: String,
 ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
-    let result = state
-        .application
-        .restore_last_config(confirm_restore, &expected_revision);
+    let application = state.application.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        application.restore_last_config(confirm_restore, &expected_revision)
+    })
+    .await
+    .map_err(|_| environment_task_failed())?;
     refresh_environment_tray_after(&app, result)
 }
 
 #[tauri::command]
-pub(crate) fn switch_to_openai_login(
+pub(crate) async fn switch_to_openai_login(
     app: AppHandle,
     state: State<'_, EnvironmentRuntime>,
     confirm_switch: bool,
     expected_revision: String,
 ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
-    let result = state
-        .application
-        .switch_to_openai_login(confirm_switch, &expected_revision);
+    let application = state.application.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        application.switch_to_openai_login(confirm_switch, &expected_revision)
+    })
+    .await
+    .map_err(|_| environment_task_failed())?;
     refresh_environment_tray_after(&app, result)
 }
 
@@ -293,22 +309,32 @@ pub(crate) fn save_provider_update(
 }
 
 #[tauri::command]
-pub(crate) fn save_and_apply_provider_update(
+pub(crate) async fn save_and_apply_provider_update(
     app: AppHandle,
-    provider_state: State<'_, ProviderRuntime>,
-    environment_state: State<'_, EnvironmentRuntime>,
     validation_id: String,
     provider_id: String,
     name: String,
     confirm_consumer_risk: bool,
 ) -> Result<ProviderSummary, ProviderFailure> {
-    let result = provider_state.application.save_and_apply_provider_update(
-        &environment_state.application,
-        &validation_id,
-        &provider_id,
-        &name,
-        confirm_consumer_risk,
-    );
+    let task_app = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let provider_state = task_app.state::<ProviderRuntime>();
+        let environment_state = task_app.state::<EnvironmentRuntime>();
+        provider_state.application.save_and_apply_provider_update(
+            &environment_state.application,
+            &validation_id,
+            &provider_id,
+            &name,
+            confirm_consumer_risk,
+        )
+    })
+    .await
+    .map_err(|_| {
+        ProviderFailure::new(
+            ProviderFailureCategory::StateUnavailable,
+            "provider.state_unavailable",
+        )
+    })?;
     match result {
         Ok(applied) => {
             let _ = tray::refresh_with_snapshot(&app, &applied.environment);
@@ -374,4 +400,11 @@ fn refresh_environment_tray_after(
         let _ = tray::refresh_with_snapshot(app, snapshot);
     }
     result
+}
+
+fn environment_task_failed() -> EnvironmentFailure {
+    EnvironmentFailure::new(
+        EnvironmentFailureCategory::StateUnavailable,
+        "environment.state_unavailable",
+    )
 }
