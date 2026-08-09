@@ -1268,20 +1268,7 @@ fn managed_block_has_expected_shape(block: &str, provider_id: &str) -> bool {
     let Some(provider) = providers.get(provider_id).and_then(|item| item.as_table()) else {
         return false;
     };
-    provider.len() == 4
-        && provider
-            .get("name")
-            .and_then(|item| item.as_str())
-            .is_some()
-        && provider
-            .get("base_url")
-            .and_then(|item| item.as_str())
-            .is_some()
-        && provider.get("wire_api").and_then(|item| item.as_str()) == Some("responses")
-        && provider
-            .get("requires_openai_auth")
-            .and_then(|item| item.as_bool())
-            == Some(true)
+    managed_provider_fields(provider).is_some()
 }
 
 fn managed_block_is_root_scoped(
@@ -1310,19 +1297,28 @@ fn managed_block_is_root_scoped(
     ) else {
         return false;
     };
-    actual.len() == expected.len()
-        && actual.get("name").and_then(|item| item.as_str())
-            == expected.get("name").and_then(|item| item.as_str())
-        && actual.get("base_url").and_then(|item| item.as_str())
-            == expected.get("base_url").and_then(|item| item.as_str())
-        && actual.get("wire_api").and_then(|item| item.as_str())
-            == expected.get("wire_api").and_then(|item| item.as_str())
-        && actual
-            .get("requires_openai_auth")
-            .and_then(|item| item.as_bool())
-            == expected
-                .get("requires_openai_auth")
-                .and_then(|item| item.as_bool())
+    managed_provider_fields(actual) == managed_provider_fields(expected)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ManagedProviderFields<'a> {
+    name: &'a str,
+    base_url: &'a str,
+    wire_api: &'a str,
+    requires_openai_auth: bool,
+}
+
+fn managed_provider_fields(table: &toml_edit::Table) -> Option<ManagedProviderFields<'_>> {
+    if table.len() != 4 {
+        return None;
+    }
+    Some(ManagedProviderFields {
+        name: table.get("name")?.as_str()?,
+        base_url: table.get("base_url")?.as_str()?,
+        wire_api: table.get("wire_api")?.as_str()?,
+        requires_openai_auth: table.get("requires_openai_auth")?.as_bool()?,
+    })
+    .filter(|fields| fields.wire_api == "responses" && fields.requires_openai_auth)
 }
 
 fn managed_provider_table<'a>(

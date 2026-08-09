@@ -104,6 +104,7 @@ export const providerFailureMessages: Record<string, string> = {
   "environment.state_unavailable": "无法提交 Codex 环境状态，请重试。",
   "environment.managed_conflict": "Codex 环境存在管理冲突，未写入任何内容。",
   "environment.concurrent_modification": "Codex 工件已被其他程序修改，请刷新后重试。",
+  "environment.artifact_redirected": "Codex 工件使用了路径重定向，当前操作已停止。",
   "environment.artifact_write_failed": "无法安全写入 Codex 工件，旧状态已保留。",
   "environment.rollback_failed": "Codex 工件恢复未完成，请重新启动 GPTEasy 进行协调。",
   "provider.clipboard_unavailable": "无法写入系统剪贴板。",
