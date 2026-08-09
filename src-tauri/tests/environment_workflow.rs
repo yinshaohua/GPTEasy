@@ -293,6 +293,27 @@ fn confirmed_retakeover_repairs_a_drifted_but_well_formed_managed_block() {
 }
 
 #[test]
+fn editing_only_managed_block_formatting_still_requires_confirmed_retakeover() {
+    let (temp, _, application) = fixture();
+    let codex_home = temp.path().join(".codex");
+    application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("establish managed environment");
+    let config_path = codex_home.join("config.toml");
+    let edited = fs::read_to_string(&config_path)
+        .expect("read managed config")
+        .replace(
+            "# GPTEasy provider-id:",
+            "# external formatting edit\n# GPTEasy provider-id:",
+        );
+    fs::write(&config_path, edited).expect("edit managed block formatting");
+
+    let snapshot = application.inspect().expect("inspect formatting edit");
+    assert_eq!(snapshot.state, EnvironmentState::Conflict);
+    assert!(snapshot.requires_takeover_confirmation);
+}
+
+#[test]
 fn confirmed_switch_creates_the_file_credential_carrier() {
     let (temp, _, application) = fixture();
 
@@ -612,6 +633,9 @@ fn non_string_credential_store_shape_stops_before_backup_or_write() {
     fs::create_dir_all(&codex_home).expect("create Codex fixture");
     let original = b"cli_auth_credentials_store = { kind = 'file' }\ncustom_flag = true\n";
     fs::write(codex_home.join("config.toml"), original).expect("write unsupported config");
+
+    let snapshot = application.inspect().expect("inspect unsupported config");
+    assert_eq!(snapshot.state, EnvironmentState::Conflict);
 
     let failure = application
         .apply_provider(PROVIDER_ID, true)

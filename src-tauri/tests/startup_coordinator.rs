@@ -93,7 +93,7 @@ fn unsupported_credential_carrier_blocks_startup() {
     let codex_home = TempDir::new().expect("codex home");
     fs::write(
         codex_home.path().join("config.toml"),
-        "cli_auth_credentials_store = 'temporary'\n",
+        "cli_auth_credentials_store = { kind = 'file' }\n",
     )
     .expect("write unsupported config");
     let coordinator = StartupCoordinator::new(
@@ -103,6 +103,10 @@ fn unsupported_credential_carrier_blocks_startup() {
 
     let snapshot = coordinator.inspect();
 
+    assert_eq!(
+        snapshot.codex.credential_store,
+        CredentialStore::Unsupported
+    );
     assert_eq!(snapshot.mode, ApplicationMode::Blocked);
     assert_eq!(
         snapshot.block_reason,

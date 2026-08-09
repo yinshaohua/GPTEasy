@@ -497,6 +497,9 @@ fn inspect_environment(
             return Ok(conflict_snapshot(impacts));
         }
     };
+    if ensure_file_credential_store(Some(config_bytes)).is_err() {
+        return Ok(conflict_snapshot(impacts));
+    }
     let managed = match managed_block(config_text) {
         ManagedBlock::None => {
             return Ok(if last_applied.is_some() {
@@ -526,10 +529,11 @@ fn inspect_environment(
         return Ok(conflict_snapshot(impacts));
     }
 
-    let Some((applied_provider, _applied_config, _applied_credentials)) = last_applied else {
+    let Some((applied_provider, applied_config, _applied_credentials)) = last_applied else {
         return Ok(external_snapshot(impacts));
     };
-    if applied_provider != provider.id {
+    if applied_provider != provider.id || applied_config != managed_config_fingerprint(config_bytes)
+    {
         return Ok(conflict_snapshot(impacts));
     }
 

@@ -213,14 +213,14 @@ pub struct CodexSnapshot {
 }
 
 fn credential_store(document: &DocumentMut) -> CredentialStore {
-    match document
-        .get("cli_auth_credentials_store")
-        .and_then(|item| item.as_str())
-    {
-        None | Some("file") => CredentialStore::File,
+    let Some(item) = document.get("cli_auth_credentials_store") else {
+        return CredentialStore::File;
+    };
+    match item.as_str() {
+        Some("file") => CredentialStore::File,
         Some("keyring") => CredentialStore::Keyring,
         Some("auto") => CredentialStore::Auto,
-        Some(_) => CredentialStore::Unsupported,
+        Some(_) | None => CredentialStore::Unsupported,
     }
 }
 
