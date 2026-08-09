@@ -8,6 +8,7 @@ import type {
   StartupBlockReason,
   PendingOperationResolution,
 } from "./contracts/startup";
+import type { AuthenticationMode, ConsumerStatus, EnvironmentState } from "./contracts/environment";
 
 export const databaseStatusMessages: Record<DatabaseStatus, string> = {
   initialized: "本地状态已初始化",
@@ -53,6 +54,23 @@ export const loginStatusMessages: Record<LoginStatus, string> = {
   logged_in: "已检测到登录",
   not_logged_in: "未检测到登录",
   unavailable: "无法确认",
+};
+
+export const authenticationModeMessages: Record<AuthenticationMode, string> = {
+  provider: "供应商模式",
+  openai_login: "OpenAI 登录模式",
+};
+
+export const environmentStateMessages: Record<EnvironmentState, string> = {
+  external: "外部配置",
+  managed: "已由 GPTEasy 管理",
+  conflict: "管理冲突",
+};
+
+export const consumerStatusMessages: Record<ConsumerStatus, string> = {
+  running: "正在运行",
+  stopped: "未运行",
+  unknown: "无法确认",
 };
 
 export const credentialStoreMessages: Record<CredentialStore, string> = {

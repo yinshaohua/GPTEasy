@@ -13,7 +13,7 @@ use commands::{
     get_startup_snapshot, list_providers, refresh_startup_snapshot, rename_provider,
     restore_last_environment_config, revalidate_provider, reveal_provider_api_key,
     save_and_apply_provider_update, save_provider_update, save_verified_provider,
-    validate_provider, validate_provider_update,
+    switch_to_openai_login, validate_provider, validate_provider_update,
 };
 use environment::EnvironmentApplication;
 use provider::{ProviderApplication, ProviderValidator, ValidationTimeouts};
@@ -49,6 +49,7 @@ pub fn run() {
             refresh_startup_snapshot,
             get_environment_snapshot,
             apply_environment_provider,
+            switch_to_openai_login,
             restore_last_environment_config,
             list_providers,
             discover_provider_models,

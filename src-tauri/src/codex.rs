@@ -137,7 +137,7 @@ impl LoginStatusCommand {
         }
     }
 
-    fn status(&self) -> LoginStatus {
+    pub(crate) fn status(&self) -> LoginStatus {
         let mut command = Command::new(&self.program);
         command
             .args(&self.arguments)

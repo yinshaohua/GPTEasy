@@ -2,10 +2,11 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
+use gpteasy_lib::codex::LoginStatus;
 use gpteasy_lib::environment::{
-    ArtifactAction, ArtifactKind, EnvironmentApplication, EnvironmentFailureCategory,
-    EnvironmentFailurePoint, EnvironmentFaultInjector, EnvironmentRecovery, EnvironmentState,
-    RestoreAvailability,
+    ArtifactAction, ArtifactKind, AuthenticationMode, EnvironmentApplication,
+    EnvironmentFailureCategory, EnvironmentFailurePoint, EnvironmentFaultInjector,
+    EnvironmentRecovery, EnvironmentState, OpenAiLoginProbe, RestoreAvailability,
 };
 use gpteasy_lib::state::{StatePaths, StateStore};
 use rusqlite::{Connection, params};
@@ -21,7 +22,11 @@ fn fixture() -> (TempDir, StateStore, EnvironmentApplication) {
     let store = StateStore::new(StatePaths::from_root(temp.path().join("state")));
     assert!(store.bootstrap().is_ready());
     insert_provider(&store);
-    let application = EnvironmentApplication::new(store.clone(), temp.path().join(".codex"));
+    let application = EnvironmentApplication::with_login_probe(
+        store.clone(),
+        temp.path().join(".codex"),
+        Arc::new(FixedLoginProbe(LoginStatus::NotLoggedIn)),
+    );
     (temp, store, application)
 }
 
@@ -232,9 +237,9 @@ fn confirmed_takeover_preserves_external_fields_and_records_the_applied_provider
         fs::read(operation_backup.join("config.toml")).expect("read config backup"),
         original_config.as_bytes()
     );
-    assert_eq!(
-        fs::read(operation_backup.join("auth.json")).expect("read auth backup"),
-        original_auth.as_bytes()
+    assert!(
+        !operation_backup.join("auth.json").exists(),
+        "OpenAI tokens must not be copied into configuration backups"
     );
     let manifest: Value = serde_json::from_slice(
         &fs::read(operation_backup.join("manifest.json")).expect("read backup manifest"),
@@ -242,6 +247,9 @@ fn confirmed_takeover_preserves_external_fields_and_records_the_applied_provider
     .expect("parse backup manifest");
     assert_eq!(manifest["configExisted"], true);
     assert_eq!(manifest["credentialsExisted"], true);
+    assert_eq!(manifest["credentialFields"]["authMode"], "chatgpt");
+    assert_eq!(manifest["credentialFields"]["openaiApiKey"], Value::Null);
+    assert!(!manifest.to_string().contains("fixture-token"));
     assert_eq!(
         manifest["oldConfigFingerprint"],
         format!("{:x}", Sha256::digest(original_config.as_bytes()))
@@ -562,6 +570,318 @@ fn configuration_failure_categories_never_expose_api_keys() {
             "{expected_category:?} must not expose the API key"
         );
     }
+}
+
+#[test]
+fn logged_in_user_can_switch_to_openai_without_touching_or_backing_up_tokens() {
+    const OPENAI_TOKEN_CANARY: &str = "openai-token-canary-must-stay-private";
+    let (temp, store, application) = fixture();
+    let codex_home = temp.path().join(".codex");
+    application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("establish provider mode");
+    let login_credentials = format!(
+        r#"{{"auth_mode":"chatgpt","tokens":{{"access_token":"{OPENAI_TOKEN_CANARY}"}},"last_refresh":"private"}}"#,
+    );
+    fs::write(codex_home.join("auth.json"), login_credentials.as_bytes())
+        .expect("simulate Codex-managed OpenAI login");
+    let application = EnvironmentApplication::with_login_probe(
+        store.clone(),
+        &codex_home,
+        Arc::new(FixedLoginProbe(LoginStatus::LoggedIn)),
+    );
+    let before = application.inspect().expect("inspect before mode switch");
+
+    let unconfirmed = application
+        .switch_to_openai_login(false, &before.revision)
+        .expect_err("mode switch requires explicit confirmation");
+    assert_eq!(
+        unconfirmed.category,
+        EnvironmentFailureCategory::ModeSwitchConfirmationRequired
+    );
+    assert_eq!(
+        fs::read(codex_home.join("auth.json")).expect("read unchanged login credentials"),
+        login_credentials.as_bytes()
+    );
+
+    let switched = application
+        .switch_to_openai_login(true, &before.revision)
+        .expect("switch to OpenAI login mode");
+
+    assert_eq!(switched.mode, Some(AuthenticationMode::OpenaiLogin));
+    assert_eq!(switched.state, EnvironmentState::Managed);
+    assert!(switched.current_provider.is_none());
+    assert_eq!(switched.login_status, LoginStatus::LoggedIn);
+    let config = fs::read_to_string(codex_home.join("config.toml")).expect("read config");
+    assert!(!config.contains("GPTEasy managed provider"));
+    assert_eq!(
+        fs::read(codex_home.join("auth.json")).expect("read untouched login credentials"),
+        login_credentials.as_bytes()
+    );
+    let latest_backup = latest_backup_path(&codex_home);
+    let backup_contents = fs::read_dir(&latest_backup)
+        .expect("read OpenAI switch backup")
+        .filter_map(Result::ok)
+        .filter_map(|entry| fs::read(entry.path()).ok())
+        .flatten()
+        .collect::<Vec<_>>();
+    assert!(!String::from_utf8_lossy(&backup_contents).contains(OPENAI_TOKEN_CANARY));
+    let connection = Connection::open(store.paths().database()).expect("open state database");
+    let (mode, provider_id): (String, Option<String>) = connection
+        .query_row(
+            "SELECT mode, provider_id FROM last_applied_state WHERE singleton = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read applied mode");
+    assert_eq!(mode, "openai_login");
+    assert_eq!(provider_id, None);
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM providers", [], |row| row
+                .get::<_, i64>(0))
+            .expect("count providers"),
+        1,
+        "OpenAI login mode must not enter the provider catalog"
+    );
+
+    let logged_out = EnvironmentApplication::with_login_probe(
+        store,
+        &codex_home,
+        Arc::new(FixedLoginProbe(LoginStatus::NotLoggedIn)),
+    )
+    .inspect()
+    .expect("inspect external logout");
+    assert_eq!(logged_out.state, EnvironmentState::Managed);
+    assert_eq!(logged_out.mode, Some(AuthenticationMode::OpenaiLogin));
+    assert_eq!(logged_out.message_id, "environment.openai_login_missing");
+}
+
+#[test]
+fn missing_or_unknown_openai_login_never_changes_any_artifact_or_state() {
+    for (status, expected_category) in [
+        (
+            LoginStatus::NotLoggedIn,
+            EnvironmentFailureCategory::OpenAiLoginRequired,
+        ),
+        (
+            LoginStatus::Unavailable,
+            EnvironmentFailureCategory::OpenAiLoginUnavailable,
+        ),
+    ] {
+        let (temp, store, application) = fixture();
+        let codex_home = temp.path().join(".codex");
+        application
+            .apply_provider(PROVIDER_ID, true)
+            .expect("establish provider mode");
+        let original_config = fs::read(codex_home.join("config.toml")).expect("read config");
+        let original_credentials =
+            fs::read(codex_home.join("auth.json")).expect("read credentials");
+        let original_database =
+            fs::read(store.paths().database()).expect("read state database bytes");
+        let original_backups = fs::read_dir(codex_home.join(".gpteasy-backups"))
+            .expect("read backup directory")
+            .count();
+        let application = EnvironmentApplication::with_login_probe(
+            store.clone(),
+            &codex_home,
+            Arc::new(FixedLoginProbe(status)),
+        );
+        let before = application
+            .inspect()
+            .expect("inspect before rejected switch");
+
+        let failure = application
+            .switch_to_openai_login(true, &before.revision)
+            .expect_err("invalid login evidence must reject the switch");
+
+        assert_eq!(failure.category, expected_category);
+        assert_eq!(
+            fs::read(codex_home.join("config.toml")).expect("read unchanged config"),
+            original_config
+        );
+        assert_eq!(
+            fs::read(codex_home.join("auth.json")).expect("read unchanged credentials"),
+            original_credentials
+        );
+        assert_eq!(
+            fs::read(store.paths().database()).expect("read unchanged database"),
+            original_database
+        );
+        assert_eq!(
+            fs::read_dir(codex_home.join(".gpteasy-backups"))
+                .expect("read unchanged backup directory")
+                .count(),
+            original_backups
+        );
+        assert!(!format!("{failure:?}").contains(API_KEY));
+    }
+}
+
+#[test]
+fn returning_from_openai_to_a_provider_requires_confirmation_without_backing_up_tokens() {
+    const OPENAI_TOKEN_CANARY: &str = "return-mode-openai-token-canary";
+    let (temp, store, _) = fixture();
+    let codex_home = temp.path().join(".codex");
+    fs::create_dir_all(&codex_home).expect("create Codex fixture");
+    fs::write(codex_home.join("config.toml"), b"custom_flag = true\n")
+        .expect("write external config");
+    let login_credentials = format!(
+        r#"{{"auth_mode":"chatgpt","tokens":{{"access_token":"{OPENAI_TOKEN_CANARY}"}},"last_refresh":"private"}}"#,
+    );
+    fs::write(codex_home.join("auth.json"), login_credentials.as_bytes())
+        .expect("write Codex-managed login credentials");
+    let application = EnvironmentApplication::with_login_probe(
+        store,
+        &codex_home,
+        Arc::new(FixedLoginProbe(LoginStatus::LoggedIn)),
+    );
+    let external = application.inspect().expect("inspect external environment");
+    let openai = application
+        .switch_to_openai_login(true, &external.revision)
+        .expect("establish OpenAI login mode");
+
+    let failure = application
+        .apply_provider_at_revision(PROVIDER_ID, false, &openai.revision)
+        .expect_err("returning to provider mode requires confirmation");
+    assert_eq!(
+        failure.category,
+        EnvironmentFailureCategory::ModeSwitchConfirmationRequired
+    );
+    assert_eq!(
+        fs::read(codex_home.join("auth.json")).expect("read unchanged login credentials"),
+        login_credentials.as_bytes()
+    );
+
+    let provider = application
+        .apply_provider_at_revision(PROVIDER_ID, true, &openai.revision)
+        .expect("confirm return to provider mode");
+
+    assert_eq!(provider.mode, Some(AuthenticationMode::Provider));
+    let credentials: Value = serde_json::from_slice(
+        &fs::read(codex_home.join("auth.json")).expect("read provider credentials"),
+    )
+    .expect("provider credentials remain valid JSON");
+    assert_eq!(credentials["auth_mode"], "apikey");
+    assert_eq!(credentials["OPENAI_API_KEY"], API_KEY);
+    assert_eq!(credentials["tokens"]["access_token"], OPENAI_TOKEN_CANARY);
+    let latest_backup = latest_backup_path(&codex_home);
+    let backup_contents = fs::read_dir(&latest_backup)
+        .expect("read provider switch backup")
+        .filter_map(Result::ok)
+        .filter_map(|entry| fs::read(entry.path()).ok())
+        .flatten()
+        .collect::<Vec<_>>();
+    assert!(!String::from_utf8_lossy(&backup_contents).contains(OPENAI_TOKEN_CANARY));
+}
+
+#[test]
+fn interrupted_openai_switch_recovers_without_exposing_or_rewriting_tokens() {
+    const OPENAI_TOKEN_CANARY: &str = "recovery-openai-token-canary";
+    let (temp, store, application) = fixture();
+    let codex_home = temp.path().join(".codex");
+    application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("establish provider mode");
+    let login_credentials = format!(
+        r#"{{"auth_mode":"chatgpt","tokens":{{"access_token":"{OPENAI_TOKEN_CANARY}"}}}}"#,
+    );
+    fs::write(codex_home.join("auth.json"), login_credentials.as_bytes())
+        .expect("simulate Codex-managed login");
+    let interrupted = EnvironmentApplication::with_dependencies(
+        store.clone(),
+        &codex_home,
+        Arc::new(InterruptAt(
+            EnvironmentFailurePoint::AfterAllArtifactsReplaced,
+        )),
+        Arc::new(FixedLoginProbe(LoginStatus::LoggedIn)),
+    );
+    let before = interrupted
+        .inspect()
+        .expect("inspect before interrupted switch");
+
+    let failure = interrupted
+        .switch_to_openai_login(true, &before.revision)
+        .expect_err("inject interruption before database commit");
+    assert_eq!(
+        failure.category,
+        EnvironmentFailureCategory::OperationInterrupted
+    );
+    let restarted = EnvironmentApplication::with_login_probe(
+        store,
+        &codex_home,
+        Arc::new(FixedLoginProbe(LoginStatus::LoggedIn)),
+    );
+    assert_eq!(
+        restarted.recover_pending().expect("recover OpenAI switch"),
+        EnvironmentRecovery::CompletedNewState
+    );
+    let recovered = restarted.inspect().expect("inspect recovered mode");
+    assert_eq!(recovered.mode, Some(AuthenticationMode::OpenaiLogin));
+    assert_eq!(
+        fs::read(codex_home.join("auth.json")).expect("read untouched token carrier"),
+        login_credentials.as_bytes()
+    );
+    let observable = format!("{failure:?} {recovered:?}");
+    assert!(!observable.contains(OPENAI_TOKEN_CANARY));
+    let backup_contents = fs::read_dir(latest_backup_path(&codex_home))
+        .expect("read recovered backup")
+        .filter_map(Result::ok)
+        .filter_map(|entry| fs::read(entry.path()).ok())
+        .flatten()
+        .collect::<Vec<_>>();
+    assert!(!String::from_utf8_lossy(&backup_contents).contains(OPENAI_TOKEN_CANARY));
+}
+
+#[test]
+fn external_provider_configuration_replaces_openai_mode_without_becoming_a_conflict() {
+    let (temp, store, _) = fixture();
+    let codex_home = temp.path().join(".codex");
+    fs::create_dir_all(&codex_home).expect("create Codex fixture");
+    fs::write(codex_home.join("config.toml"), b"custom_flag = true\n")
+        .expect("write initial config");
+    let application = EnvironmentApplication::with_login_probe(
+        store,
+        &codex_home,
+        Arc::new(FixedLoginProbe(LoginStatus::LoggedIn)),
+    );
+    let external = application.inspect().expect("inspect initial config");
+    application
+        .switch_to_openai_login(true, &external.revision)
+        .expect("establish OpenAI login mode");
+    fs::write(
+        codex_home.join("config.toml"),
+        b"model = 'external-model'\nmodel_provider = 'external-provider'\n\
+          [model_providers.external-provider]\nbase_url = 'https://external.example/v1'\n\
+          wire_api = 'responses'\n",
+    )
+    .expect("write external provider config");
+
+    let snapshot = application
+        .inspect()
+        .expect("inspect external provider config");
+
+    assert_eq!(snapshot.state, EnvironmentState::External);
+    assert_eq!(snapshot.mode, None);
+    assert_eq!(snapshot.message_id, "environment.external");
+
+    let switched = application
+        .switch_to_openai_login(true, &snapshot.revision)
+        .expect("confirm OpenAI takeover of external provider selection");
+    assert_eq!(switched.state, EnvironmentState::Managed);
+    assert_eq!(switched.mode, Some(AuthenticationMode::OpenaiLogin));
+    let config =
+        fs::read_to_string(codex_home.join("config.toml")).expect("read OpenAI mode configuration");
+    let document = config
+        .parse::<toml_edit::DocumentMut>()
+        .expect("OpenAI mode config remains valid TOML");
+    assert!(document.get("model").is_none());
+    assert!(document.get("model_provider").is_none());
+    assert_eq!(
+        document["model_providers"]["external-provider"]["base_url"].as_str(),
+        Some("https://external.example/v1"),
+        "inactive external definitions must be preserved"
+    );
 }
 
 #[test]
@@ -1397,6 +1717,14 @@ impl EnvironmentFaultInjector for FailRollback {
 
     fn fails_rollback(&self) -> bool {
         true
+    }
+}
+
+struct FixedLoginProbe(LoginStatus);
+
+impl OpenAiLoginProbe for FixedLoginProbe {
+    fn status(&self) -> LoginStatus {
+        self.0
     }
 }
 

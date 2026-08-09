@@ -6,6 +6,7 @@ import {
   FileCode2,
   KeyRound,
   LoaderCircle,
+  LogIn,
   RefreshCw,
   RotateCcw,
   Save,
@@ -16,17 +17,21 @@ import {
   asEnvironmentFailure,
   getEnvironmentSnapshot,
   restoreLastEnvironmentConfig,
+  switchToOpenAiLogin,
   type EnvironmentFailure,
   type EnvironmentSnapshot,
 } from "./contracts/environment";
 import { listProviders, type ProviderSummary } from "./contracts/provider";
 import type { StartupSnapshot } from "./contracts/startup";
 import {
+  authenticationModeMessages,
   codexConfigMessages,
+  consumerStatusMessages,
   credentialFileStatusMessages,
   credentialStoreMessages,
   databaseStatusMessages,
   loginStatusMessages,
+  environmentStateMessages,
   providerFailureMessages,
 } from "./messages";
 
@@ -34,12 +39,6 @@ type ViewState =
   | { kind: "loading" }
   | { kind: "error" }
   | { kind: "loaded"; snapshot: EnvironmentSnapshot };
-
-const stateLabels = {
-  external: "外部配置",
-  managed: "已由 GPTEasy 管理",
-  conflict: "管理冲突",
-} as const;
 
 const failureMessages: Record<string, string> = {
   "environment.state_unavailable": "无法读取 Codex 环境状态。",
@@ -58,6 +57,9 @@ const failureMessages: Record<string, string> = {
   "environment.restore_conflict": "受管工件在最近一次修改后发生变化，请先处理管理冲突。",
   "environment.backup_invalid": "最近一次配置备份不完整，无法安全恢复。",
   "environment.operation_interrupted": "配置操作被中断，请重新启动 GPTEasy 完成恢复协调。",
+  "environment.mode_switch_confirmation_required": "模式切换前需要明确确认。",
+  "environment.openai_login_required": "请先在 Codex 中完成 OpenAI 登录。",
+  "environment.openai_login_unavailable": "无法确认 Codex 登录状态，已阻止切换。",
 };
 
 const restoreAvailabilityMessages = {
@@ -75,6 +77,7 @@ export default function EnvironmentPage({ startup }: { startup: StartupSnapshot 
   const [refreshing, setRefreshing] = useState(false);
   const [applying, setApplying] = useState(false);
   const [restoring, setRestoring] = useState(false);
+  const [switchingOpenAi, setSwitchingOpenAi] = useState(false);
   const [failure, setFailure] = useState<EnvironmentFailure | null>(null);
   const [restoreFailure, setRestoreFailure] = useState<EnvironmentFailure | null>(null);
 
@@ -109,10 +112,11 @@ export default function EnvironmentPage({ startup }: { startup: StartupSnapshot 
   async function applySelected() {
     if (view.kind !== "loaded" || !selectedId) return;
     const confirmTakeover = view.snapshot.requiresTakeoverConfirmation;
-    if (
-      confirmTakeover &&
-      !window.confirm("将替换 config.toml 中的供应商字段和 auth.json 中的 API Key。是否继续？")
-    ) {
+    const confirmation =
+      view.snapshot.mode === "openai_login"
+        ? "将从 OpenAI 登录模式切换到所选供应商，并更新 config.toml 与 API Key。是否继续？"
+        : "将替换 config.toml 中的供应商字段和 auth.json 中的 API Key。是否继续？";
+    if (confirmTakeover && !window.confirm(confirmation)) {
       return;
     }
     setApplying(true);
@@ -134,6 +138,30 @@ export default function EnvironmentPage({ startup }: { startup: StartupSnapshot 
       setFailure(asEnvironmentFailure(error));
     } finally {
       setApplying(false);
+    }
+  }
+
+  async function enableOpenAiLogin() {
+    if (view.kind !== "loaded") return;
+    const loginStatus = view.snapshot.loginStatus ?? startup.codex.loginStatus;
+    if (loginStatus !== "logged_in" || view.snapshot.mode === "openai_login") return;
+    if (
+      !window.confirm(
+        "将移除 GPTEasy 管理的供应商配置；Codex 登录凭据不会被修改。是否继续？",
+      )
+    ) {
+      return;
+    }
+    setSwitchingOpenAi(true);
+    setFailure(null);
+    try {
+      const snapshot = await switchToOpenAiLogin(true, view.snapshot.revision);
+      setView({ kind: "loaded", snapshot });
+      setProviders((current) => current.map((provider) => ({ ...provider, isCurrent: false })));
+    } catch (error) {
+      setFailure(asEnvironmentFailure(error));
+    } finally {
+      setSwitchingOpenAi(false);
     }
   }
 
@@ -164,6 +192,14 @@ export default function EnvironmentPage({ startup }: { startup: StartupSnapshot 
     }
   }
 
+
+  const currentLoginStatus =
+    view.kind === "loaded" ? (view.snapshot.loginStatus ?? startup.codex.loginStatus) : startup.codex.loginStatus;
+  const desktopConsumerStatus =
+    view.kind === "loaded" ? (view.snapshot.consumers?.desktop ?? "unknown") : "unknown";
+  const cliConsumerStatus =
+    view.kind === "loaded" ? (view.snapshot.consumers?.cli ?? "unknown") : "unknown";
+
   return (
     <>
       <header className="page-header">
@@ -175,7 +211,7 @@ export default function EnvironmentPage({ startup }: { startup: StartupSnapshot 
           className="icon-button"
           type="button"
           onClick={() => void load(true)}
-          disabled={refreshing || applying || restoring}
+          disabled={refreshing || applying || restoring || switchingOpenAi}
           aria-label="重新检查环境"
           title="重新检查环境"
         >
@@ -213,10 +249,20 @@ export default function EnvironmentPage({ startup }: { startup: StartupSnapshot 
               <AlertTriangle size={24} aria-hidden="true" />
             )}
             <div>
-              <h2 id="environment-summary">{stateLabels[view.snapshot.state]}</h2>
+              <h2 id="environment-summary">
+                {view.snapshot.mode
+                  ? authenticationModeMessages[view.snapshot.mode]
+                  : environmentStateMessages[view.snapshot.state]}
+              </h2>
               <p>
                 {view.snapshot.currentProvider
                   ? `当前供应商：${view.snapshot.currentProvider.name}`
+                  : view.snapshot.mode === "openai_login"
+                    ? currentLoginStatus === "logged_in"
+                      ? "Codex 已有本地 OpenAI 登录凭据。"
+                      : currentLoginStatus === "not_logged_in"
+                        ? "Codex 的 OpenAI 登录凭据已失效或被外部注销。"
+                        : "当前无法确认 Codex 的 OpenAI 登录状态。"
                   : view.snapshot.state === "conflict"
                     ? "配置所有权无法安全确认。"
                     : "尚未建立有效的 GPTEasy 供应商 ID。"}
@@ -233,12 +279,20 @@ export default function EnvironmentPage({ startup }: { startup: StartupSnapshot 
             </div>
             <dl className="status-list">
               <StatusRow
+                label="当前模式"
+                value={
+                  view.snapshot.mode
+                    ? authenticationModeMessages[view.snapshot.mode]
+                    : environmentStateMessages[view.snapshot.state]
+                }
+              />
+              <StatusRow
                 label="用户配置"
                 value={codexConfigMessages[startup.codex.configStatus]}
               />
               <StatusRow
                 label="OpenAI 登录"
-                value={loginStatusMessages[startup.codex.loginStatus]}
+                value={loginStatusMessages[currentLoginStatus]}
               />
               <StatusRow
                 label="凭据载体"
@@ -248,7 +302,61 @@ export default function EnvironmentPage({ startup }: { startup: StartupSnapshot 
                 label="文件载体"
                 value={credentialFileStatusMessages[startup.codex.credentialFileStatus]}
               />
+              <StatusRow label="桌面 Codex" value={consumerStatusMessages[desktopConsumerStatus]} />
+              <StatusRow label="Codex CLI" value={consumerStatusMessages[cliConsumerStatus]} />
+              <StatusRow
+                label="待重启"
+                value={
+                  (view.snapshot.pendingRestart ?? startup.database.contents?.pendingRestart)
+                    ? "需要重启消费者"
+                    : "无"
+                }
+              />
             </dl>
+          </section>
+
+          <section className="status-section" aria-labelledby="authentication-mode-heading">
+            <div className="section-heading">
+              <LogIn size={20} aria-hidden="true" />
+              <h2 id="authentication-mode-heading">认证模式</h2>
+            </div>
+            <div className="environment-mode-row">
+              {view.snapshot.mode === "openai_login" && currentLoginStatus !== "logged_in" && (
+                <p className="mode-warning" role="status">
+                  {currentLoginStatus === "not_logged_in"
+                    ? "OpenAI 登录已在外部失效；当前模式保持不变。"
+                    : "无法确认 OpenAI 登录状态；当前模式保持不变。"}
+                </p>
+              )}
+              {view.snapshot.mode !== "openai_login" && currentLoginStatus !== "logged_in" && (
+                <p className="mode-warning" role="status">
+                  {currentLoginStatus === "not_logged_in"
+                    ? "请先在 Codex 中完成 OpenAI 登录。"
+                    : "无法确认 Codex 登录状态，已阻止切换。"}
+                </p>
+              )}
+              <button
+                className="command-button"
+                type="button"
+                onClick={() => void enableOpenAiLogin()}
+                disabled={
+                  applying ||
+                  restoring ||
+                  switchingOpenAi ||
+                  view.snapshot.mode === "openai_login" ||
+                  currentLoginStatus !== "logged_in"
+                }
+              >
+                {switchingOpenAi ? (
+                  <LoaderCircle className="is-spinning" size={17} aria-hidden="true" />
+                ) : (
+                  <LogIn size={17} aria-hidden="true" />
+                )}
+                {view.snapshot.mode === "openai_login"
+                  ? "当前为 OpenAI 登录模式"
+                  : "切换到 OpenAI 登录模式"}
+              </button>
+            </div>
           </section>
 
           <section className="status-section" aria-labelledby="impact-heading">
@@ -285,7 +393,7 @@ export default function EnvironmentPage({ startup }: { startup: StartupSnapshot 
                 id="environment-provider"
                 value={selectedId}
                 onChange={(event) => setSelectedId(event.target.value)}
-                disabled={applying || restoring || providers.length === 0}
+                disabled={applying || restoring || switchingOpenAi || providers.length === 0}
               >
                 {providers.length === 0 && <option value="">尚无已验证供应商</option>}
                 {providers.map((provider) => (
@@ -298,14 +406,18 @@ export default function EnvironmentPage({ startup }: { startup: StartupSnapshot 
                 className="command-button"
                 type="button"
                 onClick={() => void applySelected()}
-                disabled={applying || restoring || !selectedId}
+                disabled={applying || restoring || switchingOpenAi || !selectedId}
               >
                 {applying ? (
                   <LoaderCircle className="is-spinning" size={17} aria-hidden="true" />
                 ) : (
                   <Save size={17} aria-hidden="true" />
                 )}
-                {view.snapshot.requiresTakeoverConfirmation ? "确认接管并应用" : "应用供应商"}
+                {view.snapshot.mode === "openai_login"
+                  ? "确认返回供应商模式"
+                  : view.snapshot.requiresTakeoverConfirmation
+                    ? "确认接管并应用"
+                    : "应用供应商"}
               </button>
             </div>
             {failure && (
@@ -329,7 +441,10 @@ export default function EnvironmentPage({ startup }: { startup: StartupSnapshot 
                 type="button"
                 onClick={() => void restoreLatest()}
                 disabled={
-                  applying || restoring || view.snapshot.restoreAvailability !== "available"
+                  applying ||
+                  restoring ||
+                  switchingOpenAi ||
+                  view.snapshot.restoreAvailability !== "available"
                 }
               >
                 {restoring ? (
@@ -364,6 +479,7 @@ function StatusRow({ label, value }: { label: string; value: string }) {
 function fallbackEnvironment(startup: StartupSnapshot): EnvironmentSnapshot {
   return {
     state: "external",
+    mode: null,
     messageId: "environment.external",
     revision: "startup-fallback",
     requiresTakeoverConfirmation: true,
@@ -381,5 +497,11 @@ function fallbackEnvironment(startup: StartupSnapshot): EnvironmentSnapshot {
       },
     ],
     currentProvider: null,
+    loginStatus: startup.codex.loginStatus,
+    pendingRestart: startup.database.contents?.pendingRestart ?? false,
+    consumers: {
+      desktop: "unknown",
+      cli: "unknown",
+    },
   };
 }

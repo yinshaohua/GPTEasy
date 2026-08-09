@@ -479,7 +479,7 @@ describe("Codex 环境接管", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Codex 环境" }));
 
     expect(await screen.findByRole("heading", { name: "Codex 环境" })).toBeInTheDocument();
-    expect(screen.getByText("外部配置")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "外部配置" })).toBeInTheDocument();
     expect(screen.getByText("config.toml")).toBeInTheDocument();
     expect(screen.getByText("auth.json")).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("要应用的供应商"), {
@@ -618,7 +618,7 @@ describe("Codex 环境接管", () => {
         expectedRevision: "managed-revision",
       });
     });
-    expect(await screen.findByText("外部配置")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "外部配置" })).toBeInTheDocument();
   });
 
   it("受管工件外部变化后禁用恢复并说明原因", async () => {
@@ -644,6 +644,151 @@ describe("Codex 环境接管", () => {
 
     expect(await screen.findByRole("button", { name: "恢复上次配置" })).toBeDisabled();
     expect(screen.getByText("受管工件在最近一次修改后发生变化，恢复已禁用。")).toBeInTheDocument();
+  });
+
+  it("展示认证与消费者状态，并只从环境页确认切换到 OpenAI 登录模式", async () => {
+    const external = {
+      state: "external",
+      mode: null,
+      messageId: "environment.external",
+      revision: "openai-ready-revision",
+      requiresTakeoverConfirmation: true,
+      restoreAvailability: "no_backup",
+      loginStatus: "logged_in",
+      pendingRestart: true,
+      consumers: {
+        desktop: "unknown",
+        cli: "unknown",
+      },
+      impacts: [],
+      currentProvider: null,
+    };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([]);
+      if (command === "get_environment_snapshot") return Promise.resolve(external);
+      if (command === "switch_to_openai_login") {
+        return Promise.resolve({
+          ...external,
+          state: "managed",
+          mode: "openai_login",
+          messageId: "environment.openai_login",
+          revision: "openai-active-revision",
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Codex 环境" }));
+
+    expect(await screen.findByText("外部配置", { selector: "dd" })).toBeInTheDocument();
+    expect(screen.getByText("桌面 Codex").nextElementSibling).toHaveTextContent("无法确认");
+    expect(screen.getByText("Codex CLI").nextElementSibling).toHaveTextContent("无法确认");
+    expect(screen.getByText("待重启").nextElementSibling).toHaveTextContent("需要重启消费者");
+    fireEvent.click(screen.getByRole("button", { name: "切换到 OpenAI 登录模式" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("switch_to_openai_login", {
+        confirmSwitch: true,
+        expectedRevision: "openai-ready-revision",
+      });
+    });
+    expect(await screen.findByText("OpenAI 登录模式", { selector: "dd" })).toBeInTheDocument();
+  });
+
+  it("登录缺失或不可判断时解释原因且不发起 OpenAI 模式写入", async () => {
+    for (const [loginStatus, message] of [
+      ["not_logged_in", "请先在 Codex 中完成 OpenAI 登录。"],
+      ["unavailable", "无法确认 Codex 登录状态，已阻止切换。"],
+    ] as const) {
+      cleanup();
+      invoke.mockClear();
+      invoke.mockImplementation((command: string) => {
+        if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+        if (command === "list_providers") return Promise.resolve([]);
+        if (command === "get_environment_snapshot") {
+          return Promise.resolve({
+            state: "external",
+            mode: null,
+            messageId: "environment.external",
+            revision: `blocked-${loginStatus}`,
+            requiresTakeoverConfirmation: true,
+            restoreAvailability: "no_backup",
+            loginStatus,
+            pendingRestart: false,
+            consumers: { desktop: "unknown", cli: "unknown" },
+            impacts: [],
+            currentProvider: null,
+          });
+        }
+        return Promise.resolve(undefined);
+      });
+
+      render(<App />);
+      fireEvent.click(await screen.findByRole("button", { name: "Codex 环境" }));
+
+      expect(await screen.findByText(message)).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "切换到 OpenAI 登录模式" })).toBeDisabled();
+      expect(invoke.mock.calls.some(([command]) => command === "switch_to_openai_login")).toBe(
+        false,
+      );
+    }
+  });
+
+  it("外部注销后保留 OpenAI 模式，并在确认后返回已验证供应商", async () => {
+    const provider = {
+      id: "90f00c5a-59a7-4936-a791-583d90b81b73",
+      name: "Return Provider",
+      baseUrl: "https://return.example/v1",
+      defaultModel: "model-a",
+      verifiedAtEpochSeconds: 1_786_140_900,
+      isCurrent: false,
+    };
+    const openai = {
+      state: "managed",
+      mode: "openai_login",
+      messageId: "environment.openai_login_missing",
+      revision: "logged-out-openai-revision",
+      requiresTakeoverConfirmation: true,
+      restoreAvailability: "no_backup",
+      loginStatus: "not_logged_in",
+      pendingRestart: false,
+      consumers: { desktop: "unknown", cli: "unknown" },
+      impacts: [],
+      currentProvider: null,
+    };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([provider]);
+      if (command === "get_environment_snapshot") return Promise.resolve(openai);
+      if (command === "apply_environment_provider") {
+        return Promise.resolve({
+          ...openai,
+          mode: "provider",
+          messageId: "environment.managed",
+          revision: "provider-revision",
+          requiresTakeoverConfirmation: false,
+          currentProvider: { ...provider, isCurrent: true },
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Codex 环境" }));
+
+    expect(await screen.findByText("OpenAI 登录已在外部失效；当前模式保持不变。")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "确认返回供应商模式" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("apply_environment_provider", {
+        providerId: provider.id,
+        confirmTakeover: true,
+        expectedRevision: "logged-out-openai-revision",
+      });
+    });
   });
 });
 

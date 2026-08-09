@@ -355,6 +355,20 @@ select:focus-visible {
   border-radius: 5px;
 }
 
+.environment-mode-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.mode-warning {
+  flex: 1;
+  margin: 0;
+  color: var(--danger);
+  font-size: 13px;
+}
+
 .environment-restore-row {
   display: flex;
   align-items: center;
@@ -846,6 +860,11 @@ select:focus-visible {
 
   .environment-restore-row {
     align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .environment-mode-row {
+    align-items: stretch;
     flex-direction: column;
   }
 }

@@ -112,6 +112,17 @@ pub(crate) fn restore_last_environment_config(
 }
 
 #[tauri::command]
+pub(crate) fn switch_to_openai_login(
+    state: State<'_, EnvironmentRuntime>,
+    confirm_switch: bool,
+    expected_revision: String,
+) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
+    state
+        .application
+        .switch_to_openai_login(confirm_switch, &expected_revision)
+}
+
+#[tauri::command]
 pub(crate) async fn discover_provider_models(
     state: State<'_, ProviderRuntime>,
     request_id: String,

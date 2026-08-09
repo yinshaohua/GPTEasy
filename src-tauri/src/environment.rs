@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 use toml_edit::DocumentMut;
 use uuid::Uuid;
 
+use crate::codex::{LoginStatus, LoginStatusCommand};
 use crate::provider::ProviderSummary;
 use crate::state::StateStore;
 
@@ -28,6 +29,26 @@ pub enum EnvironmentState {
     External,
     Managed,
     Conflict,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthenticationMode {
+    Provider,
+    OpenaiLogin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConsumerStatus {
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConsumerStatuses {
+    pub desktop: ConsumerStatus,
+    pub cli: ConsumerStatus,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -56,12 +77,16 @@ pub struct ArtifactImpact {
 #[serde(rename_all = "camelCase")]
 pub struct EnvironmentSnapshot {
     pub state: EnvironmentState,
+    pub mode: Option<AuthenticationMode>,
     pub message_id: &'static str,
     pub revision: String,
     pub requires_takeover_confirmation: bool,
     pub impacts: Vec<ArtifactImpact>,
     pub current_provider: Option<ProviderSummary>,
     pub restore_availability: RestoreAvailability,
+    pub login_status: LoginStatus,
+    pub pending_restart: bool,
+    pub consumers: ConsumerStatuses,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -93,6 +118,9 @@ pub enum EnvironmentFailureCategory {
     RestoreConfirmationRequired,
     RestoreUnavailable,
     BackupInvalid,
+    ModeSwitchConfirmationRequired,
+    OpenAiLoginRequired,
+    OpenAiLoginUnavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -147,6 +175,16 @@ pub trait EnvironmentFaultInjector: Send + Sync {
     }
 }
 
+pub trait OpenAiLoginProbe: Send + Sync {
+    fn status(&self) -> LoginStatus;
+}
+
+impl OpenAiLoginProbe for LoginStatusCommand {
+    fn status(&self) -> LoginStatus {
+        self.status()
+    }
+}
+
 struct NoFaults;
 
 impl EnvironmentFaultInjector for NoFaults {
@@ -161,11 +199,17 @@ pub struct EnvironmentApplication {
     codex_home: PathBuf,
     operation_lock: Arc<Mutex<()>>,
     faults: Arc<dyn EnvironmentFaultInjector>,
+    login_probe: Arc<dyn OpenAiLoginProbe>,
 }
 
 impl EnvironmentApplication {
     pub fn new(state_store: StateStore, codex_home: impl AsRef<Path>) -> Self {
-        Self::with_fault_injector(state_store, codex_home, Arc::new(NoFaults))
+        Self::with_dependencies(
+            state_store,
+            codex_home,
+            Arc::new(NoFaults),
+            Arc::new(LoginStatusCommand::codex_default()),
+        )
     }
 
     #[doc(hidden)]
@@ -174,17 +218,42 @@ impl EnvironmentApplication {
         codex_home: impl AsRef<Path>,
         faults: Arc<dyn EnvironmentFaultInjector>,
     ) -> Self {
+        Self::with_dependencies(
+            state_store,
+            codex_home,
+            faults,
+            Arc::new(LoginStatusCommand::codex_default()),
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn with_login_probe(
+        state_store: StateStore,
+        codex_home: impl AsRef<Path>,
+        login_probe: Arc<dyn OpenAiLoginProbe>,
+    ) -> Self {
+        Self::with_dependencies(state_store, codex_home, Arc::new(NoFaults), login_probe)
+    }
+
+    #[doc(hidden)]
+    pub fn with_dependencies(
+        state_store: StateStore,
+        codex_home: impl AsRef<Path>,
+        faults: Arc<dyn EnvironmentFaultInjector>,
+        login_probe: Arc<dyn OpenAiLoginProbe>,
+    ) -> Self {
         Self {
             state_store,
             codex_home: codex_home.as_ref().to_path_buf(),
             operation_lock: Arc::new(Mutex::new(())),
             faults,
+            login_probe,
         }
     }
 
     pub fn inspect(&self) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
         let connection = self.open_state()?;
-        inspect_environment(&connection, &self.codex_home)
+        self.inspect_environment(&connection)
     }
 
     pub fn recover_pending(&self) -> Result<EnvironmentRecovery, EnvironmentFailure> {
@@ -226,18 +295,32 @@ impl EnvironmentApplication {
             }
         };
         let config = read_artifact(&self.codex_home.join("config.toml"))?;
-        let credentials = read_artifact(&self.codex_home.join("auth.json"))?;
+        let credentials_affected = pending.old_credentials_fingerprint.is_some()
+            || pending.new_credentials_fingerprint.is_some();
+        let credentials = if credentials_affected {
+            read_artifact(&self.codex_home.join("auth.json"))?
+        } else {
+            ArtifactBytes { bytes: None }
+        };
         let current_config = config.fingerprint(ArtifactKind::Config);
         let current_credentials = credentials.fingerprint(ArtifactKind::Credentials);
-        if current_config == pending.old_config_fingerprint
-            && current_credentials == pending.old_credentials_fingerprint
+        if fingerprints_match(&current_config, &pending.old_config_fingerprint, true)
+            && fingerprints_match(
+                &current_credentials,
+                &pending.old_credentials_fingerprint,
+                credentials_affected,
+            )
         {
             unmark_backup_completed(&backup)?;
             clear_pending(&connection, &pending.operation_id)?;
             return Ok(EnvironmentRecovery::KeptOldState);
         }
-        if current_config == pending.new_config_fingerprint
-            && current_credentials == pending.new_credentials_fingerprint
+        if fingerprints_match(&current_config, &pending.new_config_fingerprint, true)
+            && fingerprints_match(
+                &current_credentials,
+                &pending.new_credentials_fingerprint,
+                credentials_affected,
+            )
         {
             if mark_backup_completed(&backup).is_ok()
                 && commit_recovered_state(&mut connection, &pending, &config, &credentials).is_ok()
@@ -282,7 +365,7 @@ impl EnvironmentApplication {
                 "environment.restore_conflict",
             ));
         }
-        let prepared = PreparedRestore::new(&self.codex_home, config, credentials, backup);
+        let prepared = PreparedRestore::new(&self.codex_home, config, credentials, backup)?;
         if self.faults.fails_backup_creation() {
             return Err(backup_failed());
         }
@@ -305,9 +388,11 @@ impl EnvironmentApplication {
                     interrupted = true;
                     failure
                 })?;
-            self.check_fault(EnvironmentFailurePoint::BeforeCredentialsReplace)?;
-            prepared.credentials.commit()?;
-            credentials_applied = true;
+            if let Some(credentials) = &prepared.credentials {
+                self.check_fault(EnvironmentFailurePoint::BeforeCredentialsReplace)?;
+                credentials.commit()?;
+                credentials_applied = true;
+            }
             prepared.verify_committed()?;
             update_pending_stage(&connection, &prepared.operation_id, "artifacts_replaced")?;
             mark_backup_completed(&rollback_backup)?;
@@ -351,7 +436,7 @@ impl EnvironmentApplication {
             return Err(failure);
         }
 
-        inspect_environment(&connection, &self.codex_home)
+        self.inspect_environment(&connection)
     }
 
     pub fn apply_provider(
@@ -361,6 +446,124 @@ impl EnvironmentApplication {
     ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
         let revision = self.inspect()?.revision;
         self.apply_provider_at_revision(provider_id, confirm_takeover, &revision)
+    }
+
+    pub fn switch_to_openai_login(
+        &self,
+        confirm_switch: bool,
+        expected_revision: &str,
+    ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
+        if !confirm_switch {
+            return Err(EnvironmentFailure::new(
+                EnvironmentFailureCategory::ModeSwitchConfirmationRequired,
+                "environment.mode_switch_confirmation_required",
+            ));
+        }
+        match self.login_probe.status() {
+            LoginStatus::LoggedIn => {}
+            LoginStatus::NotLoggedIn => {
+                return Err(EnvironmentFailure::new(
+                    EnvironmentFailureCategory::OpenAiLoginRequired,
+                    "environment.openai_login_required",
+                ));
+            }
+            LoginStatus::Unavailable => {
+                return Err(EnvironmentFailure::new(
+                    EnvironmentFailureCategory::OpenAiLoginUnavailable,
+                    "environment.openai_login_unavailable",
+                ));
+            }
+        }
+        let _guard = self
+            .operation_lock
+            .lock()
+            .map_err(|_| state_unavailable())?;
+        let mut connection = self.open_state()?;
+        let before = self.inspect_environment(&connection)?;
+        match before.login_status {
+            LoginStatus::LoggedIn => {}
+            LoginStatus::NotLoggedIn => {
+                return Err(EnvironmentFailure::new(
+                    EnvironmentFailureCategory::OpenAiLoginRequired,
+                    "environment.openai_login_required",
+                ));
+            }
+            LoginStatus::Unavailable => {
+                return Err(EnvironmentFailure::new(
+                    EnvironmentFailureCategory::OpenAiLoginUnavailable,
+                    "environment.openai_login_unavailable",
+                ));
+            }
+        }
+        if before.revision != expected_revision {
+            return Err(concurrent_modification());
+        }
+        let prepared = PreparedOpenAiSwitch::prepare(&self.codex_home)?;
+        if self.faults.fails_backup_creation() {
+            return Err(backup_failed());
+        }
+        let backup = create_openai_backup(&self.codex_home, &prepared)?;
+        self.check_interruption(EnvironmentFailurePoint::AfterBackupCompleted)?;
+        persist_pending_openai(&mut connection, &prepared, &backup)?;
+        self.check_interruption(EnvironmentFailurePoint::AfterPendingRegistered)?;
+
+        let mut config_applied = false;
+        let mut interrupted = false;
+        let mut backup_completed = false;
+        let result = (|| {
+            self.check_fault(EnvironmentFailurePoint::BeforeConfigReplace)?;
+            prepared.config.commit()?;
+            config_applied = true;
+            update_pending_stage(&connection, &prepared.operation_id, "config_replaced")?;
+            self.check_interruption(EnvironmentFailurePoint::AfterConfigReplaced)
+                .map_err(|failure| {
+                    interrupted = true;
+                    failure
+                })?;
+            prepared.config.verify_target()?;
+            update_pending_stage(&connection, &prepared.operation_id, "artifacts_replaced")?;
+            mark_backup_completed(&backup)?;
+            backup_completed = true;
+            self.check_interruption(EnvironmentFailurePoint::AfterAllArtifactsReplaced)
+                .map_err(|failure| {
+                    interrupted = true;
+                    failure
+                })?;
+            self.check_interruption(EnvironmentFailurePoint::BeforeDatabaseCommit)
+                .map_err(|failure| {
+                    interrupted = true;
+                    failure
+                })?;
+            self.check_fault(EnvironmentFailurePoint::BeforeDatabaseCommit)?;
+            commit_openai_state(&mut connection, &prepared)?;
+            self.check_interruption(EnvironmentFailurePoint::AfterDatabaseCommit)
+                .map_err(|failure| {
+                    interrupted = true;
+                    failure
+                })?;
+            Ok(())
+        })();
+
+        if let Err(failure) = result {
+            if interrupted {
+                return Err(failure);
+            }
+            if backup_completed {
+                unmark_backup_completed(&backup)?;
+            }
+            if self.faults.fails_rollback()
+                || (config_applied && prepared.config.rollback().is_err())
+            {
+                return Err(EnvironmentFailure::new(
+                    EnvironmentFailureCategory::RollbackFailed,
+                    "environment.rollback_failed",
+                ));
+            }
+            clear_pending(&connection, &prepared.operation_id)?;
+            return Err(failure);
+        }
+
+        self.inspect_environment(&connection)
     }
 
     pub fn apply_provider_at_revision(
@@ -393,7 +596,7 @@ impl EnvironmentApplication {
             .lock()
             .map_err(|_| state_unavailable())?;
         let mut connection = self.open_state()?;
-        let before = inspect_environment(&connection, &self.codex_home)?;
+        let before = self.inspect_environment(&connection)?;
         if before.state != EnvironmentState::Managed
             || before
                 .current_provider
@@ -418,9 +621,15 @@ impl EnvironmentApplication {
         expected_revision: Option<&str>,
         update_guard: Option<UpdateGuard>,
     ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
-        let before = inspect_environment(connection, &self.codex_home)?;
+        let before = self.inspect_environment(connection)?;
         if expected_revision.is_some_and(|expected| before.revision != expected) {
             return Err(concurrent_modification());
+        }
+        if before.mode == Some(AuthenticationMode::OpenaiLogin) && !confirm_takeover {
+            return Err(EnvironmentFailure::new(
+                EnvironmentFailureCategory::ModeSwitchConfirmationRequired,
+                "environment.mode_switch_confirmation_required",
+            ));
         }
         match before.state {
             EnvironmentState::Conflict if !confirm_takeover => {
@@ -511,7 +720,14 @@ impl EnvironmentApplication {
             return Err(failure);
         }
 
-        inspect_environment(connection, &self.codex_home)
+        self.inspect_environment(connection)
+    }
+
+    fn inspect_environment(
+        &self,
+        connection: &Connection,
+    ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
+        inspect_environment(connection, &self.codex_home, self.login_probe.status())
     }
 
     fn open_state(&self) -> Result<Connection, EnvironmentFailure> {
@@ -677,6 +893,10 @@ fn has_pending_operation(connection: &Connection) -> Result<bool, EnvironmentFai
         .map_err(|_| state_unavailable())
 }
 
+fn fingerprints_match(current: &Option<String>, expected: &Option<String>, affected: bool) -> bool {
+    !affected || current == expected
+}
+
 fn inspect_restore_availability(
     connection: &Connection,
     codex_home: &Path,
@@ -701,6 +921,7 @@ fn inspect_restore_availability(
 fn inspect_environment(
     connection: &Connection,
     codex_home: &Path,
+    login_status: LoginStatus,
 ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
     let config = read_artifact(&codex_home.join("config.toml"))?;
     let credentials = read_artifact(&codex_home.join("auth.json"))?;
@@ -719,6 +940,13 @@ fn inspect_environment(
             fields: vec!["auth_mode", "OPENAI_API_KEY"],
         },
     ];
+    let pending_restart = connection
+        .query_row(
+            "SELECT pending_restart FROM app_state WHERE singleton = 1",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|_| state_unavailable())?;
     let recovery_conflict = connection
         .query_row(
             "SELECT EXISTS(
@@ -730,110 +958,292 @@ fn inspect_environment(
         )
         .map_err(|_| state_unavailable())?;
     if recovery_conflict {
-        return Ok(conflict_snapshot(impacts, revision, restore_availability));
+        return Ok(conflict_snapshot(
+            impacts,
+            revision,
+            restore_availability,
+            login_status,
+            pending_restart,
+        ));
     }
     let last_applied = connection
         .query_row(
-            "SELECT provider_id, config_fingerprint, credentials_fingerprint
-             FROM last_applied_state WHERE singleton = 1 AND mode = 'provider'",
+            "SELECT mode, provider_id, config_fingerprint, credentials_fingerprint
+             FROM last_applied_state WHERE singleton = 1",
             [],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, Option<String>>(1)?,
                     row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
                 ))
             },
         )
         .optional()
         .map_err(|_| state_unavailable())?;
 
-    let Some(config_bytes) = config.bytes.as_deref() else {
-        return Ok(if last_applied.is_some() {
-            conflict_snapshot(impacts, revision, restore_availability)
+    if last_applied.as_ref().map(|applied| applied.0.as_str()) == Some("openai_login") {
+        let openai_config_state = match config.bytes.as_deref() {
+            None => OpenAiConfigState::OpenAi,
+            Some(bytes) => match std::str::from_utf8(bytes).ok().and_then(|text| {
+                text.parse::<DocumentMut>()
+                    .ok()
+                    .map(|document| (text, document))
+            }) {
+                Some((text, document)) => match managed_block(text) {
+                    ManagedBlock::None if document.get("model_provider").is_some() => {
+                        OpenAiConfigState::External
+                    }
+                    ManagedBlock::None => OpenAiConfigState::OpenAi,
+                    ManagedBlock::Valid(_) | ManagedBlock::Conflict => OpenAiConfigState::Conflict,
+                },
+                None => OpenAiConfigState::Conflict,
+            },
+        };
+        if openai_config_state == OpenAiConfigState::External {
+            return Ok(external_snapshot(
+                impacts,
+                revision,
+                restore_availability,
+                login_status,
+                pending_restart,
+            ));
+        }
+        if openai_config_state == OpenAiConfigState::Conflict {
+            return Ok(conflict_snapshot(
+                impacts,
+                revision,
+                restore_availability,
+                login_status,
+                pending_restart,
+            ));
+        }
+        return Ok(EnvironmentSnapshot {
+            state: EnvironmentState::Managed,
+            mode: Some(AuthenticationMode::OpenaiLogin),
+            message_id: match login_status {
+                LoginStatus::LoggedIn => "environment.openai_login",
+                LoginStatus::NotLoggedIn => "environment.openai_login_missing",
+                LoginStatus::Unavailable => "environment.openai_login_unavailable",
+            },
+            revision,
+            requires_takeover_confirmation: true,
+            impacts,
+            current_provider: None,
+            restore_availability,
+            login_status,
+            pending_restart,
+            consumers: unknown_consumers(),
+        });
+    }
+
+    let last_applied_provider = last_applied.and_then(|applied| {
+        if applied.0 == "provider" {
+            applied
+                .1
+                .map(|provider_id| (provider_id, applied.2, applied.3))
         } else {
-            external_snapshot(impacts, revision, restore_availability)
+            None
+        }
+    });
+
+    let Some(config_bytes) = config.bytes.as_deref() else {
+        return Ok(if last_applied_provider.is_some() {
+            conflict_snapshot(
+                impacts,
+                revision,
+                restore_availability,
+                login_status,
+                pending_restart,
+            )
+        } else {
+            external_snapshot(
+                impacts,
+                revision,
+                restore_availability,
+                login_status,
+                pending_restart,
+            )
         });
     };
     let config_text = match std::str::from_utf8(config_bytes) {
         Ok(text) => text,
-        Err(_) => return Ok(conflict_snapshot(impacts, revision, restore_availability)),
+        Err(_) => {
+            return Ok(conflict_snapshot(
+                impacts,
+                revision,
+                restore_availability,
+                login_status,
+                pending_restart,
+            ));
+        }
     };
     let document = match config_text.parse::<DocumentMut>() {
         Ok(document) => document,
         Err(_) => {
-            return Ok(conflict_snapshot(impacts, revision, restore_availability));
+            return Ok(conflict_snapshot(
+                impacts,
+                revision,
+                restore_availability,
+                login_status,
+                pending_restart,
+            ));
         }
     };
     if ensure_file_credential_store(Some(config_bytes)).is_err() {
-        return Ok(conflict_snapshot(impacts, revision, restore_availability));
+        return Ok(conflict_snapshot(
+            impacts,
+            revision,
+            restore_availability,
+            login_status,
+            pending_restart,
+        ));
     }
     let managed = match managed_block(config_text) {
         ManagedBlock::None => {
-            return Ok(if last_applied.is_some() {
-                conflict_snapshot(impacts, revision, restore_availability)
+            return Ok(if last_applied_provider.is_some() {
+                conflict_snapshot(
+                    impacts,
+                    revision,
+                    restore_availability,
+                    login_status,
+                    pending_restart,
+                )
             } else {
-                external_snapshot(impacts, revision, restore_availability)
+                external_snapshot(
+                    impacts,
+                    revision,
+                    restore_availability,
+                    login_status,
+                    pending_restart,
+                )
             });
         }
         ManagedBlock::Conflict => {
-            return Ok(conflict_snapshot(impacts, revision, restore_availability));
+            return Ok(conflict_snapshot(
+                impacts,
+                revision,
+                restore_availability,
+                login_status,
+                pending_restart,
+            ));
         }
         ManagedBlock::Valid(block) => block,
     };
     if !managed_block_is_root_scoped(&document, config_text, &managed) {
-        return Ok(conflict_snapshot(impacts, revision, restore_availability));
+        return Ok(conflict_snapshot(
+            impacts,
+            revision,
+            restore_availability,
+            login_status,
+            pending_restart,
+        ));
     }
     let provider = match load_provider(connection, &managed.provider_id) {
         Ok(provider) => provider,
         Err(failure) if failure.category == EnvironmentFailureCategory::ProviderNotFound => {
-            return Ok(if last_applied.is_some() {
-                conflict_snapshot(impacts, revision, restore_availability)
+            return Ok(if last_applied_provider.is_some() {
+                conflict_snapshot(
+                    impacts,
+                    revision,
+                    restore_availability,
+                    login_status,
+                    pending_restart,
+                )
             } else {
-                external_snapshot(impacts, revision, restore_availability)
+                external_snapshot(
+                    impacts,
+                    revision,
+                    restore_availability,
+                    login_status,
+                    pending_restart,
+                )
             });
         }
         Err(failure) => return Err(failure),
     };
     if !managed_config_matches(&document, &provider) {
-        return Ok(conflict_snapshot(impacts, revision, restore_availability));
+        return Ok(conflict_snapshot(
+            impacts,
+            revision,
+            restore_availability,
+            login_status,
+            pending_restart,
+        ));
     }
     if !credentials_match(&credentials, &provider.api_key)? {
-        return Ok(conflict_snapshot(impacts, revision, restore_availability));
+        return Ok(conflict_snapshot(
+            impacts,
+            revision,
+            restore_availability,
+            login_status,
+            pending_restart,
+        ));
     }
 
-    let Some((applied_provider, applied_config, _applied_credentials)) = last_applied else {
-        return Ok(external_snapshot(impacts, revision, restore_availability));
+    let Some((applied_provider, applied_config, _applied_credentials)) = last_applied_provider
+    else {
+        return Ok(external_snapshot(
+            impacts,
+            revision,
+            restore_availability,
+            login_status,
+            pending_restart,
+        ));
     };
     if applied_provider != provider.id || applied_config != managed_config_fingerprint(config_bytes)
     {
-        return Ok(conflict_snapshot(impacts, revision, restore_availability));
+        return Ok(conflict_snapshot(
+            impacts,
+            revision,
+            restore_availability,
+            login_status,
+            pending_restart,
+        ));
     }
 
     Ok(EnvironmentSnapshot {
         state: EnvironmentState::Managed,
+        mode: Some(AuthenticationMode::Provider),
         message_id: "environment.managed",
         revision,
         requires_takeover_confirmation: false,
         impacts,
         current_provider: Some(provider.summary(true)),
         restore_availability,
+        login_status,
+        pending_restart,
+        consumers: unknown_consumers(),
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenAiConfigState {
+    OpenAi,
+    External,
+    Conflict,
 }
 
 fn external_snapshot(
     impacts: Vec<ArtifactImpact>,
     revision: String,
     restore_availability: RestoreAvailability,
+    login_status: LoginStatus,
+    pending_restart: bool,
 ) -> EnvironmentSnapshot {
     EnvironmentSnapshot {
         state: EnvironmentState::External,
+        mode: None,
         message_id: "environment.external",
         revision,
         requires_takeover_confirmation: true,
         impacts,
         current_provider: None,
         restore_availability,
+        login_status,
+        pending_restart,
+        consumers: unknown_consumers(),
     }
 }
 
@@ -841,15 +1251,28 @@ fn conflict_snapshot(
     impacts: Vec<ArtifactImpact>,
     revision: String,
     restore_availability: RestoreAvailability,
+    login_status: LoginStatus,
+    pending_restart: bool,
 ) -> EnvironmentSnapshot {
     EnvironmentSnapshot {
         state: EnvironmentState::Conflict,
+        mode: None,
         message_id: "environment.managed_conflict",
         revision,
         requires_takeover_confirmation: true,
         impacts,
         current_provider: None,
         restore_availability,
+        login_status,
+        pending_restart,
+        consumers: unknown_consumers(),
+    }
+}
+
+fn unknown_consumers() -> ConsumerStatuses {
+    ConsumerStatuses {
+        desktop: ConsumerStatus::Unknown,
+        cli: ConsumerStatus::Unknown,
     }
 }
 
@@ -868,6 +1291,30 @@ struct PreparedSwitch {
     config: PreparedArtifact,
     credentials: PreparedArtifact,
     update_guard: Option<UpdateGuard>,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedOpenAiSwitch {
+    operation_id: String,
+    config: PreparedRestoreArtifact,
+}
+
+impl PreparedOpenAiSwitch {
+    fn prepare(codex_home: &Path) -> Result<Self, EnvironmentFailure> {
+        let current = read_artifact(&codex_home.join("config.toml"))?;
+        let target = ArtifactBytes {
+            bytes: render_openai_config(current.bytes.as_deref())?,
+        };
+        Ok(Self {
+            operation_id: Uuid::new_v4().to_string(),
+            config: PreparedRestoreArtifact::new(
+                codex_home.join("config.toml"),
+                current,
+                target,
+                ArtifactKind::Config,
+            ),
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1025,9 +1472,11 @@ struct CompletedBackup {
 
 impl CompletedBackup {
     fn matches_current(&self, config: &ArtifactBytes, credentials: &ArtifactBytes) -> bool {
-        config.fingerprint(ArtifactKind::Config) == self.manifest.new_config_fingerprint
-            && credentials.fingerprint(ArtifactKind::Credentials)
-                == self.manifest.new_credentials_fingerprint
+        (!self.manifest.config_affected
+            || config.fingerprint(ArtifactKind::Config) == self.manifest.new_config_fingerprint)
+            && (!self.manifest.credentials_affected
+                || credentials.fingerprint(ArtifactKind::Credentials)
+                    == self.manifest.new_credentials_fingerprint)
     }
 }
 
@@ -1035,7 +1484,7 @@ impl CompletedBackup {
 struct PreparedRestore {
     operation_id: String,
     config: PreparedRestoreArtifact,
-    credentials: PreparedRestoreArtifact,
+    credentials: Option<PreparedRestoreArtifact>,
     source_backup: PathBuf,
 }
 
@@ -1045,8 +1494,19 @@ impl PreparedRestore {
         config: ArtifactBytes,
         credentials: ArtifactBytes,
         backup: CompletedBackup,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, EnvironmentFailure> {
+        let credential_target = if !backup.manifest.credentials_affected {
+            None
+        } else if let Some(fields) = backup.manifest.credential_fields.as_ref() {
+            Some(restore_credential_fields(
+                &credentials,
+                backup.manifest.credentials_existed,
+                fields,
+            )?)
+        } else {
+            Some(backup.credentials.clone())
+        };
+        Ok(Self {
             operation_id: Uuid::new_v4().to_string(),
             config: PreparedRestoreArtifact::new(
                 codex_home.join("config.toml"),
@@ -1054,20 +1514,61 @@ impl PreparedRestore {
                 backup.config,
                 ArtifactKind::Config,
             ),
-            credentials: PreparedRestoreArtifact::new(
-                codex_home.join("auth.json"),
-                credentials,
-                backup.credentials,
-                ArtifactKind::Credentials,
-            ),
+            credentials: credential_target.map(|target| {
+                PreparedRestoreArtifact::new(
+                    codex_home.join("auth.json"),
+                    credentials,
+                    target,
+                    ArtifactKind::Credentials,
+                )
+            }),
             source_backup: backup.path,
-        }
+        })
     }
 
     fn verify_committed(&self) -> Result<(), EnvironmentFailure> {
         self.config.verify_target()?;
-        self.credentials.verify_target()
+        if let Some(credentials) = &self.credentials {
+            credentials.verify_target()?;
+        }
+        Ok(())
     }
+}
+
+fn restore_credential_fields(
+    current: &ArtifactBytes,
+    existed: bool,
+    fields: &CredentialFieldsBackup,
+) -> Result<ArtifactBytes, EnvironmentFailure> {
+    if !existed {
+        return Ok(ArtifactBytes { bytes: None });
+    }
+    let bytes = current.bytes.as_deref().ok_or_else(backup_invalid)?;
+    let mut object = serde_json::from_slice::<Value>(bytes)
+        .map_err(|_| invalid_credentials())?
+        .as_object()
+        .cloned()
+        .ok_or_else(invalid_credentials)?;
+    match &fields.auth_mode {
+        Some(value) => {
+            object.insert("auth_mode".to_owned(), value.clone());
+        }
+        None => {
+            object.remove("auth_mode");
+        }
+    }
+    match &fields.openai_api_key {
+        Some(value) => {
+            object.insert("OPENAI_API_KEY".to_owned(), value.clone());
+        }
+        None => {
+            object.remove("OPENAI_API_KEY");
+        }
+    }
+    let mut bytes =
+        serde_json::to_vec_pretty(&Value::Object(object)).map_err(|_| invalid_credentials())?;
+    bytes.push(b'\n');
+    Ok(ArtifactBytes { bytes: Some(bytes) })
 }
 
 #[derive(Debug, Clone)]
@@ -1151,7 +1652,11 @@ fn rollback_restore(
     credentials_applied: bool,
 ) -> Result<(), EnvironmentFailure> {
     if credentials_applied {
-        prepared.credentials.rollback()?;
+        prepared
+            .credentials
+            .as_ref()
+            .ok_or_else(state_unavailable)?
+            .rollback()?;
     }
     if config_applied {
         prepared.config.rollback()?;
@@ -1222,6 +1727,35 @@ fn persist_pending(
     transaction.commit().map_err(|_| state_unavailable())
 }
 
+fn persist_pending_openai(
+    connection: &mut Connection,
+    prepared: &PreparedOpenAiSwitch,
+    backup: &Path,
+) -> Result<(), EnvironmentFailure> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| state_unavailable())?;
+    transaction
+        .execute(
+            "INSERT INTO pending_config_operation (
+                singleton, operation_id, operation_kind, stage,
+                old_config_fingerprint, new_config_fingerprint,
+                old_credentials_fingerprint, new_credentials_fingerprint,
+                backup_reference, target_snapshot_json, started_at
+             ) VALUES (1, ?1, 'switch_openai_login', 'prepared', ?2, ?3,
+                       NULL, NULL, ?4, '{}', ?5)",
+            params![
+                prepared.operation_id,
+                prepared.config.current_fingerprint,
+                prepared.config.target_fingerprint,
+                backup.to_string_lossy(),
+                epoch_seconds().to_string(),
+            ],
+        )
+        .map_err(|_| state_unavailable())?;
+    transaction.commit().map_err(|_| state_unavailable())
+}
+
 fn persist_pending_restore(
     connection: &mut Connection,
     prepared: &PreparedRestore,
@@ -1246,8 +1780,14 @@ fn persist_pending_restore(
                 prepared.operation_id,
                 prepared.config.current_fingerprint,
                 prepared.config.target_fingerprint,
-                prepared.credentials.current_fingerprint,
-                prepared.credentials.target_fingerprint,
+                prepared
+                    .credentials
+                    .as_ref()
+                    .and_then(|credentials| credentials.current_fingerprint.clone()),
+                prepared
+                    .credentials
+                    .as_ref()
+                    .and_then(|credentials| credentials.target_fingerprint.clone()),
                 backup.to_string_lossy(),
                 target_snapshot,
                 epoch_seconds().to_string(),
@@ -1318,6 +1858,68 @@ fn commit_applied_state(
     transaction.commit().map_err(|_| state_unavailable())
 }
 
+fn commit_openai_state(
+    connection: &mut Connection,
+    prepared: &PreparedOpenAiSwitch,
+) -> Result<(), EnvironmentFailure> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| state_unavailable())?;
+    transaction
+        .execute(
+            "INSERT INTO last_applied_state (
+                singleton, mode, provider_id, config_fingerprint,
+                credentials_fingerprint, applied_at
+             ) VALUES (1, 'openai_login', NULL, NULL, NULL, ?1)
+             ON CONFLICT(singleton) DO UPDATE SET
+                mode = excluded.mode,
+                provider_id = NULL,
+                config_fingerprint = NULL,
+                credentials_fingerprint = NULL,
+                applied_at = excluded.applied_at",
+            [epoch_seconds().to_string()],
+        )
+        .map_err(|_| state_unavailable())?;
+    transaction
+        .execute(
+            "DELETE FROM pending_config_operation WHERE singleton = 1 AND operation_id = ?1",
+            [&prepared.operation_id],
+        )
+        .map_err(|_| state_unavailable())?;
+    transaction.commit().map_err(|_| state_unavailable())
+}
+
+fn commit_recovered_openai_state(
+    connection: &mut Connection,
+    operation_id: &str,
+) -> Result<(), EnvironmentFailure> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| state_unavailable())?;
+    transaction
+        .execute(
+            "INSERT INTO last_applied_state (
+                singleton, mode, provider_id, config_fingerprint,
+                credentials_fingerprint, applied_at
+             ) VALUES (1, 'openai_login', NULL, NULL, NULL, ?1)
+             ON CONFLICT(singleton) DO UPDATE SET
+                mode = excluded.mode,
+                provider_id = NULL,
+                config_fingerprint = NULL,
+                credentials_fingerprint = NULL,
+                applied_at = excluded.applied_at",
+            [epoch_seconds().to_string()],
+        )
+        .map_err(|_| state_unavailable())?;
+    transaction
+        .execute(
+            "DELETE FROM pending_config_operation WHERE singleton = 1 AND operation_id = ?1",
+            [operation_id],
+        )
+        .map_err(|_| state_unavailable())?;
+    transaction.commit().map_err(|_| state_unavailable())
+}
+
 fn clear_pending(connection: &Connection, operation_id: &str) -> Result<(), EnvironmentFailure> {
     connection
         .execute(
@@ -1377,7 +1979,13 @@ fn commit_recovered_state(
     credentials: &ArtifactBytes,
 ) -> Result<(), EnvironmentFailure> {
     if pending.operation_kind == "restore_latest" {
+        let credentials = (pending.old_credentials_fingerprint.is_some()
+            || pending.new_credentials_fingerprint.is_some())
+        .then_some(credentials);
         return commit_reconciled_state(connection, &pending.operation_id, config, credentials);
+    }
+    if pending.operation_kind == "switch_openai_login" {
+        return commit_recovered_openai_state(connection, &pending.operation_id);
     }
     let provider: ProviderTarget =
         serde_json::from_str(&pending.target_snapshot_json).map_err(|_| state_unavailable())?;
@@ -1454,7 +2062,10 @@ fn commit_restored_state(
         connection,
         &prepared.operation_id,
         &prepared.config.target,
-        &prepared.credentials.target,
+        prepared
+            .credentials
+            .as_ref()
+            .map(|credentials| &credentials.target),
     )
 }
 
@@ -1462,7 +2073,7 @@ fn commit_reconciled_state(
     connection: &mut Connection,
     operation_id: &str,
     config: &ArtifactBytes,
-    credentials: &ArtifactBytes,
+    credentials: Option<&ArtifactBytes>,
 ) -> Result<(), EnvironmentFailure> {
     let applied = reconciled_applied_provider(connection, config, credentials)?;
     let transaction = connection
@@ -1509,8 +2120,11 @@ fn commit_reconciled_state(
 fn reconciled_applied_provider(
     connection: &Connection,
     config: &ArtifactBytes,
-    credentials: &ArtifactBytes,
+    credentials: Option<&ArtifactBytes>,
 ) -> Result<Option<(String, String, String)>, EnvironmentFailure> {
+    let Some(credentials) = credentials else {
+        return Ok(None);
+    };
     let Some(config_bytes) = config.bytes.as_deref() else {
         return Ok(None);
     };
@@ -1557,12 +2171,52 @@ struct BackupManifest {
     format_version: u8,
     operation_id: String,
     operation_kind: String,
+    #[serde(default = "default_true")]
+    config_affected: bool,
+    #[serde(default = "default_true")]
+    credentials_affected: bool,
     config_existed: bool,
     credentials_existed: bool,
     old_config_fingerprint: Option<String>,
     new_config_fingerprint: Option<String>,
     old_credentials_fingerprint: Option<String>,
     new_credentials_fingerprint: Option<String>,
+    #[serde(default)]
+    credential_fields: Option<CredentialFieldsBackup>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CredentialFieldsBackup {
+    auth_mode: Option<Value>,
+    openai_api_key: Option<Value>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn credential_fields_backup(
+    credentials: &ArtifactBytes,
+) -> Result<Option<CredentialFieldsBackup>, EnvironmentFailure> {
+    let Some(bytes) = credentials.bytes.as_deref() else {
+        return Ok(None);
+    };
+    let object = serde_json::from_slice::<Value>(bytes)
+        .map_err(|_| invalid_credentials())?
+        .as_object()
+        .cloned()
+        .ok_or_else(invalid_credentials)?;
+    let contains_openai_login_material = object.keys().any(|key| {
+        let key = key.to_ascii_lowercase();
+        key.contains("token") || key == "last_refresh"
+    });
+    Ok(
+        contains_openai_login_material.then(|| CredentialFieldsBackup {
+            auth_mode: object.get("auth_mode").cloned(),
+            openai_api_key: object.get("OPENAI_API_KEY").cloned(),
+        }),
+    )
 }
 
 fn create_backup(
@@ -1578,11 +2232,15 @@ fn create_backup(
     ));
     fs::create_dir_all(&operation).map_err(|_| backup_failed())?;
     let result = (|| {
+        let credential_fields = credential_fields_backup(&prepared.credentials.old)?;
         if let Some(bytes) = prepared.config.old.bytes.as_deref() {
             write_new_synced(&operation.join("config.toml"), bytes).map_err(|_| backup_failed())?;
         }
-        if let Some(bytes) = prepared.credentials.old.bytes.as_deref() {
-            write_new_synced(&operation.join("auth.json"), bytes).map_err(|_| backup_failed())?;
+        if credential_fields.is_none() {
+            if let Some(bytes) = prepared.credentials.old.bytes.as_deref() {
+                write_new_synced(&operation.join("auth.json"), bytes)
+                    .map_err(|_| backup_failed())?;
+            }
         }
         let manifest = serde_json::to_vec_pretty(&BackupManifest {
             format_version: BACKUP_FORMAT_VERSION,
@@ -1592,12 +2250,56 @@ fn create_backup(
             } else {
                 "switch_provider".to_owned()
             },
+            config_affected: true,
+            credentials_affected: true,
             config_existed: prepared.config.old.bytes.is_some(),
             credentials_existed: prepared.credentials.old.bytes.is_some(),
             old_config_fingerprint: prepared.config.old_fingerprint.clone(),
             new_config_fingerprint: Some(prepared.config.new_fingerprint.clone()),
             old_credentials_fingerprint: prepared.credentials.old_fingerprint.clone(),
             new_credentials_fingerprint: Some(prepared.credentials.new_fingerprint.clone()),
+            credential_fields,
+        })
+        .map_err(|_| backup_failed())?;
+        write_new_synced(&operation.join("manifest.json"), &manifest)
+            .map_err(|_| backup_failed())?;
+        prune_backups(&root)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&operation);
+    }
+    result.map(|_| operation)
+}
+
+fn create_openai_backup(
+    codex_home: &Path,
+    prepared: &PreparedOpenAiSwitch,
+) -> Result<PathBuf, EnvironmentFailure> {
+    let root = codex_home.join(".gpteasy-backups");
+    reject_redirect(&root)?;
+    let operation = root.join(format!(
+        "operation-{}-{}",
+        epoch_nanos(),
+        prepared.operation_id
+    ));
+    fs::create_dir_all(&operation).map_err(|_| backup_failed())?;
+    let result = (|| {
+        if let Some(bytes) = prepared.config.current.bytes.as_deref() {
+            write_new_synced(&operation.join("config.toml"), bytes).map_err(|_| backup_failed())?;
+        }
+        let manifest = serde_json::to_vec_pretty(&BackupManifest {
+            format_version: BACKUP_FORMAT_VERSION,
+            operation_id: prepared.operation_id.clone(),
+            operation_kind: "switch_openai_login".to_owned(),
+            config_affected: true,
+            credentials_affected: false,
+            config_existed: prepared.config.current.bytes.is_some(),
+            credentials_existed: false,
+            old_config_fingerprint: prepared.config.current_fingerprint.clone(),
+            new_config_fingerprint: prepared.config.target_fingerprint.clone(),
+            old_credentials_fingerprint: None,
+            new_credentials_fingerprint: None,
+            credential_fields: None,
         })
         .map_err(|_| backup_failed())?;
         write_new_synced(&operation.join("manifest.json"), &manifest)
@@ -1623,22 +2325,47 @@ fn create_restore_backup(
     ));
     fs::create_dir_all(&operation).map_err(|_| backup_failed())?;
     let result = (|| {
+        let credential_fields = prepared
+            .credentials
+            .as_ref()
+            .map(|credentials| credential_fields_backup(&credentials.current))
+            .transpose()?
+            .flatten();
         if let Some(bytes) = prepared.config.current.bytes.as_deref() {
             write_new_synced(&operation.join("config.toml"), bytes).map_err(|_| backup_failed())?;
         }
-        if let Some(bytes) = prepared.credentials.current.bytes.as_deref() {
-            write_new_synced(&operation.join("auth.json"), bytes).map_err(|_| backup_failed())?;
+        if credential_fields.is_none() {
+            if let Some(bytes) = prepared
+                .credentials
+                .as_ref()
+                .and_then(|credentials| credentials.current.bytes.as_deref())
+            {
+                write_new_synced(&operation.join("auth.json"), bytes)
+                    .map_err(|_| backup_failed())?;
+            }
         }
         let manifest = serde_json::to_vec_pretty(&BackupManifest {
             format_version: BACKUP_FORMAT_VERSION,
             operation_id: prepared.operation_id.clone(),
             operation_kind: "restore_latest".to_owned(),
+            config_affected: true,
+            credentials_affected: prepared.credentials.is_some(),
             config_existed: prepared.config.current.bytes.is_some(),
-            credentials_existed: prepared.credentials.current.bytes.is_some(),
+            credentials_existed: prepared
+                .credentials
+                .as_ref()
+                .is_some_and(|credentials| credentials.current.bytes.is_some()),
             old_config_fingerprint: prepared.config.current_fingerprint.clone(),
             new_config_fingerprint: prepared.config.target_fingerprint.clone(),
-            old_credentials_fingerprint: prepared.credentials.current_fingerprint.clone(),
-            new_credentials_fingerprint: prepared.credentials.target_fingerprint.clone(),
+            old_credentials_fingerprint: prepared
+                .credentials
+                .as_ref()
+                .and_then(|credentials| credentials.current_fingerprint.clone()),
+            new_credentials_fingerprint: prepared
+                .credentials
+                .as_ref()
+                .and_then(|credentials| credentials.target_fingerprint.clone()),
+            credential_fields,
         })
         .map_err(|_| backup_failed())?;
         write_new_synced(&operation.join("manifest.json"), &manifest)
@@ -1743,7 +2470,7 @@ fn load_completed_backup(path: PathBuf) -> Result<CompletedBackup, EnvironmentFa
             .map_err(|_| backup_invalid())?;
     let valid_kind = matches!(
         manifest.operation_kind.as_str(),
-        "switch_provider" | "save_and_apply" | "restore_latest"
+        "switch_provider" | "save_and_apply" | "restore_latest" | "switch_openai_login"
     );
     let operation_name_matches = path
         .file_name()
@@ -1753,8 +2480,17 @@ fn load_completed_backup(path: PathBuf) -> Result<CompletedBackup, EnvironmentFa
         || !valid_kind
         || Uuid::parse_str(&manifest.operation_id).is_err()
         || !operation_name_matches
+        || !manifest.config_affected
         || manifest.config_existed != manifest.old_config_fingerprint.is_some()
-        || manifest.credentials_existed != manifest.old_credentials_fingerprint.is_some()
+        || (manifest.credentials_affected
+            && manifest.credentials_existed != manifest.old_credentials_fingerprint.is_some())
+        || (!manifest.credentials_affected
+            && (manifest.credentials_existed
+                || manifest.old_credentials_fingerprint.is_some()
+                || manifest.new_credentials_fingerprint.is_some()
+                || manifest.credential_fields.is_some()))
+        || (manifest.credential_fields.is_some()
+            && (!manifest.credentials_affected || !manifest.credentials_existed))
     {
         return Err(backup_invalid());
     }
@@ -1764,12 +2500,28 @@ fn load_completed_backup(path: PathBuf) -> Result<CompletedBackup, EnvironmentFa
         manifest.old_config_fingerprint.as_deref(),
         ArtifactKind::Config,
     )?;
-    let credentials = read_backup_artifact(
-        &path.join("auth.json"),
-        manifest.credentials_existed,
-        manifest.old_credentials_fingerprint.as_deref(),
-        ArtifactKind::Credentials,
-    )?;
+    let credentials = if manifest.credential_fields.is_some() {
+        read_backup_artifact(
+            &path.join("auth.json"),
+            false,
+            None,
+            ArtifactKind::Credentials,
+        )?
+    } else if manifest.credentials_affected {
+        read_backup_artifact(
+            &path.join("auth.json"),
+            manifest.credentials_existed,
+            manifest.old_credentials_fingerprint.as_deref(),
+            ArtifactKind::Credentials,
+        )?
+    } else {
+        read_backup_artifact(
+            &path.join("auth.json"),
+            false,
+            None,
+            ArtifactKind::Credentials,
+        )?
+    };
     Ok(CompletedBackup {
         path,
         manifest,
@@ -1861,6 +2613,37 @@ fn render_config(
         .parse::<DocumentMut>()
         .map_err(|_| invalid_config())?;
     Ok(rendered.into_bytes())
+}
+
+fn render_openai_config(original: Option<&[u8]>) -> Result<Option<Vec<u8>>, EnvironmentFailure> {
+    let Some(original) = original else {
+        return Ok(None);
+    };
+    let text = std::str::from_utf8(original).map_err(|_| invalid_config())?;
+    let mut document = text.parse::<DocumentMut>().map_err(|_| invalid_config())?;
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let rendered = match managed_block(text) {
+        ManagedBlock::None if document.get("model_provider").is_some() => {
+            document.remove("model");
+            document.remove("model_provider");
+            normalize_newlines(&document.to_string(), newline)
+        }
+        ManagedBlock::None => text.to_owned(),
+        ManagedBlock::Valid(block) => {
+            if !managed_block_is_root_scoped(&document, text, &block) {
+                return Err(managed_conflict());
+            }
+            let mut rendered = String::with_capacity(text.len() - (block.end - block.start));
+            rendered.push_str(&text[..block.start]);
+            rendered.push_str(&text[block.end..]);
+            rendered
+        }
+        ManagedBlock::Conflict => return Err(managed_conflict()),
+    };
+    rendered
+        .parse::<DocumentMut>()
+        .map_err(|_| invalid_config())?;
+    Ok(Some(rendered.into_bytes()))
 }
 
 fn migrate_external_config(
