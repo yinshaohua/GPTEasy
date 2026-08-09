@@ -442,6 +442,7 @@ describe("Codex 环境接管", () => {
     const external = {
       state: "external",
       messageId: "environment.external",
+      revision: "external-revision",
       requiresTakeoverConfirmation: true,
       impacts: [
         {
@@ -490,6 +491,7 @@ describe("Codex 环境接管", () => {
       expect(invoke).toHaveBeenCalledWith("apply_environment_provider", {
         providerId: provider.id,
         confirmTakeover: true,
+        expectedRevision: "external-revision",
       });
     });
     expect(await screen.findByText("当前供应商：Applied Provider")).toBeInTheDocument();
@@ -507,6 +509,7 @@ describe("Codex 环境接管", () => {
     const conflict = {
       state: "conflict",
       messageId: "environment.managed_conflict",
+      revision: "conflict-revision",
       requiresTakeoverConfirmation: true,
       impacts: [
         {
@@ -552,6 +555,7 @@ describe("Codex 环境接管", () => {
       expect(invoke).toHaveBeenCalledWith("apply_environment_provider", {
         providerId: provider.id,
         confirmTakeover: true,
+        expectedRevision: "conflict-revision",
       });
     });
   });

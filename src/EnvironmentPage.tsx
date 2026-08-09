@@ -48,6 +48,7 @@ const failureMessages: Record<string, string> = {
   "environment.credentials_invalid": "auth.json 不是可安全保留字段的 JSON 对象。",
   "environment.backup_failed": "无法创建完整配置备份，未写入任何工件。",
   "environment.concurrent_modification": "Codex 工件刚刚发生变化，请刷新后重试。",
+  "environment.artifact_redirected": "Codex 工件使用了路径重定向，当前操作已停止。",
   "environment.artifact_write_failed": "无法安全写入 Codex 工件，旧状态已保留。",
   "environment.rollback_failed": "旧工件恢复未完成，请重新启动 GPTEasy 进行协调。",
 };
@@ -99,7 +100,11 @@ export default function EnvironmentPage({ startup }: { startup: StartupSnapshot 
     setApplying(true);
     setFailure(null);
     try {
-      const snapshot = await applyEnvironmentProvider(selectedId, confirmTakeover);
+      const snapshot = await applyEnvironmentProvider(
+        selectedId,
+        confirmTakeover,
+        view.snapshot.revision,
+      );
       setView({ kind: "loaded", snapshot });
       setProviders((current) =>
         current.map((provider) => ({
@@ -283,6 +288,7 @@ function fallbackEnvironment(startup: StartupSnapshot): EnvironmentSnapshot {
   return {
     state: "external",
     messageId: "environment.external",
+    revision: "startup-fallback",
     requiresTakeoverConfirmation: true,
     impacts: [
       {

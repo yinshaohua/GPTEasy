@@ -78,6 +78,73 @@ fn missing_codex_artifacts_are_previewed_without_being_created() {
 }
 
 #[test]
+fn changes_after_preview_abort_before_backup_or_write() {
+    let (temp, _, application) = fixture();
+    let codex_home = temp.path().join(".codex");
+    fs::create_dir_all(&codex_home).expect("create Codex fixture");
+    fs::write(
+        codex_home.join("config.toml"),
+        b"model = 'external-model'\ncustom_flag = true\n",
+    )
+    .expect("write previewed config");
+    fs::write(
+        codex_home.join("auth.json"),
+        br#"{"auth_mode":"apikey","OPENAI_API_KEY":"external-key"}"#,
+    )
+    .expect("write previewed credentials");
+
+    let preview = application.inspect().expect("preview external environment");
+    let changed = b"model = 'externally-edited-model'\ncustom_flag = true\n";
+    fs::write(codex_home.join("config.toml"), changed).expect("simulate external edit");
+
+    let failure = application
+        .apply_provider_at_revision(PROVIDER_ID, true, &preview.revision)
+        .expect_err("stale preview must be rejected");
+
+    assert_eq!(
+        failure.category,
+        EnvironmentFailureCategory::ConcurrentModification
+    );
+    assert_eq!(
+        fs::read(codex_home.join("config.toml")).expect("read external edit"),
+        changed
+    );
+    assert!(!codex_home.join(".gpteasy-backups").exists());
+}
+
+#[test]
+fn credential_changes_after_preview_abort_before_backup_or_write() {
+    let (temp, _, application) = fixture();
+    let codex_home = temp.path().join(".codex");
+    fs::create_dir_all(&codex_home).expect("create Codex fixture");
+    fs::write(codex_home.join("config.toml"), b"custom_flag = true\n")
+        .expect("write previewed config");
+    fs::write(
+        codex_home.join("auth.json"),
+        br#"{"auth_mode":"apikey","OPENAI_API_KEY":"external-key"}"#,
+    )
+    .expect("write previewed credentials");
+
+    let preview = application.inspect().expect("preview external environment");
+    let changed = br#"{"auth_mode":"apikey","OPENAI_API_KEY":"externally-edited-key"}"#;
+    fs::write(codex_home.join("auth.json"), changed).expect("simulate credential edit");
+
+    let failure = application
+        .apply_provider_at_revision(PROVIDER_ID, true, &preview.revision)
+        .expect_err("stale credential preview must be rejected");
+
+    assert_eq!(
+        failure.category,
+        EnvironmentFailureCategory::ConcurrentModification
+    );
+    assert_eq!(
+        fs::read(codex_home.join("auth.json")).expect("read external credential edit"),
+        changed
+    );
+    assert!(!codex_home.join(".gpteasy-backups").exists());
+}
+
+#[test]
 fn confirmed_takeover_preserves_external_fields_and_records_the_applied_provider() {
     let (temp, store, application) = fixture();
     let codex_home = temp.path().join(".codex");
@@ -168,7 +235,23 @@ fn confirmed_takeover_preserves_external_fields_and_records_the_applied_provider
         fs::read(operation_backup.join("auth.json")).expect("read auth backup"),
         original_auth.as_bytes()
     );
-    assert!(operation_backup.join("manifest.json").is_file());
+    let manifest: Value = serde_json::from_slice(
+        &fs::read(operation_backup.join("manifest.json")).expect("read backup manifest"),
+    )
+    .expect("parse backup manifest");
+    assert_eq!(manifest["configExisted"], true);
+    assert_eq!(manifest["credentialsExisted"], true);
+    assert_eq!(
+        manifest["oldConfigFingerprint"],
+        format!("{:x}", Sha256::digest(original_config.as_bytes()))
+    );
+    let mut auth_hasher = Sha256::new();
+    auth_hasher.update(b"file:present:");
+    auth_hasher.update(original_auth.as_bytes());
+    assert_eq!(
+        manifest["oldCredentialsFingerprint"],
+        format!("{:x}", auth_hasher.finalize())
+    );
 
     let state = store.bootstrap();
     let contents = state.contents.expect("database contents");
@@ -196,6 +279,78 @@ fn managed_environment_accepts_and_preserves_changes_outside_the_managed_block()
 
     let reapplied = fs::read_to_string(config_path).expect("read reapplied config");
     assert!(reapplied.ends_with("\n[projects.external]\ntrust_level = \"trusted\"\n"));
+}
+
+#[test]
+fn managed_block_with_an_unowned_field_is_a_conflict_and_cannot_be_repaired() {
+    let (temp, _, application) = fixture();
+    let codex_home = temp.path().join(".codex");
+    application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("establish managed environment");
+    let config_path = codex_home.join("config.toml");
+    let original = fs::read_to_string(&config_path).expect("read managed config");
+    let damaged = original.replace(
+        &format!("model_provider = \"{PROVIDER_ID}\"\n"),
+        &format!("model_provider = \"{PROVIDER_ID}\"\nunowned = true\n"),
+    );
+    assert_ne!(damaged, original);
+    fs::write(&config_path, &damaged).expect("damage managed block");
+
+    let preview = application.inspect().expect("inspect damaged block");
+    assert_eq!(preview.state, EnvironmentState::Conflict);
+    let failure = application
+        .apply_provider_at_revision(PROVIDER_ID, true, &preview.revision)
+        .expect_err("unowned managed fields must be rejected");
+
+    assert_eq!(
+        failure.category,
+        EnvironmentFailureCategory::ManagedConflict
+    );
+    assert_eq!(
+        fs::read_to_string(&config_path).expect("read preserved config"),
+        damaged
+    );
+}
+
+#[test]
+fn managed_block_nested_under_a_toml_table_is_rejected_without_writing() {
+    let (temp, _, application) = fixture();
+    let codex_home = temp.path().join(".codex");
+    application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("establish managed environment");
+    let config_path = codex_home.join("config.toml");
+    let managed = fs::read_to_string(&config_path).expect("read managed config");
+    let nested = format!("[profile]\n{managed}");
+    fs::write(&config_path, &nested).expect("nest managed block under a table");
+
+    let preview = application.inspect().expect("inspect nested block");
+    assert_eq!(preview.state, EnvironmentState::Conflict);
+    let backup_root = codex_home.join(".gpteasy-backups");
+    let backup_count_before = fs::read_dir(&backup_root)
+        .expect("read existing backups")
+        .filter_map(Result::ok)
+        .count();
+    let failure = application
+        .apply_provider_at_revision(PROVIDER_ID, true, &preview.revision)
+        .expect_err("nested managed block must be rejected");
+
+    assert_eq!(
+        failure.category,
+        EnvironmentFailureCategory::ManagedConflict
+    );
+    assert_eq!(
+        fs::read_to_string(&config_path).expect("read preserved config"),
+        nested
+    );
+    assert_eq!(
+        fs::read_dir(&backup_root)
+            .expect("read preserved backups")
+            .filter_map(Result::ok)
+            .count(),
+        backup_count_before
+    );
 }
 
 #[test]
@@ -559,17 +714,85 @@ fn recovery_stops_on_a_mixed_artifact_state_without_overwriting_it() {
 #[test]
 fn configuration_backups_keep_the_latest_five_operations() {
     let (temp, _, application) = fixture();
+    let mut created = Vec::new();
     for _ in 0..7 {
         application
             .apply_provider(PROVIDER_ID, true)
             .expect("repeat provider application");
+        created.push(latest_backup_path(&temp.path().join(".codex")));
     }
-    let backup_count = fs::read_dir(temp.path().join(".codex/.gpteasy-backups"))
+    let backups = fs::read_dir(temp.path().join(".codex/.gpteasy-backups"))
         .expect("read backup root")
         .filter_map(Result::ok)
         .filter(|entry| entry.path().is_dir())
-        .count();
-    assert_eq!(backup_count, 5);
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    assert_eq!(backups.len(), 5);
+    assert!(!created[0].exists());
+    assert!(!created[1].exists());
+    assert!(created[2..].iter().all(|path| path.exists()));
+}
+
+#[test]
+fn duplicate_or_damaged_managed_metadata_is_rejected_without_new_backup() {
+    for damage in ["duplicate marker", "duplicate provider id", "invalid TOML"] {
+        let (temp, _, application) = fixture();
+        let codex_home = temp.path().join(".codex");
+        application
+            .apply_provider(PROVIDER_ID, true)
+            .expect("establish managed environment");
+        let config_path = codex_home.join("config.toml");
+        let managed = fs::read_to_string(&config_path).expect("read managed config");
+        let damaged = match damage {
+            "duplicate marker" => managed.replacen(
+                "# >>> GPTEasy managed provider >>>",
+                "# >>> GPTEasy managed provider >>>\n# >>> GPTEasy managed provider >>>",
+                1,
+            ),
+            "duplicate provider id" => managed.replacen(
+                &format!("# GPTEasy provider-id: {PROVIDER_ID}"),
+                &format!(
+                    "# GPTEasy provider-id: {PROVIDER_ID}\n# GPTEasy provider-id: {PROVIDER_ID}"
+                ),
+                1,
+            ),
+            "invalid TOML" => format!("{managed}broken = [\n"),
+            _ => unreachable!(),
+        };
+        fs::write(&config_path, &damaged).expect("write damaged config");
+        let preview = application.inspect().expect("inspect damaged config");
+        assert_eq!(preview.state, EnvironmentState::Conflict, "{damage}");
+        let backup_root = codex_home.join(".gpteasy-backups");
+        let backup_count = fs::read_dir(&backup_root)
+            .expect("read initial backup")
+            .filter_map(Result::ok)
+            .count();
+
+        let failure = application
+            .apply_provider_at_revision(PROVIDER_ID, true, &preview.revision)
+            .expect_err("damaged metadata must not be repaired");
+
+        assert!(
+            matches!(
+                failure.category,
+                EnvironmentFailureCategory::ManagedConflict
+                    | EnvironmentFailureCategory::InvalidConfig
+            ),
+            "{damage}: {:?}",
+            failure.category
+        );
+        assert_eq!(
+            fs::read_to_string(&config_path).expect("read preserved config"),
+            damaged
+        );
+        assert_eq!(
+            fs::read_dir(&backup_root)
+                .expect("read unchanged backups")
+                .filter_map(Result::ok)
+                .count(),
+            backup_count
+        );
+    }
 }
 
 #[test]
@@ -648,6 +871,31 @@ fn non_string_credential_store_shape_stops_before_backup_or_write() {
     assert!(!codex_home.join(".gpteasy-backups").exists());
 }
 
+#[test]
+fn redirected_config_artifact_is_rejected_without_following_the_target() {
+    let (temp, _, application) = fixture();
+    let codex_home = temp.path().join(".codex");
+    fs::create_dir_all(&codex_home).expect("create Codex fixture");
+    let redirect_target = temp.path().join("external-config.toml");
+    let original = b"model = 'external-model'\n";
+    fs::write(&redirect_target, original).expect("write redirect target");
+    create_file_symlink(&redirect_target, &codex_home.join("config.toml"));
+
+    let failure = application
+        .inspect()
+        .expect_err("redirected config must be rejected");
+
+    assert_eq!(
+        failure.category,
+        EnvironmentFailureCategory::ArtifactRedirected
+    );
+    assert_eq!(
+        fs::read(&redirect_target).expect("read redirect target"),
+        original
+    );
+    assert!(!codex_home.join(".gpteasy-backups").exists());
+}
+
 fn artifact_fingerprints(codex_home: &Path) -> (String, String) {
     let config = fs::read(codex_home.join("config.toml")).expect("read config fingerprint input");
     let credentials =
@@ -671,6 +919,16 @@ fn latest_backup_path(codex_home: &std::path::Path) -> std::path::PathBuf {
         .collect::<Vec<_>>();
     backups.sort();
     backups.pop().expect("latest operation backup")
+}
+
+#[cfg(windows)]
+fn create_file_symlink(target: &Path, link: &Path) {
+    std::os::windows::fs::symlink_file(target, link).expect("create file symlink fixture");
+}
+
+#[cfg(unix)]
+fn create_file_symlink(target: &Path, link: &Path) {
+    std::os::unix::fs::symlink(target, link).expect("create file symlink fixture");
 }
 
 struct FailBeforeCredentials;

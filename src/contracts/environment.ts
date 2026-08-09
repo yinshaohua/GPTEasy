@@ -15,6 +15,7 @@ export interface ArtifactImpact {
 export interface EnvironmentSnapshot {
   state: EnvironmentState;
   messageId: string;
+  revision: string;
   requiresTakeoverConfirmation: boolean;
   impacts: ArtifactImpact[];
   currentProvider: ProviderSummary | null;
@@ -33,11 +34,13 @@ export function getEnvironmentSnapshot(): Promise<EnvironmentSnapshot> {
 export function applyEnvironmentProvider(
   providerId: string,
   confirmTakeover: boolean,
+  expectedRevision: string,
 ): Promise<EnvironmentSnapshot> {
   if (isBrowserPreview()) return Promise.reject(previewFailure);
   return invoke<EnvironmentSnapshot>("apply_environment_provider", {
     providerId,
     confirmTakeover,
+    expectedRevision,
   });
 }
 
@@ -62,6 +65,7 @@ function isBrowserPreview(): boolean {
 const previewSnapshot: EnvironmentSnapshot = {
   state: "external",
   messageId: "environment.external",
+  revision: "browser-preview",
   requiresTakeoverConfirmation: true,
   impacts: [
     {

@@ -93,10 +93,11 @@ pub(crate) fn apply_environment_provider(
     state: State<'_, EnvironmentRuntime>,
     provider_id: String,
     confirm_takeover: bool,
+    expected_revision: String,
 ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
     state
         .application
-        .apply_provider(&provider_id, confirm_takeover)
+        .apply_provider_at_revision(&provider_id, confirm_takeover, &expected_revision)
 }
 
 #[tauri::command]

@@ -54,6 +54,7 @@ pub struct ArtifactImpact {
 pub struct EnvironmentSnapshot {
     pub state: EnvironmentState,
     pub message_id: &'static str,
+    pub revision: String,
     pub requires_takeover_confirmation: bool,
     pub impacts: Vec<ArtifactImpact>,
     pub current_provider: Option<ProviderSummary>,
@@ -71,6 +72,7 @@ pub enum EnvironmentFailureCategory {
     InvalidCredentials,
     BackupFailed,
     ConcurrentModification,
+    ArtifactRedirected,
     ArtifactWriteFailed,
     RollbackFailed,
 }
@@ -212,13 +214,29 @@ impl EnvironmentApplication {
         provider_id: &str,
         confirm_takeover: bool,
     ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
+        let revision = self.inspect()?.revision;
+        self.apply_provider_at_revision(provider_id, confirm_takeover, &revision)
+    }
+
+    pub fn apply_provider_at_revision(
+        &self,
+        provider_id: &str,
+        confirm_takeover: bool,
+        expected_revision: &str,
+    ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
         let _guard = self
             .operation_lock
             .lock()
             .map_err(|_| state_unavailable())?;
         let mut connection = self.open_state()?;
         let provider = load_provider(&connection, provider_id)?;
-        self.apply_target(&mut connection, provider, confirm_takeover, None)
+        self.apply_target(
+            &mut connection,
+            provider,
+            confirm_takeover,
+            Some(expected_revision),
+            None,
+        )
     }
 
     pub(crate) fn save_and_apply_provider_update(
@@ -244,7 +262,7 @@ impl EnvironmentApplication {
             original_name: update.original_name,
             original_verification_fingerprint: update.original_verification_fingerprint,
         };
-        self.apply_target(&mut connection, update.provider, false, Some(guard))
+        self.apply_target(&mut connection, update.provider, false, None, Some(guard))
     }
 
     fn apply_target(
@@ -252,9 +270,13 @@ impl EnvironmentApplication {
         connection: &mut Connection,
         provider: ProviderTarget,
         confirm_takeover: bool,
+        expected_revision: Option<&str>,
         update_guard: Option<UpdateGuard>,
     ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
         let before = inspect_environment(connection, &self.codex_home)?;
+        if expected_revision.is_some_and(|expected| before.revision != expected) {
+            return Err(concurrent_modification());
+        }
         match before.state {
             EnvironmentState::Conflict if !confirm_takeover => {
                 return Err(EnvironmentFailure::new(
@@ -273,6 +295,9 @@ impl EnvironmentApplication {
         }
 
         let prepared = PreparedSwitch::prepare(&self.codex_home, provider, update_guard)?;
+        if expected_revision.is_some_and(|expected| prepared.old_revision() != expected) {
+            return Err(concurrent_modification());
+        }
         let backup = create_backup(&self.codex_home, &prepared)?;
         persist_pending(connection, &prepared, &backup)?;
 
@@ -455,6 +480,7 @@ fn inspect_environment(
 ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
     let config = read_artifact(&codex_home.join("config.toml"))?;
     let credentials = read_artifact(&codex_home.join("auth.json"))?;
+    let revision = environment_revision(&config, &credentials);
     let impacts = vec![
         ArtifactImpact {
             artifact: ArtifactKind::Config,
@@ -485,81 +511,87 @@ fn inspect_environment(
 
     let Some(config_bytes) = config.bytes.as_deref() else {
         return Ok(if last_applied.is_some() {
-            conflict_snapshot(impacts)
+            conflict_snapshot(impacts, revision)
         } else {
-            external_snapshot(impacts)
+            external_snapshot(impacts, revision)
         });
     };
     let config_text = std::str::from_utf8(config_bytes).map_err(|_| invalid_config())?;
     let document = match config_text.parse::<DocumentMut>() {
         Ok(document) => document,
         Err(_) => {
-            return Ok(conflict_snapshot(impacts));
+            return Ok(conflict_snapshot(impacts, revision));
         }
     };
     if ensure_file_credential_store(Some(config_bytes)).is_err() {
-        return Ok(conflict_snapshot(impacts));
+        return Ok(conflict_snapshot(impacts, revision));
     }
     let managed = match managed_block(config_text) {
         ManagedBlock::None => {
             return Ok(if last_applied.is_some() {
-                conflict_snapshot(impacts)
+                conflict_snapshot(impacts, revision)
             } else {
-                external_snapshot(impacts)
+                external_snapshot(impacts, revision)
             });
         }
-        ManagedBlock::Conflict => return Ok(conflict_snapshot(impacts)),
+        ManagedBlock::Conflict => return Ok(conflict_snapshot(impacts, revision)),
         ManagedBlock::Valid(block) => block,
     };
+    if !managed_block_is_root_scoped(&document, config_text, &managed) {
+        return Ok(conflict_snapshot(impacts, revision));
+    }
     let provider = match load_provider(connection, &managed.provider_id) {
         Ok(provider) => provider,
         Err(failure) if failure.category == EnvironmentFailureCategory::ProviderNotFound => {
             return Ok(if last_applied.is_some() {
-                conflict_snapshot(impacts)
+                conflict_snapshot(impacts, revision)
             } else {
-                external_snapshot(impacts)
+                external_snapshot(impacts, revision)
             });
         }
         Err(failure) => return Err(failure),
     };
     if !managed_config_matches(&document, &provider) {
-        return Ok(conflict_snapshot(impacts));
+        return Ok(conflict_snapshot(impacts, revision));
     }
     if !credentials_match(&credentials, &provider.api_key)? {
-        return Ok(conflict_snapshot(impacts));
+        return Ok(conflict_snapshot(impacts, revision));
     }
 
     let Some((applied_provider, applied_config, _applied_credentials)) = last_applied else {
-        return Ok(external_snapshot(impacts));
+        return Ok(external_snapshot(impacts, revision));
     };
     if applied_provider != provider.id || applied_config != managed_config_fingerprint(config_bytes)
     {
-        return Ok(conflict_snapshot(impacts));
+        return Ok(conflict_snapshot(impacts, revision));
     }
 
     Ok(EnvironmentSnapshot {
         state: EnvironmentState::Managed,
         message_id: "environment.managed",
+        revision,
         requires_takeover_confirmation: false,
         impacts,
         current_provider: Some(provider.summary(true)),
     })
 }
 
-fn external_snapshot(impacts: Vec<ArtifactImpact>) -> EnvironmentSnapshot {
+fn external_snapshot(impacts: Vec<ArtifactImpact>, revision: String) -> EnvironmentSnapshot {
     EnvironmentSnapshot {
         state: EnvironmentState::External,
         message_id: "environment.external",
+        revision,
         requires_takeover_confirmation: true,
         impacts,
         current_provider: None,
     }
 }
 
-fn conflict_snapshot(impacts: Vec<ArtifactImpact>) -> EnvironmentSnapshot {
+fn conflict_snapshot(impacts: Vec<ArtifactImpact>, revision: String) -> EnvironmentSnapshot {
     EnvironmentSnapshot {
         state: EnvironmentState::Conflict,
         message_id: "environment.managed_conflict",
+        revision,
         requires_takeover_confirmation: true,
         impacts,
         current_provider: None,
@@ -631,6 +663,10 @@ impl PreparedSwitch {
     fn verify_committed(&self) -> Result<(), EnvironmentFailure> {
         self.config.verify_new()?;
         self.credentials.verify_new()
+    }
+
+    fn old_revision(&self) -> String {
+        environment_revision(&self.config.old, &self.credentials.old)
     }
 }
 
@@ -957,6 +993,7 @@ fn create_backup(
     prepared: &PreparedSwitch,
 ) -> Result<PathBuf, EnvironmentFailure> {
     let root = codex_home.join(".gpteasy-backups");
+    reject_redirect(&root)?;
     let operation = root.join(format!(
         "operation-{}-{}",
         epoch_nanos(),
@@ -1015,6 +1052,7 @@ fn render_config(
 ) -> Result<Vec<u8>, EnvironmentFailure> {
     let original = original.unwrap_or_default();
     let text = std::str::from_utf8(original).map_err(|_| invalid_config())?;
+    let document = text.parse::<DocumentMut>().map_err(|_| invalid_config())?;
     let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
     let block = render_managed_block(provider, newline);
     let rendered = match managed_block(text) {
@@ -1023,6 +1061,9 @@ fn render_config(
             format!("{block}{body}")
         }
         ManagedBlock::Valid(existing) => {
+            if !managed_block_is_root_scoped(&document, text, &existing) {
+                return Err(managed_conflict());
+            }
             let mut rendered = String::with_capacity(text.len() + block.len());
             rendered.push_str(&text[..existing.start]);
             rendered.push_str(&block);
@@ -1179,19 +1220,120 @@ fn managed_block(text: &str) -> ManagedBlock {
                 .lines()
                 .filter_map(|line| line.strip_prefix(PROVIDER_ID_PREFIX))
                 .map(str::trim)
-                .filter(|value| !value.is_empty())
                 .collect::<Vec<_>>();
             match provider_ids.as_slice() {
-                [provider_id] => ManagedBlock::Valid(ManagedBlockRange {
-                    start: *start,
-                    end: *end,
-                    provider_id: (*provider_id).to_owned(),
-                }),
+                [provider_id]
+                    if !provider_id.is_empty()
+                        && Uuid::parse_str(provider_id).is_ok()
+                        && managed_block_has_expected_shape(block, provider_id) =>
+                {
+                    ManagedBlock::Valid(ManagedBlockRange {
+                        start: *start,
+                        end: *end,
+                        provider_id: (*provider_id).to_owned(),
+                    })
+                }
                 _ => ManagedBlock::Conflict,
             }
         }
         _ => ManagedBlock::Conflict,
     }
+}
+
+fn managed_block_has_expected_shape(block: &str, provider_id: &str) -> bool {
+    let Ok(document) = block.parse::<DocumentMut>() else {
+        return false;
+    };
+    if document.iter().count() != 3
+        || document
+            .get("model")
+            .and_then(|item| item.as_str())
+            .is_none()
+        || document
+            .get("model_provider")
+            .and_then(|item| item.as_str())
+            != Some(provider_id)
+    {
+        return false;
+    }
+    let Some(providers) = document
+        .get("model_providers")
+        .and_then(|item| item.as_table())
+    else {
+        return false;
+    };
+    if providers.len() != 1 {
+        return false;
+    }
+    let Some(provider) = providers.get(provider_id).and_then(|item| item.as_table()) else {
+        return false;
+    };
+    provider.len() == 4
+        && provider
+            .get("name")
+            .and_then(|item| item.as_str())
+            .is_some()
+        && provider
+            .get("base_url")
+            .and_then(|item| item.as_str())
+            .is_some()
+        && provider.get("wire_api").and_then(|item| item.as_str()) == Some("responses")
+        && provider
+            .get("requires_openai_auth")
+            .and_then(|item| item.as_bool())
+            == Some(true)
+}
+
+fn managed_block_is_root_scoped(
+    document: &DocumentMut,
+    text: &str,
+    managed: &ManagedBlockRange,
+) -> bool {
+    let Some(block) = text.get(managed.start..managed.end) else {
+        return false;
+    };
+    let Ok(block_document) = block.parse::<DocumentMut>() else {
+        return false;
+    };
+    if document.get("model").and_then(|item| item.as_str())
+        != block_document.get("model").and_then(|item| item.as_str())
+        || document
+            .get("model_provider")
+            .and_then(|item| item.as_str())
+            != Some(&managed.provider_id)
+    {
+        return false;
+    }
+    let (Some(actual), Some(expected)) = (
+        managed_provider_table(document, &managed.provider_id),
+        managed_provider_table(&block_document, &managed.provider_id),
+    ) else {
+        return false;
+    };
+    actual.len() == expected.len()
+        && actual.get("name").and_then(|item| item.as_str())
+            == expected.get("name").and_then(|item| item.as_str())
+        && actual.get("base_url").and_then(|item| item.as_str())
+            == expected.get("base_url").and_then(|item| item.as_str())
+        && actual.get("wire_api").and_then(|item| item.as_str())
+            == expected.get("wire_api").and_then(|item| item.as_str())
+        && actual
+            .get("requires_openai_auth")
+            .and_then(|item| item.as_bool())
+            == expected
+                .get("requires_openai_auth")
+                .and_then(|item| item.as_bool())
+}
+
+fn managed_provider_table<'a>(
+    document: &'a DocumentMut,
+    provider_id: &str,
+) -> Option<&'a toml_edit::Table> {
+    document
+        .get("model_providers")
+        .and_then(|item| item.as_table())
+        .and_then(|providers| providers.get(provider_id))
+        .and_then(|item| item.as_table())
 }
 
 pub(crate) fn managed_config_fingerprint(bytes: &[u8]) -> Option<String> {
@@ -1308,6 +1450,7 @@ fn credentials_match(
 }
 
 fn read_artifact(path: &Path) -> Result<ArtifactBytes, EnvironmentFailure> {
+    reject_redirect(path)?;
     match fs::read(path) {
         Ok(bytes) => Ok(ArtifactBytes { bytes: Some(bytes) }),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1318,11 +1461,24 @@ fn read_artifact(path: &Path) -> Result<ArtifactBytes, EnvironmentFailure> {
 }
 
 fn artifact_matches(path: &Path, expected: Option<&[u8]>) -> Result<bool, EnvironmentFailure> {
+    reject_redirect(path)?;
     match (fs::read(path), expected) {
         (Ok(actual), Some(expected)) => Ok(actual == expected),
         (Err(error), None) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
         (Ok(_), None) | (Err(_), Some(_)) => Ok(false),
         (Err(_), None) => Err(artifact_write_failed()),
+    }
+}
+
+fn reject_redirect(path: &Path) -> Result<(), EnvironmentFailure> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(EnvironmentFailure::new(
+            EnvironmentFailureCategory::ArtifactRedirected,
+            "environment.artifact_redirected",
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(artifact_write_failed()),
     }
 }
 
@@ -1429,6 +1585,26 @@ fn artifact_hash(kind: ArtifactKind, bytes: &[u8]) -> String {
         hasher.update(b"file:present:");
     }
     hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
+fn environment_revision(config: &ArtifactBytes, credentials: &ArtifactBytes) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"gpteasy-environment-revision-v1\0");
+    for (label, artifact) in [
+        (b"config".as_slice(), config),
+        (b"credentials", credentials),
+    ] {
+        hasher.update(label);
+        match artifact.bytes.as_deref() {
+            Some(bytes) => {
+                hasher.update(b":present:");
+                hasher.update(bytes);
+            }
+            None => hasher.update(b":missing"),
+        }
+        hasher.update(b"\0");
+    }
     format!("{:x}", hasher.finalize())
 }
 
