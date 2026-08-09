@@ -820,6 +820,30 @@ fn malformed_managed_markers_stop_before_backup_or_write() {
 }
 
 #[test]
+fn non_utf8_config_is_reported_as_conflict_and_rejected_without_backup() {
+    let (temp, _, application) = fixture();
+    let codex_home = temp.path().join(".codex");
+    fs::create_dir_all(&codex_home).expect("create Codex fixture");
+    let original = [0xff, 0xfe, b'=', b'1'];
+    fs::write(codex_home.join("config.toml"), original).expect("write non-UTF-8 config");
+
+    let preview = application
+        .inspect()
+        .expect("inspect non-UTF-8 config as conflict");
+    assert_eq!(preview.state, EnvironmentState::Conflict);
+    let failure = application
+        .apply_provider_at_revision(PROVIDER_ID, true, &preview.revision)
+        .expect_err("non-UTF-8 config must be rejected");
+
+    assert_eq!(failure.category, EnvironmentFailureCategory::InvalidConfig);
+    assert_eq!(
+        fs::read(codex_home.join("config.toml")).expect("read preserved config"),
+        original
+    );
+    assert!(!codex_home.join(".gpteasy-backups").exists());
+}
+
+#[test]
 fn managed_markers_inside_a_multiline_string_are_never_treated_as_a_block() {
     let (temp, _, application) = fixture();
     let codex_home = temp.path().join(".codex");

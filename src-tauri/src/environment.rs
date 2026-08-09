@@ -516,7 +516,10 @@ fn inspect_environment(
             external_snapshot(impacts, revision)
         });
     };
-    let config_text = std::str::from_utf8(config_bytes).map_err(|_| invalid_config())?;
+    let config_text = match std::str::from_utf8(config_bytes) {
+        Ok(text) => text,
+        Err(_) => return Ok(conflict_snapshot(impacts, revision)),
+    };
     let document = match config_text.parse::<DocumentMut>() {
         Ok(document) => document,
         Err(_) => {
