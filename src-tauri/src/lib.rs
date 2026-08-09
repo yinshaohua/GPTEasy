@@ -1,9 +1,11 @@
 pub mod codex;
 mod commands;
+pub mod consumer;
 pub mod environment;
 pub mod provider;
 pub mod startup;
 pub mod state;
+mod tray;
 
 use codex::{CodexInspector, LoginStatusCommand};
 use commands::{
@@ -20,15 +22,18 @@ use provider::{ProviderApplication, ProviderValidator, ValidationTimeouts};
 use startup::StartupCoordinator;
 use state::{StatePaths, StateStore};
 use tauri::Manager;
+use tray::LifecycleRuntime;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let state_root = app.path().app_local_data_dir()?;
             let home = app.path().home_dir()?;
             let state_store = StateStore::new(StatePaths::from_root(state_root));
+            app.manage(LifecycleRuntime::new(state_store.clone()));
             let codex_home = home.join(".codex");
             let coordinator = StartupCoordinator::new(
                 state_store.clone(),
@@ -42,8 +47,10 @@ pub fn run() {
                 state_store,
                 ProviderValidator::new(ValidationTimeouts::default()),
             )));
+            tray::setup(app)?;
             Ok(())
         })
+        .on_window_event(tray::handle_window_event)
         .invoke_handler(tauri::generate_handler![
             get_startup_snapshot,
             refresh_startup_snapshot,

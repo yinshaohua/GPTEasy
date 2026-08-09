@@ -1,8 +1,12 @@
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use gpteasy_lib::codex::LoginStatus;
+use gpteasy_lib::consumer::{
+    ConsumerIdentity, ConsumerRole, ConsumerScan, ConsumerScanner, ConsumerStatus,
+};
 use gpteasy_lib::environment::{
     ArtifactAction, ArtifactKind, AuthenticationMode, EnvironmentApplication,
     EnvironmentFailureCategory, EnvironmentFailurePoint, EnvironmentFaultInjector,
@@ -22,12 +26,60 @@ fn fixture() -> (TempDir, StateStore, EnvironmentApplication) {
     let store = StateStore::new(StatePaths::from_root(temp.path().join("state")));
     assert!(store.bootstrap().is_ready());
     insert_provider(&store);
-    let application = EnvironmentApplication::with_login_probe(
+    let application = EnvironmentApplication::with_runtime_probes(
         store.clone(),
         temp.path().join(".codex"),
         Arc::new(FixedLoginProbe(LoginStatus::NotLoggedIn)),
+        Arc::new(StoppedConsumers),
     );
     (temp, store, application)
+}
+
+struct StoppedConsumers;
+
+impl ConsumerScanner for StoppedConsumers {
+    fn scan(&self) -> ConsumerScan {
+        ConsumerScan {
+            desktop: ConsumerStatus::Stopped,
+            cli: ConsumerStatus::Stopped,
+            identities: Vec::new(),
+        }
+    }
+}
+
+struct MutableConsumers(Mutex<ConsumerScan>);
+
+impl MutableConsumers {
+    fn new(scan: ConsumerScan) -> Self {
+        Self(Mutex::new(scan))
+    }
+
+    fn set(&self, scan: ConsumerScan) {
+        *self.0.lock().expect("lock consumer fixture") = scan;
+    }
+}
+
+impl ConsumerScanner for MutableConsumers {
+    fn scan(&self) -> ConsumerScan {
+        self.0.lock().expect("lock consumer fixture").clone()
+    }
+}
+
+struct StartsConsumerDuringWrite {
+    scanner: Arc<MutableConsumers>,
+}
+
+impl EnvironmentFaultInjector for StartsConsumerDuringWrite {
+    fn fails_at(&self, point: EnvironmentFailurePoint) -> bool {
+        if point == EnvironmentFailurePoint::BeforeCredentialsReplace {
+            let started_at_epoch_millis = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time")
+                .as_millis() as u64;
+            self.scanner.set(running_cli(42, started_at_epoch_millis));
+        }
+        false
+    }
 }
 
 fn insert_provider(store: &StateStore) {
@@ -49,6 +101,55 @@ fn insert_provider(store: &StateStore) {
             ],
         )
         .expect("insert provider fixture");
+}
+
+fn insert_second_provider(store: &StateStore, provider_id: &str) {
+    let connection = Connection::open(store.paths().database()).expect("open state database");
+    connection
+        .execute(
+            "INSERT INTO providers (
+                id, name, base_url, api_key, default_model, verified_at,
+                verification_fingerprint
+             ) VALUES (?1, 'Second Provider', 'https://second.example/v1',
+                       'second-key', 'second-model', '1775606500', 'second-fingerprint')",
+            [provider_id],
+        )
+        .expect("insert second provider fixture");
+}
+
+fn running_cli(pid: u32, started_at_epoch_millis: u64) -> ConsumerScan {
+    ConsumerScan {
+        desktop: ConsumerStatus::Stopped,
+        cli: ConsumerStatus::Running,
+        identities: vec![ConsumerIdentity {
+            role: ConsumerRole::Cli,
+            pid,
+            started_at_epoch_millis,
+        }],
+    }
+}
+
+fn stopped_consumers() -> ConsumerScan {
+    ConsumerScan {
+        desktop: ConsumerStatus::Stopped,
+        cli: ConsumerStatus::Stopped,
+        identities: Vec::new(),
+    }
+}
+
+fn running_desktop(consumers: &[(u32, u64)]) -> ConsumerScan {
+    ConsumerScan {
+        desktop: ConsumerStatus::Running,
+        cli: ConsumerStatus::Stopped,
+        identities: consumers
+            .iter()
+            .map(|(pid, started_at_epoch_millis)| ConsumerIdentity {
+                role: ConsumerRole::Desktop,
+                pid: *pid,
+                started_at_epoch_millis: *started_at_epoch_millis,
+            })
+            .collect(),
+    }
 }
 
 #[test]
@@ -283,7 +384,7 @@ fn managed_environment_accepts_and_preserves_changes_outside_the_managed_block()
     let snapshot = application.inspect().expect("inspect external edit");
     assert_eq!(snapshot.state, EnvironmentState::Managed);
     application
-        .apply_provider(PROVIDER_ID, false)
+        .apply_provider(PROVIDER_ID, true)
         .expect("reapply after compatible external edit");
 
     let reapplied = fs::read_to_string(config_path).expect("read reapplied config");
@@ -903,7 +1004,7 @@ fn recovery_completes_the_database_commit_when_both_new_artifacts_are_present() 
         "next-verification-fingerprint",
     );
     let next = application
-        .apply_provider(next_id, false)
+        .apply_provider(next_id, true)
         .expect("write both new artifacts");
     let new_fingerprints = artifact_fingerprints(&codex_home);
     let backup = latest_backup_path(&codex_home);
@@ -996,7 +1097,7 @@ fn recovery_stops_on_a_mixed_artifact_state_without_overwriting_it() {
         "next-verification-fingerprint",
     );
     application
-        .apply_provider(next_id, false)
+        .apply_provider(next_id, true)
         .expect("apply next provider");
     let new_fingerprints = artifact_fingerprints(&codex_home);
     let backup = latest_backup_path(&codex_home);
@@ -1317,7 +1418,7 @@ fn restore_uses_only_the_immediately_previous_completed_configuration() {
         "next-verification-fingerprint",
     );
     let second = application
-        .apply_provider(next_id, false)
+        .apply_provider(next_id, true)
         .expect("apply second provider");
 
     let restored = application
@@ -1747,4 +1848,271 @@ fn insert_provider_values(
             params![id, name, base_url, api_key, default_model, fingerprint],
         )
         .expect("insert provider fixture");
+}
+
+#[test]
+fn running_consumer_requires_confirmation_and_sets_pending_restart() {
+    const SECOND_PROVIDER_ID: &str = "6cde0dd7-9725-462a-ac79-864f5cf63f76";
+    let temp = TempDir::new().expect("temp dir");
+    let store = StateStore::new(StatePaths::from_root(temp.path().join("state")));
+    assert!(store.bootstrap().is_ready());
+    insert_provider(&store);
+    insert_second_provider(&store, SECOND_PROVIDER_ID);
+    let scanner = Arc::new(MutableConsumers::new(stopped_consumers()));
+    let application = EnvironmentApplication::with_runtime_probes(
+        store,
+        temp.path().join(".codex"),
+        Arc::new(FixedLoginProbe(LoginStatus::NotLoggedIn)),
+        scanner.clone(),
+    );
+
+    application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("apply initial provider without a running consumer");
+    scanner.set(running_cli(42, 1));
+    let before = application.inspect().expect("inspect running consumer");
+    assert!(before.requires_consumer_confirmation);
+
+    let failure = application
+        .apply_provider_at_revision(SECOND_PROVIDER_ID, false, &before.revision)
+        .expect_err("running consumer must require confirmation");
+    assert_eq!(
+        failure.category,
+        EnvironmentFailureCategory::ConsumerConfirmationRequired
+    );
+    assert_eq!(
+        application
+            .inspect()
+            .expect("inspect unchanged provider")
+            .current_provider
+            .expect("current provider")
+            .id,
+        PROVIDER_ID
+    );
+
+    let switched = application
+        .apply_provider_at_revision(SECOND_PROVIDER_ID, true, &before.revision)
+        .expect("confirmed switch");
+    assert!(switched.pending_restart);
+}
+
+#[test]
+fn no_detected_consumer_still_requires_confirmation_and_returns_pending_restart() {
+    const SECOND_PROVIDER_ID: &str = "6cde0dd7-9725-462a-ac79-864f5cf63f76";
+    let temp = TempDir::new().expect("temp dir");
+    let store = StateStore::new(StatePaths::from_root(temp.path().join("state")));
+    assert!(store.bootstrap().is_ready());
+    insert_provider(&store);
+    insert_second_provider(&store, SECOND_PROVIDER_ID);
+    let application = EnvironmentApplication::with_runtime_probes(
+        store,
+        temp.path().join(".codex"),
+        Arc::new(FixedLoginProbe(LoginStatus::NotLoggedIn)),
+        Arc::new(StoppedConsumers),
+    );
+
+    application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("apply initial provider");
+    let before = application.inspect().expect("inspect managed environment");
+    assert!(before.requires_consumer_confirmation);
+
+    let failure = application
+        .apply_provider_at_revision(SECOND_PROVIDER_ID, false, &before.revision)
+        .expect_err("no detected consumer still requires confirmation");
+    assert_eq!(
+        failure.category,
+        EnvironmentFailureCategory::ConsumerConfirmationRequired
+    );
+
+    let switched = application
+        .apply_provider_at_revision(SECOND_PROVIDER_ID, true, &before.revision)
+        .expect("confirmed switch");
+    assert!(switched.pending_restart);
+    assert!(
+        !application
+            .inspect()
+            .expect("later trustworthy observation clears pending restart")
+            .pending_restart
+    );
+}
+
+#[test]
+fn pending_restart_clears_after_old_identity_exits_and_ignores_pid_reuse() {
+    let temp = TempDir::new().expect("temp dir");
+    let store = StateStore::new(StatePaths::from_root(temp.path().join("state")));
+    assert!(store.bootstrap().is_ready());
+    insert_provider(&store);
+    let scanner = Arc::new(MutableConsumers::new(running_cli(42, 1)));
+    let application = EnvironmentApplication::with_runtime_probes(
+        store,
+        temp.path().join(".codex"),
+        Arc::new(FixedLoginProbe(LoginStatus::NotLoggedIn)),
+        scanner.clone(),
+    );
+
+    let applied = application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("apply provider with a running consumer");
+    assert!(applied.pending_restart);
+
+    scanner.set(running_cli(42, u64::MAX));
+    let reconciled = application.inspect().expect("reconcile reused PID");
+    assert!(!reconciled.pending_restart);
+    assert_eq!(reconciled.consumers.cli, ConsumerStatus::Running);
+}
+
+#[test]
+fn consumer_started_during_artifact_write_blocks_pending_restart_clear() {
+    let temp = TempDir::new().expect("temp dir");
+    let store = StateStore::new(StatePaths::from_root(temp.path().join("state")));
+    assert!(store.bootstrap().is_ready());
+    insert_provider(&store);
+    let scanner = Arc::new(MutableConsumers::new(stopped_consumers()));
+    let application = EnvironmentApplication::with_runtime_dependencies(
+        store,
+        temp.path().join(".codex"),
+        Arc::new(StartsConsumerDuringWrite {
+            scanner: scanner.clone(),
+        }),
+        Arc::new(FixedLoginProbe(LoginStatus::NotLoggedIn)),
+        scanner.clone(),
+    );
+
+    assert!(
+        application
+            .apply_provider(PROVIDER_ID, true)
+            .expect("apply provider while consumer starts")
+            .pending_restart
+    );
+    assert!(
+        application
+            .inspect()
+            .expect("consumer started before write completed remains old")
+            .pending_restart
+    );
+
+    scanner.set(stopped_consumers());
+    assert!(
+        !application
+            .inspect()
+            .expect("pending clears after the consumer exits")
+            .pending_restart
+    );
+}
+
+#[test]
+fn bundled_desktop_child_keeps_pending_restart_after_its_root_exits() {
+    let temp = TempDir::new().expect("temp dir");
+    let store = StateStore::new(StatePaths::from_root(temp.path().join("state")));
+    assert!(store.bootstrap().is_ready());
+    insert_provider(&store);
+    let scanner = Arc::new(MutableConsumers::new(running_desktop(&[
+        (100, 1),
+        (101, 2),
+    ])));
+    let application = EnvironmentApplication::with_runtime_probes(
+        store,
+        temp.path().join(".codex"),
+        Arc::new(FixedLoginProbe(LoginStatus::NotLoggedIn)),
+        scanner.clone(),
+    );
+
+    assert!(
+        application
+            .apply_provider(PROVIDER_ID, true)
+            .expect("apply provider with desktop process tree")
+            .pending_restart
+    );
+    scanner.set(running_desktop(&[(101, 2)]));
+
+    assert!(
+        application
+            .inspect()
+            .expect("inspect remaining bundled child")
+            .pending_restart
+    );
+}
+
+#[test]
+fn missing_or_corrupt_restart_context_keeps_pending_restart() {
+    let temp = TempDir::new().expect("temp dir");
+    let store = StateStore::new(StatePaths::from_root(temp.path().join("state")));
+    assert!(store.bootstrap().is_ready());
+    insert_provider(&store);
+    let application = EnvironmentApplication::with_runtime_probes(
+        store.clone(),
+        temp.path().join(".codex"),
+        Arc::new(FixedLoginProbe(LoginStatus::NotLoggedIn)),
+        Arc::new(StoppedConsumers),
+    );
+    assert!(
+        application
+            .apply_provider(PROVIDER_ID, true)
+            .expect("apply provider")
+            .pending_restart
+    );
+    let connection = Connection::open(store.paths().database()).expect("open state database");
+
+    connection
+        .execute(
+            "UPDATE app_state SET pending_restart_context = NULL WHERE singleton = 1",
+            [],
+        )
+        .expect("remove restart context");
+    assert!(
+        application
+            .inspect()
+            .expect("missing context fails closed")
+            .pending_restart
+    );
+
+    connection
+        .execute(
+            "UPDATE app_state SET pending_restart_context = '{not-json' WHERE singleton = 1",
+            [],
+        )
+        .expect("corrupt restart context");
+    assert!(
+        application
+            .inspect()
+            .expect("corrupt context fails closed")
+            .pending_restart
+    );
+}
+
+#[test]
+fn unknown_detection_stays_pending_until_a_trustworthy_scan() {
+    let temp = TempDir::new().expect("temp dir");
+    let store = StateStore::new(StatePaths::from_root(temp.path().join("state")));
+    assert!(store.bootstrap().is_ready());
+    insert_provider(&store);
+    let scanner = Arc::new(MutableConsumers::new(ConsumerScan::unknown()));
+    let application = EnvironmentApplication::with_runtime_probes(
+        store,
+        temp.path().join(".codex"),
+        Arc::new(FixedLoginProbe(LoginStatus::NotLoggedIn)),
+        scanner.clone(),
+    );
+
+    assert!(
+        application
+            .apply_provider(PROVIDER_ID, true)
+            .expect("confirmed switch after unknown scan")
+            .pending_restart
+    );
+    assert!(
+        application
+            .inspect()
+            .expect("unknown scan remains conservative")
+            .pending_restart
+    );
+
+    scanner.set(stopped_consumers());
+    assert!(
+        !application
+            .inspect()
+            .expect("trustworthy stopped scan clears pending restart")
+            .pending_restart
+    );
 }

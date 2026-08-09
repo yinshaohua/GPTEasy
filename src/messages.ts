@@ -162,6 +162,8 @@ export const providerMessages = {
   deleteConfirmation: "确定删除这个供应商吗？",
   save: "保存",
   saveAndApply: "保存并应用",
+  consumerRiskConfirmation:
+    "GPTEasy 将保守标记环境为待重启；确认切换前的 Codex 消费者退出后会自动清除。是否继续保存并应用？",
   validationPassed: "完整验证已通过",
   validationTitle: "供应商验证",
   modelsConfirmed: "模型确认",

@@ -358,7 +358,7 @@ describe("供应商目录生命周期", () => {
       verifiedAtEpochSeconds: 1_786_140_100,
       isCurrent: true,
     };
-    invoke.mockImplementation((command: string) => {
+    invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
       if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
       if (command === "list_providers") return Promise.resolve([current]);
       if (command === "discover_provider_models_for_update") {
@@ -377,6 +377,12 @@ describe("供应商目录生命周期", () => {
         });
       }
       if (command === "save_and_apply_provider_update") {
+        if (!args?.confirmConsumerRisk) {
+          return Promise.reject({
+            category: "save_and_apply_failed",
+            messageId: "environment.consumer_confirmation_required",
+          });
+        }
         return Promise.resolve({
           ...current,
           baseUrl: "https://current.example/next/v1",
@@ -386,6 +392,7 @@ describe("供应商目录生命周期", () => {
       }
       return Promise.resolve(undefined);
     });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
 
     render(<App />);
     fireEvent.click(
@@ -410,8 +417,16 @@ describe("供应商目录生命周期", () => {
         validationId: "current-update-validation",
         providerId: current.id,
         name: current.name,
+        confirmConsumerRisk: false,
+      });
+      expect(invoke).toHaveBeenCalledWith("save_and_apply_provider_update", {
+        validationId: "current-update-validation",
+        providerId: current.id,
+        name: current.name,
+        confirmConsumerRisk: true,
       });
     });
+    expect(confirm).toHaveBeenCalledOnce();
     expect(
       invoke.mock.calls.some(([command]) => command === "save_provider_update"),
     ).toBe(false);
@@ -490,7 +505,7 @@ describe("Codex 环境接管", () => {
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("apply_environment_provider", {
         providerId: provider.id,
-        confirmTakeover: true,
+        confirmSwitchRisk: true,
         expectedRevision: "external-revision",
       });
     });
@@ -554,7 +569,7 @@ describe("Codex 环境接管", () => {
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("apply_environment_provider", {
         providerId: provider.id,
-        confirmTakeover: true,
+        confirmSwitchRisk: true,
         expectedRevision: "conflict-revision",
       });
     });
@@ -785,7 +800,7 @@ describe("Codex 环境接管", () => {
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("apply_environment_provider", {
         providerId: provider.id,
-        confirmTakeover: true,
+        confirmSwitchRisk: true,
         expectedRevision: "logged-out-openai-revision",
       });
     });

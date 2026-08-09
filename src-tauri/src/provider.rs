@@ -228,6 +228,12 @@ pub struct ProviderApplication {
     verified_candidates: Mutex<HashMap<String, VerifiedCandidate>>,
 }
 
+#[derive(Debug)]
+pub struct AppliedProviderUpdate {
+    pub provider: ProviderSummary,
+    pub environment: crate::environment::EnvironmentSnapshot,
+}
+
 #[derive(Clone)]
 struct VerifiedCandidate {
     request_id: String,
@@ -561,7 +567,8 @@ impl ProviderApplication {
         validation_id: &str,
         provider_id: &str,
         name: &str,
-    ) -> Result<ProviderSummary, ProviderFailure> {
+        confirm_consumer_risk: bool,
+    ) -> Result<AppliedProviderUpdate, ProviderFailure> {
         let name = name.trim();
         if name.is_empty() {
             return Err(ProviderFailure::new(
@@ -605,21 +612,24 @@ impl ProviderApplication {
         );
         let update = VerifiedProviderUpdate::new(provider, original_name, original_fingerprint);
         let snapshot = environment
-            .save_and_apply_provider_update(update)
+            .save_and_apply_provider_update(update, confirm_consumer_risk)
             .map_err(|failure| {
                 ProviderFailure::new(
                     ProviderFailureCategory::SaveAndApplyFailed,
                     failure.message_id,
                 )
             })?;
-        let summary = snapshot.current_provider.ok_or_else(|| {
+        let summary = snapshot.current_provider.clone().ok_or_else(|| {
             ProviderFailure::new(
                 ProviderFailureCategory::SaveAndApplyFailed,
                 "environment.state_unavailable",
             )
         })?;
         self.discard_validation(validation_id);
-        Ok(summary)
+        Ok(AppliedProviderUpdate {
+            provider: summary,
+            environment: snapshot,
+        })
     }
 
     pub async fn revalidate_provider(

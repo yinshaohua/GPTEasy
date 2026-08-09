@@ -656,6 +656,23 @@ async fn current_provider_update_commits_catalog_and_codex_artifacts_together() 
         )
         .await
         .expect("updated current combination validates");
+    let confirmation_required = application
+        .save_and_apply_provider_update(
+            &environment,
+            &receipt.validation_id,
+            &original.id,
+            "Updated Current Provider",
+            false,
+        )
+        .expect_err("current provider update must require consumer confirmation");
+    assert_eq!(
+        confirmation_required.category,
+        ProviderFailureCategory::SaveAndApplyFailed
+    );
+    assert_eq!(
+        confirmation_required.message_id,
+        "environment.consumer_confirmation_required"
+    );
     let failing_environment = EnvironmentApplication::with_fault_injector(
         store.clone(),
         &codex_home,
@@ -668,6 +685,7 @@ async fn current_provider_update_commits_catalog_and_codex_artifacts_together() 
             &receipt.validation_id,
             &original.id,
             "Updated Current Provider",
+            true,
         )
         .expect_err("database commit failure must roll back the whole update");
 
@@ -703,8 +721,10 @@ async fn current_provider_update_commits_catalog_and_codex_artifacts_together() 
             &receipt.validation_id,
             &original.id,
             "Updated Current Provider",
+            true,
         )
         .expect("retry save and apply");
+    let updated = updated.provider;
 
     assert_eq!(updated.id, original.id);
     assert_eq!(updated.name, "Updated Current Provider");

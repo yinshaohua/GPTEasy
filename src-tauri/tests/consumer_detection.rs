@@ -1,0 +1,263 @@
+use std::path::PathBuf;
+
+use gpteasy_lib::consumer::{
+    ConsumerRole, ConsumerScanner, ConsumerStatus, FixtureProcess, ProcessAccess,
+    WindowsConsumerScanner, classify_fixture,
+};
+
+fn process(
+    pid: u32,
+    parent_pid: u32,
+    started_at_epoch_millis: u64,
+    name: &str,
+    executable: &str,
+) -> FixtureProcess {
+    FixtureProcess {
+        pid,
+        parent_pid,
+        started_at_epoch_millis,
+        name: name.to_owned(),
+        executable: PathBuf::from(executable),
+        access: ProcessAccess::Available,
+        electron_helper: false,
+    }
+}
+
+#[test]
+fn recognizes_desktop_root_and_its_bundled_codex_child_from_process_evidence() {
+    let scan = classify_fixture(&[
+        process(
+            100,
+            1,
+            1_000,
+            "Codex.exe",
+            r"C:\Program Files\WindowsApps\OpenAI.Codex_1.2.3_x64__2p2nqsd0c76g0\Codex.exe",
+        ),
+        process(
+            101,
+            100,
+            1_001,
+            "codex.exe",
+            r"C:\Program Files\WindowsApps\OpenAI.Codex_1.2.3_x64__2p2nqsd0c76g0\resources\codex\codex.exe",
+        ),
+    ]);
+
+    assert_eq!(scan.desktop, ConsumerStatus::Running);
+    assert_eq!(scan.cli, ConsumerStatus::Stopped);
+    assert_eq!(scan.identities.len(), 2);
+    assert_eq!(scan.identities[0].role, ConsumerRole::Desktop);
+    assert_eq!(scan.identities[0].pid, 100);
+    assert_eq!(scan.identities[1].role, ConsumerRole::Desktop);
+    assert_eq!(scan.identities[1].pid, 101);
+}
+
+#[test]
+fn recognizes_standalone_codex_cli_without_mistaking_the_bundled_child_for_cli() {
+    let scan = classify_fixture(&[
+        process(
+            100,
+            1,
+            1_000,
+            "ChatGPT.exe",
+            r"C:\Program Files\WindowsApps\OpenAI.Codex_1.2.3_x64__2p2nqsd0c76g0\ChatGPT.exe",
+        ),
+        process(
+            101,
+            100,
+            1_001,
+            "codex.exe",
+            r"C:\Program Files\WindowsApps\OpenAI.Codex_1.2.3_x64__2p2nqsd0c76g0\resources\codex\codex.exe",
+        ),
+        process(
+            202,
+            77,
+            2_000,
+            "codex.exe",
+            r"C:\Users\example\AppData\Roaming\npm\node_modules\@openai\codex\vendor\codex.exe",
+        ),
+    ]);
+
+    assert_eq!(scan.desktop, ConsumerStatus::Running);
+    assert_eq!(scan.cli, ConsumerStatus::Running);
+    assert_eq!(
+        scan.identities
+            .iter()
+            .find(|identity| identity.role == ConsumerRole::Cli)
+            .map(|identity| identity.pid),
+        Some(202)
+    );
+}
+
+#[test]
+fn codex_name_without_a_trusted_install_path_is_unknown() {
+    let scan = classify_fixture(&[process(
+        202,
+        77,
+        2_000,
+        "codex.exe",
+        r"C:\tools\unrelated\codex.exe",
+    )]);
+
+    assert_eq!(scan.desktop, ConsumerStatus::Unknown);
+    assert_eq!(scan.cli, ConsumerStatus::Unknown);
+    assert!(scan.identities.is_empty());
+}
+
+#[test]
+fn orphaned_bundled_codex_child_is_unknown_and_not_a_cli() {
+    let scan = classify_fixture(&[process(
+        101,
+        100,
+        1_001,
+        "codex.exe",
+        r"C:\Program Files\WindowsApps\OpenAI.Codex_1.2.3_x64__2p2nqsd0c76g0\resources\codex\codex.exe",
+    )]);
+
+    assert_eq!(scan.desktop, ConsumerStatus::Unknown);
+    assert_eq!(scan.cli, ConsumerStatus::Stopped);
+    assert!(scan.identities.is_empty());
+}
+
+#[test]
+fn electron_helper_is_not_classified_as_a_desktop_root() {
+    let mut helper = process(
+        100,
+        1,
+        1_000,
+        "Codex.exe",
+        r"C:\Program Files\WindowsApps\OpenAI.Codex_1.2.3_x64__2p2nqsd0c76g0\Codex.exe",
+    );
+    helper.electron_helper = true;
+
+    let scan = classify_fixture(&[helper]);
+
+    assert_eq!(scan.desktop, ConsumerStatus::Stopped);
+    assert_eq!(scan.cli, ConsumerStatus::Stopped);
+    assert!(scan.identities.is_empty());
+}
+
+#[test]
+fn access_limited_candidate_is_unknown_instead_of_being_reported_as_stopped() {
+    let mut candidate = process(202, 77, 2_000, "codex.exe", r"C:\unknown\codex.exe");
+    candidate.access = ProcessAccess::Denied;
+
+    let scan = classify_fixture(&[candidate]);
+
+    assert_eq!(scan.desktop, ConsumerStatus::Unknown);
+    assert_eq!(scan.cli, ConsumerStatus::Unknown);
+}
+
+#[test]
+fn another_users_codex_process_is_outside_the_managed_environment() {
+    let mut candidate = process(
+        202,
+        77,
+        2_000,
+        "codex.exe",
+        r"C:\Users\other\node_modules\@openai\codex\vendor\codex.exe",
+    );
+    candidate.access = ProcessAccess::OtherUser;
+
+    let scan = classify_fixture(&[candidate]);
+
+    assert_eq!(scan.desktop, ConsumerStatus::Stopped);
+    assert_eq!(scan.cli, ConsumerStatus::Stopped);
+    assert!(scan.identities.is_empty());
+}
+
+#[test]
+fn access_limited_candidate_keeps_the_role_unknown_even_when_another_process_is_visible() {
+    let visible = process(
+        202,
+        77,
+        2_000,
+        "codex.exe",
+        r"C:\Users\example\AppData\Roaming\npm\node_modules\@openai\codex\vendor\codex.exe",
+    );
+    let mut hidden = process(203, 77, 2_001, "codex.exe", r"C:\unknown\codex.exe");
+    hidden.access = ProcessAccess::Denied;
+
+    let scan = classify_fixture(&[visible, hidden]);
+
+    assert_eq!(scan.cli, ConsumerStatus::Unknown);
+    assert!(!scan.is_trustworthy());
+}
+
+#[test]
+fn pending_identity_uses_start_time_so_pid_reuse_does_not_keep_restart_pending() {
+    let before = classify_fixture(&[process(
+        202,
+        77,
+        2_000,
+        "codex.exe",
+        r"C:\Users\example\AppData\Roaming\npm\node_modules\@openai\codex\vendor\codex.exe",
+    )]);
+    let after = classify_fixture(&[process(
+        202,
+        77,
+        3_000,
+        "codex.exe",
+        r"C:\Users\example\AppData\Roaming\npm\node_modules\@openai\codex\vendor\codex.exe",
+    )]);
+
+    assert!(before.has_live_identity_from(&before.identities));
+    assert!(!after.has_live_identity_from(&before.identities));
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_scanner_recognizes_a_real_process_from_a_trusted_cli_path() {
+    use std::fs;
+    use std::process::{Child, Command};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    struct ChildGuard(Child);
+
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let temp = tempfile::TempDir::new().expect("temp directory");
+    let fixture_dir = temp
+        .path()
+        .join("node_modules")
+        .join("@openai")
+        .join("codex")
+        .join("vendor");
+    fs::create_dir_all(&fixture_dir).expect("create trusted fixture path");
+    let executable = fixture_dir.join("codex.exe");
+    let system_root = std::env::var_os("SystemRoot").expect("SystemRoot");
+    fs::copy(
+        PathBuf::from(system_root).join("System32").join("cmd.exe"),
+        &executable,
+    )
+    .expect("copy process fixture");
+    let child = Command::new(&executable)
+        .args(["/d", "/c", "ping.exe -n 30 127.0.0.1 >nul"])
+        .spawn()
+        .expect("start process fixture");
+    let pid = child.id();
+    let _guard = ChildGuard(child);
+    let scanner = WindowsConsumerScanner::new();
+    let deadline = Instant::now() + Duration::from_secs(3);
+
+    loop {
+        let scan = scanner.scan();
+        if scan
+            .identities
+            .iter()
+            .any(|identity| identity.role == ConsumerRole::Cli && identity.pid == pid)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "scanner did not identify fixture PID {pid}"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+}

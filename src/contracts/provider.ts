@@ -163,12 +163,14 @@ export function saveAndApplyProviderUpdate(
   validationId: string,
   providerId: string,
   name: string,
+  confirmConsumerRisk: boolean,
 ): Promise<ProviderSummary> {
   if (isBrowserPreview()) return Promise.reject(previewFailure);
   return invoke<ProviderSummary>("save_and_apply_provider_update", {
     validationId,
     providerId,
     name,
+    confirmConsumerRisk,
   });
 }
 

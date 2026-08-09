@@ -12,6 +12,8 @@ use toml_edit::DocumentMut;
 use uuid::Uuid;
 
 use crate::codex::{LoginStatus, LoginStatusCommand};
+pub use crate::consumer::ConsumerStatus;
+use crate::consumer::{ConsumerIdentity, ConsumerScan, ConsumerScanner, WindowsConsumerScanner};
 use crate::provider::ProviderSummary;
 use crate::state::StateStore;
 
@@ -39,16 +41,17 @@ pub enum AuthenticationMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ConsumerStatus {
-    Unknown,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConsumerStatuses {
     pub desktop: ConsumerStatus,
     pub cli: ConsumerStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PendingRestartContext {
+    consumers: Vec<ConsumerIdentity>,
+    switched_at_epoch_millis: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -86,6 +89,7 @@ pub struct EnvironmentSnapshot {
     pub restore_availability: RestoreAvailability,
     pub login_status: LoginStatus,
     pub pending_restart: bool,
+    pub requires_consumer_confirmation: bool,
     pub consumers: ConsumerStatuses,
 }
 
@@ -119,6 +123,7 @@ pub enum EnvironmentFailureCategory {
     RestoreUnavailable,
     BackupInvalid,
     ModeSwitchConfirmationRequired,
+    ConsumerConfirmationRequired,
     OpenAiLoginRequired,
     OpenAiLoginUnavailable,
 }
@@ -200,15 +205,17 @@ pub struct EnvironmentApplication {
     operation_lock: Arc<Mutex<()>>,
     faults: Arc<dyn EnvironmentFaultInjector>,
     login_probe: Arc<dyn OpenAiLoginProbe>,
+    consumer_scanner: Arc<dyn ConsumerScanner>,
 }
 
 impl EnvironmentApplication {
     pub fn new(state_store: StateStore, codex_home: impl AsRef<Path>) -> Self {
-        Self::with_dependencies(
+        Self::with_dependencies_and_scanner(
             state_store,
             codex_home,
             Arc::new(NoFaults),
             Arc::new(LoginStatusCommand::codex_default()),
+            Arc::new(WindowsConsumerScanner::new()),
         )
     }
 
@@ -218,11 +225,12 @@ impl EnvironmentApplication {
         codex_home: impl AsRef<Path>,
         faults: Arc<dyn EnvironmentFaultInjector>,
     ) -> Self {
-        Self::with_dependencies(
+        Self::with_dependencies_and_scanner(
             state_store,
             codex_home,
             faults,
             Arc::new(LoginStatusCommand::codex_default()),
+            Arc::new(WindowsConsumerScanner::new()),
         )
     }
 
@@ -232,7 +240,13 @@ impl EnvironmentApplication {
         codex_home: impl AsRef<Path>,
         login_probe: Arc<dyn OpenAiLoginProbe>,
     ) -> Self {
-        Self::with_dependencies(state_store, codex_home, Arc::new(NoFaults), login_probe)
+        Self::with_dependencies_and_scanner(
+            state_store,
+            codex_home,
+            Arc::new(NoFaults),
+            login_probe,
+            Arc::new(WindowsConsumerScanner::new()),
+        )
     }
 
     #[doc(hidden)]
@@ -242,18 +256,98 @@ impl EnvironmentApplication {
         faults: Arc<dyn EnvironmentFaultInjector>,
         login_probe: Arc<dyn OpenAiLoginProbe>,
     ) -> Self {
+        Self::with_dependencies_and_scanner(
+            state_store,
+            codex_home,
+            faults,
+            login_probe,
+            Arc::new(WindowsConsumerScanner::new()),
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn with_consumer_scanner(
+        state_store: StateStore,
+        codex_home: impl AsRef<Path>,
+        scanner: Arc<dyn ConsumerScanner>,
+    ) -> Self {
+        Self::with_dependencies_and_scanner(
+            state_store,
+            codex_home,
+            Arc::new(NoFaults),
+            Arc::new(LoginStatusCommand::codex_default()),
+            scanner,
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn with_runtime_probes(
+        state_store: StateStore,
+        codex_home: impl AsRef<Path>,
+        login_probe: Arc<dyn OpenAiLoginProbe>,
+        consumer_scanner: Arc<dyn ConsumerScanner>,
+    ) -> Self {
+        Self::with_dependencies_and_scanner(
+            state_store,
+            codex_home,
+            Arc::new(NoFaults),
+            login_probe,
+            consumer_scanner,
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn with_runtime_dependencies(
+        state_store: StateStore,
+        codex_home: impl AsRef<Path>,
+        faults: Arc<dyn EnvironmentFaultInjector>,
+        login_probe: Arc<dyn OpenAiLoginProbe>,
+        consumer_scanner: Arc<dyn ConsumerScanner>,
+    ) -> Self {
+        Self::with_dependencies_and_scanner(
+            state_store,
+            codex_home,
+            faults,
+            login_probe,
+            consumer_scanner,
+        )
+    }
+
+    fn with_dependencies_and_scanner(
+        state_store: StateStore,
+        codex_home: impl AsRef<Path>,
+        faults: Arc<dyn EnvironmentFaultInjector>,
+        login_probe: Arc<dyn OpenAiLoginProbe>,
+        consumer_scanner: Arc<dyn ConsumerScanner>,
+    ) -> Self {
         Self {
             state_store,
             codex_home: codex_home.as_ref().to_path_buf(),
             operation_lock: Arc::new(Mutex::new(())),
             faults,
             login_probe,
+            consumer_scanner,
         }
     }
 
     pub fn inspect(&self) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
+        let _guard = self
+            .operation_lock
+            .lock()
+            .map_err(|_| state_unavailable())?;
         let connection = self.open_state()?;
         self.inspect_environment(&connection)
+    }
+
+    pub fn has_pending_restart(&self) -> Result<bool, EnvironmentFailure> {
+        let connection = self.open_state()?;
+        connection
+            .query_row(
+                "SELECT pending_restart FROM app_state WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|_| state_unavailable())
     }
 
     pub fn recover_pending(&self) -> Result<EnvironmentRecovery, EnvironmentFailure> {
@@ -266,7 +360,8 @@ impl EnvironmentApplication {
             .query_row(
                 "SELECT operation_id, operation_kind, old_config_fingerprint,
                         new_config_fingerprint, old_credentials_fingerprint,
-                        new_credentials_fingerprint, backup_reference, target_snapshot_json
+                        new_credentials_fingerprint, backup_reference, target_snapshot_json,
+                        restart_context
                  FROM pending_config_operation WHERE singleton = 1",
                 [],
                 |row| {
@@ -279,6 +374,7 @@ impl EnvironmentApplication {
                         new_credentials_fingerprint: row.get(5)?,
                         backup_reference: PathBuf::from(row.get::<_, String>(6)?),
                         target_snapshot_json: row.get(7)?,
+                        restart_context: row.get::<_, Option<String>>(8)?,
                     })
                 },
             )
@@ -358,6 +454,8 @@ impl EnvironmentApplication {
         if environment_revision(&config, &credentials) != expected_revision {
             return Err(concurrent_modification());
         }
+        let consumer_scan = self.consumer_scanner.scan();
+        let mut restart_context = pending_restart_context(&consumer_scan);
         let backup = latest_completed_backup(&self.codex_home)?.ok_or_else(restore_unavailable)?;
         if !backup.matches_current(&config, &credentials) {
             return Err(EnvironmentFailure::new(
@@ -371,7 +469,12 @@ impl EnvironmentApplication {
         }
         let rollback_backup = create_restore_backup(&self.codex_home, &prepared)?;
         self.check_interruption(EnvironmentFailurePoint::AfterBackupCompleted)?;
-        persist_pending_restore(&mut connection, &prepared, &rollback_backup)?;
+        persist_pending_restore(
+            &mut connection,
+            &prepared,
+            &rollback_backup,
+            restart_context.as_ref(),
+        )?;
         self.check_interruption(EnvironmentFailurePoint::AfterPendingRegistered)?;
 
         let mut config_applied = false;
@@ -384,9 +487,8 @@ impl EnvironmentApplication {
             config_applied = true;
             update_pending_stage(&connection, &prepared.operation_id, "config_replaced")?;
             self.check_interruption(EnvironmentFailurePoint::AfterConfigReplaced)
-                .map_err(|failure| {
+                .inspect_err(|_| {
                     interrupted = true;
-                    failure
                 })?;
             if let Some(credentials) = &prepared.credentials {
                 self.check_fault(EnvironmentFailurePoint::BeforeCredentialsReplace)?;
@@ -395,24 +497,22 @@ impl EnvironmentApplication {
             }
             prepared.verify_committed()?;
             update_pending_stage(&connection, &prepared.operation_id, "artifacts_replaced")?;
+            finalize_restart_context(&connection, &prepared.operation_id, &mut restart_context)?;
             mark_backup_completed(&rollback_backup)?;
             backup_completed = true;
             self.check_interruption(EnvironmentFailurePoint::AfterAllArtifactsReplaced)
-                .map_err(|failure| {
+                .inspect_err(|_| {
                     interrupted = true;
-                    failure
                 })?;
             self.check_interruption(EnvironmentFailurePoint::BeforeDatabaseCommit)
-                .map_err(|failure| {
+                .inspect_err(|_| {
                     interrupted = true;
-                    failure
                 })?;
             self.check_fault(EnvironmentFailurePoint::BeforeDatabaseCommit)?;
-            commit_restored_state(&mut connection, &prepared)?;
+            commit_restored_state(&mut connection, &prepared, restart_context.as_ref())?;
             self.check_interruption(EnvironmentFailurePoint::AfterDatabaseCommit)
-                .map_err(|failure| {
+                .inspect_err(|_| {
                     interrupted = true;
-                    failure
                 })?;
             Ok(())
         })();
@@ -436,16 +536,16 @@ impl EnvironmentApplication {
             return Err(failure);
         }
 
-        self.inspect_environment(&connection)
+        self.inspect_environment_after_write(&connection, &consumer_scan)
     }
 
     pub fn apply_provider(
         &self,
         provider_id: &str,
-        confirm_takeover: bool,
+        confirm_switch_risk: bool,
     ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
         let revision = self.inspect()?.revision;
-        self.apply_provider_at_revision(provider_id, confirm_takeover, &revision)
+        self.apply_provider_at_revision(provider_id, confirm_switch_risk, &revision)
     }
 
     pub fn switch_to_openai_login(
@@ -498,13 +598,20 @@ impl EnvironmentApplication {
         if before.revision != expected_revision {
             return Err(concurrent_modification());
         }
+        let consumer_scan = self.consumer_scanner.scan();
+        let mut restart_context = pending_restart_context(&consumer_scan);
         let prepared = PreparedOpenAiSwitch::prepare(&self.codex_home)?;
         if self.faults.fails_backup_creation() {
             return Err(backup_failed());
         }
         let backup = create_openai_backup(&self.codex_home, &prepared)?;
         self.check_interruption(EnvironmentFailurePoint::AfterBackupCompleted)?;
-        persist_pending_openai(&mut connection, &prepared, &backup)?;
+        persist_pending_openai(
+            &mut connection,
+            &prepared,
+            &backup,
+            restart_context.as_ref(),
+        )?;
         self.check_interruption(EnvironmentFailurePoint::AfterPendingRegistered)?;
 
         let mut config_applied = false;
@@ -516,30 +623,27 @@ impl EnvironmentApplication {
             config_applied = true;
             update_pending_stage(&connection, &prepared.operation_id, "config_replaced")?;
             self.check_interruption(EnvironmentFailurePoint::AfterConfigReplaced)
-                .map_err(|failure| {
+                .inspect_err(|_| {
                     interrupted = true;
-                    failure
                 })?;
             prepared.config.verify_target()?;
             update_pending_stage(&connection, &prepared.operation_id, "artifacts_replaced")?;
+            finalize_restart_context(&connection, &prepared.operation_id, &mut restart_context)?;
             mark_backup_completed(&backup)?;
             backup_completed = true;
             self.check_interruption(EnvironmentFailurePoint::AfterAllArtifactsReplaced)
-                .map_err(|failure| {
+                .inspect_err(|_| {
                     interrupted = true;
-                    failure
                 })?;
             self.check_interruption(EnvironmentFailurePoint::BeforeDatabaseCommit)
-                .map_err(|failure| {
+                .inspect_err(|_| {
                     interrupted = true;
-                    failure
                 })?;
             self.check_fault(EnvironmentFailurePoint::BeforeDatabaseCommit)?;
-            commit_openai_state(&mut connection, &prepared)?;
+            commit_openai_state(&mut connection, &prepared, restart_context.as_ref())?;
             self.check_interruption(EnvironmentFailurePoint::AfterDatabaseCommit)
-                .map_err(|failure| {
+                .inspect_err(|_| {
                     interrupted = true;
-                    failure
                 })?;
             Ok(())
         })();
@@ -563,13 +667,13 @@ impl EnvironmentApplication {
             return Err(failure);
         }
 
-        self.inspect_environment(&connection)
+        self.inspect_environment_after_write(&connection, &consumer_scan)
     }
 
     pub fn apply_provider_at_revision(
         &self,
         provider_id: &str,
-        confirm_takeover: bool,
+        confirm_switch_risk: bool,
         expected_revision: &str,
     ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
         let _guard = self
@@ -581,7 +685,7 @@ impl EnvironmentApplication {
         self.apply_target(
             &mut connection,
             provider,
-            confirm_takeover,
+            confirm_switch_risk,
             Some(expected_revision),
             None,
         )
@@ -590,6 +694,7 @@ impl EnvironmentApplication {
     pub(crate) fn save_and_apply_provider_update(
         &self,
         update: VerifiedProviderUpdate,
+        confirm_consumer_risk: bool,
     ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
         let _guard = self
             .operation_lock
@@ -610,35 +715,42 @@ impl EnvironmentApplication {
             original_name: update.original_name,
             original_verification_fingerprint: update.original_verification_fingerprint,
         };
-        self.apply_target(&mut connection, update.provider, false, None, Some(guard))
+        self.apply_target(
+            &mut connection,
+            update.provider,
+            confirm_consumer_risk,
+            None,
+            Some(guard),
+        )
     }
 
     fn apply_target(
         &self,
         connection: &mut Connection,
         provider: ProviderTarget,
-        confirm_takeover: bool,
+        confirm_switch_risk: bool,
         expected_revision: Option<&str>,
         update_guard: Option<UpdateGuard>,
     ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
         let before = self.inspect_environment(connection)?;
+        let consumer_scan = self.consumer_scanner.scan();
         if expected_revision.is_some_and(|expected| before.revision != expected) {
             return Err(concurrent_modification());
         }
-        if before.mode == Some(AuthenticationMode::OpenaiLogin) && !confirm_takeover {
+        if before.mode == Some(AuthenticationMode::OpenaiLogin) && !confirm_switch_risk {
             return Err(EnvironmentFailure::new(
                 EnvironmentFailureCategory::ModeSwitchConfirmationRequired,
                 "environment.mode_switch_confirmation_required",
             ));
         }
         match before.state {
-            EnvironmentState::Conflict if !confirm_takeover => {
+            EnvironmentState::Conflict if !confirm_switch_risk => {
                 return Err(EnvironmentFailure::new(
                     EnvironmentFailureCategory::TakeoverConfirmationRequired,
                     "environment.takeover_confirmation_required",
                 ));
             }
-            EnvironmentState::External if !confirm_takeover => {
+            EnvironmentState::External if !confirm_switch_risk => {
                 return Err(EnvironmentFailure::new(
                     EnvironmentFailureCategory::TakeoverConfirmationRequired,
                     "environment.takeover_confirmation_required",
@@ -646,6 +758,12 @@ impl EnvironmentApplication {
             }
             EnvironmentState::Conflict | EnvironmentState::External | EnvironmentState::Managed => {
             }
+        }
+        if !confirm_switch_risk {
+            return Err(EnvironmentFailure::new(
+                EnvironmentFailureCategory::ConsumerConfirmationRequired,
+                "environment.consumer_confirmation_required",
+            ));
         }
 
         let prepared = PreparedSwitch::prepare(&self.codex_home, provider, update_guard)?;
@@ -657,7 +775,8 @@ impl EnvironmentApplication {
         }
         let backup = create_backup(&self.codex_home, &prepared)?;
         self.check_interruption(EnvironmentFailurePoint::AfterBackupCompleted)?;
-        persist_pending(connection, &prepared, &backup)?;
+        let mut restart_context = pending_restart_context(&consumer_scan);
+        persist_pending(connection, &prepared, &backup, restart_context.as_ref())?;
         self.check_interruption(EnvironmentFailurePoint::AfterPendingRegistered)?;
 
         let mut config_applied = false;
@@ -670,33 +789,30 @@ impl EnvironmentApplication {
             config_applied = true;
             update_pending_stage(connection, &prepared.operation_id, "config_replaced")?;
             self.check_interruption(EnvironmentFailurePoint::AfterConfigReplaced)
-                .map_err(|failure| {
+                .inspect_err(|_| {
                     interrupted = true;
-                    failure
                 })?;
             self.check_fault(EnvironmentFailurePoint::BeforeCredentialsReplace)?;
             prepared.credentials.commit()?;
             credentials_applied = true;
             prepared.verify_committed()?;
             update_pending_stage(connection, &prepared.operation_id, "artifacts_replaced")?;
+            finalize_restart_context(connection, &prepared.operation_id, &mut restart_context)?;
             mark_backup_completed(&backup)?;
             backup_completed = true;
             self.check_interruption(EnvironmentFailurePoint::AfterAllArtifactsReplaced)
-                .map_err(|failure| {
+                .inspect_err(|_| {
                     interrupted = true;
-                    failure
                 })?;
             self.check_interruption(EnvironmentFailurePoint::BeforeDatabaseCommit)
-                .map_err(|failure| {
+                .inspect_err(|_| {
                     interrupted = true;
-                    failure
                 })?;
             self.check_fault(EnvironmentFailurePoint::BeforeDatabaseCommit)?;
-            commit_applied_state(connection, &prepared)?;
+            commit_applied_state(connection, &prepared, restart_context.as_ref())?;
             self.check_interruption(EnvironmentFailurePoint::AfterDatabaseCommit)
-                .map_err(|failure| {
+                .inspect_err(|_| {
                     interrupted = true;
-                    failure
                 })?;
             Ok(())
         })();
@@ -720,14 +836,36 @@ impl EnvironmentApplication {
             return Err(failure);
         }
 
-        self.inspect_environment(connection)
+        self.inspect_environment_after_write(connection, &consumer_scan)
     }
 
     fn inspect_environment(
         &self,
         connection: &Connection,
     ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
-        inspect_environment(connection, &self.codex_home, self.login_probe.status())
+        let scan = self.consumer_scanner.scan();
+        reconcile_pending_restart(connection, &scan)?;
+        self.snapshot_with_consumer_scan(connection, &scan)
+    }
+
+    fn inspect_environment_after_write(
+        &self,
+        connection: &Connection,
+        scan: &ConsumerScan,
+    ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
+        self.snapshot_with_consumer_scan(connection, scan)
+    }
+
+    fn snapshot_with_consumer_scan(
+        &self,
+        connection: &Connection,
+        scan: &ConsumerScan,
+    ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
+        let mut snapshot =
+            inspect_environment(connection, &self.codex_home, self.login_probe.status())?;
+        snapshot.requires_consumer_confirmation = true;
+        snapshot.consumers = consumer_statuses(scan);
+        Ok(snapshot)
     }
 
     fn open_state(&self) -> Result<Connection, EnvironmentFailure> {
@@ -809,6 +947,7 @@ struct PendingRecovery {
     new_credentials_fingerprint: Option<String>,
     backup_reference: PathBuf,
     target_snapshot_json: String,
+    restart_context: Option<String>,
 }
 
 pub(crate) struct VerifiedProviderUpdate {
@@ -1034,6 +1173,7 @@ fn inspect_environment(
             restore_availability,
             login_status,
             pending_restart,
+            requires_consumer_confirmation: false,
             consumers: unknown_consumers(),
         });
     }
@@ -1214,6 +1354,7 @@ fn inspect_environment(
         restore_availability,
         login_status,
         pending_restart,
+        requires_consumer_confirmation: false,
         consumers: unknown_consumers(),
     })
 }
@@ -1243,6 +1384,7 @@ fn external_snapshot(
         restore_availability,
         login_status,
         pending_restart,
+        requires_consumer_confirmation: false,
         consumers: unknown_consumers(),
     }
 }
@@ -1265,6 +1407,7 @@ fn conflict_snapshot(
         restore_availability,
         login_status,
         pending_restart,
+        requires_consumer_confirmation: false,
         consumers: unknown_consumers(),
     }
 }
@@ -1274,6 +1417,105 @@ fn unknown_consumers() -> ConsumerStatuses {
         desktop: ConsumerStatus::Unknown,
         cli: ConsumerStatus::Unknown,
     }
+}
+
+fn consumer_statuses(scan: &ConsumerScan) -> ConsumerStatuses {
+    ConsumerStatuses {
+        desktop: scan.desktop,
+        cli: scan.cli,
+    }
+}
+
+fn pending_restart_context(scan: &ConsumerScan) -> Option<PendingRestartContext> {
+    Some(PendingRestartContext {
+        consumers: scan.identities.clone(),
+        switched_at_epoch_millis: u64::MAX,
+    })
+}
+
+fn finalize_restart_context(
+    connection: &Connection,
+    operation_id: &str,
+    context: &mut Option<PendingRestartContext>,
+) -> Result<(), EnvironmentFailure> {
+    let context = context.as_mut().ok_or_else(state_unavailable)?;
+    context.switched_at_epoch_millis = epoch_millis();
+    let context_json = serde_json::to_string(context).map_err(|_| state_unavailable())?;
+    let changed = connection
+        .execute(
+            "UPDATE pending_config_operation SET restart_context = ?1
+             WHERE singleton = 1 AND operation_id = ?2",
+            params![context_json, operation_id],
+        )
+        .map_err(|_| state_unavailable())?;
+    if changed == 1 {
+        Ok(())
+    } else {
+        Err(state_unavailable())
+    }
+}
+
+fn serialize_restart_context(
+    context: Option<&PendingRestartContext>,
+) -> Result<Option<String>, EnvironmentFailure> {
+    context
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|_| state_unavailable())
+}
+
+fn update_pending_restart(
+    transaction: &rusqlite::Transaction<'_>,
+    context: Option<&PendingRestartContext>,
+) -> Result<(), EnvironmentFailure> {
+    let context_json = serialize_restart_context(context)?;
+    transaction
+        .execute(
+            "UPDATE app_state SET pending_restart = ?1,
+                pending_restart_context = ?2 WHERE singleton = 1",
+            params![context.is_some(), context_json],
+        )
+        .map_err(|_| state_unavailable())?;
+    Ok(())
+}
+
+fn reconcile_pending_restart(
+    connection: &Connection,
+    scan: &ConsumerScan,
+) -> Result<(), EnvironmentFailure> {
+    let Some((pending_restart, context)) = connection
+        .query_row(
+            "SELECT pending_restart, pending_restart_context
+             FROM app_state WHERE singleton = 1",
+            [],
+            |row| Ok((row.get::<_, bool>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .optional()
+        .map_err(|_| state_unavailable())?
+    else {
+        return Err(state_unavailable());
+    };
+    if !pending_restart || !scan.is_trustworthy() {
+        return Ok(());
+    }
+    let Some(context_json) = context.as_deref() else {
+        return Ok(());
+    };
+    let Ok(context) = serde_json::from_str::<PendingRestartContext>(context_json) else {
+        return Ok(());
+    };
+    let old_consumer_alive = scan.has_live_identity_from(&context.consumers)
+        || scan.has_consumer_started_before(context.switched_at_epoch_millis);
+    if !old_consumer_alive {
+        connection
+            .execute(
+                "UPDATE app_state SET pending_restart = 0,
+                    pending_restart_context = NULL WHERE singleton = 1",
+                [],
+            )
+            .map_err(|_| state_unavailable())?;
+    }
+    Ok(())
 }
 
 fn action_for(artifact: &ArtifactBytes) -> ArtifactAction {
@@ -1668,8 +1910,10 @@ fn persist_pending(
     connection: &mut Connection,
     prepared: &PreparedSwitch,
     backup: &Path,
+    restart_context: Option<&PendingRestartContext>,
 ) -> Result<(), EnvironmentFailure> {
     let snapshot = serde_json::to_string(&prepared.provider).map_err(|_| state_unavailable())?;
+    let restart_context = serialize_restart_context(restart_context)?;
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| state_unavailable())?;
@@ -1704,8 +1948,8 @@ fn persist_pending(
                 singleton, operation_id, operation_kind, stage, target_provider_id,
                 old_config_fingerprint, new_config_fingerprint,
                 old_credentials_fingerprint, new_credentials_fingerprint,
-                backup_reference, target_snapshot_json, started_at
-             ) VALUES (1, ?1, ?2, 'prepared', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                backup_reference, target_snapshot_json, started_at, restart_context
+             ) VALUES (1, ?1, ?2, 'prepared', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 prepared.operation_id,
                 if prepared.update_guard.is_some() {
@@ -1721,6 +1965,7 @@ fn persist_pending(
                 backup.to_string_lossy(),
                 snapshot,
                 epoch_seconds().to_string(),
+                restart_context,
             ],
         )
         .map_err(|_| state_unavailable())?;
@@ -1731,7 +1976,9 @@ fn persist_pending_openai(
     connection: &mut Connection,
     prepared: &PreparedOpenAiSwitch,
     backup: &Path,
+    restart_context: Option<&PendingRestartContext>,
 ) -> Result<(), EnvironmentFailure> {
+    let restart_context = serialize_restart_context(restart_context)?;
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| state_unavailable())?;
@@ -1741,15 +1988,16 @@ fn persist_pending_openai(
                 singleton, operation_id, operation_kind, stage,
                 old_config_fingerprint, new_config_fingerprint,
                 old_credentials_fingerprint, new_credentials_fingerprint,
-                backup_reference, target_snapshot_json, started_at
+                backup_reference, target_snapshot_json, started_at, restart_context
              ) VALUES (1, ?1, 'switch_openai_login', 'prepared', ?2, ?3,
-                       NULL, NULL, ?4, '{}', ?5)",
+                       NULL, NULL, ?4, '{}', ?5, ?6)",
             params![
                 prepared.operation_id,
                 prepared.config.current_fingerprint,
                 prepared.config.target_fingerprint,
                 backup.to_string_lossy(),
                 epoch_seconds().to_string(),
+                restart_context,
             ],
         )
         .map_err(|_| state_unavailable())?;
@@ -1760,11 +2008,13 @@ fn persist_pending_restore(
     connection: &mut Connection,
     prepared: &PreparedRestore,
     backup: &Path,
+    restart_context: Option<&PendingRestartContext>,
 ) -> Result<(), EnvironmentFailure> {
     let target_snapshot = serde_json::json!({
         "sourceBackup": prepared.source_backup.to_string_lossy(),
     })
     .to_string();
+    let restart_context = serialize_restart_context(restart_context)?;
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| state_unavailable())?;
@@ -1774,8 +2024,8 @@ fn persist_pending_restore(
                 singleton, operation_id, operation_kind, stage,
                 old_config_fingerprint, new_config_fingerprint,
                 old_credentials_fingerprint, new_credentials_fingerprint,
-                backup_reference, target_snapshot_json, started_at
-             ) VALUES (1, ?1, 'restore_latest', 'prepared', ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                backup_reference, target_snapshot_json, started_at, restart_context
+             ) VALUES (1, ?1, 'restore_latest', 'prepared', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 prepared.operation_id,
                 prepared.config.current_fingerprint,
@@ -1791,6 +2041,7 @@ fn persist_pending_restore(
                 backup.to_string_lossy(),
                 target_snapshot,
                 epoch_seconds().to_string(),
+                restart_context,
             ],
         )
         .map_err(|_| state_unavailable())?;
@@ -1800,6 +2051,7 @@ fn persist_pending_restore(
 fn commit_applied_state(
     connection: &mut Connection,
     prepared: &PreparedSwitch,
+    restart_context: Option<&PendingRestartContext>,
 ) -> Result<(), EnvironmentFailure> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1849,6 +2101,7 @@ fn commit_applied_state(
             ],
         )
         .map_err(|_| state_unavailable())?;
+    update_pending_restart(&transaction, restart_context)?;
     transaction
         .execute(
             "DELETE FROM pending_config_operation WHERE singleton = 1 AND operation_id = ?1",
@@ -1861,6 +2114,7 @@ fn commit_applied_state(
 fn commit_openai_state(
     connection: &mut Connection,
     prepared: &PreparedOpenAiSwitch,
+    restart_context: Option<&PendingRestartContext>,
 ) -> Result<(), EnvironmentFailure> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1880,6 +2134,7 @@ fn commit_openai_state(
             [epoch_seconds().to_string()],
         )
         .map_err(|_| state_unavailable())?;
+    update_pending_restart(&transaction, restart_context)?;
     transaction
         .execute(
             "DELETE FROM pending_config_operation WHERE singleton = 1 AND operation_id = ?1",
@@ -1892,6 +2147,7 @@ fn commit_openai_state(
 fn commit_recovered_openai_state(
     connection: &mut Connection,
     operation_id: &str,
+    restart_context: Option<&PendingRestartContext>,
 ) -> Result<(), EnvironmentFailure> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1911,6 +2167,7 @@ fn commit_recovered_openai_state(
             [epoch_seconds().to_string()],
         )
         .map_err(|_| state_unavailable())?;
+    update_pending_restart(&transaction, restart_context)?;
     transaction
         .execute(
             "DELETE FROM pending_config_operation WHERE singleton = 1 AND operation_id = ?1",
@@ -1978,14 +2235,30 @@ fn commit_recovered_state(
     config: &ArtifactBytes,
     credentials: &ArtifactBytes,
 ) -> Result<(), EnvironmentFailure> {
+    let restart_context = pending
+        .restart_context
+        .as_deref()
+        .map(serde_json::from_str::<PendingRestartContext>)
+        .transpose()
+        .map_err(|_| state_unavailable())?;
     if pending.operation_kind == "restore_latest" {
         let credentials = (pending.old_credentials_fingerprint.is_some()
             || pending.new_credentials_fingerprint.is_some())
         .then_some(credentials);
-        return commit_reconciled_state(connection, &pending.operation_id, config, credentials);
+        return commit_reconciled_state(
+            connection,
+            &pending.operation_id,
+            config,
+            credentials,
+            restart_context.as_ref(),
+        );
     }
     if pending.operation_kind == "switch_openai_login" {
-        return commit_recovered_openai_state(connection, &pending.operation_id);
+        return commit_recovered_openai_state(
+            connection,
+            &pending.operation_id,
+            restart_context.as_ref(),
+        );
     }
     let provider: ProviderTarget =
         serde_json::from_str(&pending.target_snapshot_json).map_err(|_| state_unavailable())?;
@@ -2045,6 +2318,7 @@ fn commit_recovered_state(
             ],
         )
         .map_err(|_| state_unavailable())?;
+    update_pending_restart(&transaction, restart_context.as_ref())?;
     transaction
         .execute(
             "DELETE FROM pending_config_operation WHERE singleton = 1 AND operation_id = ?1",
@@ -2057,6 +2331,7 @@ fn commit_recovered_state(
 fn commit_restored_state(
     connection: &mut Connection,
     prepared: &PreparedRestore,
+    restart_context: Option<&PendingRestartContext>,
 ) -> Result<(), EnvironmentFailure> {
     commit_reconciled_state(
         connection,
@@ -2066,6 +2341,7 @@ fn commit_restored_state(
             .credentials
             .as_ref()
             .map(|credentials| &credentials.target),
+        restart_context,
     )
 }
 
@@ -2074,6 +2350,7 @@ fn commit_reconciled_state(
     operation_id: &str,
     config: &ArtifactBytes,
     credentials: Option<&ArtifactBytes>,
+    restart_context: Option<&PendingRestartContext>,
 ) -> Result<(), EnvironmentFailure> {
     let applied = reconciled_applied_provider(connection, config, credentials)?;
     let transaction = connection
@@ -2108,6 +2385,7 @@ fn commit_reconciled_state(
                 .map_err(|_| state_unavailable())?;
         }
     }
+    update_pending_restart(&transaction, restart_context)?;
     transaction
         .execute(
             "DELETE FROM pending_config_operation WHERE singleton = 1 AND operation_id = ?1",
@@ -3192,6 +3470,14 @@ fn epoch_seconds() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn epoch_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
 }
 
 fn epoch_nanos() -> u128 {

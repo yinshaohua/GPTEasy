@@ -12,6 +12,7 @@ use crate::provider::{
     ProviderValidationStage,
 };
 use crate::startup::{StartupCoordinator, StartupSnapshot};
+use crate::tray;
 
 pub(crate) struct StartupRuntime {
     coordinator: Mutex<StartupCoordinator>,
@@ -29,11 +30,32 @@ impl ProviderRuntime {
     pub(crate) fn new(application: ProviderApplication) -> Self {
         Self { application }
     }
+
+    pub(crate) fn list(&self) -> Result<Vec<ProviderSummary>, ProviderFailure> {
+        self.application.list_providers()
+    }
 }
 
 impl EnvironmentRuntime {
     pub(crate) fn new(application: EnvironmentApplication) -> Self {
         Self { application }
+    }
+
+    pub(crate) fn inspect(&self) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
+        self.application.inspect()
+    }
+
+    pub(crate) fn switch_provider(
+        &self,
+        provider_id: &str,
+        expected_revision: &str,
+    ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
+        self.application
+            .apply_provider_at_revision(provider_id, true, expected_revision)
+    }
+
+    pub(crate) fn has_pending_restart(&self) -> Result<bool, EnvironmentFailure> {
+        self.application.has_pending_restart()
     }
 }
 
@@ -90,36 +112,44 @@ pub(crate) fn get_environment_snapshot(
 
 #[tauri::command]
 pub(crate) fn apply_environment_provider(
+    app: AppHandle,
     state: State<'_, EnvironmentRuntime>,
     provider_id: String,
-    confirm_takeover: bool,
+    confirm_switch_risk: bool,
     expected_revision: String,
 ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
-    state
-        .application
-        .apply_provider_at_revision(&provider_id, confirm_takeover, &expected_revision)
+    let result = state.application.apply_provider_at_revision(
+        &provider_id,
+        confirm_switch_risk,
+        &expected_revision,
+    );
+    refresh_environment_tray_after(&app, result)
 }
 
 #[tauri::command]
 pub(crate) fn restore_last_environment_config(
+    app: AppHandle,
     state: State<'_, EnvironmentRuntime>,
     confirm_restore: bool,
     expected_revision: String,
 ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
-    state
+    let result = state
         .application
-        .restore_last_config(confirm_restore, &expected_revision)
+        .restore_last_config(confirm_restore, &expected_revision);
+    refresh_environment_tray_after(&app, result)
 }
 
 #[tauri::command]
 pub(crate) fn switch_to_openai_login(
+    app: AppHandle,
     state: State<'_, EnvironmentRuntime>,
     confirm_switch: bool,
     expected_revision: String,
 ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
-    state
+    let result = state
         .application
-        .switch_to_openai_login(confirm_switch, &expected_revision)
+        .switch_to_openai_login(confirm_switch, &expected_revision);
+    refresh_environment_tray_after(&app, result)
 }
 
 #[tauri::command]
@@ -226,58 +256,76 @@ pub(crate) fn cancel_provider_request(
 
 #[tauri::command]
 pub(crate) fn save_verified_provider(
+    app: AppHandle,
     state: State<'_, ProviderRuntime>,
     validation_id: String,
     name: String,
 ) -> Result<ProviderSummary, ProviderFailure> {
-    state
+    let result = state
         .application
-        .save_verified_provider(&validation_id, &name)
+        .save_verified_provider(&validation_id, &name);
+    refresh_tray_after(&app, result)
 }
 
 #[tauri::command]
 pub(crate) fn rename_provider(
+    app: AppHandle,
     state: State<'_, ProviderRuntime>,
     provider_id: String,
     name: String,
 ) -> Result<ProviderSummary, ProviderFailure> {
-    state.application.rename_provider(&provider_id, &name)
+    let result = state.application.rename_provider(&provider_id, &name);
+    refresh_tray_after(&app, result)
 }
 
 #[tauri::command]
 pub(crate) fn save_provider_update(
+    app: AppHandle,
     state: State<'_, ProviderRuntime>,
     validation_id: String,
     provider_id: String,
     name: String,
 ) -> Result<ProviderSummary, ProviderFailure> {
-    state
+    let result = state
         .application
-        .save_provider_update(&validation_id, &provider_id, &name)
+        .save_provider_update(&validation_id, &provider_id, &name);
+    refresh_tray_after(&app, result)
 }
 
 #[tauri::command]
 pub(crate) fn save_and_apply_provider_update(
+    app: AppHandle,
     provider_state: State<'_, ProviderRuntime>,
     environment_state: State<'_, EnvironmentRuntime>,
     validation_id: String,
     provider_id: String,
     name: String,
+    confirm_consumer_risk: bool,
 ) -> Result<ProviderSummary, ProviderFailure> {
-    provider_state.application.save_and_apply_provider_update(
+    let result = provider_state.application.save_and_apply_provider_update(
         &environment_state.application,
         &validation_id,
         &provider_id,
         &name,
-    )
+        confirm_consumer_risk,
+    );
+    match result {
+        Ok(applied) => {
+            let _ = tray::refresh_with_snapshot(&app, &applied.environment);
+            Ok(applied.provider)
+        }
+        Err(failure) => Err(failure),
+    }
 }
 
 #[tauri::command]
 pub(crate) fn delete_provider(
+    app: AppHandle,
     state: State<'_, ProviderRuntime>,
     provider_id: String,
 ) -> Result<(), ProviderFailure> {
-    state.application.delete_provider(&provider_id)
+    let result = state.application.delete_provider(&provider_id);
+    refresh_tray_after(&app, result)
 }
 
 #[tauri::command]
@@ -309,4 +357,21 @@ pub(crate) fn discard_provider_validation(
     validation_id: String,
 ) {
     state.application.discard_validation(&validation_id);
+}
+
+fn refresh_tray_after<T, E>(app: &AppHandle, result: Result<T, E>) -> Result<T, E> {
+    if result.is_ok() {
+        let _ = tray::refresh(app);
+    }
+    result
+}
+
+fn refresh_environment_tray_after(
+    app: &AppHandle,
+    result: Result<EnvironmentSnapshot, EnvironmentFailure>,
+) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
+    if let Ok(snapshot) = &result {
+        let _ = tray::refresh_with_snapshot(app, snapshot);
+    }
+    result
 }

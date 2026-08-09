@@ -68,6 +68,27 @@ fn fresh_install_initializes_only_the_minimum_schema() {
 }
 
 #[test]
+fn first_close_notice_is_recorded_only_after_it_is_shown() {
+    let temp = TempDir::new().expect("temp dir");
+    let store = store_in(&temp);
+    assert!(store.bootstrap().is_ready());
+
+    assert!(store.should_show_first_close_notice());
+    assert!(store.mark_first_close_notice_seen());
+    assert!(!store.should_show_first_close_notice());
+}
+
+#[test]
+fn first_close_notice_check_does_not_create_a_missing_database() {
+    let temp = TempDir::new().expect("temp dir");
+    let store = store_in(&temp);
+
+    assert!(!store.should_show_first_close_notice());
+    assert!(!store.mark_first_close_notice_seen());
+    assert!(!store.paths().database().exists());
+}
+
+#[test]
 fn migration_uses_a_consistent_backup_and_keeps_only_three() {
     let temp = TempDir::new().expect("temp dir");
     let store = store_in(&temp);

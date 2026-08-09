@@ -7,7 +7,7 @@ use rusqlite::backup::Backup;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction};
 use serde::Serialize;
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 1;
+pub const CURRENT_SCHEMA_VERSION: i64 = 2;
 const APPLICATION_ID: i64 = 0x4750_5445;
 const BACKUP_LIMIT: usize = 3;
 const INSTALLATION_MARKER_CONTENT: &[u8] = b"gpteasy-state-v1\n";
@@ -60,7 +60,12 @@ CREATE TABLE app_state (
 INSERT INTO app_state (singleton) VALUES (1);
 "#;
 
-const MIGRATIONS: &[(i64, &str)] = &[(1, SCHEMA_V1)];
+const SCHEMA_V2: &str = r#"
+ALTER TABLE app_state ADD COLUMN pending_restart_context TEXT;
+ALTER TABLE pending_config_operation ADD COLUMN restart_context TEXT;
+"#;
+
+const MIGRATIONS: &[(i64, &str)] = &[(1, SCHEMA_V1), (2, SCHEMA_V2)];
 
 #[derive(Debug, Clone)]
 pub struct StatePaths {
@@ -110,6 +115,45 @@ impl StateStore {
 
     pub fn paths(&self) -> &StatePaths {
         &self.paths
+    }
+
+    pub fn should_show_first_close_notice(&self) -> bool {
+        let Some(connection) = self.open_existing_database() else {
+            return false;
+        };
+        connection
+            .query_row(
+                "SELECT first_close_notice_seen FROM app_state WHERE singleton = 1",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .is_ok_and(|seen| !seen)
+    }
+
+    pub fn mark_first_close_notice_seen(&self) -> bool {
+        let Some(connection) = self.open_existing_database() else {
+            return false;
+        };
+        connection
+            .execute(
+                "UPDATE app_state SET first_close_notice_seen = 1
+                 WHERE singleton = 1 AND first_close_notice_seen = 0",
+                [],
+            )
+            .is_ok_and(|changed| changed == 1)
+    }
+
+    fn open_existing_database(&self) -> Option<Connection> {
+        let Ok(connection) = Connection::open_with_flags(
+            &self.paths.database,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        ) else {
+            return None;
+        };
+        if configure_connection(&connection).is_err() {
+            return None;
+        }
+        Some(connection)
     }
 
     pub fn bootstrap(&self) -> DatabaseSnapshot {

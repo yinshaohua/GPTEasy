@@ -275,9 +275,33 @@ export default function ProviderPage() {
       }
       if (criticalDirty) {
         if (!receipt) return;
-        saved = selected.isCurrent
-          ? await saveAndApplyProviderUpdate(receipt.validationId, selected.id, name)
-          : await saveProviderUpdate(receipt.validationId, selected.id, name);
+        if (selected.isCurrent) {
+          try {
+            saved = await saveAndApplyProviderUpdate(
+              receipt.validationId,
+              selected.id,
+              name,
+              false,
+            );
+          } catch (error) {
+            const providerFailure = asProviderFailure(error);
+            if (providerFailure.messageId !== "environment.consumer_confirmation_required") {
+              throw error;
+            }
+            if (!window.confirm(providerMessages.consumerRiskConfirmation)) {
+              setOperation("verified");
+              return;
+            }
+            saved = await saveAndApplyProviderUpdate(
+              receipt.validationId,
+              selected.id,
+              name,
+              true,
+            );
+          }
+        } else {
+          saved = await saveProviderUpdate(receipt.validationId, selected.id, name);
+        }
         receiptRef.current = null;
       } else {
         saved = await renameProvider(selected.id, name);

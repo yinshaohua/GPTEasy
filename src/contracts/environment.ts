@@ -32,6 +32,7 @@ export interface EnvironmentSnapshot {
   restoreAvailability: RestoreAvailability;
   loginStatus: LoginStatus;
   pendingRestart: boolean;
+  requiresConsumerConfirmation?: boolean;
   consumers: {
     desktop: ConsumerStatus;
     cli: ConsumerStatus;
@@ -50,13 +51,13 @@ export function getEnvironmentSnapshot(): Promise<EnvironmentSnapshot> {
 
 export function applyEnvironmentProvider(
   providerId: string,
-  confirmTakeover: boolean,
+  confirmSwitchRisk: boolean,
   expectedRevision: string,
 ): Promise<EnvironmentSnapshot> {
   if (isBrowserPreview()) return Promise.reject(previewFailure);
   return invoke<EnvironmentSnapshot>("apply_environment_provider", {
     providerId,
-    confirmTakeover,
+    confirmSwitchRisk,
     expectedRevision,
   });
 }
@@ -123,6 +124,7 @@ const previewSnapshot: EnvironmentSnapshot = {
   currentProvider: null,
   loginStatus: "not_logged_in",
   pendingRestart: false,
+  requiresConsumerConfirmation: true,
   consumers: {
     desktop: "unknown",
     cli: "unknown",

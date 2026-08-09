@@ -58,6 +58,7 @@ const failureMessages: Record<string, string> = {
   "environment.backup_invalid": "最近一次配置备份不完整，无法安全恢复。",
   "environment.operation_interrupted": "配置操作被中断，请重新启动 GPTEasy 完成恢复协调。",
   "environment.mode_switch_confirmation_required": "模式切换前需要明确确认。",
+  "environment.consumer_confirmation_required": "运行中的 Codex 消费者或检测状态需要确认。",
   "environment.openai_login_required": "请先在 Codex 中完成 OpenAI 登录。",
   "environment.openai_login_unavailable": "无法确认 Codex 登录状态，已阻止切换。",
 };
@@ -109,23 +110,41 @@ export default function EnvironmentPage({ startup }: { startup: StartupSnapshot 
     void load(false);
   }, [load]);
 
-  async function applySelected() {
-    if (view.kind !== "loaded" || !selectedId) return;
-    const confirmTakeover = view.snapshot.requiresTakeoverConfirmation;
-    const confirmation =
-      view.snapshot.mode === "openai_login"
-        ? "将从 OpenAI 登录模式切换到所选供应商，并更新 config.toml 与 API Key。是否继续？"
-        : "将替换 config.toml 中的供应商字段和 auth.json 中的 API Key。是否继续？";
-    if (confirmTakeover && !window.confirm(confirmation)) {
+  const applyProvider = useCallback(async (
+    providerId: string,
+    snapshotBefore: EnvironmentSnapshot,
+  ) => {
+    const requiresConsumerConfirmation = snapshotBefore.requiresConsumerConfirmation ?? true;
+    const confirmSwitchRisk =
+      snapshotBefore.mode === "openai_login" ||
+      snapshotBefore.requiresTakeoverConfirmation ||
+      requiresConsumerConfirmation;
+    const confirmationContext = snapshotBefore.mode === "openai_login"
+      ? "将从 OpenAI 登录模式返回所选供应商。"
+      : snapshotBefore.requiresTakeoverConfirmation
+        ? "将接管当前 Codex 配置。"
+        : "将切换到所选供应商。";
+    const consumers = snapshotBefore.consumers ?? { desktop: "unknown", cli: "unknown" };
+    const detectionUnknown =
+      consumers.desktop === "unknown" || consumers.cli === "unknown";
+    const consumerRunning =
+      consumers.desktop === "running" || consumers.cli === "running";
+    const consumerRisk = detectionUnknown
+      ? "消费者检测结果不可信，切换后将保守标记为待重启。"
+      : consumerRunning
+        ? "运行中的 Codex 可能继续使用旧配置，切换后将标记为待重启。"
+        : "当前未检测到 Codex 消费者；为防止扫描竞态，切换后仍会暂时标记为待重启。";
+    const confirmation = `${confirmationContext}${consumerRisk}是否继续？`;
+    if (confirmSwitchRisk && !window.confirm(confirmation)) {
       return;
     }
     setApplying(true);
     setFailure(null);
     try {
       const snapshot = await applyEnvironmentProvider(
-        selectedId,
-        confirmTakeover,
-        view.snapshot.revision,
+        providerId,
+        confirmSwitchRisk,
+        snapshotBefore.revision,
       );
       setView({ kind: "loaded", snapshot });
       setProviders((current) =>
@@ -139,6 +158,11 @@ export default function EnvironmentPage({ startup }: { startup: StartupSnapshot 
     } finally {
       setApplying(false);
     }
+  }, []);
+
+  async function applySelected() {
+    if (view.kind !== "loaded" || !selectedId) return;
+    await applyProvider(selectedId, view.snapshot);
   }
 
   async function enableOpenAiLogin() {
@@ -499,6 +523,7 @@ function fallbackEnvironment(startup: StartupSnapshot): EnvironmentSnapshot {
     currentProvider: null,
     loginStatus: startup.codex.loginStatus,
     pendingRestart: startup.database.contents?.pendingRestart ?? false,
+    requiresConsumerConfirmation: true,
     consumers: {
       desktop: "unknown",
       cli: "unknown",
