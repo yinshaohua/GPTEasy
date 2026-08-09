@@ -7,6 +7,7 @@ import {
   KeyRound,
   LoaderCircle,
   RefreshCw,
+  RotateCcw,
   Save,
 } from "lucide-react";
 
@@ -14,6 +15,7 @@ import {
   applyEnvironmentProvider,
   asEnvironmentFailure,
   getEnvironmentSnapshot,
+  restoreLastEnvironmentConfig,
   type EnvironmentFailure,
   type EnvironmentSnapshot,
 } from "./contracts/environment";
@@ -51,7 +53,20 @@ const failureMessages: Record<string, string> = {
   "environment.concurrent_modification": "Codex 工件刚刚发生变化，请刷新后重试。",
   "environment.artifact_write_failed": "无法安全写入 Codex 工件，旧状态已保留。",
   "environment.rollback_failed": "旧工件恢复未完成，请重新启动 GPTEasy 进行协调。",
+  "environment.restore_confirmation_required": "恢复上次配置前需要明确确认。",
+  "environment.restore_unavailable": "当前没有可安全恢复的最近配置。",
+  "environment.restore_conflict": "受管工件在最近一次修改后发生变化，请先处理管理冲突。",
+  "environment.backup_invalid": "最近一次配置备份不完整，无法安全恢复。",
+  "environment.operation_interrupted": "配置操作被中断，请重新启动 GPTEasy 完成恢复协调。",
 };
+
+const restoreAvailabilityMessages = {
+  available: "可恢复到最近一次 GPTEasy 修改前的配置。",
+  no_backup: "尚无可恢复的 GPTEasy 配置修改。",
+  artifacts_changed: "受管工件在最近一次修改后发生变化，恢复已禁用。",
+  invalid_backup: "最近一次配置备份不完整，恢复已禁用。",
+  recovery_pending: "恢复协调完成前不能再次恢复。",
+} as const;
 
 export default function EnvironmentPage({ startup }: { startup: StartupSnapshot }) {
   const [view, setView] = useState<ViewState>({ kind: "loading" });
@@ -59,11 +74,14 @@ export default function EnvironmentPage({ startup }: { startup: StartupSnapshot 
   const [selectedId, setSelectedId] = useState("");
   const [refreshing, setRefreshing] = useState(false);
   const [applying, setApplying] = useState(false);
+  const [restoring, setRestoring] = useState(false);
   const [failure, setFailure] = useState<EnvironmentFailure | null>(null);
+  const [restoreFailure, setRestoreFailure] = useState<EnvironmentFailure | null>(null);
 
   const load = useCallback(async (refresh: boolean) => {
     if (refresh) setRefreshing(true);
     setFailure(null);
+    setRestoreFailure(null);
     try {
       const [environmentResult, providerResult] = await Promise.all([
         getEnvironmentSnapshot(),
@@ -119,6 +137,33 @@ export default function EnvironmentPage({ startup }: { startup: StartupSnapshot 
     }
   }
 
+  async function restoreLatest() {
+    if (view.kind !== "loaded" || view.snapshot.restoreAvailability !== "available") return;
+    if (
+      !window.confirm(
+        "将把 config.toml 和 auth.json 恢复到最近一次 GPTEasy 修改前的状态。是否继续？",
+      )
+    ) {
+      return;
+    }
+    setRestoring(true);
+    setRestoreFailure(null);
+    try {
+      const snapshot = await restoreLastEnvironmentConfig(true, view.snapshot.revision);
+      setView({ kind: "loaded", snapshot });
+      setProviders((current) =>
+        current.map((provider) => ({
+          ...provider,
+          isCurrent: provider.id === snapshot.currentProvider?.id,
+        })),
+      );
+    } catch (error) {
+      setRestoreFailure(asEnvironmentFailure(error));
+    } finally {
+      setRestoring(false);
+    }
+  }
+
   return (
     <>
       <header className="page-header">
@@ -130,7 +175,7 @@ export default function EnvironmentPage({ startup }: { startup: StartupSnapshot 
           className="icon-button"
           type="button"
           onClick={() => void load(true)}
-          disabled={refreshing || applying}
+          disabled={refreshing || applying || restoring}
           aria-label="重新检查环境"
           title="重新检查环境"
         >
@@ -240,7 +285,7 @@ export default function EnvironmentPage({ startup }: { startup: StartupSnapshot 
                 id="environment-provider"
                 value={selectedId}
                 onChange={(event) => setSelectedId(event.target.value)}
-                disabled={applying || providers.length === 0}
+                disabled={applying || restoring || providers.length === 0}
               >
                 {providers.length === 0 && <option value="">尚无已验证供应商</option>}
                 {providers.map((provider) => (
@@ -253,7 +298,7 @@ export default function EnvironmentPage({ startup }: { startup: StartupSnapshot 
                 className="command-button"
                 type="button"
                 onClick={() => void applySelected()}
-                disabled={applying || !selectedId}
+                disabled={applying || restoring || !selectedId}
               >
                 {applying ? (
                   <LoaderCircle className="is-spinning" size={17} aria-hidden="true" />
@@ -268,6 +313,36 @@ export default function EnvironmentPage({ startup }: { startup: StartupSnapshot 
                 {failureMessages[failure.messageId] ??
                   providerFailureMessages[failure.messageId] ??
                   "Codex 环境未发生变化，请重试。"}
+              </p>
+            )}
+          </section>
+
+          <section className="status-section" aria-labelledby="restore-heading">
+            <div className="section-heading">
+              <RotateCcw size={20} aria-hidden="true" />
+              <h2 id="restore-heading">恢复</h2>
+            </div>
+            <div className="environment-restore-row">
+              <p>{restoreAvailabilityMessages[view.snapshot.restoreAvailability]}</p>
+              <button
+                className="command-button"
+                type="button"
+                onClick={() => void restoreLatest()}
+                disabled={
+                  applying || restoring || view.snapshot.restoreAvailability !== "available"
+                }
+              >
+                {restoring ? (
+                  <LoaderCircle className="is-spinning" size={17} aria-hidden="true" />
+                ) : (
+                  <RotateCcw size={17} aria-hidden="true" />
+                )}
+                恢复上次配置
+              </button>
+            </div>
+            {restoreFailure && (
+              <p className="validation-error" role="alert">
+                {failureMessages[restoreFailure.messageId] ?? "Codex 环境未发生变化，请重试。"}
               </p>
             )}
           </section>
@@ -292,6 +367,7 @@ function fallbackEnvironment(startup: StartupSnapshot): EnvironmentSnapshot {
     messageId: "environment.external",
     revision: "startup-fallback",
     requiresTakeoverConfirmation: true,
+    restoreAvailability: "no_backup",
     impacts: [
       {
         artifact: "config",

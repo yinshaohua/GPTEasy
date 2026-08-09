@@ -101,6 +101,17 @@ pub(crate) fn apply_environment_provider(
 }
 
 #[tauri::command]
+pub(crate) fn restore_last_environment_config(
+    state: State<'_, EnvironmentRuntime>,
+    confirm_restore: bool,
+    expected_revision: String,
+) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
+    state
+        .application
+        .restore_last_config(confirm_restore, &expected_revision)
+}
+
+#[tauri::command]
 pub(crate) async fn discover_provider_models(
     state: State<'_, ProviderRuntime>,
     request_id: String,

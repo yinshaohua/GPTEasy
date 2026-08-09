@@ -5,6 +5,12 @@ import type { ProviderSummary } from "./provider";
 export type EnvironmentState = "external" | "managed" | "conflict";
 export type ArtifactKind = "config" | "credentials";
 export type ArtifactAction = "create" | "update";
+export type RestoreAvailability =
+  | "available"
+  | "no_backup"
+  | "artifacts_changed"
+  | "invalid_backup"
+  | "recovery_pending";
 
 export interface ArtifactImpact {
   artifact: ArtifactKind;
@@ -19,6 +25,7 @@ export interface EnvironmentSnapshot {
   requiresTakeoverConfirmation: boolean;
   impacts: ArtifactImpact[];
   currentProvider: ProviderSummary | null;
+  restoreAvailability: RestoreAvailability;
 }
 
 export interface EnvironmentFailure {
@@ -40,6 +47,17 @@ export function applyEnvironmentProvider(
   return invoke<EnvironmentSnapshot>("apply_environment_provider", {
     providerId,
     confirmTakeover,
+    expectedRevision,
+  });
+}
+
+export function restoreLastEnvironmentConfig(
+  confirmRestore: boolean,
+  expectedRevision: string,
+): Promise<EnvironmentSnapshot> {
+  if (isBrowserPreview()) return Promise.reject(previewFailure);
+  return invoke<EnvironmentSnapshot>("restore_last_environment_config", {
+    confirmRestore,
     expectedRevision,
   });
 }
@@ -67,6 +85,7 @@ const previewSnapshot: EnvironmentSnapshot = {
   messageId: "environment.external",
   revision: "browser-preview",
   requiresTakeoverConfirmation: true,
+  restoreAvailability: "no_backup",
   impacts: [
     {
       artifact: "config",

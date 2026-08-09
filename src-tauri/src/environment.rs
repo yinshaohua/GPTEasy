@@ -18,6 +18,9 @@ const MANAGED_START: &str = "# >>> GPTEasy managed provider >>>";
 const MANAGED_END: &str = "# <<< GPTEasy managed provider <<<";
 const PROVIDER_ID_PREFIX: &str = "# GPTEasy provider-id:";
 const BACKUP_LIMIT: usize = 5;
+const BACKUP_FORMAT_VERSION: u8 = 1;
+const BACKUP_COMPLETION_FILE: &str = "completed";
+const BACKUP_COMPLETION_CONTENT: &[u8] = b"gpteasy-config-backup-v1\n";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -58,6 +61,17 @@ pub struct EnvironmentSnapshot {
     pub requires_takeover_confirmation: bool,
     pub impacts: Vec<ArtifactImpact>,
     pub current_provider: Option<ProviderSummary>,
+    pub restore_availability: RestoreAvailability,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RestoreAvailability {
+    Available,
+    NoBackup,
+    ArtifactsChanged,
+    InvalidBackup,
+    RecoveryPending,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -75,6 +89,10 @@ pub enum EnvironmentFailureCategory {
     ArtifactRedirected,
     ArtifactWriteFailed,
     RollbackFailed,
+    OperationInterrupted,
+    RestoreConfirmationRequired,
+    RestoreUnavailable,
+    BackupInvalid,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -95,9 +113,14 @@ impl EnvironmentFailure {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnvironmentFailurePoint {
+    AfterBackupCompleted,
+    AfterPendingRegistered,
     BeforeConfigReplace,
+    AfterConfigReplaced,
     BeforeCredentialsReplace,
+    AfterAllArtifactsReplaced,
     BeforeDatabaseCommit,
+    AfterDatabaseCommit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +133,18 @@ pub enum EnvironmentRecovery {
 
 pub trait EnvironmentFaultInjector: Send + Sync {
     fn fails_at(&self, point: EnvironmentFailurePoint) -> bool;
+
+    fn interrupts_at(&self, _point: EnvironmentFailurePoint) -> bool {
+        false
+    }
+
+    fn fails_backup_creation(&self) -> bool {
+        false
+    }
+
+    fn fails_rollback(&self) -> bool {
+        false
+    }
 }
 
 struct NoFaults;
@@ -162,7 +197,7 @@ impl EnvironmentApplication {
             .query_row(
                 "SELECT operation_id, operation_kind, old_config_fingerprint,
                         new_config_fingerprint, old_credentials_fingerprint,
-                        new_credentials_fingerprint, target_snapshot_json
+                        new_credentials_fingerprint, backup_reference, target_snapshot_json
                  FROM pending_config_operation WHERE singleton = 1",
                 [],
                 |row| {
@@ -173,15 +208,8 @@ impl EnvironmentApplication {
                         new_config_fingerprint: row.get(3)?,
                         old_credentials_fingerprint: row.get(4)?,
                         new_credentials_fingerprint: row.get(5)?,
-                        provider: serde_json::from_str(&row.get::<_, String>(6)?).map_err(
-                            |error| {
-                                rusqlite::Error::FromSqlConversionFailure(
-                                    6,
-                                    rusqlite::types::Type::Text,
-                                    Box::new(error),
-                                )
-                            },
-                        )?,
+                        backup_reference: PathBuf::from(row.get::<_, String>(6)?),
+                        target_snapshot_json: row.get(7)?,
                     })
                 },
             )
@@ -190,6 +218,13 @@ impl EnvironmentApplication {
         let Some(pending) = pending else {
             return Ok(EnvironmentRecovery::NoPendingOperation);
         };
+        let backup = match pending_backup_path(&self.codex_home, &pending.backup_reference) {
+            Ok(backup) => backup,
+            Err(_) => {
+                mark_pending_conflict(&mut connection, &pending.operation_id)?;
+                return Ok(EnvironmentRecovery::Conflict);
+            }
+        };
         let config = read_artifact(&self.codex_home.join("config.toml"))?;
         let credentials = read_artifact(&self.codex_home.join("auth.json"))?;
         let current_config = config.fingerprint(ArtifactKind::Config);
@@ -197,16 +232,126 @@ impl EnvironmentApplication {
         if current_config == pending.old_config_fingerprint
             && current_credentials == pending.old_credentials_fingerprint
         {
+            unmark_backup_completed(&backup)?;
             clear_pending(&connection, &pending.operation_id)?;
             return Ok(EnvironmentRecovery::KeptOldState);
         }
         if current_config == pending.new_config_fingerprint
             && current_credentials == pending.new_credentials_fingerprint
         {
-            commit_recovered_state(&mut connection, &pending, &config)?;
-            return Ok(EnvironmentRecovery::CompletedNewState);
+            if mark_backup_completed(&backup).is_ok()
+                && commit_recovered_state(&mut connection, &pending, &config, &credentials).is_ok()
+            {
+                return Ok(EnvironmentRecovery::CompletedNewState);
+            }
+            mark_pending_conflict(&mut connection, &pending.operation_id)?;
+            return Ok(EnvironmentRecovery::Conflict);
         }
+        mark_pending_conflict(&mut connection, &pending.operation_id)?;
         Ok(EnvironmentRecovery::Conflict)
+    }
+
+    pub fn restore_last_config(
+        &self,
+        confirm_restore: bool,
+        expected_revision: &str,
+    ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
+        if !confirm_restore {
+            return Err(EnvironmentFailure::new(
+                EnvironmentFailureCategory::RestoreConfirmationRequired,
+                "environment.restore_confirmation_required",
+            ));
+        }
+        let _guard = self
+            .operation_lock
+            .lock()
+            .map_err(|_| state_unavailable())?;
+        let mut connection = self.open_state()?;
+        if has_pending_operation(&connection)? {
+            return Err(restore_unavailable());
+        }
+        let config = read_artifact(&self.codex_home.join("config.toml"))?;
+        let credentials = read_artifact(&self.codex_home.join("auth.json"))?;
+        if environment_revision(&config, &credentials) != expected_revision {
+            return Err(concurrent_modification());
+        }
+        let backup = latest_completed_backup(&self.codex_home)?.ok_or_else(restore_unavailable)?;
+        if !backup.matches_current(&config, &credentials) {
+            return Err(EnvironmentFailure::new(
+                EnvironmentFailureCategory::ManagedConflict,
+                "environment.restore_conflict",
+            ));
+        }
+        let prepared = PreparedRestore::new(&self.codex_home, config, credentials, backup);
+        if self.faults.fails_backup_creation() {
+            return Err(backup_failed());
+        }
+        let rollback_backup = create_restore_backup(&self.codex_home, &prepared)?;
+        self.check_interruption(EnvironmentFailurePoint::AfterBackupCompleted)?;
+        persist_pending_restore(&mut connection, &prepared, &rollback_backup)?;
+        self.check_interruption(EnvironmentFailurePoint::AfterPendingRegistered)?;
+
+        let mut config_applied = false;
+        let mut credentials_applied = false;
+        let mut interrupted = false;
+        let mut backup_completed = false;
+        let result = (|| {
+            self.check_fault(EnvironmentFailurePoint::BeforeConfigReplace)?;
+            prepared.config.commit()?;
+            config_applied = true;
+            update_pending_stage(&connection, &prepared.operation_id, "config_replaced")?;
+            self.check_interruption(EnvironmentFailurePoint::AfterConfigReplaced)
+                .map_err(|failure| {
+                    interrupted = true;
+                    failure
+                })?;
+            self.check_fault(EnvironmentFailurePoint::BeforeCredentialsReplace)?;
+            prepared.credentials.commit()?;
+            credentials_applied = true;
+            prepared.verify_committed()?;
+            update_pending_stage(&connection, &prepared.operation_id, "artifacts_replaced")?;
+            mark_backup_completed(&rollback_backup)?;
+            backup_completed = true;
+            self.check_interruption(EnvironmentFailurePoint::AfterAllArtifactsReplaced)
+                .map_err(|failure| {
+                    interrupted = true;
+                    failure
+                })?;
+            self.check_interruption(EnvironmentFailurePoint::BeforeDatabaseCommit)
+                .map_err(|failure| {
+                    interrupted = true;
+                    failure
+                })?;
+            self.check_fault(EnvironmentFailurePoint::BeforeDatabaseCommit)?;
+            commit_restored_state(&mut connection, &prepared)?;
+            self.check_interruption(EnvironmentFailurePoint::AfterDatabaseCommit)
+                .map_err(|failure| {
+                    interrupted = true;
+                    failure
+                })?;
+            Ok(())
+        })();
+
+        if let Err(failure) = result {
+            if interrupted {
+                return Err(failure);
+            }
+            if backup_completed {
+                unmark_backup_completed(&rollback_backup)?;
+            }
+            if self.faults.fails_rollback()
+                || rollback_restore(&prepared, config_applied, credentials_applied).is_err()
+            {
+                return Err(EnvironmentFailure::new(
+                    EnvironmentFailureCategory::RollbackFailed,
+                    "environment.rollback_failed",
+                ));
+            }
+            clear_pending(&connection, &prepared.operation_id)?;
+            return Err(failure);
+        }
+
+        inspect_environment(&connection, &self.codex_home)
     }
 
     pub fn apply_provider(
@@ -298,26 +443,65 @@ impl EnvironmentApplication {
         if expected_revision.is_some_and(|expected| prepared.old_revision() != expected) {
             return Err(concurrent_modification());
         }
+        if self.faults.fails_backup_creation() {
+            return Err(backup_failed());
+        }
         let backup = create_backup(&self.codex_home, &prepared)?;
+        self.check_interruption(EnvironmentFailurePoint::AfterBackupCompleted)?;
         persist_pending(connection, &prepared, &backup)?;
+        self.check_interruption(EnvironmentFailurePoint::AfterPendingRegistered)?;
 
         let mut config_applied = false;
         let mut credentials_applied = false;
+        let mut interrupted = false;
+        let mut backup_completed = false;
         let result = (|| {
             self.check_fault(EnvironmentFailurePoint::BeforeConfigReplace)?;
             prepared.config.commit()?;
             config_applied = true;
+            update_pending_stage(connection, &prepared.operation_id, "config_replaced")?;
+            self.check_interruption(EnvironmentFailurePoint::AfterConfigReplaced)
+                .map_err(|failure| {
+                    interrupted = true;
+                    failure
+                })?;
             self.check_fault(EnvironmentFailurePoint::BeforeCredentialsReplace)?;
             prepared.credentials.commit()?;
             credentials_applied = true;
             prepared.verify_committed()?;
+            update_pending_stage(connection, &prepared.operation_id, "artifacts_replaced")?;
+            mark_backup_completed(&backup)?;
+            backup_completed = true;
+            self.check_interruption(EnvironmentFailurePoint::AfterAllArtifactsReplaced)
+                .map_err(|failure| {
+                    interrupted = true;
+                    failure
+                })?;
+            self.check_interruption(EnvironmentFailurePoint::BeforeDatabaseCommit)
+                .map_err(|failure| {
+                    interrupted = true;
+                    failure
+                })?;
             self.check_fault(EnvironmentFailurePoint::BeforeDatabaseCommit)?;
             commit_applied_state(connection, &prepared)?;
+            self.check_interruption(EnvironmentFailurePoint::AfterDatabaseCommit)
+                .map_err(|failure| {
+                    interrupted = true;
+                    failure
+                })?;
             Ok(())
         })();
 
         if let Err(failure) = result {
-            if rollback_switch(&prepared, config_applied, credentials_applied).is_err() {
+            if interrupted {
+                return Err(failure);
+            }
+            if backup_completed {
+                unmark_backup_completed(&backup)?;
+            }
+            if self.faults.fails_rollback()
+                || rollback_switch(&prepared, config_applied, credentials_applied).is_err()
+            {
                 return Err(EnvironmentFailure::new(
                     EnvironmentFailureCategory::RollbackFailed,
                     "environment.rollback_failed",
@@ -352,6 +536,14 @@ impl EnvironmentApplication {
                 EnvironmentFailureCategory::ArtifactWriteFailed,
                 "environment.artifact_write_failed",
             ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn check_interruption(&self, point: EnvironmentFailurePoint) -> Result<(), EnvironmentFailure> {
+        if self.faults.interrupts_at(point) {
+            Err(operation_interrupted())
         } else {
             Ok(())
         }
@@ -399,7 +591,8 @@ struct PendingRecovery {
     new_config_fingerprint: Option<String>,
     old_credentials_fingerprint: Option<String>,
     new_credentials_fingerprint: Option<String>,
-    provider: ProviderTarget,
+    backup_reference: PathBuf,
+    target_snapshot_json: String,
 }
 
 pub(crate) struct VerifiedProviderUpdate {
@@ -474,6 +667,37 @@ fn load_provider(
         })
 }
 
+fn has_pending_operation(connection: &Connection) -> Result<bool, EnvironmentFailure> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pending_config_operation WHERE singleton = 1)",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|_| state_unavailable())
+}
+
+fn inspect_restore_availability(
+    connection: &Connection,
+    codex_home: &Path,
+    config: &ArtifactBytes,
+    credentials: &ArtifactBytes,
+) -> RestoreAvailability {
+    match has_pending_operation(connection) {
+        Ok(true) => return RestoreAvailability::RecoveryPending,
+        Err(_) => return RestoreAvailability::InvalidBackup,
+        Ok(false) => {}
+    }
+    match latest_completed_backup(codex_home) {
+        Ok(Some(backup)) if backup.matches_current(config, credentials) => {
+            RestoreAvailability::Available
+        }
+        Ok(Some(_)) => RestoreAvailability::ArtifactsChanged,
+        Ok(None) => RestoreAvailability::NoBackup,
+        Err(_) => RestoreAvailability::InvalidBackup,
+    }
+}
+
 fn inspect_environment(
     connection: &Connection,
     codex_home: &Path,
@@ -481,6 +705,8 @@ fn inspect_environment(
     let config = read_artifact(&codex_home.join("config.toml"))?;
     let credentials = read_artifact(&codex_home.join("auth.json"))?;
     let revision = environment_revision(&config, &credentials);
+    let restore_availability =
+        inspect_restore_availability(connection, codex_home, &config, &credentials);
     let impacts = vec![
         ArtifactImpact {
             artifact: ArtifactKind::Config,
@@ -493,6 +719,19 @@ fn inspect_environment(
             fields: vec!["auth_mode", "OPENAI_API_KEY"],
         },
     ];
+    let recovery_conflict = connection
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM pending_config_operation
+                WHERE singleton = 1 AND stage = 'conflict'
+             )",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|_| state_unavailable())?;
+    if recovery_conflict {
+        return Ok(conflict_snapshot(impacts, revision, restore_availability));
+    }
     let last_applied = connection
         .query_row(
             "SELECT provider_id, config_fingerprint, credentials_fingerprint
@@ -511,62 +750,64 @@ fn inspect_environment(
 
     let Some(config_bytes) = config.bytes.as_deref() else {
         return Ok(if last_applied.is_some() {
-            conflict_snapshot(impacts, revision)
+            conflict_snapshot(impacts, revision, restore_availability)
         } else {
-            external_snapshot(impacts, revision)
+            external_snapshot(impacts, revision, restore_availability)
         });
     };
     let config_text = match std::str::from_utf8(config_bytes) {
         Ok(text) => text,
-        Err(_) => return Ok(conflict_snapshot(impacts, revision)),
+        Err(_) => return Ok(conflict_snapshot(impacts, revision, restore_availability)),
     };
     let document = match config_text.parse::<DocumentMut>() {
         Ok(document) => document,
         Err(_) => {
-            return Ok(conflict_snapshot(impacts, revision));
+            return Ok(conflict_snapshot(impacts, revision, restore_availability));
         }
     };
     if ensure_file_credential_store(Some(config_bytes)).is_err() {
-        return Ok(conflict_snapshot(impacts, revision));
+        return Ok(conflict_snapshot(impacts, revision, restore_availability));
     }
     let managed = match managed_block(config_text) {
         ManagedBlock::None => {
             return Ok(if last_applied.is_some() {
-                conflict_snapshot(impacts, revision)
+                conflict_snapshot(impacts, revision, restore_availability)
             } else {
-                external_snapshot(impacts, revision)
+                external_snapshot(impacts, revision, restore_availability)
             });
         }
-        ManagedBlock::Conflict => return Ok(conflict_snapshot(impacts, revision)),
+        ManagedBlock::Conflict => {
+            return Ok(conflict_snapshot(impacts, revision, restore_availability));
+        }
         ManagedBlock::Valid(block) => block,
     };
     if !managed_block_is_root_scoped(&document, config_text, &managed) {
-        return Ok(conflict_snapshot(impacts, revision));
+        return Ok(conflict_snapshot(impacts, revision, restore_availability));
     }
     let provider = match load_provider(connection, &managed.provider_id) {
         Ok(provider) => provider,
         Err(failure) if failure.category == EnvironmentFailureCategory::ProviderNotFound => {
             return Ok(if last_applied.is_some() {
-                conflict_snapshot(impacts, revision)
+                conflict_snapshot(impacts, revision, restore_availability)
             } else {
-                external_snapshot(impacts, revision)
+                external_snapshot(impacts, revision, restore_availability)
             });
         }
         Err(failure) => return Err(failure),
     };
     if !managed_config_matches(&document, &provider) {
-        return Ok(conflict_snapshot(impacts, revision));
+        return Ok(conflict_snapshot(impacts, revision, restore_availability));
     }
     if !credentials_match(&credentials, &provider.api_key)? {
-        return Ok(conflict_snapshot(impacts, revision));
+        return Ok(conflict_snapshot(impacts, revision, restore_availability));
     }
 
     let Some((applied_provider, applied_config, _applied_credentials)) = last_applied else {
-        return Ok(external_snapshot(impacts, revision));
+        return Ok(external_snapshot(impacts, revision, restore_availability));
     };
     if applied_provider != provider.id || applied_config != managed_config_fingerprint(config_bytes)
     {
-        return Ok(conflict_snapshot(impacts, revision));
+        return Ok(conflict_snapshot(impacts, revision, restore_availability));
     }
 
     Ok(EnvironmentSnapshot {
@@ -576,10 +817,15 @@ fn inspect_environment(
         requires_takeover_confirmation: false,
         impacts,
         current_provider: Some(provider.summary(true)),
+        restore_availability,
     })
 }
 
-fn external_snapshot(impacts: Vec<ArtifactImpact>, revision: String) -> EnvironmentSnapshot {
+fn external_snapshot(
+    impacts: Vec<ArtifactImpact>,
+    revision: String,
+    restore_availability: RestoreAvailability,
+) -> EnvironmentSnapshot {
     EnvironmentSnapshot {
         state: EnvironmentState::External,
         message_id: "environment.external",
@@ -587,10 +833,15 @@ fn external_snapshot(impacts: Vec<ArtifactImpact>, revision: String) -> Environm
         requires_takeover_confirmation: true,
         impacts,
         current_provider: None,
+        restore_availability,
     }
 }
 
-fn conflict_snapshot(impacts: Vec<ArtifactImpact>, revision: String) -> EnvironmentSnapshot {
+fn conflict_snapshot(
+    impacts: Vec<ArtifactImpact>,
+    revision: String,
+    restore_availability: RestoreAvailability,
+) -> EnvironmentSnapshot {
     EnvironmentSnapshot {
         state: EnvironmentState::Conflict,
         message_id: "environment.managed_conflict",
@@ -598,6 +849,7 @@ fn conflict_snapshot(impacts: Vec<ArtifactImpact>, revision: String) -> Environm
         requires_takeover_confirmation: true,
         impacts,
         current_provider: None,
+        restore_availability,
     }
 }
 
@@ -763,6 +1015,122 @@ impl PreparedArtifact {
     }
 }
 
+#[derive(Debug, Clone)]
+struct CompletedBackup {
+    path: PathBuf,
+    manifest: BackupManifest,
+    config: ArtifactBytes,
+    credentials: ArtifactBytes,
+}
+
+impl CompletedBackup {
+    fn matches_current(&self, config: &ArtifactBytes, credentials: &ArtifactBytes) -> bool {
+        config.fingerprint(ArtifactKind::Config) == self.manifest.new_config_fingerprint
+            && credentials.fingerprint(ArtifactKind::Credentials)
+                == self.manifest.new_credentials_fingerprint
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PreparedRestore {
+    operation_id: String,
+    config: PreparedRestoreArtifact,
+    credentials: PreparedRestoreArtifact,
+    source_backup: PathBuf,
+}
+
+impl PreparedRestore {
+    fn new(
+        codex_home: &Path,
+        config: ArtifactBytes,
+        credentials: ArtifactBytes,
+        backup: CompletedBackup,
+    ) -> Self {
+        Self {
+            operation_id: Uuid::new_v4().to_string(),
+            config: PreparedRestoreArtifact::new(
+                codex_home.join("config.toml"),
+                config,
+                backup.config,
+                ArtifactKind::Config,
+            ),
+            credentials: PreparedRestoreArtifact::new(
+                codex_home.join("auth.json"),
+                credentials,
+                backup.credentials,
+                ArtifactKind::Credentials,
+            ),
+            source_backup: backup.path,
+        }
+    }
+
+    fn verify_committed(&self) -> Result<(), EnvironmentFailure> {
+        self.config.verify_target()?;
+        self.credentials.verify_target()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PreparedRestoreArtifact {
+    path: PathBuf,
+    current: ArtifactBytes,
+    target: ArtifactBytes,
+    current_fingerprint: Option<String>,
+    target_fingerprint: Option<String>,
+}
+
+impl PreparedRestoreArtifact {
+    fn new(
+        path: PathBuf,
+        current: ArtifactBytes,
+        target: ArtifactBytes,
+        kind: ArtifactKind,
+    ) -> Self {
+        let current_fingerprint = current.fingerprint(kind);
+        let target_fingerprint = target.fingerprint(kind);
+        Self {
+            path,
+            current,
+            target,
+            current_fingerprint,
+            target_fingerprint,
+        }
+    }
+
+    fn commit(&self) -> Result<(), EnvironmentFailure> {
+        if !artifact_matches(&self.path, self.current.bytes.as_deref())? {
+            return Err(concurrent_modification());
+        }
+        replace_artifact(
+            &self.path,
+            self.target.bytes.as_deref(),
+            self.current.bytes.is_some(),
+        )
+    }
+
+    fn verify_target(&self) -> Result<(), EnvironmentFailure> {
+        if artifact_matches(&self.path, self.target.bytes.as_deref())? {
+            Ok(())
+        } else {
+            Err(artifact_write_failed())
+        }
+    }
+
+    fn rollback(&self) -> Result<(), EnvironmentFailure> {
+        if artifact_matches(&self.path, self.current.bytes.as_deref())? {
+            return Ok(());
+        }
+        if !artifact_matches(&self.path, self.target.bytes.as_deref())? {
+            return Err(concurrent_modification());
+        }
+        replace_artifact(
+            &self.path,
+            self.current.bytes.as_deref(),
+            self.target.bytes.is_some(),
+        )
+    }
+}
+
 fn rollback_switch(
     prepared: &PreparedSwitch,
     config_applied: bool,
@@ -773,6 +1141,20 @@ fn rollback_switch(
     }
     if config_applied {
         prepared.config.restore()?;
+    }
+    Ok(())
+}
+
+fn rollback_restore(
+    prepared: &PreparedRestore,
+    config_applied: bool,
+    credentials_applied: bool,
+) -> Result<(), EnvironmentFailure> {
+    if credentials_applied {
+        prepared.credentials.rollback()?;
+    }
+    if config_applied {
+        prepared.config.rollback()?;
     }
     Ok(())
 }
@@ -833,6 +1215,41 @@ fn persist_pending(
                 prepared.credentials.new_fingerprint,
                 backup.to_string_lossy(),
                 snapshot,
+                epoch_seconds().to_string(),
+            ],
+        )
+        .map_err(|_| state_unavailable())?;
+    transaction.commit().map_err(|_| state_unavailable())
+}
+
+fn persist_pending_restore(
+    connection: &mut Connection,
+    prepared: &PreparedRestore,
+    backup: &Path,
+) -> Result<(), EnvironmentFailure> {
+    let target_snapshot = serde_json::json!({
+        "sourceBackup": prepared.source_backup.to_string_lossy(),
+    })
+    .to_string();
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| state_unavailable())?;
+    transaction
+        .execute(
+            "INSERT INTO pending_config_operation (
+                singleton, operation_id, operation_kind, stage,
+                old_config_fingerprint, new_config_fingerprint,
+                old_credentials_fingerprint, new_credentials_fingerprint,
+                backup_reference, target_snapshot_json, started_at
+             ) VALUES (1, ?1, 'restore_latest', 'prepared', ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                prepared.operation_id,
+                prepared.config.current_fingerprint,
+                prepared.config.target_fingerprint,
+                prepared.credentials.current_fingerprint,
+                prepared.credentials.target_fingerprint,
+                backup.to_string_lossy(),
+                target_snapshot,
                 epoch_seconds().to_string(),
             ],
         )
@@ -911,11 +1328,59 @@ fn clear_pending(connection: &Connection, operation_id: &str) -> Result<(), Envi
         .map_err(|_| state_unavailable())
 }
 
+fn update_pending_stage(
+    connection: &Connection,
+    operation_id: &str,
+    stage: &str,
+) -> Result<(), EnvironmentFailure> {
+    let changed = connection
+        .execute(
+            "UPDATE pending_config_operation SET stage = ?1
+             WHERE singleton = 1 AND operation_id = ?2",
+            params![stage, operation_id],
+        )
+        .map_err(|_| state_unavailable())?;
+    if changed == 1 {
+        Ok(())
+    } else {
+        Err(state_unavailable())
+    }
+}
+
+fn mark_pending_conflict(
+    connection: &mut Connection,
+    operation_id: &str,
+) -> Result<(), EnvironmentFailure> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| state_unavailable())?;
+    transaction
+        .execute("DELETE FROM last_applied_state WHERE singleton = 1", [])
+        .map_err(|_| state_unavailable())?;
+    let changed = transaction
+        .execute(
+            "UPDATE pending_config_operation SET stage = 'conflict'
+             WHERE singleton = 1 AND operation_id = ?1",
+            [operation_id],
+        )
+        .map_err(|_| state_unavailable())?;
+    if changed != 1 {
+        return Err(state_unavailable());
+    }
+    transaction.commit().map_err(|_| state_unavailable())
+}
+
 fn commit_recovered_state(
     connection: &mut Connection,
     pending: &PendingRecovery,
     config: &ArtifactBytes,
+    credentials: &ArtifactBytes,
 ) -> Result<(), EnvironmentFailure> {
+    if pending.operation_kind == "restore_latest" {
+        return commit_reconciled_state(connection, &pending.operation_id, config, credentials);
+    }
+    let provider: ProviderTarget =
+        serde_json::from_str(&pending.target_snapshot_json).map_err(|_| state_unavailable())?;
     let config_fingerprint = config
         .bytes
         .as_deref()
@@ -936,13 +1401,13 @@ fn commit_recovered_state(
                     verified_at = ?5, verification_fingerprint = ?6
                  WHERE id = ?7",
                 params![
-                    pending.provider.name,
-                    pending.provider.base_url,
-                    pending.provider.api_key,
-                    pending.provider.default_model,
-                    pending.provider.verified_at_epoch_seconds.to_string(),
-                    pending.provider.verification_fingerprint,
-                    pending.provider.id,
+                    provider.name,
+                    provider.base_url,
+                    provider.api_key,
+                    provider.default_model,
+                    provider.verified_at_epoch_seconds.to_string(),
+                    provider.verification_fingerprint,
+                    provider.id,
                 ],
             )
             .map_err(|_| state_unavailable())?;
@@ -965,7 +1430,7 @@ fn commit_recovered_state(
                 credentials_fingerprint = excluded.credentials_fingerprint,
                 applied_at = excluded.applied_at",
             params![
-                pending.provider.id,
+                provider.id,
                 config_fingerprint,
                 credentials_fingerprint,
                 epoch_seconds().to_string(),
@@ -981,14 +1446,123 @@ fn commit_recovered_state(
     transaction.commit().map_err(|_| state_unavailable())
 }
 
-#[derive(Serialize)]
+fn commit_restored_state(
+    connection: &mut Connection,
+    prepared: &PreparedRestore,
+) -> Result<(), EnvironmentFailure> {
+    commit_reconciled_state(
+        connection,
+        &prepared.operation_id,
+        &prepared.config.target,
+        &prepared.credentials.target,
+    )
+}
+
+fn commit_reconciled_state(
+    connection: &mut Connection,
+    operation_id: &str,
+    config: &ArtifactBytes,
+    credentials: &ArtifactBytes,
+) -> Result<(), EnvironmentFailure> {
+    let applied = reconciled_applied_provider(connection, config, credentials)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| state_unavailable())?;
+    match applied {
+        Some((provider_id, config_fingerprint, credentials_fingerprint)) => {
+            transaction
+                .execute(
+                    "INSERT INTO last_applied_state (
+                        singleton, mode, provider_id, config_fingerprint,
+                        credentials_fingerprint, applied_at
+                     ) VALUES (1, 'provider', ?1, ?2, ?3, ?4)
+                     ON CONFLICT(singleton) DO UPDATE SET
+                        mode = excluded.mode,
+                        provider_id = excluded.provider_id,
+                        config_fingerprint = excluded.config_fingerprint,
+                        credentials_fingerprint = excluded.credentials_fingerprint,
+                        applied_at = excluded.applied_at",
+                    params![
+                        provider_id,
+                        config_fingerprint,
+                        credentials_fingerprint,
+                        epoch_seconds().to_string(),
+                    ],
+                )
+                .map_err(|_| state_unavailable())?;
+        }
+        None => {
+            transaction
+                .execute("DELETE FROM last_applied_state WHERE singleton = 1", [])
+                .map_err(|_| state_unavailable())?;
+        }
+    }
+    transaction
+        .execute(
+            "DELETE FROM pending_config_operation WHERE singleton = 1 AND operation_id = ?1",
+            [operation_id],
+        )
+        .map_err(|_| state_unavailable())?;
+    transaction.commit().map_err(|_| state_unavailable())
+}
+
+fn reconciled_applied_provider(
+    connection: &Connection,
+    config: &ArtifactBytes,
+    credentials: &ArtifactBytes,
+) -> Result<Option<(String, String, String)>, EnvironmentFailure> {
+    let Some(config_bytes) = config.bytes.as_deref() else {
+        return Ok(None);
+    };
+    let Ok(text) = std::str::from_utf8(config_bytes) else {
+        return Ok(None);
+    };
+    let Ok(document) = text.parse::<DocumentMut>() else {
+        return Ok(None);
+    };
+    let ManagedBlock::Valid(managed) = managed_block(text) else {
+        return Ok(None);
+    };
+    if !managed_block_is_root_scoped(&document, text, &managed) {
+        return Ok(None);
+    }
+    let provider = match load_provider(connection, &managed.provider_id) {
+        Ok(provider) => provider,
+        Err(failure) if failure.category == EnvironmentFailureCategory::ProviderNotFound => {
+            return Ok(None);
+        }
+        Err(failure) => return Err(failure),
+    };
+    if !managed_config_matches(&document, &provider)
+        || !credentials_match(credentials, &provider.api_key)?
+    {
+        return Ok(None);
+    }
+    let Some(config_fingerprint) = managed_config_fingerprint(config_bytes) else {
+        return Ok(None);
+    };
+    let Some(credentials_fingerprint) = credentials.fingerprint(ArtifactKind::Credentials) else {
+        return Ok(None);
+    };
+    Ok(Some((
+        provider.id,
+        config_fingerprint,
+        credentials_fingerprint,
+    )))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct BackupManifest<'a> {
-    operation_id: &'a str,
+struct BackupManifest {
+    format_version: u8,
+    operation_id: String,
+    operation_kind: String,
     config_existed: bool,
     credentials_existed: bool,
-    old_config_fingerprint: &'a Option<String>,
-    old_credentials_fingerprint: &'a Option<String>,
+    old_config_fingerprint: Option<String>,
+    new_config_fingerprint: Option<String>,
+    old_credentials_fingerprint: Option<String>,
+    new_credentials_fingerprint: Option<String>,
 }
 
 fn create_backup(
@@ -1011,11 +1585,19 @@ fn create_backup(
             write_new_synced(&operation.join("auth.json"), bytes).map_err(|_| backup_failed())?;
         }
         let manifest = serde_json::to_vec_pretty(&BackupManifest {
-            operation_id: &prepared.operation_id,
+            format_version: BACKUP_FORMAT_VERSION,
+            operation_id: prepared.operation_id.clone(),
+            operation_kind: if prepared.update_guard.is_some() {
+                "save_and_apply".to_owned()
+            } else {
+                "switch_provider".to_owned()
+            },
             config_existed: prepared.config.old.bytes.is_some(),
             credentials_existed: prepared.credentials.old.bytes.is_some(),
-            old_config_fingerprint: &prepared.config.old_fingerprint,
-            old_credentials_fingerprint: &prepared.credentials.old_fingerprint,
+            old_config_fingerprint: prepared.config.old_fingerprint.clone(),
+            new_config_fingerprint: Some(prepared.config.new_fingerprint.clone()),
+            old_credentials_fingerprint: prepared.credentials.old_fingerprint.clone(),
+            new_credentials_fingerprint: Some(prepared.credentials.new_fingerprint.clone()),
         })
         .map_err(|_| backup_failed())?;
         write_new_synced(&operation.join("manifest.json"), &manifest)
@@ -1026,6 +1608,206 @@ fn create_backup(
         let _ = fs::remove_dir_all(&operation);
     }
     result.map(|_| operation)
+}
+
+fn create_restore_backup(
+    codex_home: &Path,
+    prepared: &PreparedRestore,
+) -> Result<PathBuf, EnvironmentFailure> {
+    let root = codex_home.join(".gpteasy-backups");
+    reject_redirect(&root)?;
+    let operation = root.join(format!(
+        "operation-{}-{}",
+        epoch_nanos(),
+        prepared.operation_id
+    ));
+    fs::create_dir_all(&operation).map_err(|_| backup_failed())?;
+    let result = (|| {
+        if let Some(bytes) = prepared.config.current.bytes.as_deref() {
+            write_new_synced(&operation.join("config.toml"), bytes).map_err(|_| backup_failed())?;
+        }
+        if let Some(bytes) = prepared.credentials.current.bytes.as_deref() {
+            write_new_synced(&operation.join("auth.json"), bytes).map_err(|_| backup_failed())?;
+        }
+        let manifest = serde_json::to_vec_pretty(&BackupManifest {
+            format_version: BACKUP_FORMAT_VERSION,
+            operation_id: prepared.operation_id.clone(),
+            operation_kind: "restore_latest".to_owned(),
+            config_existed: prepared.config.current.bytes.is_some(),
+            credentials_existed: prepared.credentials.current.bytes.is_some(),
+            old_config_fingerprint: prepared.config.current_fingerprint.clone(),
+            new_config_fingerprint: prepared.config.target_fingerprint.clone(),
+            old_credentials_fingerprint: prepared.credentials.current_fingerprint.clone(),
+            new_credentials_fingerprint: prepared.credentials.target_fingerprint.clone(),
+        })
+        .map_err(|_| backup_failed())?;
+        write_new_synced(&operation.join("manifest.json"), &manifest)
+            .map_err(|_| backup_failed())?;
+        prune_backups(&root)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&operation);
+    }
+    result.map(|_| operation)
+}
+
+fn mark_backup_completed(backup: &Path) -> Result<(), EnvironmentFailure> {
+    reject_redirect(backup).map_err(|_| backup_failed())?;
+    let marker = backup.join(BACKUP_COMPLETION_FILE);
+    reject_redirect(&marker).map_err(|_| backup_failed())?;
+    match fs::read(&marker) {
+        Ok(contents) if contents == BACKUP_COMPLETION_CONTENT => Ok(()),
+        Ok(_) => Err(backup_failed()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            write_new_synced(&marker, BACKUP_COMPLETION_CONTENT).map_err(|_| backup_failed())
+        }
+        Err(_) => Err(backup_failed()),
+    }
+}
+
+fn unmark_backup_completed(backup: &Path) -> Result<(), EnvironmentFailure> {
+    let marker = backup.join(BACKUP_COMPLETION_FILE);
+    reject_redirect(&marker).map_err(|_| backup_failed())?;
+    match fs::remove_file(marker) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(backup_failed()),
+    }
+}
+
+fn latest_completed_backup(
+    codex_home: &Path,
+) -> Result<Option<CompletedBackup>, EnvironmentFailure> {
+    let root = codex_home.join(".gpteasy-backups");
+    reject_redirect(&root).map_err(|_| backup_invalid())?;
+    let entries = match fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(backup_invalid()),
+    };
+    let mut completed = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|_| backup_invalid())?;
+        let file_type = entry.file_type().map_err(|_| backup_invalid())?;
+        let path = entry.path();
+        if !file_type.is_dir()
+            || !path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("operation-"))
+        {
+            continue;
+        }
+        let marker = path.join(BACKUP_COMPLETION_FILE);
+        let marker_type = match fs::symlink_metadata(&marker) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return Err(backup_invalid()),
+        };
+        if !marker_type.file_type().is_file()
+            || fs::read(&marker).map_err(|_| backup_invalid())? != BACKUP_COMPLETION_CONTENT
+        {
+            return Err(backup_invalid());
+        }
+        completed.push(path);
+    }
+    completed.sort_by(|left, right| right.file_name().cmp(&left.file_name()));
+    completed
+        .into_iter()
+        .next()
+        .map(load_completed_backup)
+        .transpose()
+}
+
+fn pending_backup_path(codex_home: &Path, backup: &Path) -> Result<PathBuf, EnvironmentFailure> {
+    let root = codex_home.join(".gpteasy-backups");
+    if backup.parent() != Some(root.as_path())
+        || !backup
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("operation-"))
+    {
+        return Err(backup_invalid());
+    }
+    reject_redirect(&root).map_err(|_| backup_invalid())?;
+    reject_redirect(backup).map_err(|_| backup_invalid())?;
+    Ok(backup.to_path_buf())
+}
+
+fn load_completed_backup(path: PathBuf) -> Result<CompletedBackup, EnvironmentFailure> {
+    reject_redirect(&path).map_err(|_| backup_invalid())?;
+    let manifest_path = path.join("manifest.json");
+    reject_redirect(&manifest_path).map_err(|_| backup_invalid())?;
+    let manifest: BackupManifest =
+        serde_json::from_slice(&fs::read(&manifest_path).map_err(|_| backup_invalid())?)
+            .map_err(|_| backup_invalid())?;
+    let valid_kind = matches!(
+        manifest.operation_kind.as_str(),
+        "switch_provider" | "save_and_apply" | "restore_latest"
+    );
+    let operation_name_matches = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(&manifest.operation_id));
+    if manifest.format_version != BACKUP_FORMAT_VERSION
+        || !valid_kind
+        || Uuid::parse_str(&manifest.operation_id).is_err()
+        || !operation_name_matches
+        || manifest.config_existed != manifest.old_config_fingerprint.is_some()
+        || manifest.credentials_existed != manifest.old_credentials_fingerprint.is_some()
+    {
+        return Err(backup_invalid());
+    }
+    let config = read_backup_artifact(
+        &path.join("config.toml"),
+        manifest.config_existed,
+        manifest.old_config_fingerprint.as_deref(),
+        ArtifactKind::Config,
+    )?;
+    let credentials = read_backup_artifact(
+        &path.join("auth.json"),
+        manifest.credentials_existed,
+        manifest.old_credentials_fingerprint.as_deref(),
+        ArtifactKind::Credentials,
+    )?;
+    Ok(CompletedBackup {
+        path,
+        manifest,
+        config,
+        credentials,
+    })
+}
+
+fn read_backup_artifact(
+    path: &Path,
+    existed: bool,
+    expected_fingerprint: Option<&str>,
+    kind: ArtifactKind,
+) -> Result<ArtifactBytes, EnvironmentFailure> {
+    reject_redirect(path).map_err(|_| backup_invalid())?;
+    if !existed {
+        if path.exists() || expected_fingerprint.is_some() {
+            return Err(backup_invalid());
+        }
+        return Ok(ArtifactBytes { bytes: None });
+    }
+    let bytes = fs::read(path).map_err(|_| backup_invalid())?;
+    if expected_fingerprint != Some(artifact_hash(kind, &bytes).as_str()) {
+        return Err(backup_invalid());
+    }
+    match kind {
+        ArtifactKind::Config => {
+            let text = std::str::from_utf8(&bytes).map_err(|_| backup_invalid())?;
+            text.parse::<DocumentMut>().map_err(|_| backup_invalid())?;
+        }
+        ArtifactKind::Credentials => {
+            let value: Value = serde_json::from_slice(&bytes).map_err(|_| backup_invalid())?;
+            if !value.is_object() {
+                return Err(backup_invalid());
+            }
+        }
+    }
+    Ok(ArtifactBytes { bytes: Some(bytes) })
 }
 
 fn prune_backups(root: &Path) -> Result<(), EnvironmentFailure> {
@@ -1481,6 +2263,21 @@ fn reject_redirect(path: &Path) -> Result<(), EnvironmentFailure> {
     }
 }
 
+fn replace_artifact(
+    path: &Path,
+    target: Option<&[u8]>,
+    target_existed: bool,
+) -> Result<(), EnvironmentFailure> {
+    match target {
+        Some(bytes) => {
+            let temporary = write_temporary(path, bytes)?;
+            atomic_replace(path, &temporary, target_existed)
+        }
+        None if target_existed => fs::remove_file(path).map_err(|_| artifact_write_failed()),
+        None => Ok(()),
+    }
+}
+
 fn write_temporary(path: &Path, bytes: &[u8]) -> Result<PathBuf, EnvironmentFailure> {
     let parent = path.parent().ok_or_else(artifact_write_failed)?;
     fs::create_dir_all(parent).map_err(|_| artifact_write_failed())?;
@@ -1656,6 +2453,20 @@ fn backup_failed() -> EnvironmentFailure {
     )
 }
 
+fn backup_invalid() -> EnvironmentFailure {
+    EnvironmentFailure::new(
+        EnvironmentFailureCategory::BackupInvalid,
+        "environment.backup_invalid",
+    )
+}
+
+fn restore_unavailable() -> EnvironmentFailure {
+    EnvironmentFailure::new(
+        EnvironmentFailureCategory::RestoreUnavailable,
+        "environment.restore_unavailable",
+    )
+}
+
 fn concurrent_modification() -> EnvironmentFailure {
     EnvironmentFailure::new(
         EnvironmentFailureCategory::ConcurrentModification,
@@ -1667,5 +2478,12 @@ fn artifact_write_failed() -> EnvironmentFailure {
     EnvironmentFailure::new(
         EnvironmentFailureCategory::ArtifactWriteFailed,
         "environment.artifact_write_failed",
+    )
+}
+
+fn operation_interrupted() -> EnvironmentFailure {
+    EnvironmentFailure::new(
+        EnvironmentFailureCategory::OperationInterrupted,
+        "environment.operation_interrupted",
     )
 }

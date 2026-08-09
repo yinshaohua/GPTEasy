@@ -11,8 +11,9 @@ use commands::{
     cancel_provider_request, copy_provider_api_key, delete_provider, discard_provider_validation,
     discover_provider_models, discover_provider_models_for_update, get_environment_snapshot,
     get_startup_snapshot, list_providers, refresh_startup_snapshot, rename_provider,
-    revalidate_provider, reveal_provider_api_key, save_and_apply_provider_update,
-    save_provider_update, save_verified_provider, validate_provider, validate_provider_update,
+    restore_last_environment_config, revalidate_provider, reveal_provider_api_key,
+    save_and_apply_provider_update, save_provider_update, save_verified_provider,
+    validate_provider, validate_provider_update,
 };
 use environment::EnvironmentApplication;
 use provider::{ProviderApplication, ProviderValidator, ValidationTimeouts};
@@ -48,6 +49,7 @@ pub fn run() {
             refresh_startup_snapshot,
             get_environment_snapshot,
             apply_environment_provider,
+            restore_last_environment_config,
             list_providers,
             discover_provider_models,
             discover_provider_models_for_update,

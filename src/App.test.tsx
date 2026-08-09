@@ -559,6 +559,92 @@ describe("Codex 环境接管", () => {
       });
     });
   });
+
+  it("只在最近配置可安全恢复时允许用户确认恢复", async () => {
+    const provider = {
+      id: "90f00c5a-59a7-4936-a791-583d90b81b73",
+      name: "Applied Provider",
+      baseUrl: "https://applied.example/v1",
+      defaultModel: "model-a",
+      verifiedAtEpochSeconds: 1_786_140_900,
+      isCurrent: true,
+    };
+    const managed = {
+      state: "managed",
+      messageId: "environment.managed",
+      revision: "managed-revision",
+      requiresTakeoverConfirmation: false,
+      restoreAvailability: "available",
+      impacts: [
+        {
+          artifact: "config",
+          action: "update",
+          fields: ["model", "model_provider", "model_providers.<provider-id>"],
+        },
+        {
+          artifact: "credentials",
+          action: "update",
+          fields: ["auth_mode", "OPENAI_API_KEY"],
+        },
+      ],
+      currentProvider: provider,
+    };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([provider]);
+      if (command === "get_environment_snapshot") return Promise.resolve(managed);
+      if (command === "restore_last_environment_config") {
+        return Promise.resolve({
+          ...managed,
+          state: "external",
+          messageId: "environment.external",
+          revision: "restored-revision",
+          currentProvider: null,
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Codex 环境" }));
+    const restore = await screen.findByRole("button", { name: "恢复上次配置" });
+    expect(restore).toBeEnabled();
+    fireEvent.click(restore);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("restore_last_environment_config", {
+        confirmRestore: true,
+        expectedRevision: "managed-revision",
+      });
+    });
+    expect(await screen.findByText("外部配置")).toBeInTheDocument();
+  });
+
+  it("受管工件外部变化后禁用恢复并说明原因", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([]);
+      if (command === "get_environment_snapshot") {
+        return Promise.resolve({
+          state: "managed",
+          messageId: "environment.managed",
+          revision: "changed-revision",
+          requiresTakeoverConfirmation: false,
+          restoreAvailability: "artifacts_changed",
+          impacts: [],
+          currentProvider: null,
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Codex 环境" }));
+
+    expect(await screen.findByRole("button", { name: "恢复上次配置" })).toBeDisabled();
+    expect(screen.getByText("受管工件在最近一次修改后发生变化，恢复已禁用。")).toBeInTheDocument();
+  });
 });
 
 describe("启动状态", () => {

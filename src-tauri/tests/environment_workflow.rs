@@ -5,6 +5,7 @@ use std::sync::Arc;
 use gpteasy_lib::environment::{
     ArtifactAction, ArtifactKind, EnvironmentApplication, EnvironmentFailureCategory,
     EnvironmentFailurePoint, EnvironmentFaultInjector, EnvironmentRecovery, EnvironmentState,
+    RestoreAvailability,
 };
 use gpteasy_lib::state::{StatePaths, StateStore};
 use rusqlite::{Connection, params};
@@ -527,6 +528,43 @@ fn credential_commit_failure_restores_every_old_artifact_and_database_fact() {
 }
 
 #[test]
+fn configuration_failure_categories_never_expose_api_keys() {
+    let cases: [(
+        Arc<dyn EnvironmentFaultInjector>,
+        EnvironmentFailureCategory,
+    ); 3] = [
+        (
+            Arc::new(FailBackupCreation),
+            EnvironmentFailureCategory::BackupFailed,
+        ),
+        (
+            Arc::new(FailBeforeCredentials),
+            EnvironmentFailureCategory::ArtifactWriteFailed,
+        ),
+        (
+            Arc::new(FailRollback),
+            EnvironmentFailureCategory::RollbackFailed,
+        ),
+    ];
+
+    for (fault, expected_category) in cases {
+        let (temp, store, _) = fixture();
+        let application =
+            EnvironmentApplication::with_fault_injector(store, temp.path().join(".codex"), fault);
+
+        let failure = application
+            .apply_provider(PROVIDER_ID, true)
+            .expect_err("injected configuration failure must be reported");
+
+        assert_eq!(failure.category, expected_category);
+        assert!(
+            !format!("{failure:?}").contains(API_KEY),
+            "{expected_category:?} must not expose the API key"
+        );
+    }
+}
+
+#[test]
 fn recovery_completes_the_database_commit_when_both_new_artifacts_are_present() {
     let (temp, store, application) = fixture();
     let codex_home = temp.path().join(".codex");
@@ -548,6 +586,7 @@ fn recovery_completes_the_database_commit_when_both_new_artifacts_are_present() 
         .apply_provider(next_id, false)
         .expect("write both new artifacts");
     let new_fingerprints = artifact_fingerprints(&codex_home);
+    let backup = latest_backup_path(&codex_home);
     let connection = Connection::open(store.paths().database()).expect("open state database");
     connection
         .execute(
@@ -574,13 +613,14 @@ fn recovery_completes_the_database_commit_when_both_new_artifacts_are_present() 
                 old_credentials_fingerprint, new_credentials_fingerprint,
                 backup_reference, target_snapshot_json, started_at
              ) VALUES (1, 'crash-fixture', 'switch_provider', 'prepared', ?1, ?2, ?3, ?4, ?5,
-                'unused-for-forward-recovery', ?6, '1')",
+                ?6, ?7, '1')",
             params![
                 next_id,
                 old_fingerprints.0,
                 new_fingerprints.0,
                 old_fingerprints.1,
                 new_fingerprints.1,
+                backup.to_string_lossy(),
                 target_snapshot.to_string(),
             ],
         )
@@ -709,6 +749,367 @@ fn recovery_stops_on_a_mixed_artifact_state_without_overwriting_it() {
         .expect("database contents")
         .has_pending_config_operation;
     assert!(pending);
+}
+
+#[test]
+fn crash_fault_matrix_converges_to_old_new_or_management_conflict_without_leaking_api_keys() {
+    let cases = [
+        (
+            EnvironmentFailurePoint::AfterBackupCompleted,
+            EnvironmentRecovery::NoPendingOperation,
+            EnvironmentState::External,
+        ),
+        (
+            EnvironmentFailurePoint::AfterPendingRegistered,
+            EnvironmentRecovery::KeptOldState,
+            EnvironmentState::External,
+        ),
+        (
+            EnvironmentFailurePoint::AfterConfigReplaced,
+            EnvironmentRecovery::Conflict,
+            EnvironmentState::Conflict,
+        ),
+        (
+            EnvironmentFailurePoint::AfterAllArtifactsReplaced,
+            EnvironmentRecovery::CompletedNewState,
+            EnvironmentState::Managed,
+        ),
+        (
+            EnvironmentFailurePoint::BeforeDatabaseCommit,
+            EnvironmentRecovery::CompletedNewState,
+            EnvironmentState::Managed,
+        ),
+        (
+            EnvironmentFailurePoint::AfterDatabaseCommit,
+            EnvironmentRecovery::NoPendingOperation,
+            EnvironmentState::Managed,
+        ),
+    ];
+
+    for (point, expected_recovery, expected_state) in cases {
+        let (temp, store, _) = fixture();
+        let codex_home = temp.path().join(".codex");
+        let interrupted = EnvironmentApplication::with_fault_injector(
+            store.clone(),
+            &codex_home,
+            Arc::new(InterruptAt(point)),
+        );
+
+        let failure = interrupted
+            .apply_provider(PROVIDER_ID, true)
+            .expect_err("fault matrix point must simulate process interruption");
+        assert_eq!(
+            failure.category,
+            EnvironmentFailureCategory::OperationInterrupted
+        );
+
+        let restarted = EnvironmentApplication::new(store.clone(), &codex_home);
+        let recovery = restarted
+            .recover_pending()
+            .expect("restart recovery must classify the persisted artifacts");
+        assert_eq!(
+            recovery, expected_recovery,
+            "unexpected recovery at {point:?}"
+        );
+        let snapshot = restarted
+            .inspect()
+            .expect("inspect the converged environment");
+        assert_eq!(
+            snapshot.state, expected_state,
+            "unexpected state at {point:?}"
+        );
+        assert_eq!(
+            snapshot.current_provider.is_some(),
+            expected_state == EnvironmentState::Managed,
+            "current provider evidence must agree with disk at {point:?}"
+        );
+
+        let observable_output = format!("{failure:?} {recovery:?} {snapshot:?}");
+        assert!(
+            !observable_output.contains(API_KEY),
+            "recovery output must not expose the API key at {point:?}"
+        );
+        let pending = store
+            .bootstrap()
+            .contents
+            .expect("database contents")
+            .pending_config_operation;
+        assert_eq!(
+            pending.is_some(),
+            expected_recovery == EnvironmentRecovery::Conflict,
+            "only a management conflict remains pending at {point:?}"
+        );
+        if let Some(pending) = pending {
+            assert_eq!(pending.stage, "conflict");
+        }
+    }
+}
+
+#[test]
+fn confirmed_restore_returns_only_the_latest_managed_artifacts_to_their_previous_state() {
+    let (temp, store, application) = fixture();
+    let codex_home = temp.path().join(".codex");
+    fs::create_dir_all(&codex_home).expect("create Codex fixture");
+    let original_config = b"custom_flag = true\n";
+    fs::write(codex_home.join("config.toml"), original_config).expect("write original config");
+
+    let applied = application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("apply provider before restore");
+    assert_eq!(applied.restore_availability, RestoreAvailability::Available);
+    let applied_config = fs::read(codex_home.join("config.toml")).expect("read applied config");
+    let applied_credentials =
+        fs::read(codex_home.join("auth.json")).expect("read applied credentials");
+
+    let unconfirmed = application
+        .restore_last_config(false, &applied.revision)
+        .expect_err("manual restore requires explicit confirmation");
+    assert_eq!(
+        unconfirmed.category,
+        EnvironmentFailureCategory::RestoreConfirmationRequired
+    );
+    assert_eq!(
+        fs::read(codex_home.join("config.toml")).expect("read unchanged config"),
+        applied_config
+    );
+    assert_eq!(
+        fs::read(codex_home.join("auth.json")).expect("read unchanged credentials"),
+        applied_credentials
+    );
+
+    let restored = application
+        .restore_last_config(true, &applied.revision)
+        .expect("restore the latest completed GPTEasy modification");
+
+    assert_eq!(restored.state, EnvironmentState::External);
+    assert!(restored.current_provider.is_none());
+    assert_eq!(
+        fs::read(codex_home.join("config.toml")).expect("read restored config"),
+        original_config
+    );
+    assert!(
+        !codex_home.join("auth.json").exists(),
+        "an originally missing artifact must be restored as missing"
+    );
+    let contents = store.bootstrap().contents.expect("database contents");
+    assert_eq!(
+        contents.provider_count, 1,
+        "restore must preserve the provider catalog"
+    );
+    assert!(!contents.has_last_applied_state);
+    assert!(!contents.has_pending_config_operation);
+    assert_eq!(
+        restored.restore_availability,
+        RestoreAvailability::Available,
+        "the restore itself is a reversible GPTEasy modification"
+    );
+}
+
+#[test]
+fn restore_refuses_to_overwrite_artifacts_changed_after_the_latest_operation() {
+    let (temp, store, application) = fixture();
+    let codex_home = temp.path().join(".codex");
+    application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("apply provider before external edit");
+    let config_path = codex_home.join("config.toml");
+    let externally_changed = format!(
+        "{}\n[projects.external]\ntrust_level = \"trusted\"\n",
+        fs::read_to_string(&config_path).expect("read managed config")
+    );
+    fs::write(&config_path, &externally_changed).expect("write external config change");
+    let snapshot = application.inspect().expect("inspect external change");
+    assert_eq!(snapshot.state, EnvironmentState::Managed);
+    assert_eq!(
+        snapshot.restore_availability,
+        RestoreAvailability::ArtifactsChanged
+    );
+
+    let failure = application
+        .restore_last_config(true, &snapshot.revision)
+        .expect_err("restore must not overwrite an external edit");
+
+    assert_eq!(
+        failure.category,
+        EnvironmentFailureCategory::ManagedConflict
+    );
+    assert_eq!(
+        fs::read_to_string(&config_path).expect("read preserved external edit"),
+        externally_changed
+    );
+    assert!(
+        !store
+            .bootstrap()
+            .contents
+            .expect("database contents")
+            .has_pending_config_operation
+    );
+}
+
+#[test]
+fn restore_rejects_a_corrupted_latest_completed_backup_without_falling_back() {
+    let (temp, _, application) = fixture();
+    let codex_home = temp.path().join(".codex");
+    fs::create_dir_all(&codex_home).expect("create Codex fixture");
+    fs::write(codex_home.join("config.toml"), b"custom_flag = true\n")
+        .expect("write original config");
+    application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("apply provider before corrupting backup");
+    let current_config = fs::read(codex_home.join("config.toml")).expect("read current config");
+    let backup = latest_backup_path(&codex_home);
+    fs::write(backup.join("config.toml"), b"not = [valid TOML")
+        .expect("corrupt latest completed backup");
+
+    let snapshot = application.inspect().expect("inspect corrupted backup");
+    assert_eq!(
+        snapshot.restore_availability,
+        RestoreAvailability::InvalidBackup
+    );
+    let failure = application
+        .restore_last_config(true, &snapshot.revision)
+        .expect_err("corrupt latest backup must be rejected");
+
+    assert_eq!(failure.category, EnvironmentFailureCategory::BackupInvalid);
+    assert_eq!(
+        fs::read(codex_home.join("config.toml")).expect("read preserved current config"),
+        current_config
+    );
+}
+
+#[test]
+fn restore_uses_only_the_immediately_previous_completed_configuration() {
+    let (temp, store, application) = fixture();
+    let codex_home = temp.path().join(".codex");
+    let first = application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("apply first provider");
+    let first_config = fs::read(codex_home.join("config.toml")).expect("read first config");
+    let first_credentials = fs::read(codex_home.join("auth.json")).expect("read first credentials");
+    let next_id = "924b6c4b-889c-44af-9bd3-e4892e42dac1";
+    insert_provider_values(
+        &store,
+        next_id,
+        "Next Provider",
+        "https://next.example/v1",
+        "next-key-not-real",
+        "next-model",
+        "next-verification-fingerprint",
+    );
+    let second = application
+        .apply_provider(next_id, false)
+        .expect("apply second provider");
+
+    let restored = application
+        .restore_last_config(true, &second.revision)
+        .expect("restore immediately previous configuration");
+
+    assert_eq!(restored.state, EnvironmentState::Managed);
+    assert_eq!(restored.current_provider, first.current_provider);
+    assert_eq!(
+        fs::read(codex_home.join("config.toml")).expect("read restored first config"),
+        first_config
+    );
+    assert_eq!(
+        fs::read(codex_home.join("auth.json")).expect("read restored first credentials"),
+        first_credentials
+    );
+    assert_eq!(
+        store
+            .bootstrap()
+            .contents
+            .expect("database contents")
+            .provider_count,
+        2,
+        "restore must not delete either verified provider"
+    );
+}
+
+#[test]
+fn restore_crash_fault_matrix_uses_the_same_recovery_protocol() {
+    let cases = [
+        (
+            EnvironmentFailurePoint::AfterBackupCompleted,
+            EnvironmentRecovery::NoPendingOperation,
+            EnvironmentState::Managed,
+        ),
+        (
+            EnvironmentFailurePoint::AfterPendingRegistered,
+            EnvironmentRecovery::KeptOldState,
+            EnvironmentState::Managed,
+        ),
+        (
+            EnvironmentFailurePoint::AfterConfigReplaced,
+            EnvironmentRecovery::Conflict,
+            EnvironmentState::Conflict,
+        ),
+        (
+            EnvironmentFailurePoint::AfterAllArtifactsReplaced,
+            EnvironmentRecovery::CompletedNewState,
+            EnvironmentState::External,
+        ),
+        (
+            EnvironmentFailurePoint::BeforeDatabaseCommit,
+            EnvironmentRecovery::CompletedNewState,
+            EnvironmentState::External,
+        ),
+        (
+            EnvironmentFailurePoint::AfterDatabaseCommit,
+            EnvironmentRecovery::NoPendingOperation,
+            EnvironmentState::External,
+        ),
+    ];
+
+    for (point, expected_recovery, expected_state) in cases {
+        let (temp, store, application) = fixture();
+        let codex_home = temp.path().join(".codex");
+        fs::create_dir_all(&codex_home).expect("create Codex fixture");
+        fs::write(codex_home.join("config.toml"), b"custom_flag = true\n")
+            .expect("write original config");
+        let applied = application
+            .apply_provider(PROVIDER_ID, true)
+            .expect("apply provider before interrupted restore");
+        let interrupted = EnvironmentApplication::with_fault_injector(
+            store.clone(),
+            &codex_home,
+            Arc::new(InterruptAt(point)),
+        );
+
+        let failure = interrupted
+            .restore_last_config(true, &applied.revision)
+            .expect_err("fault matrix point must interrupt the restore");
+        assert_eq!(
+            failure.category,
+            EnvironmentFailureCategory::OperationInterrupted
+        );
+        let restarted = EnvironmentApplication::new(store.clone(), &codex_home);
+        let recovery = restarted
+            .recover_pending()
+            .expect("recover interrupted restore");
+        assert_eq!(
+            recovery, expected_recovery,
+            "unexpected recovery at {point:?}"
+        );
+        let snapshot = restarted.inspect().expect("inspect recovered restore");
+        assert_eq!(
+            snapshot.state, expected_state,
+            "unexpected state at {point:?}"
+        );
+        let observable_output = format!("{failure:?} {recovery:?} {snapshot:?}");
+        assert!(!observable_output.contains(API_KEY));
+        let pending = store
+            .bootstrap()
+            .contents
+            .expect("database contents")
+            .pending_config_operation;
+        assert_eq!(
+            pending.is_some(),
+            expected_recovery == EnvironmentRecovery::Conflict
+        );
+        if let Some(pending) = pending {
+            assert_eq!(pending.stage, "conflict");
+        }
+    }
 }
 
 #[test]
@@ -960,6 +1361,42 @@ struct FailBeforeCredentials;
 impl EnvironmentFaultInjector for FailBeforeCredentials {
     fn fails_at(&self, point: EnvironmentFailurePoint) -> bool {
         point == EnvironmentFailurePoint::BeforeCredentialsReplace
+    }
+}
+
+struct InterruptAt(EnvironmentFailurePoint);
+
+impl EnvironmentFaultInjector for InterruptAt {
+    fn fails_at(&self, _point: EnvironmentFailurePoint) -> bool {
+        false
+    }
+
+    fn interrupts_at(&self, point: EnvironmentFailurePoint) -> bool {
+        point == self.0
+    }
+}
+
+struct FailBackupCreation;
+
+impl EnvironmentFaultInjector for FailBackupCreation {
+    fn fails_at(&self, _point: EnvironmentFailurePoint) -> bool {
+        false
+    }
+
+    fn fails_backup_creation(&self) -> bool {
+        true
+    }
+}
+
+struct FailRollback;
+
+impl EnvironmentFaultInjector for FailRollback {
+    fn fails_at(&self, point: EnvironmentFailurePoint) -> bool {
+        point == EnvironmentFailurePoint::BeforeCredentialsReplace
+    }
+
+    fn fails_rollback(&self) -> bool {
+        true
     }
 }
 

@@ -355,6 +355,20 @@ select:focus-visible {
   border-radius: 5px;
 }
 
+.environment-restore-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.environment-restore-row p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .blocked-state {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
@@ -828,6 +842,11 @@ select:focus-visible {
 
   .environment-apply-row {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .environment-restore-row {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }
 

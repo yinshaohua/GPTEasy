@@ -116,6 +116,13 @@ fn startup_block_reason(
     let Some(contents) = database.contents.as_ref() else {
         return Some(StartupBlockReason::DatabaseUnavailable);
     };
+    if contents
+        .pending_config_operation
+        .as_ref()
+        .is_some_and(|operation| operation.stage == "conflict")
+    {
+        return Some(StartupBlockReason::ManagedConfigConflict);
+    }
     if contents.has_pending_config_operation {
         return Some(StartupBlockReason::PendingConfigOperation);
     }

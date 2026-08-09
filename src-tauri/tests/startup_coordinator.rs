@@ -193,6 +193,47 @@ fn pending_config_operation_blocks_startup_coordination() {
 }
 
 #[test]
+fn recovered_unknown_artifacts_are_explained_as_a_management_conflict() {
+    let app_data = TempDir::new().expect("app data");
+    let codex_home = TempDir::new().expect("codex home");
+    fs::write(
+        codex_home.path().join("config.toml"),
+        b"model = 'externally-changed'\n",
+    )
+    .expect("write externally changed config");
+    let store = StateStore::new(StatePaths::from_root(app_data.path()));
+    assert!(store.bootstrap().is_ready());
+    let connection = rusqlite::Connection::open(store.paths().database()).expect("open state");
+    connection
+        .execute(
+            "INSERT INTO pending_config_operation (
+                singleton, operation_id, operation_kind, stage,
+                old_config_fingerprint, new_config_fingerprint,
+                backup_reference, target_snapshot_json, started_at
+             ) VALUES (1, 'op-conflict', 'switch_provider', 'conflict',
+                'old-fingerprint', 'new-fingerprint', 'backup', '{}', '1')",
+            [],
+        )
+        .expect("insert conflict recovery fixture");
+
+    let coordinator = StartupCoordinator::new(
+        store,
+        CodexInspector::new(codex_home.path(), login_command(7)),
+    );
+    let snapshot = coordinator.inspect();
+
+    assert_eq!(snapshot.mode, ApplicationMode::Blocked);
+    assert_eq!(
+        snapshot.block_reason,
+        Some(StartupBlockReason::ManagedConfigConflict)
+    );
+    assert_eq!(
+        snapshot.pending_operation_resolution,
+        Some(gpteasy_lib::startup::PendingOperationResolution::Conflict)
+    );
+}
+
+#[test]
 fn pending_config_only_operation_can_match_its_recorded_fingerprint() {
     let app_data = TempDir::new().expect("app data");
     let codex_home = TempDir::new().expect("codex home");
