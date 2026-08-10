@@ -1,3 +1,6 @@
+#[path = "support/state.rs"]
+mod state_support;
+
 use std::fs;
 use std::path::PathBuf;
 
@@ -7,19 +10,10 @@ use gpteasy_lib::state::{
 use rusqlite::Connection;
 use tempfile::TempDir;
 
+use state_support::create_version_zero_database;
+
 fn store_in(temp: &TempDir) -> StateStore {
     StateStore::new(StatePaths::from_root(temp.path()))
-}
-
-fn create_version_zero_database(store: &StateStore) {
-    fs::create_dir_all(store.paths().root()).expect("create state root");
-    let connection = Connection::open(store.paths().database()).expect("create v0 database");
-    connection
-        .pragma_update(None, "application_id", 1_196_446_789_i64)
-        .expect("mark v0 database as GPTEasy state");
-    connection
-        .pragma_update(None, "user_version", 0_i64)
-        .expect("create v0 schema");
 }
 
 #[test]
@@ -135,6 +129,30 @@ fn migration_uses_a_consistent_backup_and_keeps_only_three() {
         })
         .count();
     assert_eq!(retained, 3);
+}
+
+#[test]
+fn migration_failure_recovers_the_consistent_backup_through_the_public_gate() {
+    let temp = TempDir::new().expect("temp dir");
+    let paths = StatePaths::from_root(temp.path());
+    let setup = StateStore::new(paths.clone());
+    create_version_zero_database(&setup);
+    let store = state_support::with_migration_failure(paths);
+
+    let recovered = store.bootstrap();
+
+    assert_eq!(recovered.status, DatabaseStatus::Recovered);
+    assert_eq!(recovered.schema_version, Some(CURRENT_SCHEMA_VERSION));
+    assert!(
+        fs::read_dir(store.paths().root())
+            .expect("read state root")
+            .filter_map(Result::ok)
+            .any(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("state.sqlite3.failed.")),
+        "the failed primary database must remain available for investigation"
+    );
 }
 
 #[test]

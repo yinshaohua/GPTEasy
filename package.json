@@ -8,6 +8,7 @@
     "build": "tsc --noEmit && vite build",
     "check": "tsc --noEmit && eslint src vite.config.ts vitest.config.ts eslint.config.js",
     "test": "vitest run",
+    "acceptance": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-acceptance-gate.ps1",
     "tauri": "tauri"
   },
   "dependencies": {

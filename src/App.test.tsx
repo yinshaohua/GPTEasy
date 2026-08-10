@@ -185,6 +185,60 @@ describe("供应商创建", () => {
   });
 });
 
+describe("验收凭据泄漏门禁", () => {
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  beforeEach(() => {
+    invoke.mockReset();
+    listen.mockReset();
+    listen.mockResolvedValue(() => undefined);
+  });
+
+  it("[acceptance-leak-gate] 普通截图辅助和确认通知不包含 API Key", async () => {
+    const apiKeyCanary =
+      import.meta.env.VITE_GPTEASY_ACCEPTANCE_KEY_A ?? `gpteasy-ui-${crypto.randomUUID()}`;
+    const provider = {
+      id: "68bf9ee2-3ba5-4517-b47e-12a11e038de4",
+      name: "Atlas",
+      baseUrl: "https://atlas.example/v1",
+      defaultModel: "model-a",
+      verifiedAtEpochSeconds: 1_786_140_000,
+      isCurrent: false,
+    };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([provider]);
+      if (command === "reveal_provider_api_key") {
+        return Promise.resolve({ value: apiKeyCanary });
+      }
+      return Promise.resolve(undefined);
+    });
+    const notifications: string[] = [];
+    vi.spyOn(window, "confirm").mockImplementation((message) => {
+      notifications.push(String(message));
+      return false;
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "编辑 Atlas" }));
+    const apiKey = screen.getByLabelText("API Key") as HTMLInputElement;
+    expect(apiKey).toHaveAttribute("type", "password");
+    expect(apiKey).toHaveValue("");
+
+    const screenshotAssist = `${document.body.textContent}\n${document.documentElement.outerHTML}`;
+    fireEvent.click(screen.getByRole("button", { name: "删除供应商" }));
+    expect(notifications).toHaveLength(1);
+    expect(screenshotAssist).not.toContain(apiKeyCanary);
+    expect(notifications.join("\n")).not.toContain(apiKeyCanary);
+    expect(invoke.mock.calls.some(([command]) => command === "reveal_provider_api_key")).toBe(
+      false,
+    );
+  });
+});
+
 describe("供应商目录生命周期", () => {
   afterEach(() => {
     cleanup();

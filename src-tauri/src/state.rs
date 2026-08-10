@@ -1,5 +1,7 @@
+use std::fmt;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -103,14 +105,52 @@ impl StatePaths {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum StateFailurePoint {
+    BeforeMigration,
+}
+
+#[doc(hidden)]
+pub trait StateFaultInjector: Send + Sync {
+    fn fails_at(&self, point: StateFailurePoint) -> bool;
+}
+
+#[derive(Debug)]
+struct NoStateFaults;
+
+impl StateFaultInjector for NoStateFaults {
+    fn fails_at(&self, _point: StateFailurePoint) -> bool {
+        false
+    }
+}
+
+#[derive(Clone)]
 pub struct StateStore {
     paths: StatePaths,
+    faults: Arc<dyn StateFaultInjector>,
+}
+
+impl fmt::Debug for StateStore {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StateStore")
+            .field("paths", &self.paths)
+            .finish_non_exhaustive()
+    }
 }
 
 impl StateStore {
     pub fn new(paths: StatePaths) -> Self {
-        Self { paths }
+        Self {
+            paths,
+            faults: Arc::new(NoStateFaults),
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn with_fault_injector(paths: StatePaths, faults: Arc<dyn StateFaultInjector>) -> Self {
+        Self { paths, faults }
     }
 
     pub fn paths(&self) -> &StatePaths {
@@ -227,6 +267,9 @@ impl StateStore {
 
         if version < CURRENT_SCHEMA_VERSION {
             self.create_consistent_backup(&connection)?;
+            if self.faults.fails_at(StateFailurePoint::BeforeMigration) {
+                return Err(StateFailure::new(DatabaseBlockReason::MigrationFailed));
+            }
             apply_migrations(&mut connection, version)
                 .map_err(|_| StateFailure::new(DatabaseBlockReason::MigrationFailed))?;
         }
