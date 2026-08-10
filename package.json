@@ -9,6 +9,10 @@
     "check": "tsc --noEmit && eslint src vite.config.ts vitest.config.ts eslint.config.js",
     "test": "vitest run",
     "acceptance": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-acceptance-gate.ps1",
+    "candidate:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows-candidate.ps1",
+    "uat:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-windows-uat.ps1",
+    "release:tree": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-release-tree.ps1",
+    "release:check": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-release-readiness.ps1",
     "tauri": "tauri"
   },
   "dependencies": {

@@ -4,3 +4,4 @@
 
 - [2026-08-07 Codex Windows 本地合同](codex-windows-contract-2026-08-07.md)
 - [Issue #10 集成验收门禁](acceptance-gate.md)
+- [Issue #11 Windows x64 真实 UAT 与安装交付](windows-x64-uat.md)
