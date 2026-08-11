@@ -425,6 +425,120 @@ fn managed_environment_recovers_the_end_marker_after_a_desktop_rewrite() {
 }
 
 #[test]
+fn managed_environment_recovers_a_relocated_end_marker_after_a_desktop_rewrite() {
+    let (temp, _, application) = fixture();
+    let codex_home = temp.path().join(".codex");
+    application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("establish managed environment");
+    let config_path = codex_home.join("config.toml");
+    let original = fs::read_to_string(&config_path).expect("read managed config");
+    let rewritten = original.replace(
+        "# <<< GPTEasy managed provider <<<\n",
+        "[desktop]\nconversationDetailMode = 'compact'\n# <<< GPTEasy managed provider <<<\n",
+    );
+    assert_ne!(rewritten, original);
+    fs::write(&config_path, rewritten).expect("simulate desktop Codex marker relocation");
+
+    let snapshot = application.inspect().expect("inspect desktop rewrite");
+    assert_eq!(snapshot.state, EnvironmentState::Managed);
+    application
+        .apply_provider_at_revision(PROVIDER_ID, true, &snapshot.revision)
+        .expect("reapply after desktop rewrite");
+
+    let reapplied = fs::read_to_string(config_path).expect("read reapplied config");
+    assert_eq!(
+        reapplied
+            .matches("# <<< GPTEasy managed provider <<<")
+            .count(),
+        1
+    );
+    assert!(reapplied.contains("[desktop]\nconversationDetailMode = 'compact'\n"));
+    assert!(reapplied.find("# <<< GPTEasy managed provider <<<") < reapplied.find("[desktop]"));
+}
+
+#[test]
+fn restore_of_an_unchanged_apply_preserves_a_compatible_desktop_rewrite() {
+    let (temp, store, application) = fixture();
+    let codex_home = temp.path().join(".codex");
+    application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("establish managed environment");
+    application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("record an unchanged completed apply");
+    let config_path = codex_home.join("config.toml");
+    let original = fs::read_to_string(&config_path).expect("read managed config");
+    let rewritten = original.replace(
+        "# <<< GPTEasy managed provider <<<\n",
+        "[desktop]\nconversationDetailMode = 'compact'\n# <<< GPTEasy managed provider <<<\n",
+    );
+    fs::write(&config_path, &rewritten).expect("simulate desktop Codex marker relocation");
+
+    let snapshot = application.inspect().expect("inspect desktop rewrite");
+    assert_eq!(snapshot.state, EnvironmentState::Managed);
+    assert_eq!(
+        snapshot.restore_availability,
+        RestoreAvailability::Available
+    );
+    let restored = application
+        .restore_last_config(true, &snapshot.revision)
+        .expect("restore unchanged apply without discarding desktop settings");
+
+    assert_eq!(restored.state, EnvironmentState::Managed);
+    assert_eq!(
+        fs::read_to_string(config_path).expect("read restored config"),
+        rewritten
+    );
+    let contents = store.bootstrap().contents.expect("database contents");
+    assert!(contents.has_last_applied_state);
+    assert!(!contents.has_pending_config_operation);
+}
+
+#[test]
+fn restore_of_an_unchanged_apply_still_rejects_managed_drift() {
+    let (temp, store, application) = fixture();
+    let codex_home = temp.path().join(".codex");
+    application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("establish managed environment");
+    application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("record an unchanged completed apply");
+    let config_path = codex_home.join("config.toml");
+    let original = fs::read_to_string(&config_path).expect("read managed config");
+    let drifted = original.replace("https://fixture.example/v1", "https://drifted.example/v1");
+    assert_ne!(drifted, original);
+    fs::write(&config_path, &drifted).expect("drift a managed field");
+
+    let snapshot = application.inspect().expect("inspect managed drift");
+    assert_eq!(snapshot.state, EnvironmentState::Conflict);
+    assert_eq!(
+        snapshot.restore_availability,
+        RestoreAvailability::ArtifactsChanged
+    );
+    let failure = application
+        .restore_last_config(true, &snapshot.revision)
+        .expect_err("managed drift cannot use the unchanged-artifact exception");
+
+    assert_eq!(
+        failure.category,
+        EnvironmentFailureCategory::ManagedConflict
+    );
+    assert_eq!(
+        fs::read_to_string(config_path).expect("read preserved drift"),
+        drifted
+    );
+    assert!(
+        !store
+            .bootstrap()
+            .contents
+            .expect("database contents")
+            .has_pending_config_operation
+    );
+}
+
+#[test]
 fn missing_end_marker_without_last_applied_evidence_remains_a_conflict() {
     let (temp, store, application) = fixture();
     let codex_home = temp.path().join(".codex");

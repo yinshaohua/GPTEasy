@@ -457,7 +457,9 @@ impl EnvironmentApplication {
         let consumer_scan = self.consumer_scanner.scan();
         let mut restart_context = pending_restart_context(&consumer_scan);
         let backup = latest_completed_backup(&self.codex_home)?.ok_or_else(restore_unavailable)?;
-        if !backup.matches_current(&config, &credentials) {
+        let managed_current =
+            reconciled_applied_provider(&connection, &config, Some(&credentials))?.is_some();
+        if !backup.matches_current(&config, &credentials, managed_current) {
             return Err(EnvironmentFailure::new(
                 EnvironmentFailureCategory::ManagedConflict,
                 "environment.restore_conflict",
@@ -1048,10 +1050,18 @@ fn inspect_restore_availability(
         Ok(false) => {}
     }
     match latest_completed_backup(codex_home) {
-        Ok(Some(backup)) if backup.matches_current(config, credentials) => {
-            RestoreAvailability::Available
+        Ok(Some(backup)) => {
+            let managed_current =
+                reconciled_applied_provider(connection, config, Some(credentials))
+                    .ok()
+                    .flatten()
+                    .is_some();
+            if backup.matches_current(config, credentials, managed_current) {
+                RestoreAvailability::Available
+            } else {
+                RestoreAvailability::ArtifactsChanged
+            }
         }
-        Ok(Some(_)) => RestoreAvailability::ArtifactsChanged,
         Ok(None) => RestoreAvailability::NoBackup,
         Err(_) => RestoreAvailability::InvalidBackup,
     }
@@ -1271,7 +1281,7 @@ fn inspect_environment(
         }
         ManagedBlock::Valid(block) => block,
     };
-    if managed.missing_end_marker && last_applied_provider.is_none() {
+    if managed.recovered_desktop_rewrite && last_applied_provider.is_none() {
         return Ok(conflict_snapshot(
             impacts,
             revision,
@@ -1722,13 +1732,36 @@ struct CompletedBackup {
 }
 
 impl CompletedBackup {
-    fn matches_current(&self, config: &ArtifactBytes, credentials: &ArtifactBytes) -> bool {
-        (!self.manifest.config_affected
-            || config.fingerprint(ArtifactKind::Config) == self.manifest.new_config_fingerprint)
-            && (!self.manifest.credentials_affected
-                || credentials.fingerprint(ArtifactKind::Credentials)
-                    == self.manifest.new_credentials_fingerprint)
+    fn matches_current(
+        &self,
+        config: &ArtifactBytes,
+        credentials: &ArtifactBytes,
+        managed_current: bool,
+    ) -> bool {
+        artifact_matches_completed_operation(
+            config.fingerprint(ArtifactKind::Config),
+            self.manifest.old_config_fingerprint.as_deref(),
+            self.manifest.new_config_fingerprint.as_deref(),
+            self.manifest.config_affected,
+            managed_current,
+        ) && artifact_matches_completed_operation(
+            credentials.fingerprint(ArtifactKind::Credentials),
+            self.manifest.old_credentials_fingerprint.as_deref(),
+            self.manifest.new_credentials_fingerprint.as_deref(),
+            self.manifest.credentials_affected,
+            managed_current,
+        )
     }
+}
+
+fn artifact_matches_completed_operation(
+    current: Option<String>,
+    old: Option<&str>,
+    new: Option<&str>,
+    affected: bool,
+    managed_current: bool,
+) -> bool {
+    !affected || current.as_deref() == new || (managed_current && old == new)
 }
 
 #[derive(Debug, Clone)]
@@ -1746,8 +1779,14 @@ impl PreparedRestore {
         credentials: ArtifactBytes,
         backup: CompletedBackup,
     ) -> Result<Self, EnvironmentFailure> {
+        let preserve_current_config =
+            backup.manifest.old_config_fingerprint == backup.manifest.new_config_fingerprint;
+        let preserve_current_credentials = backup.manifest.old_credentials_fingerprint
+            == backup.manifest.new_credentials_fingerprint;
         let credential_target = if !backup.manifest.credentials_affected {
             None
+        } else if preserve_current_credentials {
+            Some(credentials.clone())
         } else if let Some(fields) = backup.manifest.credential_fields.as_ref() {
             Some(restore_credential_fields(
                 &credentials,
@@ -1761,8 +1800,12 @@ impl PreparedRestore {
             operation_id: Uuid::new_v4().to_string(),
             config: PreparedRestoreArtifact::new(
                 codex_home.join("config.toml"),
-                config,
-                backup.config,
+                config.clone(),
+                if preserve_current_config {
+                    config
+                } else {
+                    backup.config
+                },
                 ArtifactKind::Config,
             ),
             credentials: credential_target.map(|target| {
@@ -1852,6 +1895,9 @@ impl PreparedRestoreArtifact {
     fn commit(&self) -> Result<(), EnvironmentFailure> {
         if !artifact_matches(&self.path, self.current.bytes.as_deref())? {
             return Err(concurrent_modification());
+        }
+        if self.current.bytes == self.target.bytes {
+            return Ok(());
         }
         replace_artifact(
             &self.path,
@@ -2424,9 +2470,6 @@ fn reconciled_applied_provider(
     let ManagedBlock::Valid(managed) = managed_block(text) else {
         return Ok(None);
     };
-    if managed.missing_end_marker {
-        return Ok(None);
-    }
     if !managed_block_is_root_scoped(&document, text, &managed) {
         return Ok(None);
     }
@@ -2448,6 +2491,23 @@ fn reconciled_applied_provider(
     let Some(credentials_fingerprint) = credentials.fingerprint(ArtifactKind::Credentials) else {
         return Ok(None);
     };
+    if managed.recovered_desktop_rewrite {
+        let evidence_matches = connection
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM last_applied_state
+                    WHERE singleton = 1 AND mode = 'provider'
+                      AND provider_id = ?1 AND config_fingerprint = ?2
+                      AND credentials_fingerprint = ?3
+                 )",
+                params![provider.id, config_fingerprint, credentials_fingerprint],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|_| state_unavailable())?;
+        if !evidence_matches {
+            return Ok(None);
+        }
+    }
     Ok(Some((
         provider.id,
         config_fingerprint,
@@ -2891,11 +2951,7 @@ fn render_config(
             if !managed_block_is_root_scoped(&document, text, &existing) {
                 return Err(managed_conflict());
             }
-            let mut rendered = String::with_capacity(text.len() + block.len());
-            rendered.push_str(&text[..existing.start]);
-            rendered.push_str(&block);
-            rendered.push_str(&text[existing.end..]);
-            rendered
+            replace_managed_block(text, &existing, Some(&block)).ok_or_else(managed_conflict)?
         }
         ManagedBlock::Conflict => return Err(managed_conflict()),
     };
@@ -2923,10 +2979,7 @@ fn render_openai_config(original: Option<&[u8]>) -> Result<Option<Vec<u8>>, Envi
             if !managed_block_is_root_scoped(&document, text, &block) {
                 return Err(managed_conflict());
             }
-            let mut rendered = String::with_capacity(text.len() - (block.end - block.start));
-            rendered.push_str(&text[..block.start]);
-            rendered.push_str(&text[block.end..]);
-            rendered
+            replace_managed_block(text, &block, None).ok_or_else(managed_conflict)?
         }
         ManagedBlock::Conflict => return Err(managed_conflict()),
     };
@@ -3032,7 +3085,8 @@ struct ManagedBlockRange {
     start: usize,
     end: usize,
     provider_id: String,
-    missing_end_marker: bool,
+    recovered_desktop_rewrite: bool,
+    relocated_end_marker: Option<(usize, usize)>,
 }
 
 enum ManagedBlock {
@@ -3073,23 +3127,78 @@ fn managed_block(text: &str) -> ManagedBlock {
     }
     match (starts.as_slice(), ends.as_slice()) {
         ([], []) => ManagedBlock::None,
-        ([(start, _)], [(_, end)]) if start < end => {
-            validated_managed_block(text, *start, *end, false)
-                .map_or(ManagedBlock::Conflict, ManagedBlock::Valid)
+        ([(start, start_line_end)], [(end_start, end)]) if start < end_start => {
+            let managed = validated_managed_block(text, *start, *end).or_else(|| {
+                if *start == 0 {
+                    recover_desktop_managed_block(
+                        text,
+                        *start,
+                        *start_line_end,
+                        Some((*end_start, *end)),
+                    )
+                } else {
+                    None
+                }
+            });
+            managed.map_or(ManagedBlock::Conflict, ManagedBlock::Valid)
         }
-        // Desktop Codex can keep the owned prefix while dropping only its trailing sentinel.
+        // Desktop Codex can keep the owned prefix while dropping or relocating its sentinel.
         ([(start, start_line_end)], []) if *start == 0 => {
-            recover_managed_block_without_end(text, *start, *start_line_end)
+            recover_desktop_managed_block(text, *start, *start_line_end, None)
                 .map_or(ManagedBlock::Conflict, ManagedBlock::Valid)
         }
         _ => ManagedBlock::Conflict,
     }
 }
 
-fn recover_managed_block_without_end(
+fn replace_managed_block(
+    text: &str,
+    managed: &ManagedBlockRange,
+    replacement: Option<&str>,
+) -> Option<String> {
+    let mut rendered = String::with_capacity(text.len() + replacement.map_or(0, str::len));
+    rendered.push_str(text.get(..managed.start)?);
+    if let Some(replacement) = replacement {
+        rendered.push_str(replacement);
+    }
+    if let Some((marker_start, marker_end)) = managed.relocated_end_marker {
+        rendered.push_str(text.get(managed.end..marker_start)?);
+        rendered.push_str(text.get(marker_end..)?);
+    } else {
+        rendered.push_str(text.get(managed.end..)?);
+    }
+    Some(rendered)
+}
+
+fn canonical_managed_block(text: &str, managed: &ManagedBlockRange) -> Option<String> {
+    let bytes = text.as_bytes().get(managed.start..managed.end)?;
+    if !managed.recovered_desktop_rewrite {
+        return std::str::from_utf8(bytes).ok().map(str::to_owned);
+    }
+    String::from_utf8(reconstructed_managed_block(bytes)?).ok()
+}
+
+fn reconstructed_managed_block(prefix: &[u8]) -> Option<Vec<u8>> {
+    std::str::from_utf8(prefix).ok()?;
+    let newline = if prefix.windows(2).any(|window| window == b"\r\n") {
+        b"\r\n".as_slice()
+    } else {
+        b"\n".as_slice()
+    };
+    let mut reconstructed = prefix.to_vec();
+    if !reconstructed.ends_with(newline) {
+        reconstructed.extend_from_slice(newline);
+    }
+    reconstructed.extend_from_slice(MANAGED_END.as_bytes());
+    reconstructed.extend_from_slice(newline);
+    Some(reconstructed)
+}
+
+fn recover_desktop_managed_block(
     text: &str,
     start: usize,
     start_line_end: usize,
+    relocated_end_marker: Option<(usize, usize)>,
 ) -> Option<ManagedBlockRange> {
     let mut end = start_line_end;
     let mut remaining_lines = 7;
@@ -3103,16 +3212,41 @@ fn recover_managed_block_without_end(
     if remaining_lines != 0 {
         return None;
     }
-    validated_managed_block(text, start, end, true)
+    if let Some((marker_start, marker_end)) = relocated_end_marker {
+        if marker_start < end
+            || !text.get(marker_end..)?.trim().is_empty()
+            || text
+                .get(end..marker_start)?
+                .lines()
+                .any(|line| line.starts_with(PROVIDER_ID_PREFIX))
+        {
+            return None;
+        }
+    }
+    let block = reconstructed_managed_block(text.as_bytes().get(start..end)?)?;
+    let provider_id = validated_provider_id(std::str::from_utf8(&block).ok()?)?;
+    Some(ManagedBlockRange {
+        start,
+        end,
+        provider_id,
+        recovered_desktop_rewrite: true,
+        relocated_end_marker,
+    })
 }
 
-fn validated_managed_block(
-    text: &str,
-    start: usize,
-    end: usize,
-    missing_end_marker: bool,
-) -> Option<ManagedBlockRange> {
+fn validated_managed_block(text: &str, start: usize, end: usize) -> Option<ManagedBlockRange> {
     let block = text.get(start..end)?;
+    let provider_id = validated_provider_id(block)?;
+    Some(ManagedBlockRange {
+        start,
+        end,
+        provider_id,
+        recovered_desktop_rewrite: false,
+        relocated_end_marker: None,
+    })
+}
+
+fn validated_provider_id(block: &str) -> Option<String> {
     let provider_ids = block
         .lines()
         .filter_map(|line| line.strip_prefix(PROVIDER_ID_PREFIX))
@@ -3127,12 +3261,7 @@ fn validated_managed_block(
     {
         return None;
     }
-    Some(ManagedBlockRange {
-        start,
-        end,
-        provider_id: (*provider_id).to_owned(),
-        missing_end_marker,
-    })
+    Some((*provider_id).to_owned())
 }
 
 fn managed_block_has_expected_shape(block: &str, provider_id: &str) -> bool {
@@ -3171,7 +3300,7 @@ fn managed_block_is_root_scoped(
     text: &str,
     managed: &ManagedBlockRange,
 ) -> bool {
-    let Some(block) = text.get(managed.start..managed.end) else {
+    let Some(block) = canonical_managed_block(text, managed) else {
         return false;
     };
     let Ok(block_document) = block.parse::<DocumentMut>() else {
@@ -3229,7 +3358,7 @@ fn managed_provider_table<'a>(
 
 pub(crate) struct ManagedConfigEvidence {
     pub(crate) fingerprint: String,
-    pub(crate) recovered_missing_end_marker: bool,
+    pub(crate) recovered_desktop_rewrite: bool,
 }
 
 pub(crate) fn managed_config_evidence(bytes: &[u8]) -> Option<ManagedConfigEvidence> {
@@ -3237,28 +3366,10 @@ pub(crate) fn managed_config_evidence(bytes: &[u8]) -> Option<ManagedConfigEvide
     let ManagedBlock::Valid(block) = managed_block(text) else {
         return None;
     };
-    let managed_bytes = text.as_bytes().get(block.start..block.end)?;
-    if !block.missing_end_marker {
-        return Some(ManagedConfigEvidence {
-            fingerprint: artifact_hash(ArtifactKind::Config, managed_bytes),
-            recovered_missing_end_marker: false,
-        });
-    }
-    // Reconstruct the bytes GPTEasy originally fingerprinted before comparing SQLite evidence.
-    let newline = if managed_bytes.windows(2).any(|window| window == b"\r\n") {
-        b"\r\n".as_slice()
-    } else {
-        b"\n".as_slice()
-    };
-    let mut reconstructed = managed_bytes.to_vec();
-    if !reconstructed.ends_with(newline) {
-        reconstructed.extend_from_slice(newline);
-    }
-    reconstructed.extend_from_slice(MANAGED_END.as_bytes());
-    reconstructed.extend_from_slice(newline);
+    let canonical = canonical_managed_block(text, &block)?;
     Some(ManagedConfigEvidence {
-        fingerprint: artifact_hash(ArtifactKind::Config, &reconstructed),
-        recovered_missing_end_marker: true,
+        fingerprint: artifact_hash(ArtifactKind::Config, canonical.as_bytes()),
+        recovered_desktop_rewrite: block.recovered_desktop_rewrite,
     })
 }
 

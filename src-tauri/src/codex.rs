@@ -32,12 +32,8 @@ impl CodexInspector {
     }
 
     fn inspect_with_credentials(&self, inspect_file_content: bool) -> CodexSnapshot {
-        let (
-            config_status,
-            config_fingerprint,
-            credential_store,
-            recovered_managed_config_without_end_marker,
-        ) = self.inspect_config();
+        let (config_status, config_fingerprint, credential_store, recovered_desktop_rewrite) =
+            self.inspect_config();
         let credential_file_status = credential_file_status(&self.codex_home, credential_store);
         let login_status = self.login_command.status();
         CodexSnapshot {
@@ -46,7 +42,7 @@ impl CodexInspector {
             credential_file_status,
             credential_store,
             login_status,
-            recovered_managed_config_without_end_marker,
+            recovered_desktop_rewrite,
             credential_fingerprint: credential_fingerprint(
                 &self.codex_home,
                 credential_store,
@@ -97,14 +93,13 @@ impl CodexInspector {
                 );
             }
         };
-        let (fingerprint, recovered_managed_config_without_end_marker) =
-            match managed_config_evidence(&bytes) {
-                Some(evidence) => (
-                    Some(evidence.fingerprint),
-                    evidence.recovered_missing_end_marker,
-                ),
-                None => (Some(sha256_hex(&bytes)), false),
-            };
+        let (fingerprint, recovered_desktop_rewrite) = match managed_config_evidence(&bytes) {
+            Some(evidence) => (
+                Some(evidence.fingerprint),
+                evidence.recovered_desktop_rewrite,
+            ),
+            None => (Some(sha256_hex(&bytes)), false),
+        };
         let document = match std::str::from_utf8(&bytes)
             .ok()
             .and_then(|text| text.parse::<DocumentMut>().ok())
@@ -115,7 +110,7 @@ impl CodexInspector {
                     CodexConfigStatus::Invalid,
                     fingerprint,
                     CredentialStore::Unknown,
-                    recovered_managed_config_without_end_marker,
+                    recovered_desktop_rewrite,
                 );
             }
         };
@@ -123,7 +118,7 @@ impl CodexInspector {
             CodexConfigStatus::Valid,
             fingerprint,
             credential_store(&document),
-            recovered_managed_config_without_end_marker,
+            recovered_desktop_rewrite,
         )
     }
 }
@@ -232,7 +227,7 @@ pub struct CodexSnapshot {
     pub credential_file_status: CredentialFileStatus,
     pub login_status: LoginStatus,
     #[serde(skip)]
-    pub(crate) recovered_managed_config_without_end_marker: bool,
+    pub(crate) recovered_desktop_rewrite: bool,
     #[serde(skip)]
     pub(crate) credential_fingerprint: Option<String>,
 }
