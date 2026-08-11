@@ -497,15 +497,6 @@ fn provider_startup_accepts_desktop_rewrite_that_drops_only_the_end_marker() {
         Some(StartupBlockReason::ManagedConfigConflict)
     );
 
-    let trailing_content = format!("{rewritten}[after-marker]\nenabled = true\n");
-    fs::write(&config_path, trailing_content).expect("append content after relocated marker");
-    let invalid_boundary = coordinator.inspect();
-    assert_eq!(invalid_boundary.mode, ApplicationMode::Blocked);
-    assert_eq!(
-        invalid_boundary.block_reason,
-        Some(StartupBlockReason::ManagedConfigConflict)
-    );
-
     fs::write(&config_path, rewritten).expect("restore compatible desktop rewrite");
     connection
         .execute("DELETE FROM last_applied_state", [])
@@ -559,6 +550,15 @@ fn provider_startup_accepts_desktop_rewrite_that_relocates_the_end_marker() {
     assert_eq!(conflict.mode, ApplicationMode::Blocked);
     assert_eq!(
         conflict.block_reason,
+        Some(StartupBlockReason::ManagedConfigConflict)
+    );
+
+    let trailing_content = format!("{rewritten}[after-marker]\nenabled = true\n");
+    fs::write(&config_path, trailing_content).expect("append content after relocated marker");
+    let invalid_boundary = coordinator.inspect();
+    assert_eq!(invalid_boundary.mode, ApplicationMode::Blocked);
+    assert_eq!(
+        invalid_boundary.block_reason,
         Some(StartupBlockReason::ManagedConfigConflict)
     );
 
