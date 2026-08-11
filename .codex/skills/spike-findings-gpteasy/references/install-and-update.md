@@ -44,6 +44,8 @@ Tauri bundle 配置：
 - 开始菜单项属于当前用户
 - 静默卸载测试能清理应用目录和开始菜单项
 
+安装和卸载完成后的开始菜单证据应直接检查当前用户 `%APPDATA%\Microsoft\Windows\Start Menu\Programs` 下的预期 `.lnk` 文件。不要用 `Get-StartApps` 的即时结果作为同步门禁；它依赖 Windows Shell 的异步缓存，安装器已经创建快捷方式时仍可能短暂返回旧列表。
+
 不要用 MSI 作为严格当前用户安装的主交付格式。
 
 ### 2. 把更新检查和下载/安装拆成两个命令

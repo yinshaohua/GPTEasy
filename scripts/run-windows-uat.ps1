@@ -177,6 +177,7 @@ if ($desktopPackage[0].Architecture.ToString() -ne 'X64' -or
 
 $dataRoot = Join-Path $env:LOCALAPPDATA 'com.gpteasy.desktop'
 $codexConfig = Join-Path ([Environment]::GetFolderPath('UserProfile')) '.codex\config.toml'
+$startMenuShortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\GPTEasy.lnk'
 if (Test-Path -LiteralPath $dataRoot) {
     throw 'Disposable UAT requires no pre-existing GPTEasy user data directory.'
 }
@@ -186,7 +187,7 @@ if (Test-Path -LiteralPath $codexConfig) {
 if (@(Get-InstalledRoots).Count -ne 0) {
     throw 'Disposable UAT requires GPTEasy to be uninstalled before the run.'
 }
-if (@(Get-StartApps | Where-Object { $_.Name -eq 'GPTEasy' }).Count -ne 0) {
+if (Test-Path -LiteralPath $startMenuShortcut -PathType Leaf) {
     throw 'Disposable UAT requires no existing GPTEasy Start menu entry.'
 }
 
@@ -228,7 +229,6 @@ if ($candidateVerification.frontendCheck -ne 'passed' -or
     throw 'The candidate manifest does not record every required build gate as passed.'
 }
 $candidateManifestSha256 = Get-Sha256File $candidateManifestFile.FullName
-$startMenuBefore = @(Get-StartApps | Where-Object { $_.Name -eq 'GPTEasy' }).Count
 $checks = [System.Collections.Generic.List[object]]::new()
 $checks.Add([ordered]@{ id = 'release_tree'; passed = $true })
 
@@ -248,8 +248,7 @@ if (-not $installRoot.StartsWith($localRoot, [StringComparison]::OrdinalIgnoreCa
 }
 $app = Get-Item -LiteralPath (Join-Path $installRoot 'gpteasy.exe')
 $uninstaller = Get-Item -LiteralPath (Join-Path $installRoot 'uninstall.exe')
-$startMenuAfterInstall = @(Get-StartApps | Where-Object { $_.Name -eq 'GPTEasy' }).Count
-if ($startMenuAfterInstall -le $startMenuBefore) {
+if (-not (Test-Path -LiteralPath $startMenuShortcut -PathType Leaf)) {
     throw 'The installer did not create a current-user Start menu entry.'
 }
 $checks.Add([ordered]@{ id = 'install_current_user'; passed = $true })
@@ -322,7 +321,7 @@ Start-Sleep -Seconds 2
 if (Test-Path -LiteralPath $installRoot) {
     throw 'The application install directory remains after uninstall.'
 }
-if (@(Get-StartApps | Where-Object { $_.Name -eq 'GPTEasy' }).Count -ne 0) {
+if (Test-Path -LiteralPath $startMenuShortcut -PathType Leaf) {
     throw 'The Start menu entry remains after uninstall.'
 }
 if (-not (Test-Path -LiteralPath $stateDatabase -PathType Leaf)) {

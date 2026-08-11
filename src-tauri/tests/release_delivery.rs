@@ -204,6 +204,28 @@ fn windows_uat_refuses_to_run_without_disposable_environment_confirmation() {
 }
 
 #[test]
+fn windows_uat_uses_the_current_user_shortcut_instead_of_the_shell_cache() {
+    let root = repository_root();
+    let script = fs::read_to_string(root.join("scripts/run-windows-uat.ps1"))
+        .expect("read Windows UAT runner");
+
+    assert!(script.contains(
+        r"$startMenuShortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\GPTEasy.lnk'"
+    ));
+    assert_eq!(
+        script
+            .matches("Test-Path -LiteralPath $startMenuShortcut")
+            .count(),
+        3,
+        "preflight, installation, and uninstallation must inspect the current-user shortcut"
+    );
+    assert!(
+        !script.contains("Get-StartApps"),
+        "Get-StartApps is backed by an asynchronous shell cache"
+    );
+}
+
+#[test]
 fn acceptance_readiness_rejects_synthetic_evidence_without_rejecting_unsigned_artifact() {
     let (_temp, evidence, installer, manifest) = unsigned_uat_fixture();
     let output = run_readiness_gate("Acceptance", &evidence, &installer, &manifest);
