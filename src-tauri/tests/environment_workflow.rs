@@ -392,6 +392,60 @@ fn managed_environment_accepts_and_preserves_changes_outside_the_managed_block()
 }
 
 #[test]
+fn managed_environment_recovers_the_end_marker_after_a_desktop_rewrite() {
+    let (temp, _, application) = fixture();
+    let codex_home = temp.path().join(".codex");
+    fs::create_dir_all(&codex_home).expect("create Codex home");
+    fs::write(codex_home.join("config.toml"), "custom_flag = true\r\n").expect("write CRLF config");
+    application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("establish managed environment");
+    let config_path = codex_home.join("config.toml");
+    let original = fs::read_to_string(&config_path).expect("read managed config");
+    let rewritten = original.replace("# <<< GPTEasy managed provider <<<\r\n", "")
+        + "[desktop]\r\nconversationDetailMode = 'compact'\r\n";
+    assert_ne!(rewritten, original);
+    fs::write(&config_path, rewritten).expect("simulate desktop Codex rewrite");
+
+    let snapshot = application.inspect().expect("inspect desktop rewrite");
+    assert_eq!(snapshot.state, EnvironmentState::Managed);
+    application
+        .apply_provider_at_revision(PROVIDER_ID, true, &snapshot.revision)
+        .expect("reapply after desktop rewrite");
+
+    let reapplied = fs::read_to_string(config_path).expect("read reapplied config");
+    assert_eq!(
+        reapplied
+            .matches("# <<< GPTEasy managed provider <<<")
+            .count(),
+        1
+    );
+    assert!(reapplied.contains("[desktop]\r\nconversationDetailMode = 'compact'\r\n"));
+    assert!(reapplied.contains("custom_flag = true\r\n"));
+}
+
+#[test]
+fn missing_end_marker_without_last_applied_evidence_remains_a_conflict() {
+    let (temp, store, application) = fixture();
+    let codex_home = temp.path().join(".codex");
+    application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("establish managed environment");
+    let config_path = codex_home.join("config.toml");
+    let original = fs::read_to_string(&config_path).expect("read managed config");
+    let rewritten = original.replace("# <<< GPTEasy managed provider <<<\n", "");
+    fs::write(&config_path, rewritten).expect("remove end marker");
+    Connection::open(store.paths().database())
+        .expect("open state database")
+        .execute("DELETE FROM last_applied_state", [])
+        .expect("remove last applied evidence");
+
+    let snapshot = application.inspect().expect("inspect missing evidence");
+
+    assert_eq!(snapshot.state, EnvironmentState::Conflict);
+}
+
+#[test]
 fn managed_block_with_an_unowned_field_is_a_conflict_and_cannot_be_repaired() {
     let (temp, _, application) = fixture();
     let codex_home = temp.path().join(".codex");

@@ -126,6 +126,12 @@ fn startup_block_reason(
     if contents.has_pending_config_operation {
         return Some(StartupBlockReason::PendingConfigOperation);
     }
+    if codex.recovered_managed_config_without_end_marker
+        && (contents.last_applied_mode != Some(AppliedMode::Provider)
+            || contents.last_applied_config_fingerprint.as_ref() != Some(&codex.config_fingerprint))
+    {
+        return Some(StartupBlockReason::ManagedConfigConflict);
+    }
     if let Some(expected) = &contents.last_applied_config_fingerprint {
         if expected.as_ref() != codex.config_fingerprint.as_ref() {
             return Some(StartupBlockReason::ManagedConfigConflict);

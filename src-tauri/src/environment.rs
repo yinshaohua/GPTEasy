@@ -1271,6 +1271,15 @@ fn inspect_environment(
         }
         ManagedBlock::Valid(block) => block,
     };
+    if managed.missing_end_marker && last_applied_provider.is_none() {
+        return Ok(conflict_snapshot(
+            impacts,
+            revision,
+            restore_availability,
+            login_status,
+            pending_restart,
+        ));
+    }
     if !managed_block_is_root_scoped(&document, config_text, &managed) {
         return Ok(conflict_snapshot(
             impacts,
@@ -2415,6 +2424,9 @@ fn reconciled_applied_provider(
     let ManagedBlock::Valid(managed) = managed_block(text) else {
         return Ok(None);
     };
+    if managed.missing_end_marker {
+        return Ok(None);
+    }
     if !managed_block_is_root_scoped(&document, text, &managed) {
         return Ok(None);
     }
@@ -3020,6 +3032,7 @@ struct ManagedBlockRange {
     start: usize,
     end: usize,
     provider_id: String,
+    missing_end_marker: bool,
 }
 
 enum ManagedBlock {
@@ -3061,29 +3074,65 @@ fn managed_block(text: &str) -> ManagedBlock {
     match (starts.as_slice(), ends.as_slice()) {
         ([], []) => ManagedBlock::None,
         ([(start, _)], [(_, end)]) if start < end => {
-            let block = &text[*start..*end];
-            let provider_ids = block
-                .lines()
-                .filter_map(|line| line.strip_prefix(PROVIDER_ID_PREFIX))
-                .map(str::trim)
-                .collect::<Vec<_>>();
-            match provider_ids.as_slice() {
-                [provider_id]
-                    if !provider_id.is_empty()
-                        && Uuid::parse_str(provider_id).is_ok()
-                        && managed_block_has_expected_shape(block, provider_id) =>
-                {
-                    ManagedBlock::Valid(ManagedBlockRange {
-                        start: *start,
-                        end: *end,
-                        provider_id: (*provider_id).to_owned(),
-                    })
-                }
-                _ => ManagedBlock::Conflict,
-            }
+            validated_managed_block(text, *start, *end, false)
+                .map_or(ManagedBlock::Conflict, ManagedBlock::Valid)
+        }
+        // Desktop Codex can keep the owned prefix while dropping only its trailing sentinel.
+        ([(start, start_line_end)], []) if *start == 0 => {
+            recover_managed_block_without_end(text, *start, *start_line_end)
+                .map_or(ManagedBlock::Conflict, ManagedBlock::Valid)
         }
         _ => ManagedBlock::Conflict,
     }
+}
+
+fn recover_managed_block_without_end(
+    text: &str,
+    start: usize,
+    start_line_end: usize,
+) -> Option<ManagedBlockRange> {
+    let mut end = start_line_end;
+    let mut remaining_lines = 7;
+    for line in text.get(start_line_end..)?.split_inclusive('\n') {
+        end += line.len();
+        remaining_lines -= 1;
+        if remaining_lines == 0 {
+            break;
+        }
+    }
+    if remaining_lines != 0 {
+        return None;
+    }
+    validated_managed_block(text, start, end, true)
+}
+
+fn validated_managed_block(
+    text: &str,
+    start: usize,
+    end: usize,
+    missing_end_marker: bool,
+) -> Option<ManagedBlockRange> {
+    let block = text.get(start..end)?;
+    let provider_ids = block
+        .lines()
+        .filter_map(|line| line.strip_prefix(PROVIDER_ID_PREFIX))
+        .map(str::trim)
+        .collect::<Vec<_>>();
+    let [provider_id] = provider_ids.as_slice() else {
+        return None;
+    };
+    if provider_id.is_empty()
+        || Uuid::parse_str(provider_id).is_err()
+        || !managed_block_has_expected_shape(block, provider_id)
+    {
+        return None;
+    }
+    Some(ManagedBlockRange {
+        start,
+        end,
+        provider_id: (*provider_id).to_owned(),
+        missing_end_marker,
+    })
 }
 
 fn managed_block_has_expected_shape(block: &str, provider_id: &str) -> bool {
@@ -3178,15 +3227,43 @@ fn managed_provider_table<'a>(
         .and_then(|item| item.as_table())
 }
 
-pub(crate) fn managed_config_fingerprint(bytes: &[u8]) -> Option<String> {
+pub(crate) struct ManagedConfigEvidence {
+    pub(crate) fingerprint: String,
+    pub(crate) recovered_missing_end_marker: bool,
+}
+
+pub(crate) fn managed_config_evidence(bytes: &[u8]) -> Option<ManagedConfigEvidence> {
     let text = std::str::from_utf8(bytes).ok()?;
     let ManagedBlock::Valid(block) = managed_block(text) else {
         return None;
     };
-    Some(artifact_hash(
-        ArtifactKind::Config,
-        text.as_bytes().get(block.start..block.end)?,
-    ))
+    let managed_bytes = text.as_bytes().get(block.start..block.end)?;
+    if !block.missing_end_marker {
+        return Some(ManagedConfigEvidence {
+            fingerprint: artifact_hash(ArtifactKind::Config, managed_bytes),
+            recovered_missing_end_marker: false,
+        });
+    }
+    // Reconstruct the bytes GPTEasy originally fingerprinted before comparing SQLite evidence.
+    let newline = if managed_bytes.windows(2).any(|window| window == b"\r\n") {
+        b"\r\n".as_slice()
+    } else {
+        b"\n".as_slice()
+    };
+    let mut reconstructed = managed_bytes.to_vec();
+    if !reconstructed.ends_with(newline) {
+        reconstructed.extend_from_slice(newline);
+    }
+    reconstructed.extend_from_slice(MANAGED_END.as_bytes());
+    reconstructed.extend_from_slice(newline);
+    Some(ManagedConfigEvidence {
+        fingerprint: artifact_hash(ArtifactKind::Config, &reconstructed),
+        recovered_missing_end_marker: true,
+    })
+}
+
+pub(crate) fn managed_config_fingerprint(bytes: &[u8]) -> Option<String> {
+    managed_config_evidence(bytes).map(|evidence| evidence.fingerprint)
 }
 
 fn is_inside_multiline_string(text: &str, target: usize) -> bool {

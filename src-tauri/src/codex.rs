@@ -7,7 +7,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use toml_edit::DocumentMut;
 
-use crate::environment::managed_config_fingerprint;
+use crate::environment::managed_config_evidence;
 
 #[derive(Debug, Clone)]
 pub struct CodexInspector {
@@ -32,7 +32,12 @@ impl CodexInspector {
     }
 
     fn inspect_with_credentials(&self, inspect_file_content: bool) -> CodexSnapshot {
-        let (config_status, config_fingerprint, credential_store) = self.inspect_config();
+        let (
+            config_status,
+            config_fingerprint,
+            credential_store,
+            recovered_managed_config_without_end_marker,
+        ) = self.inspect_config();
         let credential_file_status = credential_file_status(&self.codex_home, credential_store);
         let login_status = self.login_command.status();
         CodexSnapshot {
@@ -41,6 +46,7 @@ impl CodexInspector {
             credential_file_status,
             credential_store,
             login_status,
+            recovered_managed_config_without_end_marker,
             credential_fingerprint: credential_fingerprint(
                 &self.codex_home,
                 credential_store,
@@ -51,7 +57,7 @@ impl CodexInspector {
         }
     }
 
-    fn inspect_config(&self) -> (CodexConfigStatus, Option<String>, CredentialStore) {
+    fn inspect_config(&self) -> (CodexConfigStatus, Option<String>, CredentialStore, bool) {
         let config_path = self.codex_home.join("config.toml");
         match fs::metadata(&config_path) {
             Ok(metadata) if metadata.is_file() => {}
@@ -60,16 +66,23 @@ impl CodexInspector {
                     CodexConfigStatus::Unreadable,
                     None,
                     CredentialStore::Unknown,
+                    false,
                 );
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return (CodexConfigStatus::Missing, None, CredentialStore::Unknown);
+                return (
+                    CodexConfigStatus::Missing,
+                    None,
+                    CredentialStore::Unknown,
+                    false,
+                );
             }
             Err(_) => {
                 return (
                     CodexConfigStatus::Unreadable,
                     None,
                     CredentialStore::Unknown,
+                    false,
                 );
             }
         }
@@ -80,10 +93,18 @@ impl CodexInspector {
                     CodexConfigStatus::Unreadable,
                     None,
                     CredentialStore::Unknown,
+                    false,
                 );
             }
         };
-        let fingerprint = managed_config_fingerprint(&bytes).or_else(|| Some(sha256_hex(&bytes)));
+        let (fingerprint, recovered_managed_config_without_end_marker) =
+            match managed_config_evidence(&bytes) {
+                Some(evidence) => (
+                    Some(evidence.fingerprint),
+                    evidence.recovered_missing_end_marker,
+                ),
+                None => (Some(sha256_hex(&bytes)), false),
+            };
         let document = match std::str::from_utf8(&bytes)
             .ok()
             .and_then(|text| text.parse::<DocumentMut>().ok())
@@ -94,6 +115,7 @@ impl CodexInspector {
                     CodexConfigStatus::Invalid,
                     fingerprint,
                     CredentialStore::Unknown,
+                    recovered_managed_config_without_end_marker,
                 );
             }
         };
@@ -101,6 +123,7 @@ impl CodexInspector {
             CodexConfigStatus::Valid,
             fingerprint,
             credential_store(&document),
+            recovered_managed_config_without_end_marker,
         )
     }
 }
@@ -208,6 +231,8 @@ pub struct CodexSnapshot {
     pub credential_store: CredentialStore,
     pub credential_file_status: CredentialFileStatus,
     pub login_status: LoginStatus,
+    #[serde(skip)]
+    pub(crate) recovered_managed_config_without_end_marker: bool,
     #[serde(skip)]
     pub(crate) credential_fingerprint: Option<String>,
 }
