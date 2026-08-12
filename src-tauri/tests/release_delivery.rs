@@ -226,6 +226,30 @@ fn windows_uat_uses_the_current_user_shortcut_instead_of_the_shell_cache() {
 }
 
 #[test]
+fn windows_uat_operator_prompts_are_in_simplified_chinese() {
+    let script_path = repository_root().join("scripts/run-windows-uat.ps1");
+    let script_bytes = fs::read(&script_path).expect("read Windows UAT runner bytes");
+    assert!(
+        script_bytes.starts_with(&[0xef, 0xbb, 0xbf]),
+        "localized Windows PowerShell scripts require a UTF-8 BOM"
+    );
+    let script = fs::read_to_string(script_path).expect("read Windows UAT runner");
+
+    assert!(
+        script.contains("仅在实际观察到要求的行为后输入 PASS"),
+        "UAT confirmation prompt must be in Simplified Chinese"
+    );
+    assert!(
+        script.contains("确认已安装的 GPTEasy 设置窗口可见且可正常操作。"),
+        "UAT operator steps must be in Simplified Chinese"
+    );
+    assert!(
+        !script.contains("Type PASS only after observing the required behavior"),
+        "legacy English confirmation prompt must not remain"
+    );
+}
+
+#[test]
 fn acceptance_readiness_rejects_synthetic_evidence_without_rejecting_unsigned_artifact() {
     let (_temp, evidence, installer, manifest) = unsigned_uat_fixture();
     let output = run_readiness_gate("Acceptance", &evidence, &installer, &manifest);
