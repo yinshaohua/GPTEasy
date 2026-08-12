@@ -247,6 +247,14 @@ fn windows_uat_operator_prompts_are_in_simplified_chinese() {
         !script.contains("Type PASS only after observing the required behavior"),
         "legacy English confirmation prompt must not remain"
     );
+    assert!(
+        script.contains("Get-AppxPackage -Name 'OpenAI.Codex'"),
+        "desktop Codex detection must query the exact main package name"
+    );
+    assert!(
+        !script.contains("$desktopPackage.Count -ne 1"),
+        "desktop Codex detection must tolerate multiple registered package results"
+    );
 }
 
 #[test]

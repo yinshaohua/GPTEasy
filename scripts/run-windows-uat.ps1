@@ -166,13 +166,23 @@ if ($LASTEXITCODE -ne 0 -or $codexVersion -notmatch '^codex-cli (\d+\.\d+\.\d+)'
 if ([version]$Matches[1] -lt [version]'0.147.0') {
     throw 'Windows UAT 要求 Codex CLI 0.147.0 或更高版本。'
 }
-$desktopPackage = @(Get-AppxPackage -Name 'OpenAI.Codex*' -ErrorAction SilentlyContinue)
-if ($desktopPackage.Count -ne 1) {
-    throw '必须恰好安装一个桌面 Codex 包。'
-}
-if ($desktopPackage[0].Architecture.ToString() -ne 'X64' -or
-    $desktopPackage[0].Version -lt [version]'26.803.5235.0') {
-    throw 'Windows UAT 要求安装受支持版本的 x64 桌面 Codex 包。'
+$desktopPackages = @(Get-AppxPackage -Name 'OpenAI.Codex' -ErrorAction SilentlyContinue)
+$desktopPackage = $desktopPackages |
+    Where-Object {
+        $_.Architecture.ToString() -eq 'X64' -and
+        [version]$_.Version -ge [version]'26.803.5235.0'
+    } |
+    Sort-Object { [version]$_.Version } -Descending |
+    Select-Object -First 1
+if (-not $desktopPackage) {
+    $detectedPackages = if ($desktopPackages.Count -eq 0) {
+        '未检测到 OpenAI.Codex 主包'
+    } else {
+        ($desktopPackages | ForEach-Object {
+            "$($_.Name) $($_.Version) $($_.Architecture)"
+        }) -join '；'
+    }
+    throw "Windows UAT 要求安装 x64 桌面 Codex 26.803.5235.0 或更高版本。实际检测结果：$detectedPackages。"
 }
 
 $dataRoot = Join-Path $env:LOCALAPPDATA 'com.gpteasy.desktop'
@@ -352,7 +362,7 @@ $evidence = [ordered]@{
         build = [int]$os.BuildNumber
     }
     codexCliVersion = $codexVersion
-    desktopCodexVersion = $desktopPackage[0].Version.ToString()
+    desktopCodexVersion = $desktopPackage.Version.ToString()
     providerCombinationFingerprint = $combinationFingerprint
     artifact = [ordered]@{
         fileName = $installer.Name
