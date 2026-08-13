@@ -220,6 +220,7 @@ fn bundled_codex_uses_the_full_ancestor_chain_but_codex_plus_plus_is_excluded() 
     assert_eq!(scan.cli, ConsumerStatus::Stopped);
     assert_eq!(scan.desktop_roots.len(), 1);
     assert_eq!(scan.desktop_roots[0].pid, 100);
+    assert!(scan.identities.iter().any(|identity| identity.pid == 101));
     assert!(scan.identities.iter().any(|identity| identity.pid == 102));
     assert!(scan.identities.iter().all(|identity| identity.pid != 500));
 }

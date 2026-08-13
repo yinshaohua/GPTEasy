@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -96,6 +96,11 @@ pub trait DesktopActivator: Send + Sync {
     fn activate(&self, aumid: &str) -> Result<(), DesktopBoundaryError>;
 }
 
+pub trait DesktopProcessController: Send + Sync {
+    fn request_close(&self, roots: &[ConsumerIdentity]) -> Result<(), DesktopBoundaryError>;
+    fn force_terminate(&self, roots: &[ConsumerIdentity]) -> Result<(), DesktopBoundaryError>;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DesktopBoundaryError;
 
@@ -107,6 +112,7 @@ pub trait DesktopClock: Send + Sync {
 #[serde(rename_all = "snake_case")]
 pub enum DesktopAction {
     Start,
+    Restart,
     Unavailable,
 }
 
@@ -116,12 +122,32 @@ pub struct DesktopSnapshot {
     pub status: ConsumerStatus,
     pub action: DesktopAction,
     pub message_id: &'static str,
+    pub roots: Vec<ConsumerIdentity>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopRestartStatus {
+    Restarted,
+    CloseTimedOut,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopRestartResult {
+    pub status: DesktopRestartStatus,
+    pub message_id: &'static str,
+    pub desktop_identities: Vec<ConsumerIdentity>,
+    pub force_authorization: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DesktopFailureCategory {
     ActionUnavailable,
+    CloseFailed,
+    ForceTerminateFailed,
+    IdentityChanged,
     ActivationFailed,
     LaunchNotObserved,
 }
@@ -138,9 +164,11 @@ pub struct DesktopApplication {
     discovery: Arc<dyn DesktopPackageDiscovery>,
     scanner: Arc<dyn ConsumerScanner>,
     activator: Arc<dyn DesktopActivator>,
+    process_controller: Arc<dyn DesktopProcessController>,
     clock: Arc<dyn DesktopClock>,
     scan_attempts: usize,
     scan_delay: Duration,
+    force_authorizations: Arc<Mutex<HashMap<String, Vec<ConsumerIdentity>>>>,
 }
 
 impl DesktopApplication {
@@ -149,6 +177,7 @@ impl DesktopApplication {
             Arc::new(WindowsDesktopPackageDiscovery),
             Arc::new(WindowsConsumerScanner::new()),
             Arc::new(WindowsDesktopActivator),
+            Arc::new(WindowsDesktopProcessController),
             Arc::new(SystemDesktopClock),
             20,
             Duration::from_millis(250),
@@ -159,6 +188,7 @@ impl DesktopApplication {
         discovery: Arc<dyn DesktopPackageDiscovery>,
         scanner: Arc<dyn ConsumerScanner>,
         activator: Arc<dyn DesktopActivator>,
+        process_controller: Arc<dyn DesktopProcessController>,
         clock: Arc<dyn DesktopClock>,
         scan_attempts: usize,
         scan_delay: Duration,
@@ -167,9 +197,11 @@ impl DesktopApplication {
             discovery,
             scanner,
             activator,
+            process_controller,
             clock,
             scan_attempts,
             scan_delay,
+            force_authorizations: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -183,16 +215,19 @@ impl DesktopApplication {
                         ConsumerStatus::Unknown,
                         DesktopAction::Unavailable,
                         "desktop.identity_untrusted",
+                        Vec::new(),
                     ),
                     ConsumerStatus::Running => desktop_snapshot(
                         ConsumerStatus::Running,
-                        DesktopAction::Unavailable,
-                        "desktop.running",
+                        DesktopAction::Restart,
+                        "desktop.ready_to_restart",
+                        scan.desktop_roots,
                     ),
                     ConsumerStatus::Stopped => desktop_snapshot(
                         ConsumerStatus::Stopped,
                         DesktopAction::Start,
                         "desktop.ready_to_start",
+                        Vec::new(),
                     ),
                 }
             }
@@ -204,6 +239,7 @@ impl DesktopApplication {
                 },
                 DesktopAction::Unavailable,
                 message_id,
+                Vec::new(),
             ),
         }
     }
@@ -240,8 +276,163 @@ impl DesktopApplication {
             {
                 return Ok(desktop_snapshot(
                     ConsumerStatus::Running,
-                    DesktopAction::Unavailable,
+                    DesktopAction::Restart,
                     "desktop.running",
+                    after.desktop_roots,
+                ));
+            }
+        }
+        Err(desktop_failure(
+            DesktopFailureCategory::LaunchNotObserved,
+            "desktop.launch_not_observed",
+        ))
+    }
+
+    pub fn restart(
+        &self,
+        expected_roots: &[ConsumerIdentity],
+    ) -> Result<DesktopRestartResult, DesktopFailure> {
+        let package = self.discover_package().map_err(|message_id| {
+            desktop_failure(DesktopFailureCategory::ActionUnavailable, message_id)
+        })?;
+        let packages = [package];
+        let before = self.scanner.scan_for_packages(&packages);
+        if before.desktop != ConsumerStatus::Running
+            || before.desktop_roots.is_empty()
+            || before.desktop_roots != expected_roots
+        {
+            return Err(desktop_failure(
+                DesktopFailureCategory::IdentityChanged,
+                "desktop.identity_changed",
+            ));
+        }
+        self.process_controller
+            .request_close(&before.desktop_roots)
+            .map_err(|_| {
+                desktop_failure(DesktopFailureCategory::CloseFailed, "desktop.close_failed")
+            })?;
+        let desktop_tree = desktop_identities(&before);
+        if !self.wait_for_identities_to_exit(&packages, &desktop_tree) {
+            let force_authorization = uuid::Uuid::new_v4().to_string();
+            self.force_authorizations
+                .lock()
+                .map_err(|_| {
+                    desktop_failure(
+                        DesktopFailureCategory::ActionUnavailable,
+                        "desktop.state_unavailable",
+                    )
+                })?
+                .insert(force_authorization.clone(), desktop_tree.clone());
+            return Ok(desktop_restart_result(
+                DesktopRestartStatus::CloseTimedOut,
+                "desktop.close_timed_out",
+                desktop_tree,
+                Some(force_authorization),
+            ));
+        }
+        self.activate_and_observe(&packages)
+    }
+
+    pub fn force_restart(
+        &self,
+        force_authorization: &str,
+    ) -> Result<DesktopRestartResult, DesktopFailure> {
+        let expected_identities = self
+            .force_authorizations
+            .lock()
+            .map_err(|_| {
+                desktop_failure(
+                    DesktopFailureCategory::ActionUnavailable,
+                    "desktop.state_unavailable",
+                )
+            })?
+            .remove(force_authorization)
+            .ok_or_else(|| {
+                desktop_failure(
+                    DesktopFailureCategory::ActionUnavailable,
+                    "desktop.force_not_authorized",
+                )
+            })?;
+        let package = self.discover_package().map_err(|message_id| {
+            desktop_failure(DesktopFailureCategory::ActionUnavailable, message_id)
+        })?;
+        let packages = [package];
+        let current = self.scanner.scan_for_packages(&packages);
+        let current_desktop_tree = desktop_identities(&current);
+        if expected_identities.is_empty()
+            || current.desktop != ConsumerStatus::Running
+            || current_desktop_tree != expected_identities
+        {
+            return Err(desktop_failure(
+                DesktopFailureCategory::IdentityChanged,
+                "desktop.identity_changed",
+            ));
+        }
+        self.process_controller
+            .force_terminate(&expected_identities)
+            .map_err(|_| {
+                desktop_failure(
+                    DesktopFailureCategory::ForceTerminateFailed,
+                    "desktop.force_terminate_failed",
+                )
+            })?;
+        if !self.wait_for_identities_to_exit(&packages, &expected_identities) {
+            return Err(desktop_failure(
+                DesktopFailureCategory::ForceTerminateFailed,
+                "desktop.force_terminate_failed",
+            ));
+        }
+        self.activate_and_observe(&packages)
+    }
+
+    fn wait_for_identities_to_exit(
+        &self,
+        packages: &[DesktopPackage],
+        identities: &[ConsumerIdentity],
+    ) -> bool {
+        for attempt in 0..self.scan_attempts.max(1) {
+            if attempt > 0 && !self.scan_delay.is_zero() {
+                thread::sleep(self.scan_delay);
+            }
+            let scan = self.scanner.scan_for_packages(packages);
+            if scan.desktop != ConsumerStatus::Unknown
+                && !desktop_identities(&scan)
+                    .iter()
+                    .any(|identity| identities.contains(identity))
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn activate_and_observe(
+        &self,
+        packages: &[DesktopPackage],
+    ) -> Result<DesktopRestartResult, DesktopFailure> {
+        let activation_started_at = self.clock.now_epoch_millis();
+        self.activator.activate(&packages[0].aumid()).map_err(|_| {
+            desktop_failure(
+                DesktopFailureCategory::ActivationFailed,
+                "desktop.activation_failed",
+            )
+        })?;
+        for attempt in 0..self.scan_attempts.max(1) {
+            if attempt > 0 && !self.scan_delay.is_zero() {
+                thread::sleep(self.scan_delay);
+            }
+            let scan = self.scanner.scan_for_packages(packages);
+            if scan.desktop == ConsumerStatus::Running
+                && scan
+                    .desktop_roots
+                    .iter()
+                    .any(|root| root.started_at_epoch_millis >= activation_started_at)
+            {
+                return Ok(desktop_restart_result(
+                    DesktopRestartStatus::Restarted,
+                    "desktop.restart_succeeded",
+                    Vec::new(),
+                    None,
                 ));
             }
         }
@@ -299,12 +490,39 @@ fn desktop_snapshot(
     status: ConsumerStatus,
     action: DesktopAction,
     message_id: &'static str,
+    roots: Vec<ConsumerIdentity>,
 ) -> DesktopSnapshot {
     DesktopSnapshot {
         status,
         action,
         message_id,
+        roots,
     }
+}
+
+fn desktop_restart_result(
+    status: DesktopRestartStatus,
+    message_id: &'static str,
+    desktop_identities: Vec<ConsumerIdentity>,
+    force_authorization: Option<String>,
+) -> DesktopRestartResult {
+    DesktopRestartResult {
+        status,
+        message_id,
+        desktop_identities,
+        force_authorization,
+    }
+}
+
+fn desktop_identities(scan: &ConsumerScan) -> Vec<ConsumerIdentity> {
+    scan.identities
+        .iter()
+        .filter(|identity| {
+            identity.role == ConsumerRole::Desktop && !scan.desktop_roots.contains(identity)
+        })
+        .cloned()
+        .chain(scan.desktop_roots.iter().cloned())
+        .collect()
 }
 
 fn desktop_failure(category: DesktopFailureCategory, message_id: &'static str) -> DesktopFailure {
@@ -360,6 +578,35 @@ impl DesktopActivator for WindowsDesktopActivator {
         #[cfg(not(windows))]
         {
             let _ = aumid;
+            Err(DesktopBoundaryError)
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct WindowsDesktopProcessController;
+
+impl DesktopProcessController for WindowsDesktopProcessController {
+    fn request_close(&self, roots: &[ConsumerIdentity]) -> Result<(), DesktopBoundaryError> {
+        #[cfg(windows)]
+        {
+            request_windows_close(roots)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = roots;
+            Err(DesktopBoundaryError)
+        }
+    }
+
+    fn force_terminate(&self, roots: &[ConsumerIdentity]) -> Result<(), DesktopBoundaryError> {
+        #[cfg(windows)]
+        {
+            force_terminate_windows_processes(roots)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = roots;
             Err(DesktopBoundaryError)
         }
     }
@@ -452,7 +699,8 @@ fn classify_processes(
     let desktop_children = available
         .iter()
         .filter(|process| {
-            is_bundled_codex(process, install_locations)
+            !desktop_roots.contains(&process.pid)
+                && is_discovered_openai_desktop(&process.executable, install_locations)
                 && has_desktop_ancestor(process, &by_pid, &desktop_roots)
         })
         .map(|process| process.pid)
@@ -610,6 +858,148 @@ ConvertTo-Json -Compress -InputObject $packages
             install_location: record.install_location,
         })
         .collect())
+}
+
+#[cfg(windows)]
+fn request_windows_close(roots: &[ConsumerIdentity]) -> Result<(), DesktopBoundaryError> {
+    use windows_sys::Win32::Foundation::{CloseHandle, HWND, LPARAM};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowThreadProcessId, PostMessageW, WM_CLOSE,
+    };
+
+    struct CloseContext {
+        pids: HashSet<u32>,
+        posted: bool,
+        failed: bool,
+    }
+
+    unsafe extern "system" fn close_root_window(hwnd: HWND, lparam: LPARAM) -> i32 {
+        let context = unsafe { &mut *(lparam as *mut CloseContext) };
+        let mut pid = 0;
+        unsafe {
+            GetWindowThreadProcessId(hwnd, &mut pid);
+        }
+        if context.pids.contains(&pid) {
+            context.posted = true;
+            if unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) } == 0 {
+                context.failed = true;
+            }
+        }
+        1
+    }
+
+    let handles = open_verified_windows_processes(roots, false)?;
+    let mut context = CloseContext {
+        pids: roots.iter().map(|root| root.pid).collect(),
+        posted: false,
+        failed: false,
+    };
+    let enumerated = unsafe {
+        EnumWindows(
+            Some(close_root_window),
+            (&mut context as *mut CloseContext) as LPARAM,
+        )
+    };
+    for handle in handles {
+        unsafe {
+            CloseHandle(handle);
+        }
+    }
+    if enumerated == 0 || !context.posted || context.failed {
+        return Err(DesktopBoundaryError);
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn force_terminate_windows_processes(
+    identities: &[ConsumerIdentity],
+) -> Result<(), DesktopBoundaryError> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::TerminateProcess;
+
+    let handles = open_verified_windows_processes(identities, true)?;
+
+    let mut failed = false;
+    for handle in handles {
+        let terminated = unsafe { TerminateProcess(handle, 1) != 0 };
+        unsafe {
+            CloseHandle(handle);
+        }
+        if !terminated {
+            failed = true;
+        }
+    }
+    if failed {
+        Err(DesktopBoundaryError)
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn open_verified_windows_processes(
+    identities: &[ConsumerIdentity],
+    terminate: bool,
+) -> Result<Vec<windows_sys::Win32::Foundation::HANDLE>, DesktopBoundaryError> {
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+    };
+
+    let access = if terminate {
+        PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE
+    } else {
+        PROCESS_QUERY_LIMITED_INFORMATION
+    };
+    let mut handles = Vec::with_capacity(identities.len());
+    for identity in identities {
+        let handle = unsafe { OpenProcess(access, 0, identity.pid) };
+        if handle.is_null() {
+            close_windows_handles(handles);
+            return Err(DesktopBoundaryError);
+        }
+        let mut created = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let mut exited = created;
+        let mut kernel = created;
+        let mut user = created;
+        let readable = unsafe {
+            GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) != 0
+        };
+        if !readable || windows_file_time_epoch_millis(created) != identity.started_at_epoch_millis
+        {
+            unsafe {
+                CloseHandle(handle);
+            }
+            close_windows_handles(handles);
+            return Err(DesktopBoundaryError);
+        }
+        handles.push(handle);
+    }
+    Ok(handles)
+}
+
+#[cfg(windows)]
+fn close_windows_handles(handles: Vec<windows_sys::Win32::Foundation::HANDLE>) {
+    use windows_sys::Win32::Foundation::CloseHandle;
+
+    for handle in handles {
+        unsafe {
+            CloseHandle(handle);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn windows_file_time_epoch_millis(created: windows_sys::Win32::Foundation::FILETIME) -> u64 {
+    let file_time = ((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64;
+    file_time
+        .checked_div(10_000)
+        .and_then(|milliseconds| milliseconds.checked_sub(11_644_473_600_000))
+        .unwrap_or_default()
 }
 
 fn is_desktop_root(process: &&FixtureProcess, install_locations: Option<&[PathBuf]>) -> bool {
@@ -834,11 +1224,7 @@ fn read_windows_process(pid: u32, parent_pid: u32, name: String) -> FixtureProce
             electron_helper: false,
         };
     }
-    let file_time = ((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64;
-    let started_at_epoch_millis = file_time
-        .checked_div(10_000)
-        .and_then(|milliseconds| milliseconds.checked_sub(11_644_473_600_000))
-        .unwrap_or_default();
+    let started_at_epoch_millis = windows_file_time_epoch_millis(created);
     FixtureProcess {
         pid,
         parent_pid,

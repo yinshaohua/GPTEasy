@@ -5,7 +5,9 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
-use crate::consumer::{DesktopApplication, DesktopFailure, DesktopSnapshot};
+use crate::consumer::{
+    ConsumerIdentity, DesktopApplication, DesktopFailure, DesktopRestartResult, DesktopSnapshot,
+};
 use crate::environment::{
     EnvironmentApplication, EnvironmentFailure, EnvironmentFailureCategory, EnvironmentSnapshot,
 };
@@ -146,6 +148,34 @@ pub(crate) async fn start_desktop_application(
 ) -> Result<DesktopSnapshot, DesktopFailure> {
     let application = state.application.clone();
     tauri::async_runtime::spawn_blocking(move || application.start())
+        .await
+        .map_err(|_| DesktopFailure {
+            category: crate::consumer::DesktopFailureCategory::ActionUnavailable,
+            message_id: "desktop.state_unavailable",
+        })?
+}
+
+#[tauri::command]
+pub(crate) async fn restart_desktop_application(
+    state: State<'_, DesktopRuntime>,
+    expected_roots: Vec<ConsumerIdentity>,
+) -> Result<DesktopRestartResult, DesktopFailure> {
+    let application = state.application.clone();
+    tauri::async_runtime::spawn_blocking(move || application.restart(&expected_roots))
+        .await
+        .map_err(|_| DesktopFailure {
+            category: crate::consumer::DesktopFailureCategory::ActionUnavailable,
+            message_id: "desktop.state_unavailable",
+        })?
+}
+
+#[tauri::command]
+pub(crate) async fn force_restart_desktop_application(
+    state: State<'_, DesktopRuntime>,
+    force_authorization: String,
+) -> Result<DesktopRestartResult, DesktopFailure> {
+    let application = state.application.clone();
+    tauri::async_runtime::spawn_blocking(move || application.force_restart(&force_authorization))
         .await
         .map_err(|_| DesktopFailure {
             category: crate::consumer::DesktopFailureCategory::ActionUnavailable,

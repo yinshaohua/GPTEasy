@@ -1081,6 +1081,17 @@ select:focus-visible {
   line-height: 1.55;
 }
 
+.desktop-restart-dialog ul {
+  display: grid;
+  gap: 6px;
+  max-height: 140px;
+  padding-left: 20px;
+  margin: 0 0 14px;
+  overflow: auto;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .address-comparison {
   display: grid;
   gap: 10px;
