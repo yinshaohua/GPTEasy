@@ -1156,6 +1156,85 @@ describe("供应商目录生命周期", () => {
       invoke.mock.calls.some(([command]) => command === "save_provider_update"),
     ).toBe(false);
   }, 10_000);
+
+  it("当前供应商更新在无旧消费者且检测可信时直接保存并应用", async () => {
+    const current = {
+      id: "76149f67-0d76-4d41-b606-77ba244bffec",
+      name: "Current Provider",
+      baseUrl: "https://current.example/v1",
+      defaultModel: "model-a",
+      verifiedAtEpochSeconds: 1_786_140_100,
+      isCurrent: true,
+    };
+    const environment = {
+      state: "managed",
+      mode: "provider",
+      messageId: "environment.managed",
+      revision: "quiet-current-update-revision",
+      requiresTakeoverConfirmation: false,
+      requiresConsumerConfirmation: false,
+      impacts: [],
+      currentProvider: current,
+      restoreAvailability: "no_backup",
+      loginStatus: "logged_in",
+      pendingRestart: false,
+      consumers: { desktop: "stopped", cli: "stopped" },
+    };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([current]);
+      if (command === "get_environment_snapshot") return Promise.resolve(environment);
+      if (command === "discover_provider_models_for_update") {
+        return Promise.resolve({
+          normalizedBaseUrl: "https://current.example/quiet/v1",
+          models: ["model-b"],
+        });
+      }
+      if (command === "validate_provider_update") {
+        return Promise.resolve({
+          validationId: "quiet-current-update-validation",
+          normalizedBaseUrl: "https://current.example/quiet/v1",
+          defaultModel: "model-b",
+          combinationFingerprint: "e".repeat(64),
+          verifiedAtEpochSeconds: 1_786_140_800,
+        });
+      }
+      if (command === "save_and_apply_provider_update") {
+        const provider = {
+          ...current,
+          baseUrl: "https://current.example/quiet/v1",
+          defaultModel: "model-b",
+          verifiedAtEpochSeconds: 1_786_140_800,
+        };
+        return Promise.resolve({
+          provider,
+          configChange: configChange({ ...environment, currentProvider: provider }),
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "修改 Current Provider" }));
+    fireEvent.change(screen.getByLabelText("服务地址"), {
+      target: { value: "https://current.example/quiet/v1" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "获取模型" }));
+    await screen.findByRole("option", { name: "model-b" });
+    fireEvent.change(screen.getByLabelText("默认模型"), { target: { value: "model-b" } });
+    fireEvent.click(screen.getByRole("button", { name: "验证更新" }));
+    fireEvent.click(await screen.findByRole("button", { name: "保存并应用" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("save_and_apply_provider_update", {
+        validationId: "quiet-current-update-validation",
+        providerId: current.id,
+        name: current.name,
+        restartDecision: "later",
+      });
+    });
+    expect(screen.queryByRole("dialog", { name: "确认配置切换" })).not.toBeInTheDocument();
+  }, 10_000);
 });
 
 describe("Codex 环境接管", () => {

@@ -488,13 +488,23 @@ export default function ProviderPage() {
       if (criticalDirty) {
         if (!receipt) return;
         if (selected.isCurrent) {
-          setRestartPlan({
+          const request: RestartPlanRequest = {
             kind: "provider_update",
             validationId: receipt.validationId,
             provider: selected,
             name,
-          });
-          setOperation("verified");
+          };
+          if (
+            !environment ||
+            environment.mode === "openai_login" ||
+            environment.requiresTakeoverConfirmation ||
+            environment.requiresConsumerConfirmation
+          ) {
+            setRestartPlan(request);
+            setOperation("verified");
+          } else {
+            await executeRestartPlan(request, "later");
+          }
           return;
         } else {
           saved = await saveProviderUpdate(receipt.validationId, selected.id, name);
