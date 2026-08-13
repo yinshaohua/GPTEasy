@@ -171,13 +171,9 @@ impl DesktopApplication {
     }
 
     pub fn inspect(&self) -> DesktopSnapshot {
-        match self.discovery.discover() {
-            Ok(packages) if packages.is_empty() => desktop_snapshot(
-                ConsumerStatus::Stopped,
-                DesktopAction::Unavailable,
-                "desktop.not_installed",
-            ),
-            Ok(packages) if packages.len() == 1 => {
+        match self.discover_package() {
+            Ok(package) => {
+                let packages = [package];
                 let scan = self.scanner.scan_for_packages(&packages);
                 match scan.desktop {
                     ConsumerStatus::Unknown => desktop_snapshot(
@@ -197,42 +193,23 @@ impl DesktopApplication {
                     ),
                 }
             }
-            Ok(packages) => desktop_snapshot(
-                ConsumerStatus::Stopped,
-                DesktopAction::Unavailable,
-                if has_multiple_package_families(&packages) {
-                    "desktop.ambiguous_installation"
+            Err(message_id) => desktop_snapshot(
+                if message_id == "desktop.discovery_failed" {
+                    ConsumerStatus::Unknown
                 } else {
-                    "desktop.discovery_failed"
+                    ConsumerStatus::Stopped
                 },
-            ),
-            Err(()) => desktop_snapshot(
-                ConsumerStatus::Unknown,
                 DesktopAction::Unavailable,
-                "desktop.discovery_failed",
+                message_id,
             ),
         }
     }
 
     pub fn start(&self) -> Result<DesktopSnapshot, DesktopFailure> {
-        let packages = self.discovery.discover().map_err(|()| {
-            desktop_failure(
-                DesktopFailureCategory::ActionUnavailable,
-                "desktop.discovery_failed",
-            )
+        let package = self.discover_package().map_err(|message_id| {
+            desktop_failure(DesktopFailureCategory::ActionUnavailable, message_id)
         })?;
-        let [package] = packages.as_slice() else {
-            return Err(desktop_failure(
-                DesktopFailureCategory::ActionUnavailable,
-                if packages.is_empty() {
-                    "desktop.not_installed"
-                } else if has_multiple_package_families(&packages) {
-                    "desktop.ambiguous_installation"
-                } else {
-                    "desktop.discovery_failed"
-                },
-            ));
-        };
+        let packages = [package];
         let before = self.scanner.scan_for_packages(&packages);
         if before.desktop != ConsumerStatus::Stopped {
             return Err(desktop_failure(
@@ -241,12 +218,14 @@ impl DesktopApplication {
             ));
         }
         let activation_started_at = self.clock.now_epoch_millis();
-        self.activator.activate(&package.aumid()).map_err(|()| {
-            desktop_failure(
-                DesktopFailureCategory::ActivationFailed,
-                "desktop.activation_failed",
-            )
-        })?;
+        self.activator
+            .activate(&packages[0].aumid())
+            .map_err(|()| {
+                desktop_failure(
+                    DesktopFailureCategory::ActivationFailed,
+                    "desktop.activation_failed",
+                )
+            })?;
         for attempt in 0..self.scan_attempts.max(1) {
             if attempt > 0 && !self.scan_delay.is_zero() {
                 thread::sleep(self.scan_delay);
@@ -270,15 +249,43 @@ impl DesktopApplication {
             "desktop.launch_not_observed",
         ))
     }
+
+    fn discover_package(&self) -> Result<DesktopPackage, &'static str> {
+        let packages = self
+            .discovery
+            .discover()
+            .map_err(|()| "desktop.discovery_failed")?;
+        resolve_desktop_package(packages)
+    }
 }
 
-fn has_multiple_package_families(packages: &[DesktopPackage]) -> bool {
-    packages
+const OPENAI_WINDOWS_PUBLISHER_ID: &str = "2p2nqsd0c76g0";
+
+fn resolve_desktop_package(packages: Vec<DesktopPackage>) -> Result<DesktopPackage, &'static str> {
+    if packages.is_empty() {
+        return Err("desktop.not_installed");
+    }
+    if packages.iter().any(|package| {
+        package
+            .family_name
+            .rsplit_once('_')
+            .map(|(_, publisher_id)| {
+                !publisher_id.eq_ignore_ascii_case(OPENAI_WINDOWS_PUBLISHER_ID)
+            })
+            .unwrap_or(true)
+    }) {
+        return Err("desktop.discovery_failed");
+    }
+    let family_count = packages
         .iter()
         .map(|package| package.family_name.to_ascii_lowercase())
         .collect::<HashSet<_>>()
-        .len()
-        > 1
+        .len();
+    match packages.as_slice() {
+        [package] => Ok(package.clone()),
+        _ if family_count > 1 => Err("desktop.ambiguous_installation"),
+        _ => Err("desktop.discovery_failed"),
+    }
 }
 
 impl Default for DesktopApplication {
@@ -550,7 +557,10 @@ $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $packages = @(
   Get-AppxPackage -PackageTypeFilter Main |
-    Where-Object { $_.Name -in @('OpenAI.Codex', 'OpenAI.ChatGPT') } |
+    Where-Object {
+      $_.Name -in @('OpenAI.Codex', 'OpenAI.ChatGPT') -and
+      $_.PublisherId -eq '2p2nqsd0c76g0'
+    } |
     ForEach-Object {
       $package = $_
       $manifest = Get-AppxPackageManifest -Package $package.PackageFullName

@@ -144,8 +144,8 @@ fn missing_installation_disables_start_with_a_stable_reason() {
 fn multiple_official_package_candidates_disable_ambiguous_activation() {
     let (application, _) = application(
         vec![
-            package("OpenAI.Codex", "OpenAI.Codex_publisher", "App"),
-            package("OpenAI.ChatGPT", "OpenAI.ChatGPT_publisher", "Desktop"),
+            package("OpenAI.Codex", "OpenAI.Codex_2p2nqsd0c76g0", "App"),
+            package("OpenAI.ChatGPT", "OpenAI.ChatGPT_2p2nqsd0c76g0", "Desktop"),
         ],
         vec![scan(ConsumerStatus::Stopped, &[])],
         Ok(()),
@@ -161,8 +161,8 @@ fn multiple_official_package_candidates_disable_ambiguous_activation() {
 fn multiple_desktop_entries_in_one_package_are_not_reported_as_multiple_packages() {
     let (application, _) = application(
         vec![
-            package("OpenAI.Codex", "OpenAI.Codex_publisher", "ChatGPT"),
-            package("OpenAI.Codex", "OpenAI.Codex_publisher", "Codex"),
+            package("OpenAI.Codex", "OpenAI.Codex_2p2nqsd0c76g0", "ChatGPT"),
+            package("OpenAI.Codex", "OpenAI.Codex_2p2nqsd0c76g0", "Codex"),
         ],
         vec![scan(ConsumerStatus::Stopped, &[])],
         Ok(()),
@@ -172,6 +172,31 @@ fn multiple_desktop_entries_in_one_package_are_not_reported_as_multiple_packages
 
     assert_eq!(snapshot.action, DesktopAction::Unavailable);
     assert_eq!(snapshot.message_id, "desktop.discovery_failed");
+}
+
+#[test]
+fn same_named_package_from_another_publisher_is_not_treated_as_openai() {
+    let (application, activator) = application(
+        vec![package(
+            "OpenAI.Codex",
+            "OpenAI.Codex_untrustedpublisher",
+            "App",
+        )],
+        vec![scan(ConsumerStatus::Stopped, &[])],
+        Ok(()),
+    );
+
+    let snapshot = application.inspect();
+
+    assert_eq!(snapshot.action, DesktopAction::Unavailable);
+    assert_eq!(snapshot.message_id, "desktop.discovery_failed");
+    assert!(
+        activator
+            .aumids
+            .lock()
+            .expect("activation fixture lock")
+            .is_empty()
+    );
 }
 
 #[test]
@@ -204,7 +229,7 @@ fn start_uses_the_discovered_aumid_and_waits_for_a_new_trusted_root() {
 #[test]
 fn activation_failure_returns_a_stable_failure_without_reporting_success() {
     let (application, _) = application(
-        vec![package("OpenAI.Codex", "OpenAI.Codex_publisher", "App")],
+        vec![package("OpenAI.Codex", "OpenAI.Codex_2p2nqsd0c76g0", "App")],
         vec![scan(ConsumerStatus::Stopped, &[])],
         Err(()),
     );
@@ -220,7 +245,7 @@ fn pid_reuse_or_an_untrusted_third_party_process_cannot_prove_launch_success() {
     let previous = scan(ConsumerStatus::Stopped, &[]);
     let reused_pid_without_new_start = scan(ConsumerStatus::Running, &[(420, 8_000)]);
     let (application, _) = application(
-        vec![package("OpenAI.Codex", "OpenAI.Codex_publisher", "App")],
+        vec![package("OpenAI.Codex", "OpenAI.Codex_2p2nqsd0c76g0", "App")],
         vec![
             previous,
             reused_pid_without_new_start.clone(),
