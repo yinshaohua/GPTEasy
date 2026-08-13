@@ -61,7 +61,7 @@ try {
     Invoke-Checked 'Frontend typecheck and lint' { npm run check }
     Invoke-Checked 'Frontend test suite' { npm test }
     Invoke-Checked 'Rust test suite' { cargo test --manifest-path src-tauri/Cargo.toml }
-    Invoke-Checked 'Issue #10 acceptance gate' { npm run acceptance }
+    Invoke-Checked 'Issue #22 comprehensive acceptance gate' { npm run acceptance }
     Invoke-Checked 'Release tree gate' {
         powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-release-tree.ps1 -RepositoryRoot $repoRoot
     }
@@ -100,7 +100,7 @@ if (-not $installer.FullName.StartsWith($repoRoot, [StringComparison]::OrdinalIg
 $relativeInstaller = $installer.FullName.Substring($repoRoot.Length).TrimStart('\').Replace('\', '/')
 $manifest = [ordered]@{
     schemaVersion = 1
-    issue = 11
+    issue = 22
     gitCommit = $commit
     builtAtUtc = (Get-Date).ToUniversalTime().ToString('o')
     platform = 'windows-x64-current-user'

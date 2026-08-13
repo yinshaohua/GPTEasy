@@ -39,7 +39,7 @@ const MODEL_A: &str = "model-a";
 const MODEL_B: &str = "model-b";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn windows_x64_acceptance_gate_covers_issue_10() {
+async fn windows_x64_acceptance_gate_covers_issue_22() {
     let mut context = AcceptanceContext::new();
     let mut cases = Vec::new();
 

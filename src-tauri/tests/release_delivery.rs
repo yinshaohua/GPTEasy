@@ -10,10 +10,18 @@ const REQUIRED_UAT_CHECKS: &[&str] = &[
     "release_tree",
     "install_current_user",
     "application_launch",
+    "dayway_lifecycle",
     "real_provider_validation",
+    "base_url_suggestion",
+    "provider_order_and_tray_sync",
     "provider_save_and_switch",
     "pending_restart",
     "cli_new_process_read",
+    "cli_not_terminated",
+    "desktop_restart_graceful",
+    "desktop_restart_force_confirmation",
+    "desktop_restart_cancel",
+    "desktop_activation_recheck",
     "desktop_new_process_read",
     "restore_last_config",
     "external_config_takeover",
@@ -27,6 +35,10 @@ const REQUIRED_UAT_CHECKS: &[&str] = &[
     "uninstall",
     "data_retention",
     "credential_leak_scan",
+    "usability_200_percent",
+    "usability_reduced_motion",
+    "usability_high_contrast",
+    "usability_keyboard",
 ];
 
 fn repository_root() -> PathBuf {
@@ -66,7 +78,7 @@ fn unsigned_uat_fixture() -> (TempDir, PathBuf, PathBuf, PathBuf) {
         .collect::<Vec<_>>();
     let candidate_manifest = json!({
         "schemaVersion": 1,
-        "issue": 11,
+        "issue": 22,
         "gitCommit": current_commit(&root),
         "platform": "windows-x64-current-user",
         "verification": {
@@ -91,7 +103,7 @@ fn unsigned_uat_fixture() -> (TempDir, PathBuf, PathBuf, PathBuf) {
     let candidate_manifest_sha256 = format!("{:x}", Sha256::digest(&candidate_manifest_bytes));
     let evidence = json!({
         "schemaVersion": 1,
-        "issue": 11,
+        "issue": 22,
         "evidenceOrigin": "synthetic-test",
         "completedAtUtc": "2026-08-10T00:00:00Z",
         "gitCommit": current_commit(&root),
@@ -99,6 +111,8 @@ fn unsigned_uat_fixture() -> (TempDir, PathBuf, PathBuf, PathBuf) {
         "platform": { "os": "windows", "architecture": "x64", "build": 19045 },
         "codexCliVersion": "codex-cli 0.147.0",
         "desktopCodexVersion": "26.803.5235.0",
+        "desktopApplicationId": "Codex",
+        "desktopAppUserModelId": "OpenAI.Codex_123!Codex",
         "providerCombinationFingerprint": "a".repeat(64),
         "artifact": {
             "fileName": installer.file_name().expect("file name").to_string_lossy(),
@@ -250,6 +264,10 @@ fn windows_uat_operator_prompts_are_in_simplified_chinese() {
     assert!(
         script.contains("Get-AppxPackage -Name 'OpenAI.Codex'"),
         "desktop Codex detection must query the exact main package name"
+    );
+    assert!(
+        script.contains("Get-AppxPackage -Name 'OpenAI.ChatGPT'"),
+        "desktop detection must support the ChatGPT package identity"
     );
     assert!(
         !script.contains("$desktopPackage.Count -ne 1"),

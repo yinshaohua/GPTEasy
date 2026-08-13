@@ -1,8 +1,8 @@
-# Issue #11 Windows x64 真实 UAT 与安装交付
+# Issue #22 Windows x64 真实 UAT 与安装交付
 
-Issue #11 采用三层门禁，不能用自动化 fixture 替代真实 UAT，也不能用未签名验收包冒充正式发布包：
+Issue #22 采用三层门禁，不能用自动化 fixture 替代真实 UAT，也不能用未签名验收包冒充正式发布包：
 
-1. `candidate:windows` 在干净的 `main` 上执行类型检查、完整测试、Issue #10 验收门禁、发布树检查和 Tauri x64 NSIS 构建。
+1. `candidate:windows` 在干净的 `main` 上执行类型检查、完整测试、Issue #22 综合验收门禁、发布树检查和 Tauri x64 NSIS 构建。
 2. `uat:windows` 只允许在一次性 Windows x64 当前用户账户中运行，记录真实供应商、Codex CLI、桌面 Codex 和安装生命周期的脱敏证据。
 3. `release:check` 复核证据、提交、安装包哈希、发布树和签名。`Acceptance` 允许未签名，`Release` 必须具有有效 Authenticode 签名。
 
@@ -25,7 +25,7 @@ npm run candidate:windows -- --RequireAuthenticode
 ## UAT 前置条件
 
 - 使用 Windows 10 22H2（build 19045）或更高版本的 x64 一次性当前用户账户，不使用日常开发账户。
-- Codex CLI 0.147.0 或更高版本，以及 OpenAI.Codex 26.803.5235.0 或更高版本的 x64 桌面包均已安装。
+- Codex CLI 0.147.0 或更高版本，以及可动态发现 Application Id/AUMID 的 OpenAI.Codex 26.803.5235.0 或更高版本 x64 桌面包均已安装。
 - GPTEasy 尚未安装，`%LOCALAPPDATA%\com.gpteasy.desktop` 不存在，当前用户 `~/.codex/config.toml` 不存在。
 - 工作树位于干净的 `main`，安装包由同一提交构建。
 - 真实供应商凭据只保存在被 Git 忽略的 `.codex/skills/spike-findings-gpteasy/.secrets/provider.json`：
@@ -74,4 +74,4 @@ npm run release:check -- -Mode Release -EvidencePath <evidence.json> -InstallerP
 
 复核会同时绑定候选 manifest、当前提交、UAT JSON 和安装包哈希，并默认拒绝测试生成的 synthetic evidence。正式发布模式会重新读取安装包 Authenticode 状态，只有 `Valid` 才通过。UAT JSON 中的历史签名字段、Tauri 更新签名或未签名功能验收结论都不能绕过该检查。
 
-当前开发机不满足一次性账户、真实凭据和签名证书前置条件时，只能生成并校验未签名安装包，不能生成真实 UAT 通过证据，也不能关闭 Issue #11。
+当前开发机不满足一次性账户、真实凭据和签名证书前置条件时，只能生成并校验未签名安装包，不能生成真实 UAT 通过证据，也不能关闭 Issue #22。

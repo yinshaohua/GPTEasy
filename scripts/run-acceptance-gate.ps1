@@ -5,10 +5,10 @@ $ErrorActionPreference = 'Stop'
 
 $isWindowsHost = [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
 if (-not $isWindowsHost) {
-    throw 'The Issue #10 acceptance gate is a Windows x64 gate.'
+    throw 'The Issue #22 acceptance gate is a Windows x64 gate.'
 }
 if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'X64') {
-    throw 'The Issue #10 acceptance gate requires an x64 process.'
+    throw 'The Issue #22 acceptance gate requires an x64 process.'
 }
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -64,9 +64,9 @@ try {
     try {
         $previousErrorAction = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
-        $testOutput = (& cargo test --manifest-path src-tauri/Cargo.toml --test acceptance_gate -- --nocapture --test-threads=1 2>&1 | Out-String)
+        $testOutput = (& cargo test --manifest-path src-tauri/Cargo.toml --tests -- --nocapture --test-threads=1 2>&1 | Out-String)
         $testExitCode = $LASTEXITCODE
-        $frontendOutput = (& npx --no-install vitest run src/App.test.tsx -t acceptance-leak-gate 2>&1 | Out-String)
+        $frontendOutput = (& npx --no-install vitest run src/App.test.tsx 2>&1 | Out-String)
         $frontendExitCode = $LASTEXITCODE
         $ErrorActionPreference = $previousErrorAction
     } finally {

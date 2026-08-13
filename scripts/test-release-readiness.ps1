@@ -22,10 +22,18 @@ $requiredChecks = @(
     'release_tree'
     'install_current_user'
     'application_launch'
+    'dayway_lifecycle'
     'real_provider_validation'
+    'base_url_suggestion'
+    'provider_order_and_tray_sync'
     'provider_save_and_switch'
     'pending_restart'
     'cli_new_process_read'
+    'cli_not_terminated'
+    'desktop_restart_graceful'
+    'desktop_restart_force_confirmation'
+    'desktop_restart_cancel'
+    'desktop_activation_recheck'
     'desktop_new_process_read'
     'restore_last_config'
     'external_config_takeover'
@@ -39,6 +47,10 @@ $requiredChecks = @(
     'uninstall'
     'data_retention'
     'credential_leak_scan'
+    'usability_200_percent'
+    'usability_reduced_motion'
+    'usability_high_contrast'
+    'usability_keyboard'
 )
 
 $errors = [System.Collections.Generic.List[string]]::new()
@@ -77,8 +89,8 @@ $candidateManifest = Get-Content -LiteralPath $candidateManifestFile.FullName -R
 if ($evidence.schemaVersion -ne 1) {
     Add-GateError 'Evidence schemaVersion must be 1.'
 }
-if ($evidence.issue -ne 11) {
-    Add-GateError 'Evidence must belong to Issue #11.'
+if ($evidence.issue -ne 22) {
+    Add-GateError 'Evidence must belong to Issue #22.'
 }
 if ($evidence.evidenceOrigin -eq 'synthetic-test') {
     Add-GateError 'Synthetic evidence cannot satisfy the Windows UAT gate.'
@@ -95,7 +107,7 @@ $head = (& git -C $root rev-parse HEAD | Out-String).Trim()
 if ($LASTEXITCODE -ne 0 -or $evidence.gitCommit -ne $head) {
     Add-GateError 'Evidence gitCommit does not match the current HEAD.'
 }
-if ($candidateManifest.schemaVersion -ne 1 -or $candidateManifest.issue -ne 11) {
+if ($candidateManifest.schemaVersion -ne 1 -or $candidateManifest.issue -ne 22) {
     Add-GateError 'The candidate manifest schema or issue is invalid.'
 }
 if ($candidateManifest.gitCommit -ne $head) {
@@ -128,6 +140,10 @@ if (-not $cliVersionMatch.Success -or
     [version]$cliVersionMatch.Groups[1].Value -lt [version]'0.147.0' -or
     [version]$desktopVersionMatch.Value -lt [version]'26.803.5235.0') {
     Add-GateError 'Evidence must record real Codex CLI and desktop Codex versions.'
+}
+if ([string]::IsNullOrWhiteSpace([string]$evidence.desktopApplicationId) -or
+    [string]$evidence.desktopAppUserModelId -notmatch '^[^!]+!\S+$') {
+    Add-GateError 'Evidence must record the dynamically discovered desktop Application Id and AUMID.'
 }
 if ([string]$evidence.providerCombinationFingerprint -notmatch '^[0-9a-f]{64}$' -or
     [string]$evidence.providerCombinationFingerprint -match '^0{64}$') {
@@ -202,7 +218,7 @@ if ($LASTEXITCODE -ne 0) {
 $report = [ordered]@{
     passed = $errors.Count -eq 0
     mode = $Mode
-    issue = 11
+    issue = 22
     gitCommit = $head
     artifactSha256 = $actualHash
     authenticodeStatus = $signatureStatus
