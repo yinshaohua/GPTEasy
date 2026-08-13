@@ -9,13 +9,14 @@ use crate::consumer::{
     ConsumerIdentity, DesktopApplication, DesktopFailure, DesktopRestartResult, DesktopSnapshot,
 };
 use crate::environment::{
-    EnvironmentApplication, EnvironmentFailure, EnvironmentFailureCategory, EnvironmentSnapshot,
+    ConfigChangeResult, EnvironmentApplication, EnvironmentFailure, EnvironmentFailureCategory,
+    EnvironmentSnapshot, RestartDecision,
 };
 use crate::provider::{
-    DAYWAY_WEBSITE, DiscoveryInput, ModelDiscovery, ProviderApiKey, ProviderApplication,
-    ProviderFailure, ProviderFailureCategory, ProviderRevalidationResult, ProviderSummary,
-    ProviderUpdateDiscoveryInput, ProviderUpdateValidationInput, ProviderValidationInput,
-    ProviderValidationReceipt, ProviderValidationStage,
+    DAYWAY_WEBSITE, DiscoveryInput, ModelDiscovery, PlannedProviderUpdate, ProviderApiKey,
+    ProviderApplication, ProviderFailure, ProviderFailureCategory, ProviderRevalidationResult,
+    ProviderSummary, ProviderUpdateDiscoveryInput, ProviderUpdateValidationInput,
+    ProviderValidationInput, ProviderValidationReceipt, ProviderValidationStage,
 };
 use crate::startup::{StartupCoordinator, StartupSnapshot};
 use crate::tray;
@@ -53,15 +54,6 @@ impl EnvironmentRuntime {
 
     pub(crate) fn inspect(&self) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
         self.application.inspect()
-    }
-
-    pub(crate) fn switch_provider(
-        &self,
-        provider_id: &str,
-        expected_revision: &str,
-    ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
-        self.application
-            .apply_provider_at_revision(provider_id, true, expected_revision)
     }
 
     pub(crate) fn has_pending_restart(&self) -> Result<bool, EnvironmentFailure> {
@@ -187,21 +179,24 @@ pub(crate) async fn force_restart_desktop_application(
 pub(crate) async fn apply_environment_provider(
     app: AppHandle,
     state: State<'_, EnvironmentRuntime>,
+    desktop: State<'_, DesktopRuntime>,
     provider_id: String,
-    confirm_switch_risk: bool,
+    restart_decision: RestartDecision,
     expected_revision: String,
-) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
+) -> Result<ConfigChangeResult, EnvironmentFailure> {
     let application = state.application.clone();
+    let desktop = desktop.application.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        application.apply_provider_at_revision(
+        application.apply_provider_with_restart_plan(
+            &desktop,
             &provider_id,
-            confirm_switch_risk,
+            restart_decision,
             &expected_revision,
         )
     })
     .await
     .map_err(|_| environment_task_failed())?;
-    refresh_environment_tray_after(&app, result)
+    refresh_config_change_tray_after(&app, result)
 }
 
 #[tauri::command]
@@ -224,16 +219,39 @@ pub(crate) async fn restore_last_environment_config(
 pub(crate) async fn switch_to_openai_login(
     app: AppHandle,
     state: State<'_, EnvironmentRuntime>,
-    confirm_switch: bool,
+    desktop: State<'_, DesktopRuntime>,
+    restart_decision: RestartDecision,
     expected_revision: String,
-) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
+) -> Result<ConfigChangeResult, EnvironmentFailure> {
     let application = state.application.clone();
+    let desktop = desktop.application.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        application.switch_to_openai_login(confirm_switch, &expected_revision)
+        application.switch_to_openai_login_with_restart_plan(
+            &desktop,
+            restart_decision,
+            &expected_revision,
+        )
     })
     .await
     .map_err(|_| environment_task_failed())?;
-    refresh_environment_tray_after(&app, result)
+    refresh_config_change_tray_after(&app, result)
+}
+
+#[tauri::command]
+pub(crate) async fn force_complete_config_restart(
+    app: AppHandle,
+    state: State<'_, EnvironmentRuntime>,
+    desktop: State<'_, DesktopRuntime>,
+    force_authorization: String,
+) -> Result<ConfigChangeResult, EnvironmentFailure> {
+    let application = state.application.clone();
+    let desktop = desktop.application.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        application.force_complete_restart_plan(&desktop, &force_authorization)
+    })
+    .await
+    .map_err(|_| environment_task_failed())?;
+    refresh_config_change_tray_after(&app, result)
 }
 
 #[tauri::command]
@@ -425,19 +443,23 @@ pub(crate) async fn save_and_apply_provider_update(
     validation_id: String,
     provider_id: String,
     name: String,
-    confirm_consumer_risk: bool,
-) -> Result<ProviderSummary, ProviderFailure> {
+    restart_decision: RestartDecision,
+) -> Result<PlannedProviderUpdate, ProviderFailure> {
     let task_app = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let provider_state = task_app.state::<ProviderRuntime>();
         let environment_state = task_app.state::<EnvironmentRuntime>();
-        provider_state.application.save_and_apply_provider_update(
-            &environment_state.application,
-            &validation_id,
-            &provider_id,
-            &name,
-            confirm_consumer_risk,
-        )
+        let desktop_state = task_app.state::<DesktopRuntime>();
+        provider_state
+            .application
+            .save_and_apply_provider_update_with_restart_plan(
+                &environment_state.application,
+                &desktop_state.application,
+                &validation_id,
+                &provider_id,
+                &name,
+                restart_decision,
+            )
     })
     .await
     .map_err(|_| {
@@ -448,8 +470,8 @@ pub(crate) async fn save_and_apply_provider_update(
     })?;
     match result {
         Ok(applied) => {
-            let _ = tray::refresh_with_snapshot(&app, &applied.environment);
-            Ok(applied.provider)
+            let _ = tray::refresh_with_snapshot(&app, &applied.config_change.environment);
+            Ok(applied)
         }
         Err(failure) => Err(failure),
     }
@@ -519,6 +541,16 @@ fn refresh_environment_tray_after(
 ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
     if let Ok(snapshot) = &result {
         let _ = tray::refresh_with_snapshot(app, snapshot);
+    }
+    result
+}
+
+fn refresh_config_change_tray_after(
+    app: &AppHandle,
+    result: Result<ConfigChangeResult, EnvironmentFailure>,
+) -> Result<ConfigChangeResult, EnvironmentFailure> {
+    if let Ok(change) = &result {
+        let _ = tray::refresh_with_snapshot(app, &change.environment);
     }
     result
 }

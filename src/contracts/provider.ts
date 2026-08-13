@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { ConfigChangeResult, RestartDecision } from "./environment";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export type ProviderFailureCategory =
@@ -54,6 +55,13 @@ export type ProviderValidationStage =
 export interface ProviderValidationProgress {
   requestId: string;
   stage: ProviderValidationStage;
+}
+
+export function onProviderSwitchRequested(
+  handler: (providerId: string) => void,
+): Promise<UnlistenFn> {
+  if (isBrowserPreview()) return Promise.resolve(() => undefined);
+  return listen<string>("provider-switch-requested", (event) => handler(event.payload));
 }
 
 export interface ProviderSummary {
@@ -193,14 +201,14 @@ export function saveAndApplyProviderUpdate(
   validationId: string,
   providerId: string,
   name: string,
-  confirmConsumerRisk: boolean,
-): Promise<ProviderSummary> {
+  restartDecision: RestartDecision,
+): Promise<{ provider: ProviderSummary; configChange: ConfigChangeResult }> {
   if (isBrowserPreview()) return Promise.reject(previewFailure);
-  return invoke<ProviderSummary>("save_and_apply_provider_update", {
+  return invoke<{ provider: ProviderSummary; configChange: ConfigChangeResult }>("save_and_apply_provider_update", {
     validationId,
     providerId,
     name,
-    confirmConsumerRisk,
+    restartDecision,
   });
 }
 

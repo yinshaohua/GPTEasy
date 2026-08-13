@@ -2243,7 +2243,8 @@ fn running_consumer_requires_confirmation_and_sets_pending_restart() {
 }
 
 #[test]
-fn no_detected_consumer_still_requires_confirmation_and_returns_pending_restart() {
+fn trustworthy_detection_without_consumers_switches_without_extra_confirmation_or_pending_restart()
+{
     const SECOND_PROVIDER_ID: &str = "6cde0dd7-9725-462a-ac79-864f5cf63f76";
     let temp = TempDir::new().expect("temp dir");
     let store = StateStore::new(StatePaths::from_root(temp.path().join("state")));
@@ -2261,26 +2262,12 @@ fn no_detected_consumer_still_requires_confirmation_and_returns_pending_restart(
         .apply_provider(PROVIDER_ID, true)
         .expect("apply initial provider");
     let before = application.inspect().expect("inspect managed environment");
-    assert!(before.requires_consumer_confirmation);
-
-    let failure = application
-        .apply_provider_at_revision(SECOND_PROVIDER_ID, false, &before.revision)
-        .expect_err("no detected consumer still requires confirmation");
-    assert_eq!(
-        failure.category,
-        EnvironmentFailureCategory::ConsumerConfirmationRequired
-    );
+    assert!(!before.requires_consumer_confirmation);
 
     let switched = application
-        .apply_provider_at_revision(SECOND_PROVIDER_ID, true, &before.revision)
-        .expect("confirmed switch");
-    assert!(switched.pending_restart);
-    assert!(
-        !application
-            .inspect()
-            .expect("later trustworthy observation clears pending restart")
-            .pending_restart
-    );
+        .apply_provider_at_revision(SECOND_PROVIDER_ID, false, &before.revision)
+        .expect("switch without redundant confirmation");
+    assert!(!switched.pending_restart);
 }
 
 #[test]
@@ -2386,11 +2373,12 @@ fn missing_or_corrupt_restart_context_keeps_pending_restart() {
     let store = StateStore::new(StatePaths::from_root(temp.path().join("state")));
     assert!(store.bootstrap().is_ready());
     insert_provider(&store);
+    let scanner = Arc::new(MutableConsumers::new(running_cli(42, 1)));
     let application = EnvironmentApplication::with_runtime_probes(
         store.clone(),
         temp.path().join(".codex"),
         Arc::new(FixedLoginProbe(LoginStatus::NotLoggedIn)),
-        Arc::new(StoppedConsumers),
+        scanner,
     );
     assert!(
         application

@@ -17,7 +17,11 @@ use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::environment::{EnvironmentApplication, ProviderTarget, VerifiedProviderUpdate};
+use crate::consumer::DesktopApplication;
+use crate::environment::{
+    ConfigChangeResult, EnvironmentApplication, ProviderTarget, RestartDecision,
+    VerifiedProviderUpdate,
+};
 use crate::state::StateStore;
 
 pub use validation::ProviderValidator;
@@ -261,6 +265,13 @@ pub struct ProviderApplication {
 pub struct AppliedProviderUpdate {
     pub provider: ProviderSummary,
     pub environment: crate::environment::EnvironmentSnapshot,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlannedProviderUpdate {
+    pub provider: ProviderSummary,
+    pub config_change: ConfigChangeResult,
 }
 
 #[derive(Clone)]
@@ -653,6 +664,81 @@ impl ProviderApplication {
         name: &str,
         confirm_consumer_risk: bool,
     ) -> Result<AppliedProviderUpdate, ProviderFailure> {
+        let update = self.prepare_verified_provider_update(validation_id, provider_id, name)?;
+        let snapshot = environment
+            .save_and_apply_provider_update(update, confirm_consumer_risk)
+            .map_err(|failure| {
+                ProviderFailure::new(
+                    ProviderFailureCategory::SaveAndApplyFailed,
+                    failure.message_id,
+                )
+            })?;
+        let summary = snapshot.current_provider.clone().ok_or_else(|| {
+            ProviderFailure::new(
+                ProviderFailureCategory::SaveAndApplyFailed,
+                "environment.state_unavailable",
+            )
+        })?;
+        self.discard_validation(validation_id);
+        Ok(AppliedProviderUpdate {
+            provider: summary,
+            environment: snapshot,
+        })
+    }
+
+    pub fn save_and_apply_provider_update_with_restart_plan(
+        &self,
+        environment: &EnvironmentApplication,
+        desktop: &DesktopApplication,
+        validation_id: &str,
+        provider_id: &str,
+        name: &str,
+        decision: RestartDecision,
+    ) -> Result<PlannedProviderUpdate, ProviderFailure> {
+        if decision == RestartDecision::Cancel {
+            let config_change = environment.cancel_config_change().map_err(|failure| {
+                ProviderFailure::new(
+                    ProviderFailureCategory::SaveAndApplyFailed,
+                    failure.message_id,
+                )
+            })?;
+            return Ok(PlannedProviderUpdate {
+                provider: catalog::get_provider(&self.state_store, provider_id)?.summary,
+                config_change,
+            });
+        }
+        let update = self.prepare_verified_provider_update(validation_id, provider_id, name)?;
+        let config_change = environment
+            .save_and_apply_provider_update_with_restart_plan(desktop, update, decision)
+            .map_err(|failure| {
+                ProviderFailure::new(
+                    ProviderFailureCategory::SaveAndApplyFailed,
+                    failure.message_id,
+                )
+            })?;
+        let summary = config_change
+            .environment
+            .current_provider
+            .clone()
+            .ok_or_else(|| {
+                ProviderFailure::new(
+                    ProviderFailureCategory::SaveAndApplyFailed,
+                    "environment.state_unavailable",
+                )
+            })?;
+        self.discard_validation(validation_id);
+        Ok(PlannedProviderUpdate {
+            provider: summary,
+            config_change,
+        })
+    }
+
+    fn prepare_verified_provider_update(
+        &self,
+        validation_id: &str,
+        provider_id: &str,
+        name: &str,
+    ) -> Result<VerifiedProviderUpdate, ProviderFailure> {
         let name = name.trim();
         if name.is_empty() {
             return Err(ProviderFailure::new(
@@ -679,7 +765,6 @@ impl ProviderApplication {
             self.discard_validation(validation_id);
             return Err(verification_expired());
         }
-
         let existing = catalog::get_provider(&self.state_store, provider_id)?;
         if existing.summary.recommendation_id.is_none() && name.eq_ignore_ascii_case(DAYWAY_NAME) {
             return Err(ProviderFailure::new(
@@ -711,26 +796,11 @@ impl ProviderApplication {
             existing.summary.recommendation_id,
             recommendation_template_base_url,
         );
-        let update = VerifiedProviderUpdate::new(provider, original_name, original_fingerprint);
-        let snapshot = environment
-            .save_and_apply_provider_update(update, confirm_consumer_risk)
-            .map_err(|failure| {
-                ProviderFailure::new(
-                    ProviderFailureCategory::SaveAndApplyFailed,
-                    failure.message_id,
-                )
-            })?;
-        let summary = snapshot.current_provider.clone().ok_or_else(|| {
-            ProviderFailure::new(
-                ProviderFailureCategory::SaveAndApplyFailed,
-                "environment.state_unavailable",
-            )
-        })?;
-        self.discard_validation(validation_id);
-        Ok(AppliedProviderUpdate {
-            provider: summary,
-            environment: snapshot,
-        })
+        Ok(VerifiedProviderUpdate::new(
+            provider,
+            original_name,
+            original_fingerprint,
+        ))
     }
 
     pub async fn revalidate_provider(

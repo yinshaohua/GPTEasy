@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use tauri::menu::{CheckMenuItemBuilder, Menu, MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
-use tauri::{App, AppHandle, Manager, Window, WindowEvent};
+use tauri::{App, AppHandle, Emitter, Manager, Window, WindowEvent};
 use tauri_plugin_notification::NotificationExt;
 
 use crate::commands::{EnvironmentRuntime, ProviderRuntime};
@@ -51,17 +51,14 @@ enum TrayCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TrayProviderAction {
     Ignore,
-    ConfirmAndSwitch,
+    OpenSwitchPlan,
     OpenSettings,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TrayEffect {
     ShowSettings,
-    ConfirmProviderSwitch {
-        provider_id: String,
-        expected_revision: String,
-    },
+    OpenProviderSwitchPlan(String),
     Exit,
     None,
 }
@@ -250,10 +247,10 @@ fn plan_provider_switch(app: &AppHandle, command: TrayCommand) {
 fn execute_tray_effect(app: &AppHandle, effect: TrayEffect) {
     match effect {
         TrayEffect::ShowSettings => show_settings(app),
-        TrayEffect::ConfirmProviderSwitch {
-            provider_id,
-            expected_revision,
-        } => confirm_provider_switch(app, &provider_id, &expected_revision),
+        TrayEffect::OpenProviderSwitchPlan(provider_id) => {
+            show_settings(app);
+            let _ = app.emit("provider-switch-requested", provider_id);
+        }
         TrayEffect::Exit => {
             app.state::<LifecycleRuntime>().request_exit();
             app.exit(0);
@@ -285,7 +282,7 @@ fn plan_provider_action(snapshot: &EnvironmentSnapshot, provider_id: &str) -> Tr
     }
     match snapshot.state {
         EnvironmentState::External | EnvironmentState::Conflict => TrayProviderAction::OpenSettings,
-        EnvironmentState::Managed => TrayProviderAction::ConfirmAndSwitch,
+        EnvironmentState::Managed => TrayProviderAction::OpenSwitchPlan,
     }
 }
 
@@ -301,64 +298,12 @@ fn plan_tray_effect(command: TrayCommand, snapshot: Option<&EnvironmentSnapshot>
             match plan_provider_action(snapshot, &provider_id) {
                 TrayProviderAction::Ignore => TrayEffect::None,
                 TrayProviderAction::OpenSettings => TrayEffect::ShowSettings,
-                TrayProviderAction::ConfirmAndSwitch => TrayEffect::ConfirmProviderSwitch {
-                    provider_id,
-                    expected_revision: snapshot.revision.clone(),
-                },
+                TrayProviderAction::OpenSwitchPlan => {
+                    TrayEffect::OpenProviderSwitchPlan(provider_id)
+                }
             }
         }
     }
-}
-
-fn confirm_provider_switch(app: &AppHandle, provider_id: &str, expected_revision: &str) {
-    if !confirm_switch_risk() {
-        return;
-    }
-    let switch_handle = app.clone();
-    let provider_id = provider_id.to_owned();
-    let expected_revision = expected_revision.to_owned();
-    tauri::async_runtime::spawn_blocking(move || {
-        let result = switch_handle
-            .state::<EnvironmentRuntime>()
-            .switch_provider(&provider_id, &expected_revision);
-        let result_handle = switch_handle.clone();
-        let _ = switch_handle.run_on_main_thread(move || match result {
-            Ok(snapshot) => {
-                let _ = refresh_with_snapshot(&result_handle, &snapshot);
-            }
-            Err(_) => show_settings(&result_handle),
-        });
-    });
-}
-
-#[cfg(windows)]
-fn confirm_switch_risk() -> bool {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        IDOK, MB_ICONWARNING, MB_OKCANCEL, MessageBoxW,
-    };
-
-    let message = "切换后，切换前已运行或可能遗漏的 Codex 消费者需要退出后才能读取新配置。GPTEasy 将保守标记为待重启。是否继续？"
-        .encode_utf16()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
-    let title = "切换供应商"
-        .encode_utf16()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
-    let response = unsafe {
-        MessageBoxW(
-            std::ptr::null_mut(),
-            message.as_ptr(),
-            title.as_ptr(),
-            MB_OKCANCEL | MB_ICONWARNING,
-        )
-    };
-    response == IDOK
-}
-
-#[cfg(not(windows))]
-fn confirm_switch_risk() -> bool {
-    false
 }
 
 fn show_settings(app: &AppHandle) {
@@ -505,10 +450,7 @@ mod tests {
                 TrayCommand::SwitchProvider("provider-id".to_owned()),
                 Some(&managed),
             ),
-            TrayEffect::ConfirmProviderSwitch {
-                provider_id: "provider-id".to_owned(),
-                expected_revision: "revision".to_owned(),
-            }
+            TrayEffect::OpenProviderSwitchPlan("provider-id".to_owned())
         );
         assert_eq!(
             plan_tray_effect(TrayCommand::SwitchProvider("provider-id".to_owned()), None,),
@@ -524,14 +466,14 @@ mod tests {
         );
         assert_eq!(
             plan_provider_action(&normal, "provider-id"),
-            TrayProviderAction::ConfirmAndSwitch
+            TrayProviderAction::OpenSwitchPlan
         );
 
         let mut running = normal.clone();
         running.requires_consumer_confirmation = true;
         assert_eq!(
             plan_provider_action(&running, "provider-id"),
-            TrayProviderAction::ConfirmAndSwitch
+            TrayProviderAction::OpenSwitchPlan
         );
 
         let external = snapshot(EnvironmentState::External, None);

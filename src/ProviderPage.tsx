@@ -37,6 +37,7 @@ import {
   listProviders,
   openDaywayWebsite,
   onProviderValidationProgress,
+  onProviderSwitchRequested,
   renameProvider,
   reorderProviders,
   revealProviderApiKey,
@@ -55,11 +56,14 @@ import {
 import {
   applyEnvironmentProvider,
   asEnvironmentFailure,
+  forceCompleteConfigRestart,
   getEnvironmentSnapshot,
   restoreLastEnvironmentConfig,
   switchToOpenAiLogin,
   type EnvironmentFailure,
   type EnvironmentSnapshot,
+  type ConfigChangeResult,
+  type RestartDecision,
 } from "./contracts/environment";
 import {
   authenticationModeMessages,
@@ -80,6 +84,10 @@ type Operation =
 
 type PageView = "catalog" | "detail";
 type Confirmation = "discard" | "validation" | null;
+type RestartPlanRequest =
+  | { kind: "provider"; provider: ProviderSummary }
+  | { kind: "openai" }
+  | { kind: "provider_update"; validationId: string; provider: ProviderSummary; name: string };
 
 const DAYWAY_NAME = "DayWay";
 const DAYWAY_BASE_URL = "https://dayway.site/v1";
@@ -93,6 +101,8 @@ export default function ProviderPage() {
   const [environmentOperation, setEnvironmentOperation] = useState<"idle" | "restoring" | "switching_mode">("idle");
   const [view, setView] = useState<PageView>("catalog");
   const [confirmation, setConfirmation] = useState<Confirmation>(null);
+  const [restartPlan, setRestartPlan] = useState<RestartPlanRequest | null>(null);
+  const [forceAuthorization, setForceAuthorization] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [isRecommendedCandidate, setIsRecommendedCandidate] = useState(false);
   const [name, setName] = useState("");
@@ -146,6 +156,37 @@ export default function ProviderPage() {
       mounted = false;
       if (activeRequest.current) void cancelProviderRequest(activeRequest.current);
       if (receiptRef.current) void discardProviderValidation(receiptRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void onProviderSwitchRequested(async (providerId) => {
+      try {
+        const [snapshot, catalog] = await Promise.all([
+          getEnvironmentSnapshot(),
+          listProviders(),
+        ]);
+        if (disposed) return;
+        setEnvironment(snapshot);
+        setProviders(catalog);
+        const provider = catalog.find((item) => item.id === providerId);
+        if (provider && !provider.isCurrent && canApplyProvider(snapshot)) {
+          setRestartPlan({ kind: "provider", provider });
+        }
+      } catch {
+        if (!disposed) setEnvironmentState("error");
+      }
+    })
+      .then((stopListening) => {
+        if (disposed) stopListening();
+        else unlisten = stopListening;
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisten?.();
     };
   }, []);
 
@@ -446,29 +487,14 @@ export default function ProviderPage() {
       if (criticalDirty) {
         if (!receipt) return;
         if (selected.isCurrent) {
-          try {
-            saved = await saveAndApplyProviderUpdate(
-              receipt.validationId,
-              selected.id,
-              name,
-              false,
-            );
-          } catch (error) {
-            const providerFailure = asProviderFailure(error);
-            if (providerFailure.messageId !== "environment.consumer_confirmation_required") {
-              throw error;
-            }
-            if (!window.confirm(providerMessages.consumerRiskConfirmation)) {
-              setOperation("verified");
-              return;
-            }
-            saved = await saveAndApplyProviderUpdate(
-              receipt.validationId,
-              selected.id,
-              name,
-              true,
-            );
-          }
+          setRestartPlan({
+            kind: "provider_update",
+            validationId: receipt.validationId,
+            provider: selected,
+            name,
+          });
+          setOperation("verified");
+          return;
         } else {
           saved = await saveProviderUpdate(receipt.validationId, selected.id, name);
         }
@@ -511,35 +537,15 @@ export default function ProviderPage() {
 
   async function switchCatalogProvider(provider: ProviderSummary) {
     if (provider.isCurrent || !environment || !canApplyProvider(environment)) return;
-    setOperation("saving");
-    setEnvironmentFailure(null);
-    try {
-      const confirmSwitchRisk =
-        environment.mode === "openai_login" ||
-        environment.requiresTakeoverConfirmation ||
-        environment.requiresConsumerConfirmation;
-      if (confirmSwitchRisk && !window.confirm(switchConfirmation(environment, provider))) {
-        setOperation("idle");
-        return;
-      }
-      const updated = await applyEnvironmentProvider(
-        provider.id,
-        confirmSwitchRisk,
-        environment.revision,
-      );
-      setEnvironment(updated);
-      setProviders((current) =>
-        current.map((item) => ({
-          ...item,
-          isCurrent: item.id === updated.currentProvider?.id,
-        })),
-      );
-    } catch (error) {
-      const environmentFailure = asEnvironmentFailure(error);
-      setEnvironmentFailure(environmentFailure);
-    } finally {
-      setOperation("idle");
+    if (
+      environment.mode === "openai_login" ||
+      environment.requiresTakeoverConfirmation ||
+      environment.requiresConsumerConfirmation
+    ) {
+      setRestartPlan({ kind: "provider", provider });
+      return;
     }
+    await executeRestartPlan({ kind: "provider", provider }, "later");
   }
 
   async function restoreLatest() {
@@ -566,16 +572,67 @@ export default function ProviderPage() {
 
   async function enableOpenAiLogin() {
     if (!environment || environment.loginStatus !== "logged_in" || environment.mode === "openai_login") return;
-    if (!window.confirm("将退出供应商模式并使用 Codex 已有的 OpenAI 登录；Codex 登录凭据不会被修改。是否继续？")) return;
+    setRestartPlan({ kind: "openai" });
+  }
+
+  async function executeRestartPlan(request: RestartPlanRequest, decision: RestartDecision) {
+    if (!environment) return;
+    setRestartPlan(null);
     setEnvironmentOperation("switching_mode");
+    setOperation("saving");
     setEnvironmentFailure(null);
     try {
-      const updated = await switchToOpenAiLogin(true, environment.revision);
-      applyEnvironmentSnapshot(updated);
+      let change: ConfigChangeResult;
+      if (request.kind === "provider") {
+        change = await applyEnvironmentProvider(
+          request.provider.id,
+          decision,
+          environment.revision,
+        );
+      } else if (request.kind === "openai") {
+        change = await switchToOpenAiLogin(decision, environment.revision);
+      } else {
+        const result = await saveAndApplyProviderUpdate(
+          request.validationId,
+          request.provider.id,
+          request.name,
+          decision,
+        );
+        change = result.configChange;
+        receiptRef.current = null;
+        replaceProvider(result.provider);
+        resetEditor("catalog");
+      }
+      applyConfigChange(change);
     } catch (error) {
-      setEnvironmentFailure(asEnvironmentFailure(error));
+      if (request.kind === "provider_update") setFailure(asProviderFailure(error));
+      else setEnvironmentFailure(asEnvironmentFailure(error));
     } finally {
       setEnvironmentOperation("idle");
+      setOperation("idle");
+    }
+  }
+
+  async function forceCompleteRestart() {
+    if (!forceAuthorization) return;
+    const authorization = forceAuthorization;
+    setForceAuthorization(null);
+    try {
+      applyConfigChange(await forceCompleteConfigRestart(authorization));
+    } catch (error) {
+      setEnvironmentFailure(asEnvironmentFailure(error));
+    }
+  }
+
+  function applyConfigChange(change: ConfigChangeResult) {
+    applyEnvironmentSnapshot(change.environment);
+    setForceAuthorization(change.forceAuthorization);
+    if (change.restartStatus === "restart_failed") {
+      setCatalogFeedback("配置已更新；桌面版未能重新启动，请手动启动。 ");
+    } else if (change.environment.consumers.cli === "running" && change.environment.pendingRestart) {
+      setCatalogFeedback("配置已更新；请在原终端退出并重新运行 Codex CLI。");
+    } else if (change.restartStatus === "deferred") {
+      setCatalogFeedback("配置已更新，已保留待重启状态。");
     }
   }
 
@@ -1016,6 +1073,25 @@ export default function ProviderPage() {
           primaryDisabled={!canValidate}
         />
       )}
+      {restartPlan && environment && (
+        <RestartPlanDialog
+          message={restartPlanMessage(environment, restartPlan)}
+          desktopRunning={environment.consumers?.desktop === "running"}
+          onChoose={(decision) => void executeRestartPlan(restartPlan, decision)}
+          onCancel={() => setRestartPlan(null)}
+        />
+      )}
+      {forceAuthorization && (
+        <ConfirmationDialog
+          title="桌面版未能正常关闭"
+          message="配置已经更新。强制关闭会立即中断正在运行的任务；Codex CLI 不会关闭。"
+          primaryLabel="强制关闭并重启"
+          secondaryLabel="稍后手动重启"
+          onPrimary={() => void forceCompleteRestart()}
+          onSecondary={() => setForceAuthorization(null)}
+          danger
+        />
+      )}
       {validationSession && (
         <ProviderValidationDialog
           session={validationSession}
@@ -1136,7 +1212,7 @@ function environmentDescription(snapshot: EnvironmentSnapshot): string {
     : "尚未建立有效的 GPTEasy 供应商 ID。";
 }
 
-function switchConfirmation(snapshot: EnvironmentSnapshot, provider: ProviderSummary): string {
+function providerSwitchImpact(snapshot: EnvironmentSnapshot, provider: ProviderSummary): string {
   const context = snapshot.mode === "openai_login"
     ? "将退出 OpenAI 登录模式"
     : snapshot.state === "external"
@@ -1149,7 +1225,34 @@ function switchConfirmation(snapshot: EnvironmentSnapshot, provider: ProviderSum
   const cli = snapshot.consumers?.cli ?? "unknown";
   const desktopRisk = desktop === "running" ? "ChatGPT/Codex 桌面版正在运行" : desktop === "unknown" ? "无法确认桌面版状态" : "桌面版未运行";
   const cliRisk = cli === "running" ? "Codex CLI 正在运行且不会被关闭" : cli === "unknown" ? "无法确认 Codex CLI 状态" : "Codex CLI 未运行";
-  return `${context}并应用“${provider.name}”。将修改：${impacts || "无可安全解析的工件范围"}。${desktopRisk}；${cliRisk}。是否继续？`;
+  return `${context}并应用“${provider.name}”。将修改：${impacts || "无可安全解析的工件范围"}。${desktopRisk}；${cliRisk}。`;
+}
+
+function restartPlanMessage(
+  snapshot: EnvironmentSnapshot,
+  request: RestartPlanRequest,
+): string {
+  if (request.kind === "provider") return providerSwitchImpact(snapshot, request.provider);
+  if (request.kind === "provider_update") {
+    return `将保存并应用“${request.provider.name}”的已验证更新。${consumerImpact(snapshot)}`;
+  }
+  return `将退出供应商模式并使用 Codex 已有的 OpenAI 登录；Codex 登录凭据不会被修改。${consumerImpact(snapshot)}`;
+}
+
+function consumerImpact(snapshot: EnvironmentSnapshot): string {
+  const desktop = snapshot.consumers?.desktop ?? "unknown";
+  const cli = snapshot.consumers?.cli ?? "unknown";
+  const desktopRisk = desktop === "running"
+    ? "ChatGPT/Codex 桌面版正在运行。"
+    : desktop === "unknown"
+      ? "无法确认桌面版状态。"
+      : "桌面版未运行。";
+  const cliRisk = cli === "running"
+    ? "Codex CLI 将保持运行，需要在原终端手动重启。"
+    : cli === "unknown"
+      ? "无法确认 Codex CLI 状态。"
+      : "Codex CLI 未运行。";
+  return `${desktopRisk}${cliRisk}`;
 }
 
 function artifactName(artifact: "config" | "credentials"): string {
@@ -1255,6 +1358,38 @@ function ConfirmationDialog({
             disabled={primaryDisabled}
           >
             {primaryLabel}
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function RestartPlanDialog({
+  message,
+  desktopRunning,
+  onChoose,
+  onCancel,
+}: {
+  message: string;
+  desktopRunning: boolean;
+  onChoose: (decision: RestartDecision) => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="dialog-backdrop">
+      <section className="confirmation-dialog restart-plan-dialog" role="dialog" aria-modal="true" aria-labelledby="restart-plan-title">
+        <h2 id="restart-plan-title">确认配置切换</h2>
+        <p>{message}</p>
+        <div className="dialog-actions restart-plan-actions">
+          <button className="secondary-button" type="button" onClick={onCancel} autoFocus>
+            取消
+          </button>
+          <button className="secondary-button" type="button" onClick={() => onChoose("later")}>
+            切换，稍后重启
+          </button>
+          <button className="command-button" type="button" onClick={() => onChoose("immediate")} disabled={!desktopRunning}>
+            切换并重启桌面版
           </button>
         </div>
       </section>

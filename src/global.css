@@ -1126,6 +1126,30 @@ select:focus-visible {
   gap: 8px;
 }
 
+.restart-plan-dialog {
+  width: min(560px, 100%);
+}
+
+.restart-plan-actions {
+  flex-wrap: wrap;
+}
+
+.restart-plan-actions button {
+  min-height: 38px;
+  white-space: normal;
+}
+
+@media (max-width: 520px) {
+  .restart-plan-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .restart-plan-actions button {
+    width: 100%;
+  }
+}
+
 .sr-status {
   position: absolute;
   width: 1px;
