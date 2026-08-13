@@ -1684,7 +1684,7 @@ describe("ChatGPT/Codex 桌面版命令", () => {
     render(<App />);
 
     expect(await screen.findByRole("button", { name: "启动 ChatGPT/Codex" })).toBeDisabled();
-    expect(screen.getByText("无法可靠确认桌面版身份，启动已禁用。")).toBeInTheDocument();
+    expect(await screen.findByText("无法可靠确认桌面版身份，启动已禁用。")).toBeInTheDocument();
     expect(invoke.mock.calls.some(([command]) => command === "start_desktop_application")).toBe(false);
   });
 });

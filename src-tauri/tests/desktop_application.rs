@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use gpteasy_lib::consumer::{
     ConsumerRole, ConsumerScan, ConsumerScanner, ConsumerStatus, DesktopAction, DesktopActivator,
-    DesktopApplication, DesktopClock, DesktopFailureCategory, DesktopPackage,
+    DesktopApplication, DesktopBoundaryError, DesktopClock, DesktopFailureCategory, DesktopPackage,
     DesktopPackageDiscovery,
 };
 
@@ -15,7 +15,7 @@ struct FixtureDiscovery {
 }
 
 impl DesktopPackageDiscovery for FixtureDiscovery {
-    fn discover(&self) -> Result<Vec<DesktopPackage>, ()> {
+    fn discover(&self) -> Result<Vec<DesktopPackage>, DesktopBoundaryError> {
         Ok(self.packages.clone())
     }
 }
@@ -52,7 +52,7 @@ impl ConsumerScanner for FixtureScanner {
 
 #[derive(Debug)]
 struct FixtureActivator {
-    result: Result<(), ()>,
+    result: Result<(), DesktopBoundaryError>,
     aumids: Mutex<Vec<String>>,
 }
 
@@ -66,7 +66,7 @@ impl DesktopClock for FixtureClock {
 }
 
 impl DesktopActivator for FixtureActivator {
-    fn activate(&self, aumid: &str) -> Result<(), ()> {
+    fn activate(&self, aumid: &str) -> Result<(), DesktopBoundaryError> {
         self.aumids
             .lock()
             .expect("activation fixture lock")
@@ -108,7 +108,7 @@ fn scan(status: ConsumerStatus, roots: &[(u32, u64)]) -> ConsumerScan {
 fn application(
     packages: Vec<DesktopPackage>,
     scans: Vec<ConsumerScan>,
-    activation: Result<(), ()>,
+    activation: Result<(), DesktopBoundaryError>,
 ) -> (DesktopApplication, Arc<FixtureActivator>) {
     let activator = Arc::new(FixtureActivator {
         result: activation,
@@ -231,7 +231,7 @@ fn activation_failure_returns_a_stable_failure_without_reporting_success() {
     let (application, _) = application(
         vec![package("OpenAI.Codex", "OpenAI.Codex_2p2nqsd0c76g0", "App")],
         vec![scan(ConsumerStatus::Stopped, &[])],
-        Err(()),
+        Err(DesktopBoundaryError),
     );
 
     let failure = application.start().expect_err("activation must fail");

@@ -10,6 +10,23 @@ import type {
 } from "./contracts/startup";
 import type { AuthenticationMode, ConsumerStatus, EnvironmentState } from "./contracts/environment";
 
+export const desktopMessages = {
+  startLabel: "启动 ChatGPT/Codex",
+  runningLabel: "ChatGPT/Codex 正在运行",
+  startConfirmation: "将启动 OpenAI 官方 ChatGPT/Codex 桌面版。是否继续？",
+  byId: {
+    "desktop.identity_untrusted": "无法可靠确认桌面版身份，启动已禁用。",
+    "desktop.not_installed": "未发现 OpenAI 官方 ChatGPT/Codex 桌面版。",
+    "desktop.ambiguous_installation": "发现多个桌面版候选，无法安全启动。",
+    "desktop.discovery_failed": "无法读取桌面版安装信息。",
+    "desktop.activation_failed": "Windows 未能激活 ChatGPT/Codex。",
+    "desktop.launch_not_observed": "激活后未发现可信的新桌面进程。",
+    "desktop.action_unavailable": "桌面版当前不可启动。",
+    "desktop.state_unavailable": "无法读取桌面版状态。",
+    "desktop.platform_unsupported": "当前平台暂不支持桌面版启动。",
+  } as Record<string, string>,
+};
+
 export const databaseStatusMessages: Record<DatabaseStatus, string> = {
   initialized: "本地状态已初始化",
   ready: "本地状态正常",

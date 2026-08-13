@@ -22,6 +22,7 @@ import {
 } from "./contracts/startup";
 import {
   databaseReasonMessages,
+  desktopMessages,
   pendingResolutionMessages,
   startupBlockMessages,
 } from "./messages";
@@ -107,7 +108,7 @@ function Sidebar() {
 
   const startDesktop = async () => {
     if (desktop.kind !== "loaded" || desktop.snapshot.action !== "start") return;
-    if (!window.confirm("将启动 OpenAI 官方 ChatGPT/Codex 桌面版。是否继续？")) return;
+    if (!window.confirm(desktopMessages.startConfirmation)) return;
     setDesktop({ kind: "loading" });
     try {
       setDesktop({ kind: "loaded", snapshot: await startDesktopApplication() });
@@ -150,9 +151,9 @@ function DesktopCommand({
   const snapshot = state.kind === "loaded" ? state.snapshot : null;
   const running = snapshot?.status === "running";
   const enabled = snapshot?.action === "start";
-  const label = running ? "ChatGPT/Codex 正在运行" : "启动 ChatGPT/Codex";
+  const label = running ? desktopMessages.runningLabel : desktopMessages.startLabel;
   const messageId = state.kind === "error" ? state.messageId : snapshot?.messageId;
-  const reason = messageId ? desktopMessage(messageId) : null;
+  const reason = messageId ? desktopMessages.byId[messageId] : null;
 
   return (
     <div className="sidebar-command-area">
@@ -172,21 +173,6 @@ function DesktopCommand({
       {reason && <span className="sidebar-command-reason">{reason}</span>}
     </div>
   );
-}
-
-function desktopMessage(messageId: string): string | null {
-  const messages: Record<string, string> = {
-    "desktop.identity_untrusted": "无法可靠确认桌面版身份，启动已禁用。",
-    "desktop.not_installed": "未发现 OpenAI 官方 ChatGPT/Codex 桌面版。",
-    "desktop.ambiguous_installation": "发现多个桌面版候选，无法安全启动。",
-    "desktop.discovery_failed": "无法读取桌面版安装信息。",
-    "desktop.activation_failed": "Windows 未能激活 ChatGPT/Codex。",
-    "desktop.launch_not_observed": "激活后未发现可信的新桌面进程。",
-    "desktop.action_unavailable": "桌面版当前不可启动。",
-    "desktop.state_unavailable": "无法读取桌面版状态。",
-    "desktop.platform_unsupported": "当前平台暂不支持桌面版启动。",
-  };
-  return messages[messageId] ?? null;
 }
 
 function Brand() {

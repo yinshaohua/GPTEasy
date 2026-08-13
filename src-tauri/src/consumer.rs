@@ -89,12 +89,15 @@ impl DesktopPackage {
 }
 
 pub trait DesktopPackageDiscovery: Send + Sync {
-    fn discover(&self) -> Result<Vec<DesktopPackage>, ()>;
+    fn discover(&self) -> Result<Vec<DesktopPackage>, DesktopBoundaryError>;
 }
 
 pub trait DesktopActivator: Send + Sync {
-    fn activate(&self, aumid: &str) -> Result<(), ()>;
+    fn activate(&self, aumid: &str) -> Result<(), DesktopBoundaryError>;
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DesktopBoundaryError;
 
 pub trait DesktopClock: Send + Sync {
     fn now_epoch_millis(&self) -> u64;
@@ -218,14 +221,12 @@ impl DesktopApplication {
             ));
         }
         let activation_started_at = self.clock.now_epoch_millis();
-        self.activator
-            .activate(&packages[0].aumid())
-            .map_err(|()| {
-                desktop_failure(
-                    DesktopFailureCategory::ActivationFailed,
-                    "desktop.activation_failed",
-                )
-            })?;
+        self.activator.activate(&packages[0].aumid()).map_err(|_| {
+            desktop_failure(
+                DesktopFailureCategory::ActivationFailed,
+                "desktop.activation_failed",
+            )
+        })?;
         for attempt in 0..self.scan_attempts.max(1) {
             if attempt > 0 && !self.scan_delay.is_zero() {
                 thread::sleep(self.scan_delay);
@@ -254,7 +255,7 @@ impl DesktopApplication {
         let packages = self
             .discovery
             .discover()
-            .map_err(|()| "desktop.discovery_failed")?;
+            .map_err(|_| "desktop.discovery_failed")?;
         resolve_desktop_package(packages)
     }
 }
@@ -331,14 +332,14 @@ impl DesktopClock for SystemDesktopClock {
 struct WindowsDesktopPackageDiscovery;
 
 impl DesktopPackageDiscovery for WindowsDesktopPackageDiscovery {
-    fn discover(&self) -> Result<Vec<DesktopPackage>, ()> {
+    fn discover(&self) -> Result<Vec<DesktopPackage>, DesktopBoundaryError> {
         #[cfg(windows)]
         {
             discover_windows_desktop_packages()
         }
         #[cfg(not(windows))]
         {
-            Err(())
+            Err(DesktopBoundaryError)
         }
     }
 }
@@ -347,19 +348,19 @@ impl DesktopPackageDiscovery for WindowsDesktopPackageDiscovery {
 struct WindowsDesktopActivator;
 
 impl DesktopActivator for WindowsDesktopActivator {
-    fn activate(&self, aumid: &str) -> Result<(), ()> {
+    fn activate(&self, aumid: &str) -> Result<(), DesktopBoundaryError> {
         #[cfg(windows)]
         {
             Command::new("explorer.exe")
                 .arg(format!(r"shell:AppsFolder\{aumid}"))
                 .spawn()
                 .map(|_| ())
-                .map_err(|_| ())
+                .map_err(|_| DesktopBoundaryError)
         }
         #[cfg(not(windows))]
         {
             let _ = aumid;
-            Err(())
+            Err(DesktopBoundaryError)
         }
     }
 }
@@ -542,7 +543,7 @@ fn classify_processes(
 }
 
 #[cfg(windows)]
-fn discover_windows_desktop_packages() -> Result<Vec<DesktopPackage>, ()> {
+fn discover_windows_desktop_packages() -> Result<Vec<DesktopPackage>, DesktopBoundaryError> {
     #[derive(Deserialize)]
     #[serde(rename_all = "PascalCase")]
     struct PackageRecord {
@@ -580,7 +581,7 @@ $packages = @(
 )
 ConvertTo-Json -Compress -InputObject $packages
 "#;
-    let system_root = std::env::var_os("SystemRoot").ok_or(())?;
+    let system_root = std::env::var_os("SystemRoot").ok_or(DesktopBoundaryError)?;
     let powershell = PathBuf::from(system_root)
         .join("System32")
         .join("WindowsPowerShell")
@@ -589,11 +590,12 @@ ConvertTo-Json -Compress -InputObject $packages
     let output = Command::new(powershell)
         .args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
         .output()
-        .map_err(|_| ())?;
+        .map_err(|_| DesktopBoundaryError)?;
     if !output.status.success() {
-        return Err(());
+        return Err(DesktopBoundaryError);
     }
-    let records = serde_json::from_slice::<Vec<PackageRecord>>(&output.stdout).map_err(|_| ())?;
+    let records = serde_json::from_slice::<Vec<PackageRecord>>(&output.stdout)
+        .map_err(|_| DesktopBoundaryError)?;
     Ok(records
         .into_iter()
         .filter(|record| {
