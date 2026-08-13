@@ -532,6 +532,12 @@ select:focus-visible {
   text-align: left;
 }
 
+.empty-catalog-note {
+  margin: 14px 36px 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
 .provider-drag-handle {
   display: inline-flex;
   align-items: center;
@@ -546,6 +552,11 @@ select:focus-visible {
 }
 
 .provider-drag-handle:active { cursor: grabbing; }
+
+.provider-drag-placeholder {
+  width: 28px;
+  height: 32px;
+}
 
 .provider-row-summary {
   display: grid;
@@ -592,6 +603,8 @@ select:focus-visible {
 }
 
 .verified-badge,
+.recommended-badge,
+.pending-badge,
 .current-badge {
   flex: 0 0 auto;
   padding: 2px 6px;
@@ -599,6 +612,18 @@ select:focus-visible {
   font-size: 11px;
   font-weight: 700;
   line-height: 1.35;
+}
+
+.recommended-badge {
+  color: #795000;
+  background: #fff5d6;
+  border: 1px solid #dfc369;
+}
+
+.pending-badge {
+  color: var(--text-muted);
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
 }
 
 .verified-badge {
@@ -647,6 +672,10 @@ select:focus-visible {
 
 .form-field input::placeholder {
   color: var(--text-muted);
+}
+
+.recommended-address-action {
+  justify-self: start;
 }
 
 .secret-input {

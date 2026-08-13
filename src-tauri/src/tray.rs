@@ -66,6 +66,14 @@ enum TrayEffect {
     None,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct TrayProviderItem {
+    id: String,
+    label: String,
+    checked: bool,
+    enabled: bool,
+}
+
 pub(crate) fn setup(app: &App) -> tauri::Result<()> {
     let menu = build_menu(app.app_handle(), &[], None)?;
     let mut builder = TrayIconBuilder::with_id(TRAY_ID)
@@ -167,18 +175,29 @@ fn build_menu(
     let settings = MenuItemBuilder::with_id(SETTINGS_ID, "设置...").build(app)?;
     let exit = MenuItemBuilder::with_id(EXIT_ID, "退出 GPTEasy").build(app)?;
     let mut menu = MenuBuilder::new(app).item(&status).separator();
-    for provider in providers {
-        let enabled = snapshot.is_some() && !provider.is_current;
-        let item = CheckMenuItemBuilder::with_id(
-            format!("{PROVIDER_PREFIX}{}", provider.id),
-            escape_menu_text(&provider.name),
-        )
-        .checked(provider.is_current)
-        .enabled(enabled)
-        .build(app)?;
+    for provider in tray_provider_items(providers, snapshot.is_some()) {
+        let item = CheckMenuItemBuilder::with_id(provider.id, provider.label)
+            .checked(provider.checked)
+            .enabled(provider.enabled)
+            .build(app)?;
         menu = menu.item(&item);
     }
     menu.separator().item(&settings).item(&exit).build()
+}
+
+fn tray_provider_items(
+    providers: &[ProviderSummary],
+    environment_available: bool,
+) -> Vec<TrayProviderItem> {
+    providers
+        .iter()
+        .map(|provider| TrayProviderItem {
+            id: format!("{PROVIDER_PREFIX}{}", provider.id),
+            label: escape_menu_text(&provider.name),
+            checked: provider.is_current,
+            enabled: environment_available && !provider.is_current,
+        })
+        .collect()
 }
 
 fn status_text(snapshot: Option<&EnvironmentSnapshot>) -> String {
@@ -414,6 +433,47 @@ mod tests {
                 cli: ConsumerStatus::Stopped,
             },
         }
+    }
+
+    fn provider(id: &str, name: &str, recommendation_id: Option<&str>) -> ProviderSummary {
+        ProviderSummary {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            base_url: format!("https://{id}.example/v1"),
+            default_model: "model-a".to_owned(),
+            verified_at_epoch_seconds: 1,
+            is_current: false,
+            recommendation_id: recommendation_id.map(str::to_owned),
+            has_recommendation_update: false,
+            recommendation_template_base_url: recommendation_id
+                .map(|_| crate::provider::DAYWAY_BASE_URL.to_owned()),
+        }
+    }
+
+    #[test]
+    fn tray_projects_only_persisted_catalog_entries_in_catalog_order() {
+        let saved = vec![
+            provider("dayway-id", "DayWay", Some("dayway")),
+            provider("ordinary-id", "Ordinary", None),
+        ];
+        assert_eq!(
+            tray_provider_items(&saved, true),
+            vec![
+                TrayProviderItem {
+                    id: "provider:dayway-id".to_owned(),
+                    label: "DayWay".to_owned(),
+                    checked: false,
+                    enabled: true,
+                },
+                TrayProviderItem {
+                    id: "provider:ordinary-id".to_owned(),
+                    label: "Ordinary".to_owned(),
+                    checked: false,
+                    enabled: true,
+                },
+            ]
+        );
+        assert!(tray_provider_items(&[], true).is_empty());
     }
 
     #[test]

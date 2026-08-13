@@ -295,6 +295,160 @@ describe("验收凭据泄漏门禁", () => {
 });
 
 describe("供应商目录生命周期", () => {
+  it("展示并配置未持久化的 DayWay 推荐模板，删除后恢复模板", async () => {
+    const saved = {
+      id: "c950b528-4b0a-4ba7-a578-00585d9d9d0a",
+      name: "DayWay",
+      baseUrl: "https://dayway.site/v1",
+      defaultModel: "dayway-model",
+      verifiedAtEpochSeconds: 1_786_140_000,
+      isCurrent: false,
+      recommendationId: "dayway",
+    };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([]);
+      if (command === "open_dayway_website") return Promise.resolve(undefined);
+      if (command === "discover_provider_models") {
+        return Promise.resolve({
+          normalizedBaseUrl: "https://dayway.site/v1",
+          models: ["dayway-model"],
+        });
+      }
+      if (command === "validate_provider") {
+        return Promise.resolve({
+          validationId: "dayway-validation",
+          normalizedBaseUrl: "https://dayway.site/v1",
+          defaultModel: "dayway-model",
+          combinationFingerprint: "a".repeat(64),
+          verifiedAtEpochSeconds: 1_786_140_000,
+        });
+      }
+      if (command === "save_dayway_provider") return Promise.resolve(saved);
+      if (command === "delete_provider") return Promise.resolve(undefined);
+      return Promise.resolve(undefined);
+    });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<App />);
+
+    expect(await screen.findByText("DayWay", {}, { timeout: 5_000 })).toBeInTheDocument();
+    expect(screen.getByText("推荐")).toBeInTheDocument();
+    expect(screen.getByText("待配置")).toBeInTheDocument();
+    expect(screen.getByText("https://dayway.site/v1")).toBeInTheDocument();
+    expect(screen.getByText("尚未选择")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "访问 DayWay 官网" }));
+    expect(invoke).toHaveBeenCalledWith("open_dayway_website");
+
+    fireEvent.click(screen.getByRole("button", { name: "配置 DayWay" }));
+    expect(screen.getByLabelText("供应商名称")).toHaveValue("DayWay");
+    expect(screen.getByLabelText("供应商名称")).toBeDisabled();
+    expect(screen.getByLabelText("服务地址")).toHaveValue("https://dayway.site/v1");
+    fireEvent.change(screen.getByLabelText("API Key"), { target: { value: "secret" } });
+    fireEvent.click(screen.getByRole("button", { name: "获取模型" }));
+    expect(await screen.findByRole("option", { name: "dayway-model" })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("默认模型"), { target: { value: "dayway-model" } });
+    fireEvent.click(screen.getByRole("button", { name: "验证供应商" }));
+    expect(await screen.findByText("完整验证已通过")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("save_dayway_provider", {
+        validationId: "dayway-validation",
+        confirmNameConflict: false,
+      });
+    });
+    expect(screen.getByText("已验证")).toBeInTheDocument();
+    expect(screen.getByText("推荐")).toBeInTheDocument();
+    expect(screen.queryByText("待配置")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "拖拽排序 DayWay" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "删除 DayWay" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("delete_provider", { providerId: saved.id }));
+    expect(screen.getByText("待配置")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "配置 DayWay" })).toBeEnabled();
+  }, 10_000);
+
+  it("已保存 DayWay 只在用户采用推荐地址后进入重新验证流程", async () => {
+    const saved = {
+      id: "c950b528-4b0a-4ba7-a578-00585d9d9d0a",
+      name: "DayWay",
+      baseUrl: "https://saved.dayway.example/v1",
+      defaultModel: "saved-model",
+      verifiedAtEpochSeconds: 1_786_140_000,
+      isCurrent: false,
+      recommendationId: "dayway",
+      hasRecommendationUpdate: true,
+    };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([saved]);
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+    expect(await screen.findByText("推荐地址已更新")).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: "修改 DayWay" }));
+    expect(screen.getByLabelText("服务地址")).toHaveValue(saved.baseUrl);
+    fireEvent.click(screen.getByRole("button", { name: "采用 DayWay 推荐地址" }));
+    expect(screen.getByLabelText("服务地址")).toHaveValue("https://dayway.site/v1");
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect(screen.getByRole("dialog", { name: "需要验证供应商" })).toBeInTheDocument();
+    expect(invoke.mock.calls.some(([command]) => command === "save_provider_update")).toBe(false);
+  });
+
+  it("旧普通 DayWay 名称冲突只有确认后才重试推荐保存", async () => {
+    let saveAttempts = 0;
+    invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([]);
+      if (command === "discover_provider_models") {
+        return Promise.resolve({ normalizedBaseUrl: "https://dayway.site/v1", models: ["model-a"] });
+      }
+      if (command === "validate_provider") {
+        return Promise.resolve({
+          validationId: "conflict-validation",
+          normalizedBaseUrl: "https://dayway.site/v1",
+          defaultModel: "model-a",
+          combinationFingerprint: "b".repeat(64),
+          verifiedAtEpochSeconds: 1,
+        });
+      }
+      if (command === "save_dayway_provider") {
+        saveAttempts += 1;
+        if (!args?.confirmNameConflict) {
+          return Promise.reject({ category: "invalid_input", messageId: "provider.recommended_name_conflict" });
+        }
+        return Promise.resolve({
+          id: "recommended-id",
+          name: "DayWay",
+          baseUrl: "https://dayway.site/v1",
+          defaultModel: "model-a",
+          verifiedAtEpochSeconds: 1,
+          isCurrent: false,
+          recommendationId: "dayway",
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "配置 DayWay" }));
+    fireEvent.change(screen.getByLabelText("API Key"), { target: { value: "secret" } });
+    fireEvent.click(screen.getByRole("button", { name: "获取模型" }));
+    await screen.findByRole("option", { name: "model-a" });
+    fireEvent.change(screen.getByLabelText("默认模型"), { target: { value: "model-a" } });
+    fireEvent.click(screen.getByRole("button", { name: "验证供应商" }));
+    await screen.findByText("完整验证已通过");
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(saveAttempts).toBe(2));
+    expect(invoke).toHaveBeenCalledWith("save_dayway_provider", {
+      validationId: "conflict-validation",
+      confirmNameConflict: true,
+    });
+  });
+
   afterEach(() => {
     cleanup();
     vi.restoreAllMocks();

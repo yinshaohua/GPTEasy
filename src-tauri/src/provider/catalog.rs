@@ -4,8 +4,8 @@ use uuid::Uuid;
 use crate::state::StateStore;
 
 use super::{
-    ProviderFailure, ProviderFailureCategory, ProviderSummary, ValidationEvidence,
-    VerifiedCandidate, state_unavailable, verification_expired,
+    DAYWAY_BASE_URL, DAYWAY_NAME, ProviderFailure, ProviderFailureCategory, ProviderSummary,
+    ValidationEvidence, VerifiedCandidate, state_unavailable, verification_expired,
 };
 
 pub(super) struct ProviderRecord {
@@ -24,8 +24,16 @@ pub(super) fn list_providers(
 pub(super) fn insert_provider(
     state_store: &StateStore,
     name: &str,
+    recommendation_id: Option<&str>,
+    confirm_name_conflict: bool,
     candidate: &VerifiedCandidate,
 ) -> Result<ProviderSummary, ProviderFailure> {
+    if recommendation_id.is_none() && name.eq_ignore_ascii_case(DAYWAY_NAME) {
+        return Err(ProviderFailure::new(
+            ProviderFailureCategory::InvalidInput,
+            "provider.recommended_name_reserved",
+        ));
+    }
     let mut connection = open_catalog(state_store)?;
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -41,14 +49,44 @@ pub(super) fn insert_provider(
             .map_err(|_| state_unavailable())?
     };
     let normalized_name = name.to_lowercase();
-    if existing_names
+    let duplicate_name = existing_names
         .iter()
-        .any(|existing| existing.to_lowercase() == normalized_name)
-    {
+        .any(|existing| existing.to_lowercase() == normalized_name);
+    if duplicate_name && recommendation_id.is_some() && !confirm_name_conflict {
+        return Err(ProviderFailure::new(
+            ProviderFailureCategory::InvalidInput,
+            "provider.recommended_name_conflict",
+        ));
+    }
+    if duplicate_name && recommendation_id.is_none() {
         return Err(ProviderFailure::new(
             ProviderFailureCategory::DuplicateName,
             "provider.name_duplicate",
         ));
+    }
+    if recommendation_id.is_some()
+        && transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM providers WHERE recommendation_id = ?1)",
+                [recommendation_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|_| state_unavailable())?
+            == 1
+    {
+        return Err(ProviderFailure::new(
+            ProviderFailureCategory::InvalidInput,
+            "provider.recommendation_exists",
+        ));
+    }
+    if duplicate_name {
+        let replacement = available_legacy_dayway_name(&existing_names);
+        transaction
+            .execute(
+                "UPDATE providers SET name = ?1 WHERE name = ?2 COLLATE NOCASE AND recommendation_id IS NULL",
+                params![replacement, DAYWAY_NAME],
+            )
+            .map_err(map_write_failure)?;
     }
 
     let summary = ProviderSummary {
@@ -58,12 +96,15 @@ pub(super) fn insert_provider(
         default_model: candidate.input.default_model.clone(),
         verified_at_epoch_seconds: candidate.evidence.verified_at_epoch_seconds,
         is_current: false,
+        recommendation_id: recommendation_id.map(str::to_owned),
+        has_recommendation_update: false,
+        recommendation_template_base_url: recommendation_id.map(|_| DAYWAY_BASE_URL.to_owned()),
     };
     transaction
         .execute(
             "INSERT INTO providers (\
-                id, name, base_url, api_key, default_model, verified_at, verification_fingerprint, sort_order\
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, COALESCE((SELECT MAX(sort_order) + 1 FROM providers), 0))",
+                id, name, base_url, api_key, default_model, verified_at, verification_fingerprint, sort_order, recommendation_id, recommendation_template_base_url\
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, COALESCE((SELECT MAX(sort_order) + 1 FROM providers), 0), ?8, ?9)",
             params![
                 summary.id,
                 summary.name,
@@ -72,6 +113,8 @@ pub(super) fn insert_provider(
                 summary.default_model,
                 summary.verified_at_epoch_seconds.to_string(),
                 candidate.evidence.combination_fingerprint,
+                summary.recommendation_id,
+                summary.recommendation_template_base_url,
             ],
         )
         .map_err(|error| match error {
@@ -87,6 +130,26 @@ pub(super) fn insert_provider(
     Ok(summary)
 }
 
+fn available_legacy_dayway_name(existing_names: &[String]) -> String {
+    let base = format!("{DAYWAY_NAME} (原供应商)");
+    if !existing_names
+        .iter()
+        .any(|name| name.eq_ignore_ascii_case(&base))
+    {
+        return base;
+    }
+    for suffix in 2.. {
+        let candidate = format!("{base} {suffix}");
+        if !existing_names
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(&candidate))
+        {
+            return candidate;
+        }
+    }
+    unreachable!()
+}
+
 pub(super) fn rename_provider(
     state_store: &StateStore,
     provider_id: &str,
@@ -97,6 +160,18 @@ pub(super) fn rename_provider(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| state_unavailable())?;
     let mut summary = find_provider(&transaction, provider_id)?.ok_or_else(provider_not_found)?;
+    if summary.recommendation_id.is_none() && name.eq_ignore_ascii_case(DAYWAY_NAME) {
+        return Err(ProviderFailure::new(
+            ProviderFailureCategory::InvalidInput,
+            "provider.recommended_name_reserved",
+        ));
+    }
+    if summary.recommendation_id.is_some() && name != summary.name {
+        return Err(ProviderFailure::new(
+            ProviderFailureCategory::InvalidInput,
+            "provider.recommended_name_fixed",
+        ));
+    }
     ensure_name_available(&transaction, Some(provider_id), name)?;
     transaction
         .execute(
@@ -140,7 +215,7 @@ pub(super) fn reorder_providers(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| state_unavailable())?;
     let mut statement = transaction
-        .prepare("SELECT id FROM providers ORDER BY sort_order, rowid")
+        .prepare("SELECT id FROM providers ORDER BY recommendation_id IS NULL, sort_order, rowid")
         .map_err(|_| state_unavailable())?;
     let existing = statement
         .query_map([], |row| row.get::<_, String>(0))
@@ -149,7 +224,9 @@ pub(super) fn reorder_providers(
         .map_err(|_| state_unavailable())?;
     drop(statement);
     if provider_ids.len() != existing.len()
-        || provider_ids.iter().any(|id| !existing.iter().any(|value| value == id))
+        || provider_ids
+            .iter()
+            .any(|id| !existing.iter().any(|value| value == id))
         || {
             let mut unique = provider_ids.to_vec();
             unique.sort();
@@ -162,9 +239,27 @@ pub(super) fn reorder_providers(
             "provider.order_invalid",
         ));
     }
+    if let Some(recommended) = transaction
+        .query_row(
+            "SELECT id FROM providers WHERE recommendation_id IS NOT NULL",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|_| state_unavailable())?
+        && provider_ids.first() != Some(&recommended)
+    {
+        return Err(ProviderFailure::new(
+            ProviderFailureCategory::InvalidInput,
+            "provider.order_invalid",
+        ));
+    }
     // Move rows into a temporary range before assigning the requested positions.
     transaction
-        .execute("UPDATE providers SET sort_order = sort_order + ?1", [existing.len() as i64])
+        .execute(
+            "UPDATE providers SET sort_order = sort_order + ?1",
+            [existing.len() as i64],
+        )
         .map_err(|_| state_unavailable())?;
     for (index, provider_id) in provider_ids.iter().enumerate() {
         transaction
@@ -182,7 +277,9 @@ pub(super) fn reorder_providers(
 fn compact_order(transaction: &rusqlite::Transaction<'_>) -> Result<(), ProviderFailure> {
     let ids = {
         let mut statement = transaction
-            .prepare("SELECT id FROM providers ORDER BY sort_order, rowid")
+            .prepare(
+                "SELECT id FROM providers ORDER BY recommendation_id IS NULL, sort_order, rowid",
+            )
             .map_err(|_| state_unavailable())?;
         statement
             .query_map([], |row| row.get::<_, String>(0))
@@ -192,7 +289,10 @@ fn compact_order(transaction: &rusqlite::Transaction<'_>) -> Result<(), Provider
     };
     let offset = ids.len() as i64 + 1;
     transaction
-        .execute("UPDATE providers SET sort_order = sort_order + ?1", [offset])
+        .execute(
+            "UPDATE providers SET sort_order = sort_order + ?1",
+            [offset],
+        )
         .map_err(|_| state_unavailable())?;
     for (index, provider_id) in ids.iter().enumerate() {
         transaction
@@ -210,17 +310,31 @@ fn list_providers_from_connection(
 ) -> Result<Vec<ProviderSummary>, ProviderFailure> {
     let mut statement = connection
         .prepare(
-            "SELECT p.id, p.name, p.base_url, p.default_model, p.verified_at, EXISTS(SELECT 1 FROM last_applied_state current WHERE current.singleton = 1 AND current.mode = 'provider' AND current.provider_id = p.id) FROM providers p ORDER BY p.sort_order, p.rowid",
+            "SELECT p.id, p.name, p.base_url, p.default_model, p.verified_at, EXISTS(SELECT 1 FROM last_applied_state current WHERE current.singleton = 1 AND current.mode = 'provider' AND current.provider_id = p.id), p.recommendation_id, p.recommendation_template_base_url FROM providers p ORDER BY p.recommendation_id IS NULL, p.sort_order, p.rowid",
         )
         .map_err(|_| state_unavailable())?;
     statement
         .query_map([], |row| {
             let verified_at = row.get::<_, String>(4)?;
-            Ok(ProviderSummary {
-                id: row.get(0)?, name: row.get(1)?, base_url: row.get(2)?, default_model: row.get(3)?,
-                verified_at_epoch_seconds: verified_at.parse().map_err(|error| SqliteError::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(error)))?,
+            let mut summary = ProviderSummary {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                base_url: row.get(2)?,
+                default_model: row.get(3)?,
+                verified_at_epoch_seconds: verified_at.parse().map_err(|error| {
+                    SqliteError::FromSqlConversionFailure(
+                        4,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?,
                 is_current: row.get::<_, i64>(5)? == 1,
-            })
+                recommendation_id: row.get(6)?,
+                has_recommendation_update: false,
+                recommendation_template_base_url: row.get(7)?,
+            };
+            summary.refresh_recommendation_update();
+            Ok(summary)
         })
         .map_err(|_| state_unavailable())?
         .collect::<Result<Vec<_>, _>>()
@@ -248,10 +362,22 @@ pub(super) fn replace_provider(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| state_unavailable())?;
     let record = find_provider_record(&transaction, provider_id)?.ok_or_else(provider_not_found)?;
+    if record.summary.recommendation_id.is_none() && name.eq_ignore_ascii_case(DAYWAY_NAME) {
+        return Err(ProviderFailure::new(
+            ProviderFailureCategory::InvalidInput,
+            "provider.recommended_name_reserved",
+        ));
+    }
     if record.summary.is_current {
         return Err(ProviderFailure::new(
             ProviderFailureCategory::SaveAndApplyRequired,
             "provider.save_and_apply_required",
+        ));
+    }
+    if record.summary.recommendation_id.is_some() && name != record.summary.name {
+        return Err(ProviderFailure::new(
+            ProviderFailureCategory::InvalidInput,
+            "provider.recommended_name_fixed",
         ));
     }
     if record.summary.name != original_name
@@ -264,7 +390,10 @@ pub(super) fn replace_provider(
         .execute(
             "UPDATE providers SET \
                 name = ?1, base_url = ?2, api_key = ?3, default_model = ?4, \
-                verified_at = ?5, verification_fingerprint = ?6 \
+                verified_at = ?5, verification_fingerprint = ?6, \
+                recommendation_template_base_url = CASE \
+                    WHEN recommendation_id IS NOT NULL AND ?2 = ?8 THEN ?8 \
+                    ELSE recommendation_template_base_url END \
              WHERE id = ?7",
             params![
                 name,
@@ -274,18 +403,30 @@ pub(super) fn replace_provider(
                 candidate.evidence.verified_at_epoch_seconds.to_string(),
                 candidate.evidence.combination_fingerprint,
                 provider_id,
+                DAYWAY_BASE_URL,
             ],
         )
         .map_err(map_write_failure)?;
     transaction.commit().map_err(|_| state_unavailable())?;
-    Ok(ProviderSummary {
+    let mut summary = ProviderSummary {
         id: provider_id.to_owned(),
         name: name.to_owned(),
         base_url: candidate.evidence.normalized_base_url.clone(),
         default_model: candidate.input.default_model.clone(),
         verified_at_epoch_seconds: candidate.evidence.verified_at_epoch_seconds,
         is_current: false,
-    })
+        recommendation_id: record.summary.recommendation_id,
+        has_recommendation_update: false,
+        recommendation_template_base_url: if candidate.evidence.normalized_base_url
+            == DAYWAY_BASE_URL
+        {
+            Some(DAYWAY_BASE_URL.to_owned())
+        } else {
+            record.summary.recommendation_template_base_url
+        },
+    };
+    summary.refresh_recommendation_update();
+    Ok(summary)
 }
 
 pub(super) fn record_revalidation(
@@ -336,12 +477,12 @@ fn find_provider(
                         WHERE current.singleton = 1 \
                           AND current.mode = 'provider' \
                           AND current.provider_id = p.id\
-                    ) \
+                    ), p.recommendation_id, p.recommendation_template_base_url \
              FROM providers p WHERE p.id = ?1",
             [provider_id],
             |row| {
                 let verified_at = row.get::<_, String>(4)?;
-                Ok(ProviderSummary {
+                let mut summary = ProviderSummary {
                     id: row.get(0)?,
                     name: row.get(1)?,
                     base_url: row.get(2)?,
@@ -354,7 +495,12 @@ fn find_provider(
                         )
                     })?,
                     is_current: row.get::<_, i64>(5)? == 1,
-                })
+                    recommendation_id: row.get(6)?,
+                    has_recommendation_update: false,
+                    recommendation_template_base_url: row.get(7)?,
+                };
+                summary.refresh_recommendation_update();
+                Ok(summary)
             },
         )
         .optional()
@@ -368,7 +514,7 @@ fn find_provider_record(
     connection
         .query_row(
             "SELECT p.id, p.name, p.base_url, p.api_key, p.default_model, p.verified_at, \
-                    p.verification_fingerprint, \
+                    p.verification_fingerprint, p.recommendation_id, p.recommendation_template_base_url, \
                     EXISTS(\
                         SELECT 1 FROM last_applied_state current \
                         WHERE current.singleton = 1 \
@@ -380,7 +526,8 @@ fn find_provider_record(
             |row| {
                 let verified_at = row.get::<_, String>(5)?;
                 Ok(ProviderRecord {
-                    summary: ProviderSummary {
+                    summary: {
+                        let mut summary = ProviderSummary {
                         id: row.get(0)?,
                         name: row.get(1)?,
                         base_url: row.get(2)?,
@@ -392,7 +539,13 @@ fn find_provider_record(
                                 Box::new(error),
                             )
                         })?,
-                        is_current: row.get::<_, i64>(7)? == 1,
+                        is_current: row.get::<_, i64>(9)? == 1,
+                        recommendation_id: row.get(7)?,
+                        has_recommendation_update: false,
+                        recommendation_template_base_url: row.get(8)?,
+                        };
+                        summary.refresh_recommendation_update();
+                        summary
                     },
                     api_key: row.get(3)?,
                     verification_fingerprint: row.get(6)?,

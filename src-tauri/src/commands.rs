@@ -1,3 +1,4 @@
+use std::process::Command;
 use std::sync::Mutex;
 
 use serde::Serialize;
@@ -8,8 +9,8 @@ use crate::environment::{
     EnvironmentApplication, EnvironmentFailure, EnvironmentFailureCategory, EnvironmentSnapshot,
 };
 use crate::provider::{
-    DiscoveryInput, ModelDiscovery, ProviderApiKey, ProviderApplication, ProviderFailure,
-    ProviderFailureCategory, ProviderSummary, ProviderUpdateDiscoveryInput,
+    DAYWAY_WEBSITE, DiscoveryInput, ModelDiscovery, ProviderApiKey, ProviderApplication,
+    ProviderFailure, ProviderFailureCategory, ProviderSummary, ProviderUpdateDiscoveryInput,
     ProviderUpdateValidationInput, ProviderValidationInput, ProviderValidationReceipt,
     ProviderValidationStage,
 };
@@ -281,6 +282,38 @@ pub(crate) fn save_verified_provider(
         .application
         .save_verified_provider(&validation_id, &name);
     refresh_tray_after(&app, result)
+}
+
+#[tauri::command]
+pub(crate) fn save_dayway_provider(
+    app: AppHandle,
+    state: State<'_, ProviderRuntime>,
+    validation_id: String,
+    confirm_name_conflict: bool,
+) -> Result<ProviderSummary, ProviderFailure> {
+    let result = state
+        .application
+        .save_dayway_provider_with_name_conflict_confirmation(
+            &validation_id,
+            confirm_name_conflict,
+        );
+    refresh_tray_after(&app, result)
+}
+
+#[tauri::command]
+pub(crate) fn open_dayway_website() -> Result<(), ProviderFailure> {
+    #[cfg(target_os = "windows")]
+    let result = Command::new("explorer.exe").arg(DAYWAY_WEBSITE).spawn();
+    #[cfg(target_os = "macos")]
+    let result = Command::new("open").arg(DAYWAY_WEBSITE).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let result = Command::new("xdg-open").arg(DAYWAY_WEBSITE).spawn();
+    result.map(|_| ()).map_err(|_| {
+        ProviderFailure::new(
+            ProviderFailureCategory::StateUnavailable,
+            "provider.website_open_failed",
+        )
+    })
 }
 
 #[tauri::command]

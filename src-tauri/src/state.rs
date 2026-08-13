@@ -9,7 +9,7 @@ use rusqlite::backup::Backup;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction};
 use serde::Serialize;
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 3;
+pub const CURRENT_SCHEMA_VERSION: i64 = 4;
 const APPLICATION_ID: i64 = 0x4750_5445;
 const BACKUP_LIMIT: usize = 3;
 const INSTALLATION_MARKER_CONTENT: &[u8] = b"gpteasy-state-v1\n";
@@ -75,7 +75,21 @@ SET sort_order = (
 );
 "#;
 
-const MIGRATIONS: &[(i64, &str)] = &[(1, SCHEMA_V1), (2, SCHEMA_V2), (3, SCHEMA_V3)];
+const SCHEMA_V4: &str = r#"
+ALTER TABLE providers ADD COLUMN recommendation_id TEXT
+    CHECK (recommendation_id IS NULL OR recommendation_id = 'dayway');
+ALTER TABLE providers ADD COLUMN recommendation_template_base_url TEXT
+    CHECK (recommendation_template_base_url IS NULL OR recommendation_id = 'dayway');
+CREATE UNIQUE INDEX providers_recommendation_id_unique
+    ON providers(recommendation_id) WHERE recommendation_id IS NOT NULL;
+"#;
+
+const MIGRATIONS: &[(i64, &str)] = &[
+    (1, SCHEMA_V1),
+    (2, SCHEMA_V2),
+    (3, SCHEMA_V3),
+    (4, SCHEMA_V4),
+];
 
 #[derive(Debug, Clone)]
 pub struct StatePaths {
@@ -660,7 +674,7 @@ fn schema_contract(connection: &Connection) -> Result<Vec<(String, String)>, Sta
     let mut statement = connection
         .prepare(
             "SELECT name, sql FROM sqlite_schema \
-             WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+             WHERE type IN ('table', 'index') AND name NOT LIKE 'sqlite_%' ORDER BY type, name",
         )
         .map_err(|_| StateFailure::new(DatabaseBlockReason::CorruptDatabase))?;
     statement

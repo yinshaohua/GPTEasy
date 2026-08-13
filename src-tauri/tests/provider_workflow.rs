@@ -13,6 +13,7 @@ use gpteasy_lib::provider::{
     ProviderUpdateValidationInput, ProviderValidationInput, ProviderValidator, ValidationTimeouts,
 };
 use gpteasy_lib::state::{StatePaths, StateStore};
+use rusqlite::Connection;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -340,6 +341,181 @@ async fn a_verified_provider_is_persisted_only_after_explicit_save() {
 }
 
 #[tokio::test]
+async fn dayway_recommendation_identity_is_explicit_pinned_and_recoverable() {
+    let temp = TempDir::new().expect("temp state directory");
+    let store = StateStore::new(StatePaths::from_root(temp.path()));
+    assert!(store.bootstrap().is_ready());
+    let application = ProviderApplication::new(store.clone(), validator());
+
+    let ordinary_server = ValidationServer::start(ValidationScenario::Success);
+    let ordinary_receipt = application
+        .validate_provider(
+            "ordinary-dayway".to_owned(),
+            ProviderValidationInput {
+                base_url: ordinary_server.base_url,
+                api_key: "ordinary-key".to_owned(),
+                default_model: "model-a".to_owned(),
+            },
+        )
+        .await
+        .expect("ordinary combination validates");
+    let reserved = application
+        .save_verified_provider(&ordinary_receipt.validation_id, "DayWay")
+        .expect_err("ordinary providers cannot reserve the recommended name");
+    assert_eq!(reserved.category, ProviderFailureCategory::InvalidInput);
+
+    let ordinary_server = ValidationServer::start(ValidationScenario::Success);
+    let ordinary = create_provider(
+        &application,
+        "ordinary-provider",
+        ordinary_server.base_url,
+        "Ordinary Provider",
+        "ordinary-key",
+    )
+    .await;
+    assert_eq!(ordinary.recommendation_id, None);
+    let impersonation = application
+        .rename_provider(&ordinary.id, "dayway")
+        .expect_err("ordinary rename cannot impersonate DayWay");
+    assert_eq!(
+        impersonation.category,
+        ProviderFailureCategory::InvalidInput
+    );
+    let recommended_server = ValidationServer::start(ValidationScenario::Success);
+    let receipt = application
+        .validate_provider(
+            "recommended-dayway".to_owned(),
+            ProviderValidationInput {
+                base_url: recommended_server.base_url,
+                api_key: "recommended-key".to_owned(),
+                default_model: "model-a".to_owned(),
+            },
+        )
+        .await
+        .expect("recommended combination validates");
+    let recommended = application
+        .save_dayway_provider(&receipt.validation_id)
+        .expect("explicit DayWay save");
+
+    assert_eq!(recommended.name, "DayWay");
+    assert_eq!(recommended.recommendation_id.as_deref(), Some("dayway"));
+    assert!(!recommended.has_recommendation_update);
+    assert_eq!(
+        application.list_providers().expect("recommended is pinned")[0].id,
+        recommended.id
+    );
+    let reorder = application
+        .reorder_providers(&[ordinary.id.clone(), recommended.id.clone()])
+        .expect_err("recommended provider cannot move from first position");
+    assert_eq!(reorder.category, ProviderFailureCategory::InvalidInput);
+    assert_eq!(
+        application
+            .list_providers()
+            .expect("pinned after rejection")[0]
+            .id,
+        recommended.id
+    );
+    let saved_base_url = recommended.base_url.clone();
+    let connection = Connection::open(store.paths().database()).expect("open provider database");
+    connection
+        .execute(
+            "UPDATE providers SET recommendation_template_base_url = 'https://old.dayway.example/v1' WHERE id = ?1",
+            [&recommended.id],
+        )
+        .expect("simulate a newer built-in template after upgrade");
+    drop(connection);
+    let after_upgrade = application.list_providers().expect("list after upgrade");
+    assert!(after_upgrade[0].has_recommendation_update);
+    assert_eq!(after_upgrade[0].base_url, saved_base_url);
+    let rename = application
+        .rename_provider(&recommended.id, "DayWay Renamed")
+        .expect_err("recommended name is fixed");
+    assert_eq!(rename.category, ProviderFailureCategory::InvalidInput);
+
+    application
+        .delete_provider(&recommended.id)
+        .expect("non-current recommendation can be deleted");
+    assert!(
+        application
+            .list_providers()
+            .expect("recommendation removed")
+            .iter()
+            .all(|provider| provider.recommendation_id.is_none())
+    );
+}
+
+#[tokio::test]
+async fn legacy_dayway_name_conflict_requires_confirmation_and_preserves_the_old_provider() {
+    let temp = TempDir::new().expect("temp state directory");
+    let store = StateStore::new(StatePaths::from_root(temp.path()));
+    assert!(store.bootstrap().is_ready());
+    let connection = Connection::open(store.paths().database()).expect("open provider database");
+    connection
+        .execute(
+            "INSERT INTO providers (id, name, base_url, api_key, default_model, verified_at, verification_fingerprint, sort_order)
+             VALUES ('legacy-id', 'DayWay', 'https://legacy.example/v1', 'legacy-key', 'legacy-model', '123', 'legacy-fingerprint', 0)",
+            [],
+        )
+        .expect("simulate migrated ordinary DayWay");
+    drop(connection);
+    let application = ProviderApplication::new(store.clone(), validator());
+    let server = ValidationServer::start(ValidationScenario::Success);
+    let receipt = application
+        .validate_provider(
+            "recommended-with-conflict".to_owned(),
+            ProviderValidationInput {
+                base_url: server.base_url,
+                api_key: "recommended-key".to_owned(),
+                default_model: "model-a".to_owned(),
+            },
+        )
+        .await
+        .expect("recommended combination validates");
+
+    let conflict = application
+        .save_dayway_provider(&receipt.validation_id)
+        .expect_err("name conflict requires explicit confirmation");
+    assert_eq!(conflict.message_id, "provider.recommended_name_conflict");
+    assert_eq!(
+        application.list_providers().expect("unchanged catalog")[0].name,
+        "DayWay"
+    );
+
+    let recommended = application
+        .save_dayway_provider_with_name_conflict_confirmation(&receipt.validation_id, true)
+        .expect("confirmed conflict resolution saves recommendation");
+    assert_eq!(recommended.recommendation_id.as_deref(), Some("dayway"));
+    let connection =
+        Connection::open(store.paths().database()).expect("inspect preserved provider");
+    let legacy = connection
+        .query_row(
+            "SELECT name, base_url, api_key, default_model, verification_fingerprint
+             FROM providers WHERE id = 'legacy-id'",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            },
+        )
+        .expect("legacy provider remains");
+    assert_eq!(
+        legacy,
+        (
+            "DayWay (原供应商)".to_owned(),
+            "https://legacy.example/v1".to_owned(),
+            "legacy-key".to_owned(),
+            "legacy-model".to_owned(),
+            "legacy-fingerprint".to_owned(),
+        )
+    );
+}
+
+#[tokio::test]
 async fn failed_cancelled_or_discarded_validation_never_changes_persistent_state() {
     let temp = TempDir::new().expect("temp state directory");
     let store = StateStore::new(StatePaths::from_root(temp.path()));
@@ -559,18 +735,38 @@ async fn catalog_order_is_persistent_and_invalid_reorders_are_atomic() {
     let reordered = application
         .reorder_providers(&[third.id.clone(), first.id.clone(), second.id.clone()])
         .expect("valid reorder");
-    assert_eq!(reordered.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(), vec![third.id.as_str(), first.id.as_str(), second.id.as_str()]);
-    assert_eq!(application.list_providers().expect("persistent order")[0].id, third.id);
+    assert_eq!(
+        reordered
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![third.id.as_str(), first.id.as_str(), second.id.as_str()]
+    );
+    assert_eq!(
+        application.list_providers().expect("persistent order")[0].id,
+        third.id
+    );
 
     let invalid = application
         .reorder_providers(&[first.id.clone(), first.id.clone(), second.id.clone()])
         .expect_err("duplicate ids are rejected");
     assert_eq!(invalid.category, ProviderFailureCategory::InvalidInput);
-    assert_eq!(application.list_providers().expect("order remains")[0].id, third.id);
+    assert_eq!(
+        application.list_providers().expect("order remains")[0].id,
+        third.id
+    );
 
-    application.delete_provider(&first.id).expect("delete provider");
+    application
+        .delete_provider(&first.id)
+        .expect("delete provider");
     let compacted = application.list_providers().expect("compact order");
-    assert_eq!(compacted.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(), vec![third.id.as_str(), second.id.as_str()]);
+    assert_eq!(
+        compacted
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![third.id.as_str(), second.id.as_str()]
+    );
 }
 
 #[tokio::test]

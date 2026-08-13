@@ -1,6 +1,11 @@
 mod catalog;
 mod validation;
 
+pub(crate) const DAYWAY_NAME: &str = "DayWay";
+pub(crate) const DAYWAY_BASE_URL: &str = "https://dayway.site/v1";
+pub(crate) const DAYWAY_RECOMMENDATION_ID: &str = "dayway";
+pub(crate) const DAYWAY_WEBSITE: &str = "https://dayway.site";
+
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Mutex;
@@ -135,6 +140,18 @@ pub struct ProviderSummary {
     pub default_model: String,
     pub verified_at_epoch_seconds: u64,
     pub is_current: bool,
+    pub recommendation_id: Option<String>,
+    pub has_recommendation_update: bool,
+    #[serde(skip_serializing)]
+    pub(crate) recommendation_template_base_url: Option<String>,
+}
+
+impl ProviderSummary {
+    pub(crate) fn refresh_recommendation_update(&mut self) {
+        self.has_recommendation_update = self.recommendation_id.as_deref()
+            == Some(DAYWAY_RECOMMENDATION_ID)
+            && self.recommendation_template_base_url.as_deref() != Some(DAYWAY_BASE_URL);
+    }
 }
 
 #[derive(Serialize)]
@@ -486,27 +503,32 @@ impl ProviderApplication {
                 "provider.name_required",
             ));
         }
-        let candidate = self
-            .verified_candidates
-            .lock()
-            .map_err(|_| state_unavailable())?
-            .get(validation_id)
-            .cloned()
-            .ok_or_else(verification_expired)?;
-        if !matches!(candidate.target, ValidationTarget::NewProvider) {
-            return Err(verification_expired());
-        }
-        let actual_fingerprint = combination_fingerprint(
-            &candidate.evidence.normalized_base_url,
-            &candidate.input.api_key,
-            &candidate.input.default_model,
-        );
-        if actual_fingerprint != candidate.evidence.combination_fingerprint {
-            self.discard_validation(validation_id);
-            return Err(verification_expired());
-        }
+        let candidate = self.valid_new_candidate(validation_id)?;
+        let summary = catalog::insert_provider(&self.state_store, name, None, false, &candidate)?;
+        self.discard_validation(validation_id);
+        Ok(summary)
+    }
 
-        let summary = catalog::insert_provider(&self.state_store, name, &candidate)?;
+    pub fn save_dayway_provider(
+        &self,
+        validation_id: &str,
+    ) -> Result<ProviderSummary, ProviderFailure> {
+        self.save_dayway_provider_with_name_conflict_confirmation(validation_id, false)
+    }
+
+    pub fn save_dayway_provider_with_name_conflict_confirmation(
+        &self,
+        validation_id: &str,
+        confirm_name_conflict: bool,
+    ) -> Result<ProviderSummary, ProviderFailure> {
+        let candidate = self.valid_new_candidate(validation_id)?;
+        let summary = catalog::insert_provider(
+            &self.state_store,
+            DAYWAY_NAME,
+            Some(DAYWAY_RECOMMENDATION_ID),
+            confirm_name_conflict,
+            &candidate,
+        )?;
         self.discard_validation(validation_id);
         Ok(summary)
     }
@@ -601,6 +623,26 @@ impl ProviderApplication {
             return Err(verification_expired());
         }
 
+        let existing = catalog::get_provider(&self.state_store, provider_id)?;
+        if existing.summary.recommendation_id.is_none() && name.eq_ignore_ascii_case(DAYWAY_NAME) {
+            return Err(ProviderFailure::new(
+                ProviderFailureCategory::InvalidInput,
+                "provider.recommended_name_reserved",
+            ));
+        }
+        if existing.summary.recommendation_id.is_some() && name != existing.summary.name {
+            return Err(ProviderFailure::new(
+                ProviderFailureCategory::InvalidInput,
+                "provider.recommended_name_fixed",
+            ));
+        }
+        let recommendation_template_base_url = if existing.summary.recommendation_id.is_some()
+            && candidate.evidence.normalized_base_url == DAYWAY_BASE_URL
+        {
+            Some(DAYWAY_BASE_URL.to_owned())
+        } else {
+            existing.summary.recommendation_template_base_url
+        };
         let provider = ProviderTarget::new(
             provider_id.to_owned(),
             name.to_owned(),
@@ -609,6 +651,8 @@ impl ProviderApplication {
             candidate.input.default_model.clone(),
             candidate.evidence.verified_at_epoch_seconds,
             candidate.evidence.combination_fingerprint.clone(),
+            existing.summary.recommendation_id,
+            recommendation_template_base_url,
         );
         let update = VerifiedProviderUpdate::new(provider, original_name, original_fingerprint);
         let snapshot = environment
@@ -715,7 +759,10 @@ impl ProviderApplication {
         catalog::delete_provider(&self.state_store, provider_id)
     }
 
-    pub fn reorder_providers(&self, provider_ids: &[String]) -> Result<Vec<ProviderSummary>, ProviderFailure> {
+    pub fn reorder_providers(
+        &self,
+        provider_ids: &[String],
+    ) -> Result<Vec<ProviderSummary>, ProviderFailure> {
         catalog::reorder_providers(&self.state_store, provider_ids)
     }
 
@@ -739,6 +786,32 @@ impl ProviderApplication {
         }
         requests.insert(request_id.to_owned(), cancellation.clone());
         Ok(cancellation)
+    }
+
+    fn valid_new_candidate(
+        &self,
+        validation_id: &str,
+    ) -> Result<VerifiedCandidate, ProviderFailure> {
+        let candidate = self
+            .verified_candidates
+            .lock()
+            .map_err(|_| state_unavailable())?
+            .get(validation_id)
+            .cloned()
+            .ok_or_else(verification_expired)?;
+        if !matches!(candidate.target, ValidationTarget::NewProvider) {
+            return Err(verification_expired());
+        }
+        let actual_fingerprint = combination_fingerprint(
+            &candidate.evidence.normalized_base_url,
+            &candidate.input.api_key,
+            &candidate.input.default_model,
+        );
+        if actual_fingerprint != candidate.evidence.combination_fingerprint {
+            self.discard_validation(validation_id);
+            return Err(verification_expired());
+        }
+        Ok(candidate)
     }
 
     fn finish_request(&self, request_id: &str) {

@@ -129,6 +129,11 @@ export const providerFailureMessages: Record<string, string> = {
   "provider.verification_expired": "本次验证已失效，请重新验证。",
   "provider.state_unavailable": "本地供应商目录暂时不可用。",
   "provider.order_invalid": "供应商排序请求无效，请刷新后重试。",
+  "provider.recommended_name_fixed": "推荐供应商名称不能修改。",
+  "provider.recommended_name_reserved": "DayWay 名称保留给推荐供应商模板。",
+  "provider.recommendation_exists": "推荐供应商已经配置。",
+  "provider.recommended_name_conflict": "已有普通供应商使用 DayWay 名称，需要确认重命名后再保存推荐供应商。",
+  "provider.website_open_failed": "无法使用系统默认浏览器打开官网。",
   "provider.preview_network_unavailable": "浏览器预览不能发起真实供应商验证。",
 };
 
@@ -140,7 +145,7 @@ export const providerMessages = {
   verifiedProviders: "已验证供应商",
   loadingCatalog: "正在读取供应商目录",
   catalogUnavailable: "无法读取供应商目录。",
-  emptyCatalog: "尚无已验证供应商",
+  emptyCatalog: "尚无其他供应商",
   editorSubtitle: "验证成功后再保存",
   detailsSubtitle: "已验证供应商详情",
   verified: "已验证",
@@ -178,6 +183,7 @@ export const providerMessages = {
   revalidate: "重新验证",
   deleteProvider: "删除供应商",
   deleteConfirmation: "确定删除这个供应商吗？",
+  daywayNameConflictConfirmation: "已有普通供应商名为 DayWay。继续后会将它重命名为“DayWay (原供应商)”，其 ID、地址、API Key、模型和验证证据保持不变。是否继续？",
   save: "保存",
   saveAndApply: "保存并应用",
   consumerRiskConfirmation:

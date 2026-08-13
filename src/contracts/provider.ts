@@ -61,6 +61,8 @@ export interface ProviderSummary {
   defaultModel: string;
   verifiedAtEpochSeconds: number;
   isCurrent: boolean;
+  recommendationId?: "dayway" | null;
+  hasRecommendationUpdate?: boolean;
 }
 
 export interface ProviderApiKey {
@@ -143,6 +145,19 @@ export function saveVerifiedProvider(
 ): Promise<ProviderSummary> {
   if (isBrowserPreview()) return Promise.reject(previewFailure);
   return invoke<ProviderSummary>("save_verified_provider", { validationId, name });
+}
+
+export function saveDaywayProvider(
+  validationId: string,
+  confirmNameConflict = false,
+): Promise<ProviderSummary> {
+  if (isBrowserPreview()) return Promise.reject(previewFailure);
+  return invoke<ProviderSummary>("save_dayway_provider", { validationId, confirmNameConflict });
+}
+
+export function openDaywayWebsite(): Promise<void> {
+  if (isBrowserPreview()) return Promise.resolve();
+  return invoke<void>("open_dayway_website");
 }
 
 export function renameProvider(providerId: string, name: string): Promise<ProviderSummary> {

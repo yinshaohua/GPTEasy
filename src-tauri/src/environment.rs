@@ -916,6 +916,10 @@ pub(crate) struct ProviderTarget {
     default_model: String,
     verified_at_epoch_seconds: u64,
     verification_fingerprint: String,
+    #[serde(default)]
+    recommendation_id: Option<String>,
+    #[serde(default)]
+    recommendation_template_base_url: Option<String>,
 }
 
 impl ProviderTarget {
@@ -927,6 +931,8 @@ impl ProviderTarget {
         default_model: String,
         verified_at_epoch_seconds: u64,
         verification_fingerprint: String,
+        recommendation_id: Option<String>,
+        recommendation_template_base_url: Option<String>,
     ) -> Self {
         Self {
             id,
@@ -936,6 +942,8 @@ impl ProviderTarget {
             default_model,
             verified_at_epoch_seconds,
             verification_fingerprint,
+            recommendation_id,
+            recommendation_template_base_url,
         }
     }
 }
@@ -974,14 +982,19 @@ impl VerifiedProviderUpdate {
 
 impl ProviderTarget {
     fn summary(&self, is_current: bool) -> ProviderSummary {
-        ProviderSummary {
+        let mut summary = ProviderSummary {
             id: self.id.clone(),
             name: self.name.clone(),
             base_url: self.base_url.clone(),
             default_model: self.default_model.clone(),
             verified_at_epoch_seconds: self.verified_at_epoch_seconds,
             is_current,
-        }
+            recommendation_id: self.recommendation_id.clone(),
+            has_recommendation_update: false,
+            recommendation_template_base_url: self.recommendation_template_base_url.clone(),
+        };
+        summary.refresh_recommendation_update();
+        summary
     }
 }
 
@@ -992,7 +1005,7 @@ fn load_provider(
     connection
         .query_row(
             "SELECT id, name, base_url, api_key, default_model, verified_at,
-                    verification_fingerprint
+                    verification_fingerprint, recommendation_id, recommendation_template_base_url
              FROM providers WHERE id = ?1",
             [provider_id],
             |row| {
@@ -1011,6 +1024,8 @@ fn load_provider(
                         )
                     })?,
                     verification_fingerprint: row.get(6)?,
+                    recommendation_id: row.get(7)?,
+                    recommendation_template_base_url: row.get(8)?,
                 })
             },
         )
@@ -2116,7 +2131,8 @@ fn commit_applied_state(
             .execute(
                 "UPDATE providers SET
                     name = ?1, base_url = ?2, api_key = ?3, default_model = ?4,
-                    verified_at = ?5, verification_fingerprint = ?6
+                    verified_at = ?5, verification_fingerprint = ?6,
+                    recommendation_template_base_url = ?10
                  WHERE id = ?7 AND name = ?8 AND verification_fingerprint = ?9",
                 params![
                     prepared.provider.name,
@@ -2128,6 +2144,7 @@ fn commit_applied_state(
                     prepared.provider.id,
                     guard.original_name,
                     guard.original_verification_fingerprint,
+                    prepared.provider.recommendation_template_base_url,
                 ],
             )
             .map_err(|_| state_unavailable())?;
@@ -2334,7 +2351,8 @@ fn commit_recovered_state(
             .execute(
                 "UPDATE providers SET
                     name = ?1, base_url = ?2, api_key = ?3, default_model = ?4,
-                    verified_at = ?5, verification_fingerprint = ?6
+                    verified_at = ?5, verification_fingerprint = ?6,
+                    recommendation_template_base_url = ?8
                  WHERE id = ?7",
                 params![
                     provider.name,
@@ -2344,6 +2362,7 @@ fn commit_recovered_state(
                     provider.verified_at_epoch_seconds.to_string(),
                     provider.verification_fingerprint,
                     provider.id,
+                    provider.recommendation_template_base_url,
                 ],
             )
             .map_err(|_| state_unavailable())?;
@@ -3743,4 +3762,27 @@ fn operation_interrupted() -> EnvironmentFailure {
         EnvironmentFailureCategory::OperationInterrupted,
         "environment.operation_interrupted",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProviderTarget;
+
+    #[test]
+    fn legacy_pending_provider_snapshot_defaults_to_no_recommendation_identity() {
+        let provider: ProviderTarget = serde_json::from_str(
+            r#"{
+                "id":"provider-id",
+                "name":"Provider",
+                "baseUrl":"https://provider.example/v1",
+                "apiKey":"key",
+                "defaultModel":"model-a",
+                "verifiedAtEpochSeconds":1,
+                "verificationFingerprint":"fingerprint"
+            }"#,
+        )
+        .expect("legacy pending provider snapshot remains readable");
+
+        assert_eq!(provider.recommendation_id, None);
+    }
 }

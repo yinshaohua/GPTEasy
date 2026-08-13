@@ -5,6 +5,7 @@ import {
   Copy,
   Eye,
   EyeOff,
+  ExternalLink,
   GripVertical,
   KeyRound,
   LoaderCircle,
@@ -26,6 +27,7 @@ import {
   discoverProviderModelsForUpdate,
   discardProviderValidation,
   listProviders,
+  openDaywayWebsite,
   onProviderValidationProgress,
   renameProvider,
   reorderProviders,
@@ -33,6 +35,7 @@ import {
   revalidateProvider,
   saveProviderUpdate,
   saveAndApplyProviderUpdate,
+  saveDaywayProvider,
   saveVerifiedProvider,
   validateProvider,
   validateProviderUpdate,
@@ -60,12 +63,16 @@ type Operation =
 type PageView = "catalog" | "detail";
 type Confirmation = "discard" | "validation" | null;
 
+const DAYWAY_NAME = "DayWay";
+const DAYWAY_BASE_URL = "https://dayway.site/v1";
+
 export default function ProviderPage() {
   const [providers, setProviders] = useState<ProviderSummary[]>([]);
   const [listState, setListState] = useState<"loading" | "ready" | "error">("loading");
   const [view, setView] = useState<PageView>("catalog");
   const [confirmation, setConfirmation] = useState<Confirmation>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [isRecommendedCandidate, setIsRecommendedCandidate] = useState(false);
   const [name, setName] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKeyPresent, setApiKeyPresent] = useState(false);
@@ -85,6 +92,8 @@ export default function ProviderPage() {
   const draggedProviderId = useRef<string | null>(null);
   const receiptRef = useRef<string | null>(null);
   const selected = providers.find((provider) => provider.id === selectedId) ?? null;
+  const savedDayway = providers.find((provider) => provider.recommendationId === "dayway") ?? null;
+  const isDaywayEditor = isRecommendedCandidate || selected?.recommendationId === "dayway";
 
   useEffect(() => {
     let mounted = true;
@@ -141,6 +150,7 @@ export default function ProviderPage() {
   function editProvider(provider: ProviderSummary) {
     discardReceipt("models_confirmed");
     setSelectedId(provider.id);
+    setIsRecommendedCandidate(false);
     setName(provider.name);
     setBaseUrl(provider.baseUrl);
     setModels([provider.defaultModel]);
@@ -153,6 +163,7 @@ export default function ProviderPage() {
   function resetEditor(nextView: PageView = "detail") {
     discardReceipt();
     setSelectedId(null);
+    setIsRecommendedCandidate(false);
     setName("");
     setBaseUrl("");
     setModels([]);
@@ -160,6 +171,13 @@ export default function ProviderPage() {
     setFailure(null);
     clearSecretInput();
     setView(nextView);
+  }
+
+  function configureDayway() {
+    resetEditor("detail");
+    setIsRecommendedCandidate(true);
+    setName(DAYWAY_NAME);
+    setBaseUrl(DAYWAY_BASE_URL);
   }
 
   function requestBack() {
@@ -296,9 +314,23 @@ export default function ProviderPage() {
       let saved: ProviderSummary;
       if (!selected) {
         if (!receipt) return;
-        saved = await saveVerifiedProvider(receipt.validationId, name);
+        if (isRecommendedCandidate) {
+          try {
+            saved = await saveDaywayProvider(receipt.validationId);
+          } catch (error) {
+            const providerFailure = asProviderFailure(error);
+            if (providerFailure.messageId !== "provider.recommended_name_conflict") throw error;
+            if (!window.confirm(providerMessages.daywayNameConflictConfirmation)) {
+              setOperation("verified");
+              return;
+            }
+            saved = await saveDaywayProvider(receipt.validationId, true);
+          }
+        } else {
+          saved = await saveVerifiedProvider(receipt.validationId, name);
+        }
         receiptRef.current = null;
-        setProviders((current) => [...current, saved]);
+        setProviders((current) => isRecommendedCandidate ? [saved, ...current] : [...current, saved]);
         resetEditor("catalog");
         return;
       }
@@ -361,6 +393,7 @@ export default function ProviderPage() {
       await deleteProvider(provider.id);
       setProviders((current) => current.filter((item) => item.id !== provider.id));
       if (selectedId === provider.id) resetEditor("catalog");
+      setOperation("idle");
     } catch (error) {
       setFailure(asProviderFailure(error));
       setOperation("idle");
@@ -433,6 +466,14 @@ export default function ProviderPage() {
     }
   }
 
+  async function visitDaywayWebsite() {
+    try {
+      await openDaywayWebsite();
+    } catch (error) {
+      setFailure(asProviderFailure(error));
+    }
+  }
+
   function replaceProvider(updated: ProviderSummary) {
     setProviders((current) =>
       current.map((provider) => (provider.id === updated.id ? updated : provider)),
@@ -450,7 +491,7 @@ export default function ProviderPage() {
       apiKeyReplacement);
   const dirty = selected
     ? nameDirty || criticalDirty
-    : name.trim().length > 0 ||
+    : isRecommendedCandidate || name.trim().length > 0 ||
       baseUrl.trim().length > 0 ||
       apiKeyPresent ||
       defaultModel.length > 0;
@@ -494,13 +535,31 @@ export default function ProviderPage() {
           </div>
           {listState === "loading" && <p className="pane-note">{providerMessages.loadingCatalog}</p>}
           {listState === "error" && <p className="inline-error">{providerMessages.catalogUnavailable}</p>}
-          {listState === "ready" && providers.length === 0 && (
-            <div className="empty-list">
-              <Server size={22} aria-hidden="true" />
-              <p>{providerMessages.emptyCatalog}</p>
-            </div>
-          )}
           <div className="provider-list" aria-label={providerMessages.verifiedProviders}>
+            {!savedDayway && (
+              <article className="provider-list-row provider-template-row">
+                <span className="provider-drag-placeholder" aria-hidden="true" />
+                <div className="provider-row-summary">
+                  <div className="provider-row-title">
+                    <strong className="provider-row-name">{DAYWAY_NAME}</strong>
+                    <span className="recommended-badge">推荐</span>
+                    <span className="pending-badge">待配置</span>
+                  </div>
+                  <span className="provider-row-url" title={DAYWAY_BASE_URL}>{DAYWAY_BASE_URL}</span>
+                  <span className="provider-row-model">尚未选择</span>
+                </div>
+                <div className="provider-row-actions">
+                  <button className="secondary-button compact" type="button" onClick={() => void visitDaywayWebsite()} aria-label="访问 DayWay 官网">
+                    <ExternalLink size={16} aria-hidden="true" />
+                    访问官网
+                  </button>
+                  <button className="command-button compact" type="button" onClick={configureDayway} disabled={busy} aria-label="配置 DayWay">
+                    <Pencil size={16} aria-hidden="true" />
+                    配置
+                  </button>
+                </div>
+              </article>
+            )}
             {providers.map((provider) => (
               <article
                 className="provider-list-row"
@@ -510,7 +569,7 @@ export default function ProviderPage() {
                   event.preventDefault();
                   const sourceId = draggedProviderId.current;
                   draggedProviderId.current = null;
-                  if (!sourceId || sourceId === provider.id || busy) return;
+                  if (!sourceId || sourceId === provider.id || busy || provider.recommendationId === "dayway") return;
                   const next = providers.filter((item) => item.id !== sourceId);
                   const targetIndex = next.findIndex((item) => item.id === provider.id);
                   if (targetIndex < 0) return;
@@ -521,20 +580,18 @@ export default function ProviderPage() {
                   });
                 }}
               >
-                <span
-                  className="provider-drag-handle"
-                  draggable
-                  role="img"
-                  aria-label={`拖拽排序 ${provider.name}`}
-                  title={`拖拽排序 ${provider.name}`}
-                  onDragStart={() => { draggedProviderId.current = provider.id; }}
-                  onDragEnd={() => { draggedProviderId.current = null; }}
-                >
-                  <GripVertical size={18} aria-hidden="true" />
-                </span>
+                {provider.recommendationId === "dayway" ? (
+                  <span className="provider-drag-placeholder" aria-hidden="true" />
+                ) : (
+                  <span className="provider-drag-handle" draggable role="img" aria-label={`拖拽排序 ${provider.name}`} title={`拖拽排序 ${provider.name}`} onDragStart={() => { draggedProviderId.current = provider.id; }} onDragEnd={() => { draggedProviderId.current = null; }}>
+                    <GripVertical size={18} aria-hidden="true" />
+                  </span>
+                )}
                 <div className="provider-row-summary">
                   <div className="provider-row-title">
                     <strong className="provider-row-name">{provider.name}</strong>
+                    {provider.recommendationId === "dayway" && <span className="recommended-badge">推荐</span>}
+                    {provider.hasRecommendationUpdate && <span className="pending-badge">推荐地址已更新</span>}
                     <span className="verified-badge">{providerMessages.verified}</span>
                     {provider.isCurrent && (
                       <span className="current-badge">{providerMessages.currentProvider}</span>
@@ -546,6 +603,12 @@ export default function ProviderPage() {
                   </span>
                 </div>
                 <div className="provider-row-actions">
+                  {provider.recommendationId === "dayway" && (
+                    <button className="secondary-button compact" type="button" onClick={() => void visitDaywayWebsite()} aria-label="访问 DayWay 官网">
+                      <ExternalLink size={16} aria-hidden="true" />
+                      访问官网
+                    </button>
+                  )}
                   <button
                     className="secondary-button compact"
                     type="button"
@@ -589,6 +652,9 @@ export default function ProviderPage() {
                 </div>
               </article>
             ))}
+            {listState === "ready" && providers.length === 0 && (
+              <p className="empty-catalog-note">{providerMessages.emptyCatalog}</p>
+            )}
           </div>
           {failure && (
             <p className="validation-error" role="alert">
@@ -601,7 +667,7 @@ export default function ProviderPage() {
           <div className="detail-heading">
             <div>
               <h2 id="provider-editor-heading">
-                {selected ? `修改 ${selected.name}` : providerMessages.newProvider}
+                {selected ? `修改 ${selected.name}` : isRecommendedCandidate ? "配置 DayWay" : providerMessages.newProvider}
               </h2>
               <span>{selected ? providerMessages.detailsSubtitle : providerMessages.editorSubtitle}</span>
             </div>
@@ -616,7 +682,7 @@ export default function ProviderPage() {
               <input
                 value={name}
                 onChange={(event) => setName(event.target.value)}
-                disabled={operation === "saving"}
+                disabled={operation === "saving" || isDaywayEditor}
                 aria-describedby={errorId}
               />
             </label>
@@ -630,6 +696,17 @@ export default function ProviderPage() {
                 disabled={busy}
                 aria-describedby={errorId}
               />
+              {selected?.hasRecommendationUpdate && baseUrl !== DAYWAY_BASE_URL && (
+                <button
+                  className="secondary-button recommended-address-action"
+                  type="button"
+                  onClick={() => changeConnection("baseUrl", DAYWAY_BASE_URL)}
+                  disabled={busy}
+                  aria-label="采用 DayWay 推荐地址"
+                >
+                  采用推荐地址
+                </button>
+              )}
             </label>
             <div className="form-field full-width">
               <label htmlFor="provider-api-key">{providerMessages.apiKey}</label>

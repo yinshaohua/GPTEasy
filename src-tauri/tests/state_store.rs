@@ -132,6 +132,59 @@ fn migration_uses_a_consistent_backup_and_keeps_only_three() {
 }
 
 #[test]
+fn recommendation_migration_never_claims_or_overwrites_an_existing_dayway_name() {
+    let temp = TempDir::new().expect("temp dir");
+    let store = store_in(&temp);
+    assert!(store.bootstrap().is_ready());
+    let connection = Connection::open(store.paths().database()).expect("open state database");
+    connection
+        .execute("DROP INDEX providers_recommendation_id_unique", [])
+        .expect("remove v4 index");
+    connection
+        .execute(
+            "ALTER TABLE providers DROP COLUMN recommendation_template_base_url",
+            [],
+        )
+        .expect("remove v4 template snapshot");
+    connection
+        .execute("ALTER TABLE providers DROP COLUMN recommendation_id", [])
+        .expect("restore v3 provider schema");
+    connection
+        .execute(
+            "INSERT INTO providers (id, name, base_url, api_key, default_model, verified_at, verification_fingerprint, sort_order)
+             VALUES ('existing-id', 'DayWay', 'https://saved.example/v1', 'saved-key', 'saved-model', '123', 'saved-fingerprint', 0)",
+            [],
+        )
+        .expect("insert existing same-name provider");
+    connection
+        .pragma_update(None, "user_version", 3_i64)
+        .expect("mark v3 database");
+    drop(connection);
+
+    assert_eq!(store.bootstrap().status, DatabaseStatus::Ready);
+    let connection = Connection::open(store.paths().database()).expect("open upgraded database");
+    let preserved = connection
+        .query_row(
+            "SELECT name, base_url, api_key, default_model, verification_fingerprint, recommendation_id
+             FROM providers WHERE id = 'existing-id'",
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, Option<String>>(5)?)),
+        )
+        .expect("read preserved provider");
+    assert_eq!(
+        preserved,
+        (
+            "DayWay".to_owned(),
+            "https://saved.example/v1".to_owned(),
+            "saved-key".to_owned(),
+            "saved-model".to_owned(),
+            "saved-fingerprint".to_owned(),
+            None,
+        )
+    );
+}
+
+#[test]
 fn migration_failure_recovers_the_consistent_backup_through_the_public_gate() {
     let temp = TempDir::new().expect("temp dir");
     let paths = StatePaths::from_root(temp.path());
