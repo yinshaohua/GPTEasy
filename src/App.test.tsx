@@ -106,6 +106,94 @@ describe("供应商创建", () => {
     expect(JSON.stringify(saveCall?.[1])).not.toContain("secret-provider-key");
   }, 10_000);
 
+  it("候选地址完整验证后由用户确认，拒绝不会回填或保存", async () => {
+    let validationIndex = 0;
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([]);
+      if (command === "discover_provider_models") {
+        return Promise.resolve({
+          requestedBaseUrl: "https://provider.example/api",
+          normalizedBaseUrl: "https://provider.example/api/v1",
+          models: ["candidate-model"],
+        });
+      }
+      if (command === "validate_provider") {
+        validationIndex += 1;
+        return Promise.resolve({
+          validationId: `candidate-validation-${validationIndex}`,
+          requestedBaseUrl: "https://provider.example/api",
+          normalizedBaseUrl: "https://provider.example/api/v1",
+          defaultModel: "candidate-model",
+          combinationFingerprint: "c".repeat(64),
+          verifiedAtEpochSeconds: 1_786_140_000,
+        });
+      }
+      if (command === "save_verified_provider") {
+        return Promise.resolve({
+          id: "candidate-provider",
+          name: "Candidate Provider",
+          baseUrl: "https://provider.example/api/v1",
+          defaultModel: "candidate-model",
+          verifiedAtEpochSeconds: 1_786_140_000,
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "添加供应商" }));
+    fireEvent.change(screen.getByLabelText("供应商名称"), {
+      target: { value: "Candidate Provider" },
+    });
+    fireEvent.change(screen.getByLabelText("服务地址"), {
+      target: { value: "https://provider.example/api" },
+    });
+    fireEvent.change(screen.getByLabelText("API Key"), { target: { value: "secret" } });
+    fireEvent.click(screen.getByRole("button", { name: "获取模型" }));
+
+    expect(await screen.findByRole("option", { name: "candidate-model" })).toBeInTheDocument();
+    expect(screen.getByLabelText("服务地址")).toHaveValue("https://provider.example/api");
+    fireEvent.change(screen.getByLabelText("默认模型"), {
+      target: { value: "candidate-model" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "验证供应商" }));
+    fireEvent.click(await screen.findByRole("button", { name: "完成" }));
+
+    expect(screen.getByRole("dialog", { name: "建议修正服务地址" })).toHaveTextContent(
+      "https://provider.example/api",
+    );
+    expect(screen.getByRole("dialog", { name: "建议修正服务地址" })).toHaveTextContent(
+      "https://provider.example/api/v1",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "保留原地址" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("discard_provider_validation", {
+      validationId: "candidate-validation-1",
+    }));
+    expect(screen.getByLabelText("服务地址")).toHaveValue("https://provider.example/api");
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect(screen.getByRole("dialog", { name: "需要验证供应商" })).toBeInTheDocument();
+    expect(invoke.mock.calls.some(([command]) => command === "save_verified_provider")).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "继续编辑" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "验证供应商" }));
+    fireEvent.click(await screen.findByRole("button", { name: "完成" }));
+    fireEvent.click(screen.getByRole("button", { name: "采用建议地址" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith(
+      "confirm_provider_validation_base_url",
+      {
+        validationId: "candidate-validation-2",
+        baseUrl: "https://provider.example/api/v1",
+      },
+    ));
+    expect(screen.getByLabelText("服务地址")).toHaveValue("https://provider.example/api/v1");
+    expect(invoke.mock.calls.some(([command]) => command === "save_verified_provider")).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect(await screen.findByText("Candidate Provider", { selector: ".provider-row-name" }))
+      .toBeInTheDocument();
+  }, 10_000);
+
   it("按后端进度依次展示 Responses 与工具闭环", async () => {
     let finishValidation: (value: object) => void = () => undefined;
     const validation = new Promise<object>((resolve) => {
@@ -344,7 +432,9 @@ describe("逐项供应商验证弹窗", () => {
     invoke.mockImplementation((command: string) => {
       if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
       if (command === "list_providers") return Promise.resolve([provider]);
-      if (command === "revalidate_provider") return Promise.resolve(updated);
+      if (command === "revalidate_provider") {
+        return Promise.resolve({ provider: updated, validationReceipt: null });
+      }
       return Promise.resolve(undefined);
     });
 
@@ -367,6 +457,61 @@ describe("逐项供应商验证弹窗", () => {
     act(() => vi.advanceTimersByTime(5_001));
     expect(screen.queryByText("Atlas 重新验证成功。")).not.toBeInTheDocument();
     vi.useRealTimers();
+  });
+
+  it("目录重新验证命中候选后保持原记录并要求明确保存建议地址", async () => {
+    const provider = {
+      id: "candidate-revalidation-provider",
+      name: "Atlas",
+      baseUrl: "https://atlas.example/api",
+      defaultModel: "model-a",
+      verifiedAtEpochSeconds: 1_786_140_000,
+      isCurrent: false,
+    };
+    const receipt = {
+      validationId: "candidate-revalidation-receipt",
+      requestedBaseUrl: provider.baseUrl,
+      normalizedBaseUrl: "https://atlas.example/api/v1",
+      defaultModel: "model-a",
+      combinationFingerprint: "d".repeat(64),
+      verifiedAtEpochSeconds: 1_786_140_900,
+    };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([provider]);
+      if (command === "revalidate_provider") {
+        return Promise.resolve({ provider, validationReceipt: receipt });
+      }
+      if (command === "save_provider_update") {
+        return Promise.resolve({
+          ...provider,
+          baseUrl: receipt.normalizedBaseUrl,
+          verifiedAtEpochSeconds: receipt.verifiedAtEpochSeconds,
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+    const originalVerifiedAt = (await screen.findByText(/^验证于 /)).textContent;
+    fireEvent.click(screen.getByRole("button", { name: "验证 Atlas" }));
+    fireEvent.click(await screen.findByRole("button", { name: "完成" }));
+
+    expect(screen.getByRole("dialog", { name: "建议修正服务地址" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "采用建议地址" }));
+    await waitFor(() => expect(screen.getByLabelText("服务地址")).toHaveValue(
+      receipt.normalizedBaseUrl,
+    ));
+    expect(invoke.mock.calls.some(([command]) => command === "save_provider_update")).toBe(false);
+    expect(screen.getByRole("button", { name: "保存" })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("save_provider_update", {
+      validationId: receipt.validationId,
+      providerId: provider.id,
+      name: provider.name,
+    }));
+    expect(originalVerifiedAt).toBeTruthy();
   });
 
   it("目录重新验证失败保留原验证时间、供应商和当前环境", async () => {
@@ -718,7 +863,10 @@ describe("供应商目录生命周期", () => {
         return Promise.resolve({ ...first, name: "Atlas Renamed" });
       }
       if (command === "revalidate_provider") {
-        return Promise.resolve({ ...first, name: "Atlas Renamed", verifiedAtEpochSeconds: 1_786_140_500 });
+        return Promise.resolve({
+          provider: { ...first, name: "Atlas Renamed", verifiedAtEpochSeconds: 1_786_140_500 },
+          validationReceipt: null,
+        });
       }
       if (command === "delete_provider") return Promise.resolve(undefined);
       return Promise.resolve(undefined);

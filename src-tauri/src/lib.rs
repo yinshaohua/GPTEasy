@@ -10,10 +10,11 @@ mod tray;
 use codex::{CodexInspector, LoginStatusCommand};
 use commands::{
     EnvironmentRuntime, ProviderRuntime, StartupRuntime, apply_environment_provider,
-    cancel_provider_request, copy_provider_api_key, delete_provider, discard_provider_validation,
-    discover_provider_models, discover_provider_models_for_update, get_environment_snapshot,
-    get_startup_snapshot, list_providers, open_dayway_website, refresh_startup_snapshot,
-    rename_provider, reorder_providers, restore_last_environment_config, revalidate_provider,
+    cancel_provider_request, confirm_provider_validation_base_url, copy_provider_api_key,
+    delete_provider, discard_provider_validation, discover_provider_models,
+    discover_provider_models_for_update, get_environment_snapshot, get_startup_snapshot,
+    list_providers, open_dayway_website, refresh_startup_snapshot, rename_provider,
+    reorder_providers, restore_last_environment_config, revalidate_provider,
     reveal_provider_api_key, save_and_apply_provider_update, save_dayway_provider,
     save_provider_update, save_verified_provider, switch_to_openai_login, validate_provider,
     validate_provider_update,
@@ -66,6 +67,7 @@ pub fn run() {
             validate_provider_update,
             revalidate_provider,
             cancel_provider_request,
+            confirm_provider_validation_base_url,
             save_verified_provider,
             save_dayway_provider,
             open_dayway_website,

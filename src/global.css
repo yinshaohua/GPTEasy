@@ -944,6 +944,34 @@ select:focus-visible {
   line-height: 1.55;
 }
 
+.address-comparison {
+  display: grid;
+  gap: 10px;
+  margin: 0 0 20px;
+}
+
+.address-comparison div {
+  min-width: 0;
+  padding: 10px 12px;
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.address-comparison dt {
+  margin-bottom: 4px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.address-comparison dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .dialog-actions {
   display: flex;
   justify-content: flex-end;

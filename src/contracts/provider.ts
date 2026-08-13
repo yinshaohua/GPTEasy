@@ -32,12 +32,14 @@ export interface ProviderFailure {
 }
 
 export interface ModelDiscovery {
+  requestedBaseUrl: string;
   normalizedBaseUrl: string;
   models: string[];
 }
 
 export interface ProviderValidationReceipt {
   validationId: string;
+  requestedBaseUrl: string;
   normalizedBaseUrl: string;
   defaultModel: string;
   combinationFingerprint: string;
@@ -63,6 +65,11 @@ export interface ProviderSummary {
   isCurrent: boolean;
   recommendationId?: "dayway" | null;
   hasRecommendationUpdate?: boolean;
+}
+
+export interface ProviderRevalidationResult {
+  provider: ProviderSummary;
+  validationReceipt: ProviderValidationReceipt | null;
 }
 
 export interface ProviderApiKey {
@@ -129,9 +136,17 @@ export function validateProviderUpdate(
 export function revalidateProvider(
   requestId: string,
   providerId: string,
-): Promise<ProviderSummary> {
+): Promise<ProviderRevalidationResult> {
   if (isBrowserPreview()) return Promise.reject(previewFailure);
-  return invoke<ProviderSummary>("revalidate_provider", { requestId, providerId });
+  return invoke<ProviderRevalidationResult>("revalidate_provider", { requestId, providerId });
+}
+
+export function confirmProviderValidationBaseUrl(
+  validationId: string,
+  baseUrl: string,
+): Promise<void> {
+  if (isBrowserPreview()) return Promise.resolve();
+  return invoke<void>("confirm_provider_validation_base_url", { validationId, baseUrl });
 }
 
 export function cancelProviderRequest(requestId: string): Promise<boolean> {

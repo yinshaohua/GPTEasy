@@ -24,6 +24,7 @@ import ProviderValidationDialog, {
 import {
   asProviderFailure,
   cancelProviderRequest,
+  confirmProviderValidationBaseUrl,
   copyProviderApiKey,
   deleteProvider,
   discoverProviderModels,
@@ -90,6 +91,7 @@ export default function ProviderPage() {
     ProviderValidationStage | "idle" | "complete"
   >("idle");
   const [validationSession, setValidationSession] = useState<ProviderValidationSession | null>(null);
+  const [addressSuggestion, setAddressSuggestion] = useState<ProviderValidationReceipt | null>(null);
   const [catalogFeedback, setCatalogFeedback] = useState("");
   const [copyStatus, setCopyStatus] = useState("");
   const apiKeyRef = useRef<HTMLInputElement | null>(null);
@@ -151,6 +153,7 @@ export default function ProviderPage() {
     if (receiptRef.current) void discardProviderValidation(receiptRef.current);
     receiptRef.current = null;
     setReceipt(null);
+    setAddressSuggestion(null);
     setOperation("idle");
     setValidationStage(nextStage);
   }
@@ -247,7 +250,6 @@ export default function ProviderPage() {
             apiKey,
           )
         : await discoverProviderModels(requestId, baseUrl, apiKey ?? "");
-      setBaseUrl(result.normalizedBaseUrl);
       setModels(result.models);
       setDefaultModel("");
       setOperation("idle");
@@ -286,6 +288,9 @@ export default function ProviderPage() {
         : await validateProvider(requestId, baseUrl, apiKey ?? "", defaultModel);
       receiptRef.current = result.validationId;
       setReceipt(result);
+      setAddressSuggestion(
+        result.requestedBaseUrl !== result.normalizedBaseUrl ? result : null,
+      );
       setOperation("verified");
       setValidationStage("complete");
       setValidationSession((current) => current
@@ -317,9 +322,18 @@ export default function ProviderPage() {
       providerName: target.name,
     }));
     try {
-      const updated = await revalidateProvider(requestId, target.id);
-      replaceProvider(updated);
-      setOperation("idle");
+      const result = await revalidateProvider(requestId, target.id);
+      replaceProvider(result.provider);
+      if (result.validationReceipt) {
+        editProvider(result.provider);
+        receiptRef.current = result.validationReceipt.validationId;
+        setReceipt(result.validationReceipt);
+        setAddressSuggestion(result.validationReceipt);
+        setOperation("verified");
+        setValidationStage("complete");
+      } else {
+        setOperation("idle");
+      }
       setValidationStage("complete");
       setValidationSession((current) => current
         ? { ...current, status: "succeeded", stage: "tool_round_trip" }
@@ -349,6 +363,25 @@ export default function ProviderPage() {
       setFailure(null);
     }
     setValidationSession(null);
+  }
+
+  async function acceptAddressSuggestion() {
+    if (!addressSuggestion) return;
+    try {
+      await confirmProviderValidationBaseUrl(
+        addressSuggestion.validationId,
+        addressSuggestion.normalizedBaseUrl,
+      );
+      setBaseUrl(addressSuggestion.normalizedBaseUrl);
+      setAddressSuggestion(null);
+    } catch (error) {
+      discardReceipt("models_confirmed");
+      setFailure(asProviderFailure(error));
+    }
+  }
+
+  function rejectAddressSuggestion() {
+    discardReceipt("models_confirmed");
   }
 
   async function saveProvider() {
@@ -902,7 +935,59 @@ export default function ProviderPage() {
           onClose={closeValidationSession}
         />
       )}
+      {addressSuggestion && !validationSession && (
+        <AddressSuggestionDialog
+          requestedBaseUrl={addressSuggestion.requestedBaseUrl}
+          suggestedBaseUrl={addressSuggestion.normalizedBaseUrl}
+          onAccept={() => void acceptAddressSuggestion()}
+          onReject={rejectAddressSuggestion}
+        />
+      )}
     </>
+  );
+}
+
+function AddressSuggestionDialog({
+  requestedBaseUrl,
+  suggestedBaseUrl,
+  onAccept,
+  onReject,
+}: {
+  requestedBaseUrl: string;
+  suggestedBaseUrl: string;
+  onAccept: () => void;
+  onReject: () => void;
+}) {
+  return (
+    <div className="dialog-backdrop">
+      <section
+        className="confirmation-dialog address-suggestion-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="address-suggestion-title"
+      >
+        <h2 id="address-suggestion-title">{providerMessages.addressSuggestionTitle}</h2>
+        <p>{providerMessages.addressSuggestionMessage}</p>
+        <dl className="address-comparison">
+          <div>
+            <dt>{providerMessages.requestedAddress}</dt>
+            <dd>{requestedBaseUrl}</dd>
+          </div>
+          <div>
+            <dt>{providerMessages.suggestedAddress}</dt>
+            <dd>{suggestedBaseUrl}</dd>
+          </div>
+        </dl>
+        <div className="dialog-actions">
+          <button className="secondary-button" type="button" onClick={onReject} autoFocus>
+            {providerMessages.keepRequestedAddress}
+          </button>
+          <button className="command-button" type="button" onClick={onAccept}>
+            {providerMessages.acceptSuggestedAddress}
+          </button>
+        </div>
+      </section>
+    </div>
   );
 }
 

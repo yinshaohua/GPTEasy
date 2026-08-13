@@ -10,9 +10,9 @@ use crate::environment::{
 };
 use crate::provider::{
     DAYWAY_WEBSITE, DiscoveryInput, ModelDiscovery, ProviderApiKey, ProviderApplication,
-    ProviderFailure, ProviderFailureCategory, ProviderSummary, ProviderUpdateDiscoveryInput,
-    ProviderUpdateValidationInput, ProviderValidationInput, ProviderValidationReceipt,
-    ProviderValidationStage,
+    ProviderFailure, ProviderFailureCategory, ProviderRevalidationResult, ProviderSummary,
+    ProviderUpdateDiscoveryInput, ProviderUpdateValidationInput, ProviderValidationInput,
+    ProviderValidationReceipt, ProviderValidationStage,
 };
 use crate::startup::{StartupCoordinator, StartupSnapshot};
 use crate::tray;
@@ -240,7 +240,7 @@ pub(crate) async fn revalidate_provider(
     state: State<'_, ProviderRuntime>,
     request_id: String,
     provider_id: String,
-) -> Result<ProviderSummary, ProviderFailure> {
+) -> Result<ProviderRevalidationResult, ProviderFailure> {
     let progress_request_id = request_id.clone();
     state
         .application
@@ -269,6 +269,17 @@ pub(crate) fn cancel_provider_request(
     request_id: String,
 ) -> bool {
     state.application.cancel_request(&request_id)
+}
+
+#[tauri::command]
+pub(crate) fn confirm_provider_validation_base_url(
+    state: State<'_, ProviderRuntime>,
+    validation_id: String,
+    base_url: String,
+) -> Result<(), ProviderFailure> {
+    state
+        .application
+        .confirm_validation_base_url(&validation_id, &base_url)
 }
 
 #[tauri::command]

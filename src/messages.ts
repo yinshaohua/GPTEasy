@@ -208,4 +208,10 @@ export const providerMessages = {
   unnamedProvider: "未命名供应商",
   technicalDetails: "技术详情",
   validationFallback: "验证未完成，请检查输入后重试。",
+  addressSuggestionTitle: "建议修正服务地址",
+  addressSuggestionMessage: "此地址已完成完整供应商验证。采用后仍需明确保存。",
+  requestedAddress: "原地址",
+  suggestedAddress: "建议地址",
+  keepRequestedAddress: "保留原地址",
+  acceptSuggestedAddress: "采用建议地址",
 } as const;

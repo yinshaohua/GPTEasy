@@ -113,6 +113,193 @@ async fn model_discovery_preserves_the_path_prefix_and_returns_actual_models() {
 }
 
 #[tokio::test]
+async fn model_discovery_probes_bounded_path_candidates_in_serial_order() {
+    let server = ScriptedModelServer::start([
+        ("404 Not Found", r#"{"error":"missing endpoint"}"#),
+        ("404 Not Found", r#"{"error":"missing endpoint"}"#),
+        (
+            "200 OK",
+            r#"{"object":"list","data":[{"id":"candidate-model"}]}"#,
+        ),
+    ]);
+    let requested_base_url = format!("{}/tenant/chat/completions", server.base_url);
+
+    let discovery = validator()
+        .discover_models(
+            DiscoveryInput {
+                base_url: requested_base_url.clone(),
+                api_key: "test-provider-key".to_owned(),
+            },
+            Default::default(),
+        )
+        .await
+        .expect("a bounded path candidate succeeds");
+
+    assert_eq!(discovery.requested_base_url, requested_base_url);
+    assert_eq!(
+        discovery.normalized_base_url,
+        format!("{}/tenant/v1", server.base_url)
+    );
+    assert_eq!(discovery.models, ["candidate-model"]);
+    assert_eq!(
+        server.finish(),
+        [
+            "/tenant/chat/completions/models",
+            "/tenant/models",
+            "/tenant/v1/models",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn model_discovery_does_not_guess_paths_for_non_path_failures() {
+    for (status, expected) in [
+        ("401 Unauthorized", ProviderFailureCategory::Authentication),
+        ("429 Too Many Requests", ProviderFailureCategory::RateLimit),
+        ("302 Found", ProviderFailureCategory::SecurityPolicy),
+        (
+            "500 Internal Server Error",
+            ProviderFailureCategory::ModelDiscovery,
+        ),
+    ] {
+        let server = ScriptedModelServer::start([(status, r#"{"error":"stop"}"#)]);
+        let failure = validator()
+            .discover_models(
+                DiscoveryInput {
+                    base_url: format!("{}/wrong", server.base_url),
+                    api_key: "test-provider-key".to_owned(),
+                },
+                Default::default(),
+            )
+            .await
+            .expect_err("non-path failures must stop candidate probing");
+
+        assert_eq!(failure.category, expected, "status {status}");
+        assert_eq!(server.finish(), ["/wrong/models"], "status {status}");
+    }
+
+    let server = ScriptedModelServer::start([("200 OK", "not-json")]);
+    let failure = validator()
+        .discover_models(
+            DiscoveryInput {
+                base_url: format!("{}/wrong", server.base_url),
+                api_key: "test-provider-key".to_owned(),
+            },
+            Default::default(),
+        )
+        .await
+        .expect_err("protocol errors must stop candidate probing");
+    assert_eq!(failure.category, ProviderFailureCategory::ModelDiscovery);
+    assert_eq!(server.finish(), ["/wrong/models"]);
+}
+
+#[tokio::test]
+async fn model_discovery_stops_guessing_for_timeout_security_and_tls_failures() {
+    let timeout_server = DelayedModelServer::start(Duration::from_millis(400));
+    let timed_out = validator()
+        .discover_models(
+            DiscoveryInput {
+                base_url: format!("{}/wrong", timeout_server.base_url),
+                api_key: "test-provider-key".to_owned(),
+            },
+            Default::default(),
+        )
+        .await
+        .expect_err("response timeout stops candidate probing");
+    assert_eq!(
+        timed_out.category,
+        ProviderFailureCategory::ResponseHeaderTimeout
+    );
+    assert_eq!(timeout_server.finish(), ["/wrong/models"]);
+
+    let security_failure = validator()
+        .discover_models(
+            DiscoveryInput {
+                base_url: "http://provider.example/wrong".to_owned(),
+                api_key: "test-provider-key".to_owned(),
+            },
+            Default::default(),
+        )
+        .await
+        .expect_err("security policy stops before candidate probing");
+    assert_eq!(
+        security_failure.category,
+        ProviderFailureCategory::SecurityPolicy
+    );
+
+    let tls_failure = validator()
+        .discover_models(
+            DiscoveryInput {
+                base_url: "https://127.0.0.1:9/wrong".to_owned(),
+                api_key: "test-provider-key".to_owned(),
+            },
+            Default::default(),
+        )
+        .await
+        .expect_err("TLS or transport failure stops candidate probing");
+    assert!(matches!(
+        tls_failure.category,
+        ProviderFailureCategory::Transport | ProviderFailureCategory::ResponseHeaderTimeout
+    ));
+}
+
+#[tokio::test]
+async fn model_discovery_covers_each_bounded_suffix_candidate_without_changing_origin() {
+    for (requested_path, expected_paths, resolved_path) in [
+        (
+            "/tenant/models",
+            vec!["/tenant/models/models", "/tenant/models"],
+            "/tenant",
+        ),
+        (
+            "/tenant/responses",
+            vec!["/tenant/responses/models", "/tenant/models"],
+            "/tenant",
+        ),
+        (
+            "/tenant/chat/completions",
+            vec!["/tenant/chat/completions/models", "/tenant/models"],
+            "/tenant",
+        ),
+        (
+            "/tenant",
+            vec!["/tenant/models", "/tenant/v1/models"],
+            "/tenant/v1",
+        ),
+        (
+            "/tenant/v1",
+            vec!["/tenant/v1/models", "/tenant/models"],
+            "/tenant",
+        ),
+    ] {
+        let server = ScriptedModelServer::start([
+            ("404 Not Found", r#"{"error":"missing endpoint"}"#),
+            (
+                "200 OK",
+                r#"{"object":"list","data":[{"id":"candidate-model"}]}"#,
+            ),
+        ]);
+        let expected_resolved_base_url = format!("{}{resolved_path}", server.base_url);
+        let discovery = validator()
+            .discover_models(
+                DiscoveryInput {
+                    base_url: format!("{}{requested_path}", server.base_url),
+                    api_key: "test-provider-key".to_owned(),
+                },
+                Default::default(),
+            )
+            .await
+            .expect("bounded suffix candidate succeeds");
+
+        assert_eq!(server.finish(), expected_paths, "path {requested_path}");
+        assert_eq!(
+            discovery.normalized_base_url, expected_resolved_base_url,
+            "path {requested_path}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn validation_completes_a_fragmented_strict_tool_round_trip() {
     let server = ValidationServer::start(ValidationScenario::Success);
 
@@ -149,6 +336,105 @@ async fn validation_completes_a_fragmented_strict_tool_round_trip() {
     assert_eq!(first["parallel_tool_calls"], false);
     let second: Value = serde_json::from_slice(request_body(&requests[2])).expect("second payload");
     assert_eq!(second["input"][1]["call_id"], second["input"][2]["call_id"]);
+}
+
+#[tokio::test]
+async fn candidate_validation_requires_explicit_address_confirmation_before_save() {
+    let temp = TempDir::new().expect("temp state directory");
+    let store = StateStore::new(StatePaths::from_root(temp.path()));
+    assert!(store.bootstrap().is_ready());
+    let application = ProviderApplication::new(store, validator());
+    let server = PathFixValidationServer::start();
+    let requested_base_url = format!("{}/tenant", server.base_url);
+    let resolved_base_url = format!("{}/tenant/v1", server.base_url);
+
+    let receipt = application
+        .validate_provider(
+            "candidate-validation".to_owned(),
+            ProviderValidationInput {
+                base_url: requested_base_url.clone(),
+                api_key: "test-provider-key".to_owned(),
+                default_model: "model-a".to_owned(),
+            },
+        )
+        .await
+        .expect("candidate completes full validation");
+
+    assert_eq!(receipt.requested_base_url, requested_base_url);
+    assert_eq!(receipt.normalized_base_url, resolved_base_url);
+    let blocked = application
+        .save_verified_provider(&receipt.validation_id, "Candidate Provider")
+        .expect_err("an unconfirmed suggested address cannot be saved");
+    assert_eq!(
+        blocked.category,
+        ProviderFailureCategory::VerificationExpired
+    );
+    assert!(
+        application
+            .list_providers()
+            .expect("empty catalog")
+            .is_empty()
+    );
+
+    application
+        .confirm_validation_base_url(&receipt.validation_id, &receipt.normalized_base_url)
+        .expect("user confirms the validated candidate address");
+    let saved = application
+        .save_verified_provider(&receipt.validation_id, "Candidate Provider")
+        .expect("confirmed candidate can be saved");
+    assert_eq!(saved.base_url, resolved_base_url);
+    assert_eq!(
+        server.finish(),
+        [
+            "/tenant/models",
+            "/tenant/v1/models",
+            "/tenant/v1/responses",
+            "/tenant/v1/responses",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn expired_candidate_receipt_cannot_be_confirmed_or_saved() {
+    let temp = TempDir::new().expect("temp state directory");
+    let store = StateStore::new(StatePaths::from_root(temp.path()));
+    assert!(store.bootstrap().is_ready());
+    let application =
+        ProviderApplication::with_validation_receipt_ttl(store, validator(), Duration::ZERO);
+    let server = PathFixValidationServer::start();
+    let receipt = application
+        .validate_provider(
+            "expiring-candidate".to_owned(),
+            ProviderValidationInput {
+                base_url: format!("{}/tenant", server.base_url),
+                api_key: "test-provider-key".to_owned(),
+                default_model: "model-a".to_owned(),
+            },
+        )
+        .await
+        .expect("candidate validates before receipt expiry");
+
+    let expired = application
+        .confirm_validation_base_url(&receipt.validation_id, &receipt.normalized_base_url)
+        .expect_err("expired receipt cannot be confirmed");
+    assert_eq!(
+        expired.category,
+        ProviderFailureCategory::VerificationExpired
+    );
+    let expired = application
+        .save_verified_provider(&receipt.validation_id, "Expired Candidate")
+        .expect_err("expired receipt cannot be saved");
+    assert_eq!(
+        expired.category,
+        ProviderFailureCategory::VerificationExpired
+    );
+    assert!(
+        application
+            .list_providers()
+            .expect("empty catalog")
+            .is_empty()
+    );
+    server.finish();
 }
 
 #[tokio::test]
@@ -706,7 +992,9 @@ async fn failed_catalog_revalidation_keeps_verification_time_and_current_provide
     )
     .await;
     mark_current_provider(&store, &provider.id);
-    let before = application.list_providers().expect("catalog before failure");
+    let before = application
+        .list_providers()
+        .expect("catalog before failure");
 
     let failure = application
         .revalidate_provider("failed-catalog-revalidation".to_owned(), provider.id)
@@ -720,6 +1008,46 @@ async fn failed_catalog_revalidation_keeps_verification_time_and_current_provide
     assert_eq!(
         application.list_providers().expect("catalog after failure"),
         before
+    );
+}
+
+#[tokio::test]
+async fn catalog_revalidation_returns_a_candidate_receipt_without_persisting_it() {
+    let temp = TempDir::new().expect("temp state directory");
+    let store = StateStore::new(StatePaths::from_root(temp.path()));
+    assert!(store.bootstrap().is_ready());
+    let application = ProviderApplication::new(store.clone(), validator());
+    let server = PathFixValidationServer::start();
+    let requested_base_url = format!("{}/tenant", server.base_url);
+    let resolved_base_url = format!("{}/tenant/v1", server.base_url);
+    insert_provider_record(
+        &store,
+        "candidate-revalidation-provider",
+        &requested_base_url,
+        "test-provider-key",
+        123,
+    );
+
+    let result = application
+        .revalidate_provider(
+            "candidate-revalidation".to_owned(),
+            "candidate-revalidation-provider".to_owned(),
+        )
+        .await
+        .expect("candidate completes revalidation");
+
+    assert_eq!(result.provider.base_url, requested_base_url);
+    assert_eq!(result.provider.verified_at_epoch_seconds, 123);
+    let receipt = result
+        .validation_receipt
+        .expect("candidate revalidation requires address confirmation");
+    assert_eq!(receipt.normalized_base_url, resolved_base_url);
+    assert_eq!(
+        application
+            .list_providers()
+            .expect("catalog remains unchanged")[0]
+            .base_url,
+        requested_base_url
     );
 }
 
@@ -932,7 +1260,8 @@ async fn provider_updates_replace_only_the_freshly_validated_non_current_record(
         .revalidate_provider("manual-revalidation".to_owned(), original.id.clone())
         .await
         .expect("manual revalidation succeeds");
-    assert_eq!(revalidated.id, original.id);
+    assert_eq!(revalidated.provider.id, original.id);
+    assert!(revalidated.validation_receipt.is_none());
 
     mark_current_provider(&store, &original.id);
     let current_receipt = application
@@ -1215,6 +1544,23 @@ fn mark_current_provider(store: &StateStore, provider_id: &str) {
         .expect("mark current provider");
 }
 
+fn insert_provider_record(
+    store: &StateStore,
+    provider_id: &str,
+    base_url: &str,
+    api_key: &str,
+    verified_at: u64,
+) {
+    let connection = Connection::open(store.paths().database()).expect("open state");
+    connection
+        .execute(
+            "INSERT INTO providers (id, name, base_url, api_key, default_model, verified_at, verification_fingerprint, sort_order)
+             VALUES (?1, 'Candidate Revalidation', ?2, ?3, 'model-a', ?4, 'original-fingerprint', 0)",
+            rusqlite::params![provider_id, base_url, api_key, verified_at.to_string()],
+        )
+        .expect("insert saved provider fixture");
+}
+
 struct ModelServer {
     base_url: String,
     request: mpsc::Receiver<String>,
@@ -1255,6 +1601,143 @@ impl ModelServer {
             base_url: format!("http://{url_host}:{}", address.port()),
             request,
         }
+    }
+}
+
+struct ScriptedModelServer {
+    base_url: String,
+    requests: mpsc::Receiver<Vec<String>>,
+    worker: thread::JoinHandle<()>,
+}
+
+impl ScriptedModelServer {
+    fn start<const N: usize>(responses: [(&'static str, &'static str); N]) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind scripted provider");
+        let address = listener.local_addr().expect("scripted provider address");
+        let (sender, requests) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let mut paths = Vec::new();
+            for (status, body) in responses {
+                let (mut stream, _) = listener.accept().expect("accept scripted request");
+                let request = read_request(&mut stream);
+                let request_line = String::from_utf8_lossy(&request)
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned();
+                let path = request_line
+                    .split_whitespace()
+                    .nth(1)
+                    .expect("request path")
+                    .to_owned();
+                paths.push(path);
+                write_json(&mut stream, status, body);
+            }
+            sender.send(paths).expect("capture scripted paths");
+        });
+        Self {
+            base_url: format!("http://{address}"),
+            requests,
+            worker,
+        }
+    }
+
+    fn finish(self) -> Vec<String> {
+        self.worker.join().expect("scripted provider worker");
+        self.requests.recv().expect("scripted request paths")
+    }
+}
+
+struct DelayedModelServer {
+    base_url: String,
+    requests: mpsc::Receiver<Vec<String>>,
+    worker: thread::JoinHandle<()>,
+}
+
+impl DelayedModelServer {
+    fn start(delay: Duration) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind delayed provider");
+        let address = listener.local_addr().expect("delayed provider address");
+        let (sender, requests) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept delayed request");
+            let request = read_request(&mut stream);
+            let path = String::from_utf8_lossy(&request)
+                .lines()
+                .next()
+                .and_then(|line| line.split_whitespace().nth(1))
+                .expect("delayed request path")
+                .to_owned();
+            sender.send(vec![path]).expect("capture delayed path");
+            thread::sleep(delay);
+            write_json(&mut stream, "200 OK", r#"{"object":"list","data":[]}"#);
+        });
+        Self {
+            base_url: format!("http://{address}"),
+            requests,
+            worker,
+        }
+    }
+
+    fn finish(self) -> Vec<String> {
+        self.worker.join().expect("delayed provider worker");
+        self.requests.recv().expect("delayed request paths")
+    }
+}
+
+struct PathFixValidationServer {
+    base_url: String,
+    requests: mpsc::Receiver<Vec<String>>,
+    worker: thread::JoinHandle<()>,
+}
+
+impl PathFixValidationServer {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind path-fix provider");
+        let address = listener.local_addr().expect("path-fix provider address");
+        let (sender, requests) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let mut paths = Vec::new();
+            for index in 0..4 {
+                let (mut stream, _) = listener.accept().expect("accept path-fix request");
+                let request = read_request(&mut stream);
+                let path = String::from_utf8_lossy(&request)
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .expect("path-fix request path")
+                    .to_owned();
+                paths.push(path);
+                match index {
+                    0 => write_json(
+                        &mut stream,
+                        "404 Not Found",
+                        r#"{"error":"missing endpoint"}"#,
+                    ),
+                    1 => write_json(
+                        &mut stream,
+                        "200 OK",
+                        r#"{"object":"list","data":[{"id":"model-a"}]}"#,
+                    ),
+                    _ => {
+                        let payload: Value = serde_json::from_slice(request_body(&request))
+                            .expect("path-fix validation payload");
+                        write_validation_sse(&mut stream, ValidationScenario::Success, &payload);
+                    }
+                }
+            }
+            sender.send(paths).expect("capture path-fix requests");
+        });
+        Self {
+            base_url: format!("http://{address}"),
+            requests,
+            worker,
+        }
+    }
+
+    fn finish(self) -> Vec<String> {
+        self.worker.join().expect("path-fix provider worker");
+        self.requests.recv().expect("path-fix request paths")
     }
 }
 

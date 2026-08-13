@@ -38,11 +38,47 @@ impl ProviderValidator {
         input: DiscoveryInput,
         cancellation: CancellationToken,
     ) -> Result<ModelDiscovery, ProviderFailure> {
-        let normalized = normalize_base_url(&input.base_url)?;
-        let endpoint = endpoint(&normalized, "models");
-        let request = self.client.get(endpoint).bearer_auth(&input.api_key).send();
+        let requested = normalize_base_url(&input.base_url)?;
+        let candidates = base_url_candidates(&requested);
+        let candidate_count = candidates.len();
+        for (index, candidate) in candidates.into_iter().enumerate() {
+            match self
+                .discover_models_at(&candidate, &input.api_key, cancellation.clone())
+                .await
+            {
+                Ok(models) => {
+                    return Ok(ModelDiscovery {
+                        requested_base_url: requested.to_string(),
+                        normalized_base_url: candidate.to_string(),
+                        models,
+                    });
+                }
+                Err(DiscoveryAttemptFailure::EndpointPath) if index + 1 < candidate_count => {}
+                Err(DiscoveryAttemptFailure::EndpointPath) => {
+                    return Err(ProviderFailure::new(
+                        ProviderFailureCategory::ModelDiscovery,
+                        "provider.models_request_failed",
+                    ));
+                }
+                Err(DiscoveryAttemptFailure::Failure(failure)) => return Err(failure),
+            }
+        }
+        unreachable!("base URL candidates always contain the requested URL")
+    }
+
+    async fn discover_models_at(
+        &self,
+        base_url: &Url,
+        api_key: &str,
+        cancellation: CancellationToken,
+    ) -> Result<Vec<String>, DiscoveryAttemptFailure> {
+        let request = self
+            .client
+            .get(endpoint(base_url, "models"))
+            .bearer_auth(api_key)
+            .send();
         let response = tokio::select! {
-            _ = cancellation.cancelled() => return Err(cancelled()),
+            _ = cancellation.cancelled() => return Err(cancelled().into()),
             result = timeout(self.timeouts.response_header, request) => {
                 result
                     .map_err(|_| ProviderFailure::new(
@@ -52,9 +88,15 @@ impl ProviderValidator {
                     .map_err(|error| transport_failure(&error))?
             }
         };
+        if matches!(
+            response.status(),
+            StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+        ) {
+            return Err(DiscoveryAttemptFailure::EndpointPath);
+        }
         classify_status(response.status(), true)?;
         let body = tokio::select! {
-            _ = cancellation.cancelled() => return Err(cancelled()),
+            _ = cancellation.cancelled() => return Err(cancelled().into()),
             result = timeout(self.timeouts.response_overall, response.bytes()) => {
                 result
                     .map_err(|_| ProviderFailure::new(
@@ -64,48 +106,7 @@ impl ProviderValidator {
                     .map_err(|error| transport_failure(&error))?
             }
         };
-        let document: Value = serde_json::from_slice(&body).map_err(|_| {
-            ProviderFailure::new(
-                ProviderFailureCategory::ModelDiscovery,
-                "provider.models_invalid",
-            )
-        })?;
-        let data = document
-            .get("data")
-            .and_then(Value::as_array)
-            .ok_or_else(|| {
-                ProviderFailure::new(
-                    ProviderFailureCategory::ModelDiscovery,
-                    "provider.models_invalid",
-                )
-            })?;
-        let mut seen = HashSet::new();
-        let mut models = Vec::new();
-        for item in data {
-            let id = item
-                .get("id")
-                .and_then(Value::as_str)
-                .filter(|id| !id.is_empty())
-                .ok_or_else(|| {
-                    ProviderFailure::new(
-                        ProviderFailureCategory::ModelDiscovery,
-                        "provider.models_invalid",
-                    )
-                })?;
-            if seen.insert(id.to_owned()) {
-                models.push(id.to_owned());
-            }
-        }
-        if models.is_empty() {
-            return Err(ProviderFailure::new(
-                ProviderFailureCategory::ModelDiscovery,
-                "provider.models_empty",
-            ));
-        }
-        Ok(ModelDiscovery {
-            normalized_base_url: normalized.to_string(),
-            models,
-        })
+        parse_models(&body).map_err(Into::into)
     }
 
     pub async fn validate_provider(
@@ -168,6 +169,7 @@ impl ProviderValidator {
         .await?;
 
         Ok(ValidationEvidence {
+            requested_base_url: discovery.requested_base_url,
             combination_fingerprint: combination_fingerprint(
                 &discovery.normalized_base_url,
                 &input.api_key,
@@ -537,6 +539,92 @@ fn overall_timeout() -> ProviderFailure {
         ProviderFailureCategory::OverallTimeout,
         "provider.overall_timeout",
     )
+}
+
+enum DiscoveryAttemptFailure {
+    EndpointPath,
+    Failure(ProviderFailure),
+}
+
+impl From<ProviderFailure> for DiscoveryAttemptFailure {
+    fn from(failure: ProviderFailure) -> Self {
+        Self::Failure(failure)
+    }
+}
+
+fn parse_models(body: &[u8]) -> Result<Vec<String>, ProviderFailure> {
+    let document: Value = serde_json::from_slice(body).map_err(|_| {
+        ProviderFailure::new(
+            ProviderFailureCategory::ModelDiscovery,
+            "provider.models_invalid",
+        )
+    })?;
+    let data = document
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            ProviderFailure::new(
+                ProviderFailureCategory::ModelDiscovery,
+                "provider.models_invalid",
+            )
+        })?;
+    let mut seen = HashSet::new();
+    let mut models = Vec::new();
+    for item in data {
+        let id = item
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| {
+                ProviderFailure::new(
+                    ProviderFailureCategory::ModelDiscovery,
+                    "provider.models_invalid",
+                )
+            })?;
+        if seen.insert(id.to_owned()) {
+            models.push(id.to_owned());
+        }
+    }
+    if models.is_empty() {
+        return Err(ProviderFailure::new(
+            ProviderFailureCategory::ModelDiscovery,
+            "provider.models_empty",
+        ));
+    }
+    Ok(models)
+}
+
+fn base_url_candidates(requested: &Url) -> Vec<Url> {
+    let requested_path = requested.path().trim_end_matches('/');
+    let stripped_path = strip_endpoint_suffix(requested_path);
+    let mut paths = vec![requested_path.to_owned()];
+    if stripped_path != requested_path {
+        paths.push(stripped_path.to_owned());
+    }
+    let toggle_source = stripped_path;
+    if let Some(without_v1) = toggle_source.strip_suffix("/v1") {
+        paths.push(without_v1.to_owned());
+    } else {
+        paths.push(format!("{}/v1", toggle_source.trim_end_matches('/')));
+    }
+
+    let mut seen = HashSet::new();
+    paths
+        .into_iter()
+        .map(|path| {
+            let mut candidate = requested.clone();
+            candidate.set_path(if path.is_empty() { "/" } else { &path });
+            candidate
+        })
+        .filter(|candidate| seen.insert(candidate.as_str().to_owned()))
+        .collect()
+}
+
+fn strip_endpoint_suffix(path: &str) -> &str {
+    ["/chat/completions", "/responses", "/models"]
+        .into_iter()
+        .find_map(|suffix| path.strip_suffix(suffix))
+        .unwrap_or(path)
 }
 
 fn endpoint(base_url: &Url, suffix: &str) -> Url {

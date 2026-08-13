@@ -5,11 +5,12 @@ pub(crate) const DAYWAY_NAME: &str = "DayWay";
 pub(crate) const DAYWAY_BASE_URL: &str = "https://dayway.site/v1";
 pub(crate) const DAYWAY_RECOMMENDATION_ID: &str = "dayway";
 pub(crate) const DAYWAY_WEBSITE: &str = "https://dayway.site";
+const DEFAULT_VALIDATION_RECEIPT_TTL: Duration = Duration::from_secs(15 * 60);
 
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -100,6 +101,7 @@ impl fmt::Debug for ProviderValidationInput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelDiscovery {
+    pub requested_base_url: String,
     pub normalized_base_url: String,
     pub models: Vec<String>,
 }
@@ -107,6 +109,7 @@ pub struct ModelDiscovery {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ValidationEvidence {
+    pub requested_base_url: String,
     pub normalized_base_url: String,
     pub default_model: String,
     pub combination_fingerprint: String,
@@ -117,10 +120,18 @@ pub struct ValidationEvidence {
 #[serde(rename_all = "camelCase")]
 pub struct ProviderValidationReceipt {
     pub validation_id: String,
+    pub requested_base_url: String,
     pub normalized_base_url: String,
     pub default_model: String,
     pub combination_fingerprint: String,
     pub verified_at_epoch_seconds: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderRevalidationResult {
+    pub provider: ProviderSummary,
+    pub validation_receipt: Option<ProviderValidationReceipt>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -243,6 +254,7 @@ pub struct ProviderApplication {
     validator: ProviderValidator,
     active_requests: Mutex<HashMap<String, CancellationToken>>,
     verified_candidates: Mutex<HashMap<String, VerifiedCandidate>>,
+    validation_receipt_ttl: Duration,
 }
 
 #[derive(Debug)]
@@ -256,7 +268,23 @@ struct VerifiedCandidate {
     request_id: String,
     input: ProviderValidationInput,
     evidence: ValidationEvidence,
+    base_url_confirmed: bool,
+    created_at: Instant,
     target: ValidationTarget,
+}
+
+impl VerifiedCandidate {
+    fn ensure_base_url_confirmed(&self) -> Result<(), ProviderFailure> {
+        if self.base_url_confirmed {
+            Ok(())
+        } else {
+            Err(verification_expired())
+        }
+    }
+
+    fn is_expired(&self, ttl: Duration) -> bool {
+        self.created_at.elapsed() >= ttl
+    }
 }
 
 #[derive(Clone)]
@@ -271,11 +299,20 @@ enum ValidationTarget {
 
 impl ProviderApplication {
     pub fn new(state_store: StateStore, validator: ProviderValidator) -> Self {
+        Self::with_validation_receipt_ttl(state_store, validator, DEFAULT_VALIDATION_RECEIPT_TTL)
+    }
+
+    pub fn with_validation_receipt_ttl(
+        state_store: StateStore,
+        validator: ProviderValidator,
+        validation_receipt_ttl: Duration,
+    ) -> Self {
         Self {
             state_store,
             validator,
             active_requests: Mutex::new(HashMap::new()),
             verified_candidates: Mutex::new(HashMap::new()),
+            validation_receipt_ttl,
         }
     }
 
@@ -448,6 +485,8 @@ impl ProviderApplication {
             VerifiedCandidate {
                 request_id: request_id.clone(),
                 input,
+                base_url_confirmed: evidence.requested_base_url == evidence.normalized_base_url,
+                created_at: Instant::now(),
                 evidence: evidence.clone(),
                 target,
             },
@@ -456,6 +495,7 @@ impl ProviderApplication {
 
         Ok(ProviderValidationReceipt {
             validation_id,
+            requested_base_url: evidence.requested_base_url,
             normalized_base_url: evidence.normalized_base_url,
             default_model: evidence.default_model,
             combination_fingerprint: evidence.combination_fingerprint,
@@ -489,6 +529,33 @@ impl ProviderApplication {
         if let Ok(mut candidates) = self.verified_candidates.lock() {
             candidates.remove(validation_id);
         }
+    }
+
+    pub fn confirm_validation_base_url(
+        &self,
+        validation_id: &str,
+        base_url: &str,
+    ) -> Result<(), ProviderFailure> {
+        let mut candidates = self
+            .verified_candidates
+            .lock()
+            .map_err(|_| state_unavailable())?;
+        if candidates
+            .get(validation_id)
+            .is_some_and(|candidate| candidate.is_expired(self.validation_receipt_ttl))
+        {
+            candidates.remove(validation_id);
+            return Err(verification_expired());
+        }
+        let candidate = candidates
+            .get_mut(validation_id)
+            .ok_or_else(verification_expired)?;
+        if candidate.evidence.normalized_base_url != base_url {
+            candidates.remove(validation_id);
+            return Err(verification_expired());
+        }
+        candidate.base_url_confirmed = true;
+        Ok(())
     }
 
     pub fn save_verified_provider(
@@ -546,13 +613,7 @@ impl ProviderApplication {
                 "provider.name_required",
             ));
         }
-        let candidate = self
-            .verified_candidates
-            .lock()
-            .map_err(|_| state_unavailable())?
-            .get(validation_id)
-            .cloned()
-            .ok_or_else(verification_expired)?;
+        let candidate = self.verified_candidate(validation_id)?;
         let (original_name, original_fingerprint) = match &candidate.target {
             ValidationTarget::ExistingProvider {
                 provider_id: target_id,
@@ -561,6 +622,7 @@ impl ProviderApplication {
             } if target_id == provider_id => (original_name, original_fingerprint),
             _ => return Err(verification_expired()),
         };
+        candidate.ensure_base_url_confirmed()?;
         let actual_fingerprint = combination_fingerprint(
             &candidate.evidence.normalized_base_url,
             &candidate.input.api_key,
@@ -598,13 +660,7 @@ impl ProviderApplication {
                 "provider.name_required",
             ));
         }
-        let candidate = self
-            .verified_candidates
-            .lock()
-            .map_err(|_| state_unavailable())?
-            .get(validation_id)
-            .cloned()
-            .ok_or_else(verification_expired)?;
+        let candidate = self.verified_candidate(validation_id)?;
         let (original_name, original_fingerprint) = match &candidate.target {
             ValidationTarget::ExistingProvider {
                 provider_id: target_id,
@@ -613,6 +669,7 @@ impl ProviderApplication {
             } if target_id == provider_id => (original_name.clone(), original_fingerprint.clone()),
             _ => return Err(verification_expired()),
         };
+        candidate.ensure_base_url_confirmed()?;
         let actual_fingerprint = combination_fingerprint(
             &candidate.evidence.normalized_base_url,
             &candidate.input.api_key,
@@ -680,7 +737,7 @@ impl ProviderApplication {
         &self,
         request_id: String,
         provider_id: String,
-    ) -> Result<ProviderSummary, ProviderFailure> {
+    ) -> Result<ProviderRevalidationResult, ProviderFailure> {
         self.revalidate_provider_with_progress(request_id, provider_id, |_| {})
             .await
     }
@@ -690,7 +747,7 @@ impl ProviderApplication {
         request_id: String,
         provider_id: String,
         progress: F,
-    ) -> Result<ProviderSummary, ProviderFailure>
+    ) -> Result<ProviderRevalidationResult, ProviderFailure>
     where
         F: Fn(ProviderValidationStage),
     {
@@ -707,24 +764,47 @@ impl ProviderApplication {
             api_key: record.api_key,
             default_model: record.summary.default_model.clone(),
         };
-        let result = self
+        let evidence = match self
             .validator
-            .validate_provider_with_progress(input, cancellation.clone(), progress)
+            .validate_provider_with_progress(input.clone(), cancellation.clone(), progress)
             .await
-            .and_then(|evidence| {
-                if cancellation.is_cancelled() {
-                    Err(cancelled())
-                } else {
-                    catalog::record_revalidation(
-                        &self.state_store,
-                        &provider_id,
-                        &record.verification_fingerprint,
-                        &evidence,
-                    )
-                }
+        {
+            Ok(evidence) => evidence,
+            Err(failure) => {
+                self.finish_request(&request_id);
+                return Err(failure);
+            }
+        };
+        if evidence.requested_base_url == evidence.normalized_base_url {
+            let result = catalog::record_revalidation(
+                &self.state_store,
+                &provider_id,
+                &record.verification_fingerprint,
+                &evidence,
+            );
+            self.finish_request(&request_id);
+            let provider = result?;
+            return Ok(ProviderRevalidationResult {
+                provider,
+                validation_receipt: None,
             });
-        self.finish_request(&request_id);
-        result
+        }
+        let provider = record.summary.clone();
+        let receipt = self.remember_verified_candidate(
+            request_id,
+            cancellation,
+            input,
+            evidence,
+            ValidationTarget::ExistingProvider {
+                provider_id,
+                original_name: record.summary.name,
+                original_fingerprint: record.verification_fingerprint,
+            },
+        )?;
+        Ok(ProviderRevalidationResult {
+            provider,
+            validation_receipt: Some(receipt),
+        })
     }
 
     pub fn reveal_provider_api_key(
@@ -792,16 +872,11 @@ impl ProviderApplication {
         &self,
         validation_id: &str,
     ) -> Result<VerifiedCandidate, ProviderFailure> {
-        let candidate = self
-            .verified_candidates
-            .lock()
-            .map_err(|_| state_unavailable())?
-            .get(validation_id)
-            .cloned()
-            .ok_or_else(verification_expired)?;
+        let candidate = self.verified_candidate(validation_id)?;
         if !matches!(candidate.target, ValidationTarget::NewProvider) {
             return Err(verification_expired());
         }
+        candidate.ensure_base_url_confirmed()?;
         let actual_fingerprint = combination_fingerprint(
             &candidate.evidence.normalized_base_url,
             &candidate.input.api_key,
@@ -812,6 +887,27 @@ impl ProviderApplication {
             return Err(verification_expired());
         }
         Ok(candidate)
+    }
+
+    fn verified_candidate(
+        &self,
+        validation_id: &str,
+    ) -> Result<VerifiedCandidate, ProviderFailure> {
+        let mut candidates = self
+            .verified_candidates
+            .lock()
+            .map_err(|_| state_unavailable())?;
+        if candidates
+            .get(validation_id)
+            .is_some_and(|candidate| candidate.is_expired(self.validation_receipt_ttl))
+        {
+            candidates.remove(validation_id);
+            return Err(verification_expired());
+        }
+        candidates
+            .get(validation_id)
+            .cloned()
+            .ok_or_else(verification_expired)
     }
 
     fn finish_request(&self, request_id: &str) {
