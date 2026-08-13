@@ -179,6 +179,11 @@ export function deleteProvider(providerId: string): Promise<void> {
   return invoke<void>("delete_provider", { providerId });
 }
 
+export function reorderProviders(providerIds: string[]): Promise<ProviderSummary[]> {
+  if (isBrowserPreview()) return Promise.reject(previewFailure);
+  return invoke<ProviderSummary[]>("reorder_providers", { providerIds });
+}
+
 export function revealProviderApiKey(providerId: string): Promise<ProviderApiKey> {
   if (isBrowserPreview()) return Promise.reject(previewFailure);
   return invoke<ProviderApiKey>("reveal_provider_api_key", { providerId });

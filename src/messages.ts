@@ -128,6 +128,7 @@ export const providerFailureMessages: Record<string, string> = {
   "provider.clipboard_unavailable": "无法写入系统剪贴板。",
   "provider.verification_expired": "本次验证已失效，请重新验证。",
   "provider.state_unavailable": "本地供应商目录暂时不可用。",
+  "provider.order_invalid": "供应商排序请求无效，请刷新后重试。",
   "provider.preview_network_unavailable": "浏览器预览不能发起真实供应商验证。",
 };
 

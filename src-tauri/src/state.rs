@@ -9,7 +9,7 @@ use rusqlite::backup::Backup;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction};
 use serde::Serialize;
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 2;
+pub const CURRENT_SCHEMA_VERSION: i64 = 3;
 const APPLICATION_ID: i64 = 0x4750_5445;
 const BACKUP_LIMIT: usize = 3;
 const INSTALLATION_MARKER_CONTENT: &[u8] = b"gpteasy-state-v1\n";
@@ -67,7 +67,15 @@ ALTER TABLE app_state ADD COLUMN pending_restart_context TEXT;
 ALTER TABLE pending_config_operation ADD COLUMN restart_context TEXT;
 "#;
 
-const MIGRATIONS: &[(i64, &str)] = &[(1, SCHEMA_V1), (2, SCHEMA_V2)];
+const SCHEMA_V3: &str = r#"
+ALTER TABLE providers ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0;
+UPDATE providers
+SET sort_order = (
+    SELECT COUNT(*) FROM providers earlier WHERE earlier.rowid < providers.rowid
+);
+"#;
+
+const MIGRATIONS: &[(i64, &str)] = &[(1, SCHEMA_V1), (2, SCHEMA_V2), (3, SCHEMA_V3)];
 
 #[derive(Debug, Clone)]
 pub struct StatePaths {

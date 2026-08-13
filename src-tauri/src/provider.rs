@@ -715,6 +715,10 @@ impl ProviderApplication {
         catalog::delete_provider(&self.state_store, provider_id)
     }
 
+    pub fn reorder_providers(&self, provider_ids: &[String]) -> Result<Vec<ProviderSummary>, ProviderFailure> {
+        catalog::reorder_providers(&self.state_store, provider_ids)
+    }
+
     fn begin_request(&self, request_id: &str) -> Result<CancellationToken, ProviderFailure> {
         if request_id.trim().is_empty() {
             return Err(ProviderFailure::new(

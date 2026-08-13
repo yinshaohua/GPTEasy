@@ -355,6 +355,16 @@ pub(crate) fn delete_provider(
 }
 
 #[tauri::command]
+pub(crate) fn reorder_providers(
+    app: AppHandle,
+    state: State<'_, ProviderRuntime>,
+    provider_ids: Vec<String>,
+) -> Result<Vec<ProviderSummary>, ProviderFailure> {
+    let result = state.application.reorder_providers(&provider_ids);
+    refresh_tray_after(&app, result)
+}
+
+#[tauri::command]
 pub(crate) fn reveal_provider_api_key(
     state: State<'_, ProviderRuntime>,
     provider_id: String,

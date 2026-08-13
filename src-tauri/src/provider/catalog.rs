@@ -18,39 +18,7 @@ pub(super) fn list_providers(
     state_store: &StateStore,
 ) -> Result<Vec<ProviderSummary>, ProviderFailure> {
     let connection = open_catalog(state_store)?;
-    let mut statement = connection
-        .prepare(
-            "SELECT p.id, p.name, p.base_url, p.default_model, p.verified_at, \
-                    EXISTS(\
-                        SELECT 1 FROM last_applied_state current \
-                        WHERE current.singleton = 1 \
-                          AND current.mode = 'provider' \
-                          AND current.provider_id = p.id\
-                    ) \
-             FROM providers p ORDER BY p.name COLLATE NOCASE, p.id",
-        )
-        .map_err(|_| state_unavailable())?;
-    statement
-        .query_map([], |row| {
-            let verified_at = row.get::<_, String>(4)?;
-            Ok(ProviderSummary {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                base_url: row.get(2)?,
-                default_model: row.get(3)?,
-                verified_at_epoch_seconds: verified_at.parse().map_err(|error| {
-                    SqliteError::FromSqlConversionFailure(
-                        4,
-                        rusqlite::types::Type::Text,
-                        Box::new(error),
-                    )
-                })?,
-                is_current: row.get::<_, i64>(5)? == 1,
-            })
-        })
-        .map_err(|_| state_unavailable())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| state_unavailable())
+    list_providers_from_connection(&connection)
 }
 
 pub(super) fn insert_provider(
@@ -94,8 +62,8 @@ pub(super) fn insert_provider(
     transaction
         .execute(
             "INSERT INTO providers (\
-                id, name, base_url, api_key, default_model, verified_at, verification_fingerprint\
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                id, name, base_url, api_key, default_model, verified_at, verification_fingerprint, sort_order\
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, COALESCE((SELECT MAX(sort_order) + 1 FROM providers), 0))",
             params![
                 summary.id,
                 summary.name,
@@ -159,7 +127,104 @@ pub(super) fn delete_provider(
     transaction
         .execute("DELETE FROM providers WHERE id = ?1", [provider_id])
         .map_err(|_| state_unavailable())?;
+    compact_order(&transaction)?;
     transaction.commit().map_err(|_| state_unavailable())
+}
+
+pub(super) fn reorder_providers(
+    state_store: &StateStore,
+    provider_ids: &[String],
+) -> Result<Vec<ProviderSummary>, ProviderFailure> {
+    let mut connection = open_catalog(state_store)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| state_unavailable())?;
+    let mut statement = transaction
+        .prepare("SELECT id FROM providers ORDER BY sort_order, rowid")
+        .map_err(|_| state_unavailable())?;
+    let existing = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|_| state_unavailable())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| state_unavailable())?;
+    drop(statement);
+    if provider_ids.len() != existing.len()
+        || provider_ids.iter().any(|id| !existing.iter().any(|value| value == id))
+        || {
+            let mut unique = provider_ids.to_vec();
+            unique.sort();
+            unique.dedup();
+            unique.len() != provider_ids.len()
+        }
+    {
+        return Err(ProviderFailure::new(
+            ProviderFailureCategory::InvalidInput,
+            "provider.order_invalid",
+        ));
+    }
+    // Move rows into a temporary range before assigning the requested positions.
+    transaction
+        .execute("UPDATE providers SET sort_order = sort_order + ?1", [existing.len() as i64])
+        .map_err(|_| state_unavailable())?;
+    for (index, provider_id) in provider_ids.iter().enumerate() {
+        transaction
+            .execute(
+                "UPDATE providers SET sort_order = ?1 WHERE id = ?2",
+                params![index as i64, provider_id],
+            )
+            .map_err(|_| state_unavailable())?;
+    }
+    let summaries = list_providers_from_connection(&transaction)?;
+    transaction.commit().map_err(|_| state_unavailable())?;
+    Ok(summaries)
+}
+
+fn compact_order(transaction: &rusqlite::Transaction<'_>) -> Result<(), ProviderFailure> {
+    let ids = {
+        let mut statement = transaction
+            .prepare("SELECT id FROM providers ORDER BY sort_order, rowid")
+            .map_err(|_| state_unavailable())?;
+        statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|_| state_unavailable())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| state_unavailable())?
+    };
+    let offset = ids.len() as i64 + 1;
+    transaction
+        .execute("UPDATE providers SET sort_order = sort_order + ?1", [offset])
+        .map_err(|_| state_unavailable())?;
+    for (index, provider_id) in ids.iter().enumerate() {
+        transaction
+            .execute(
+                "UPDATE providers SET sort_order = ?1 WHERE id = ?2",
+                params![index as i64, provider_id],
+            )
+            .map_err(|_| state_unavailable())?;
+    }
+    Ok(())
+}
+
+fn list_providers_from_connection(
+    connection: &Connection,
+) -> Result<Vec<ProviderSummary>, ProviderFailure> {
+    let mut statement = connection
+        .prepare(
+            "SELECT p.id, p.name, p.base_url, p.default_model, p.verified_at, EXISTS(SELECT 1 FROM last_applied_state current WHERE current.singleton = 1 AND current.mode = 'provider' AND current.provider_id = p.id) FROM providers p ORDER BY p.sort_order, p.rowid",
+        )
+        .map_err(|_| state_unavailable())?;
+    statement
+        .query_map([], |row| {
+            let verified_at = row.get::<_, String>(4)?;
+            Ok(ProviderSummary {
+                id: row.get(0)?, name: row.get(1)?, base_url: row.get(2)?, default_model: row.get(3)?,
+                verified_at_epoch_seconds: verified_at.parse().map_err(|error| SqliteError::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(error)))?,
+                is_current: row.get::<_, i64>(5)? == 1,
+            })
+        })
+        .map_err(|_| state_unavailable())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| state_unavailable())
 }
 
 pub(super) fn get_provider(

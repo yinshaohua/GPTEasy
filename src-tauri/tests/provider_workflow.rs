@@ -523,6 +523,57 @@ async fn catalog_keeps_provider_identity_across_rename_and_protects_the_current_
 }
 
 #[tokio::test]
+async fn catalog_order_is_persistent_and_invalid_reorders_are_atomic() {
+    let temp = TempDir::new().expect("temp state directory");
+    let store = StateStore::new(StatePaths::from_root(temp.path()));
+    assert!(store.bootstrap().is_ready());
+    let application = ProviderApplication::new(store.clone(), validator());
+    let first_server = ValidationServer::start(ValidationScenario::Success);
+    let first = create_provider(
+        &application,
+        "order-first",
+        first_server.base_url.clone(),
+        "First Provider",
+        "first-key",
+    )
+    .await;
+    let second_server = ValidationServer::start(ValidationScenario::Success);
+    let second = create_provider(
+        &application,
+        "order-second",
+        second_server.base_url.clone(),
+        "Second Provider",
+        "second-key",
+    )
+    .await;
+    let third_server = ValidationServer::start(ValidationScenario::Success);
+    let third = create_provider(
+        &application,
+        "order-third",
+        third_server.base_url.clone(),
+        "Third Provider",
+        "third-key",
+    )
+    .await;
+
+    let reordered = application
+        .reorder_providers(&[third.id.clone(), first.id.clone(), second.id.clone()])
+        .expect("valid reorder");
+    assert_eq!(reordered.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(), vec![third.id.as_str(), first.id.as_str(), second.id.as_str()]);
+    assert_eq!(application.list_providers().expect("persistent order")[0].id, third.id);
+
+    let invalid = application
+        .reorder_providers(&[first.id.clone(), first.id.clone(), second.id.clone()])
+        .expect_err("duplicate ids are rejected");
+    assert_eq!(invalid.category, ProviderFailureCategory::InvalidInput);
+    assert_eq!(application.list_providers().expect("order remains")[0].id, third.id);
+
+    application.delete_provider(&first.id).expect("delete provider");
+    let compacted = application.list_providers().expect("compact order");
+    assert_eq!(compacted.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(), vec![third.id.as_str(), second.id.as_str()]);
+}
+
+#[tokio::test]
 async fn provider_updates_replace_only_the_freshly_validated_non_current_record() {
     let temp = TempDir::new().expect("temp state directory");
     let store = StateStore::new(StatePaths::from_root(temp.path()));

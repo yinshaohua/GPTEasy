@@ -5,6 +5,7 @@ import {
   Copy,
   Eye,
   EyeOff,
+  GripVertical,
   KeyRound,
   LoaderCircle,
   Pencil,
@@ -27,6 +28,7 @@ import {
   listProviders,
   onProviderValidationProgress,
   renameProvider,
+  reorderProviders,
   revealProviderApiKey,
   revalidateProvider,
   saveProviderUpdate,
@@ -80,6 +82,7 @@ export default function ProviderPage() {
   const [copyStatus, setCopyStatus] = useState("");
   const apiKeyRef = useRef<HTMLInputElement | null>(null);
   const activeRequest = useRef<string | null>(null);
+  const draggedProviderId = useRef<string | null>(null);
   const receiptRef = useRef<string | null>(null);
   const selected = providers.find((provider) => provider.id === selectedId) ?? null;
 
@@ -295,7 +298,7 @@ export default function ProviderPage() {
         if (!receipt) return;
         saved = await saveVerifiedProvider(receipt.validationId, name);
         receiptRef.current = null;
-        setProviders((current) => sortProviders([...current, saved]));
+        setProviders((current) => [...current, saved]);
         resetEditor("catalog");
         return;
       }
@@ -432,7 +435,7 @@ export default function ProviderPage() {
 
   function replaceProvider(updated: ProviderSummary) {
     setProviders((current) =>
-      sortProviders(current.map((provider) => (provider.id === updated.id ? updated : provider))),
+      current.map((provider) => (provider.id === updated.id ? updated : provider)),
     );
   }
 
@@ -499,7 +502,36 @@ export default function ProviderPage() {
           )}
           <div className="provider-list" aria-label={providerMessages.verifiedProviders}>
             {providers.map((provider) => (
-              <article className="provider-list-row" key={provider.id}>
+              <article
+                className="provider-list-row"
+                key={provider.id}
+                onDragOver={(event) => event.preventDefault()}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  const sourceId = draggedProviderId.current;
+                  draggedProviderId.current = null;
+                  if (!sourceId || sourceId === provider.id || busy) return;
+                  const next = providers.filter((item) => item.id !== sourceId);
+                  const targetIndex = next.findIndex((item) => item.id === provider.id);
+                  if (targetIndex < 0) return;
+                  next.splice(targetIndex, 0, providers.find((item) => item.id === sourceId)!);
+                  setProviders(next);
+                  void reorderProviders(next.map((item) => item.id)).catch(() => {
+                    void listProviders().then(setProviders).catch(() => undefined);
+                  });
+                }}
+              >
+                <span
+                  className="provider-drag-handle"
+                  draggable
+                  role="img"
+                  aria-label={`拖拽排序 ${provider.name}`}
+                  title={`拖拽排序 ${provider.name}`}
+                  onDragStart={() => { draggedProviderId.current = provider.id; }}
+                  onDragEnd={() => { draggedProviderId.current = null; }}
+                >
+                  <GripVertical size={18} aria-hidden="true" />
+                </span>
                 <div className="provider-row-summary">
                   <div className="provider-row-title">
                     <strong className="provider-row-name">{provider.name}</strong>
@@ -848,10 +880,6 @@ function ValidationStep({ complete, active, label }: { complete: boolean; active
       {label}
     </li>
   );
-}
-
-function sortProviders(providers: ProviderSummary[]): ProviderSummary[] {
-  return [...providers].sort((left, right) => left.name.localeCompare(right.name, "zh-CN"));
 }
 
 function candidateStatus(

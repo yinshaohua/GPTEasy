@@ -519,7 +519,7 @@ select:focus-visible {
 
 .provider-list-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
   align-items: center;
   gap: 20px;
   width: 100%;
@@ -531,6 +531,21 @@ select:focus-visible {
   border-bottom: 1px solid var(--border);
   text-align: left;
 }
+
+.provider-drag-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 32px;
+  padding: 0;
+  color: var(--muted-text);
+  background: transparent;
+  border: 0;
+  cursor: grab;
+}
+
+.provider-drag-handle:active { cursor: grabbing; }
 
 .provider-row-summary {
   display: grid;
@@ -891,11 +906,12 @@ select:focus-visible {
 
 @media (max-width: 1180px) {
   .provider-list-row {
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: 28px minmax(0, 1fr);
     gap: 10px;
   }
 
   .provider-row-actions {
+    grid-column: 2;
     justify-content: flex-start;
   }
 }
