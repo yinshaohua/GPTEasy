@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import {
+  CirclePlay,
   LoaderCircle,
   MessageSquare,
   RefreshCw,
@@ -8,6 +9,12 @@ import {
 } from "lucide-react";
 
 import ProviderPage from "./ProviderPage";
+import {
+  asDesktopFailure,
+  getDesktopSnapshot,
+  startDesktopApplication,
+  type DesktopSnapshot,
+} from "./contracts/desktop";
 import {
   getStartupSnapshot,
   refreshStartupSnapshot,
@@ -23,6 +30,11 @@ type ViewState =
   | { kind: "loading" }
   | { kind: "loaded"; snapshot: StartupSnapshot }
   | { kind: "error" };
+
+type DesktopViewState =
+  | { kind: "loading" }
+  | { kind: "loaded"; snapshot: DesktopSnapshot }
+  | { kind: "error"; messageId: string };
 
 export default function App() {
   const [state, setState] = useState<ViewState>({ kind: "loading" });
@@ -77,6 +89,33 @@ function Shell({ children }: { children: React.ReactNode }) {
 }
 
 function Sidebar() {
+  const [desktop, setDesktop] = useState<DesktopViewState>({ kind: "loading" });
+
+  useEffect(() => {
+    let current = true;
+    void getDesktopSnapshot()
+      .then((snapshot) => {
+        if (current) setDesktop({ kind: "loaded", snapshot });
+      })
+      .catch((error: unknown) => {
+        if (current) setDesktop({ kind: "error", messageId: asDesktopFailure(error).messageId });
+      });
+    return () => {
+      current = false;
+    };
+  }, []);
+
+  const startDesktop = async () => {
+    if (desktop.kind !== "loaded" || desktop.snapshot.action !== "start") return;
+    if (!window.confirm("将启动 OpenAI 官方 ChatGPT/Codex 桌面版。是否继续？")) return;
+    setDesktop({ kind: "loading" });
+    try {
+      setDesktop({ kind: "loaded", snapshot: await startDesktopApplication() });
+    } catch (error) {
+      setDesktop({ kind: "error", messageId: asDesktopFailure(error).messageId });
+    }
+  };
+
   return (
     <aside className="sidebar" aria-label="应用导航">
       <Brand />
@@ -95,9 +134,59 @@ function Sidebar() {
           <span className="nav-item-note">即将支持</span>
         </button>
       </nav>
+      <DesktopCommand state={desktop} onStart={() => void startDesktop()} />
       <div className="sidebar-meta">当前用户</div>
     </aside>
   );
+}
+
+function DesktopCommand({
+  state,
+  onStart,
+}: {
+  state: DesktopViewState;
+  onStart: () => void;
+}) {
+  const snapshot = state.kind === "loaded" ? state.snapshot : null;
+  const running = snapshot?.status === "running";
+  const enabled = snapshot?.action === "start";
+  const label = running ? "ChatGPT/Codex 正在运行" : "启动 ChatGPT/Codex";
+  const messageId = state.kind === "error" ? state.messageId : snapshot?.messageId;
+  const reason = messageId ? desktopMessage(messageId) : null;
+
+  return (
+    <div className="sidebar-command-area">
+      <button
+        className="sidebar-command"
+        type="button"
+        disabled={!enabled || state.kind === "loading"}
+        onClick={onStart}
+      >
+        {state.kind === "loading" ? (
+          <LoaderCircle className="is-spinning" size={17} aria-hidden="true" />
+        ) : (
+          <CirclePlay size={17} aria-hidden="true" />
+        )}
+        <span>{label}</span>
+      </button>
+      {reason && <span className="sidebar-command-reason">{reason}</span>}
+    </div>
+  );
+}
+
+function desktopMessage(messageId: string): string | null {
+  const messages: Record<string, string> = {
+    "desktop.identity_untrusted": "无法可靠确认桌面版身份，启动已禁用。",
+    "desktop.not_installed": "未发现 OpenAI 官方 ChatGPT/Codex 桌面版。",
+    "desktop.ambiguous_installation": "发现多个桌面版候选，无法安全启动。",
+    "desktop.discovery_failed": "无法读取桌面版安装信息。",
+    "desktop.activation_failed": "Windows 未能激活 ChatGPT/Codex。",
+    "desktop.launch_not_observed": "激活后未发现可信的新桌面进程。",
+    "desktop.action_unavailable": "桌面版当前不可启动。",
+    "desktop.state_unavailable": "无法读取桌面版状态。",
+    "desktop.platform_unsupported": "当前平台暂不支持桌面版启动。",
+  };
+  return messages[messageId] ?? null;
 }
 
 function Brand() {

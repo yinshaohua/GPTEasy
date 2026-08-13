@@ -43,6 +43,7 @@ impl ConsumerScanner for StoppedConsumers {
             desktop: ConsumerStatus::Stopped,
             cli: ConsumerStatus::Stopped,
             identities: Vec::new(),
+            desktop_roots: Vec::new(),
         }
     }
 }
@@ -126,6 +127,7 @@ fn running_cli(pid: u32, started_at_epoch_millis: u64) -> ConsumerScan {
             pid,
             started_at_epoch_millis,
         }],
+        desktop_roots: Vec::new(),
     }
 }
 
@@ -134,21 +136,24 @@ fn stopped_consumers() -> ConsumerScan {
         desktop: ConsumerStatus::Stopped,
         cli: ConsumerStatus::Stopped,
         identities: Vec::new(),
+        desktop_roots: Vec::new(),
     }
 }
 
 fn running_desktop(consumers: &[(u32, u64)]) -> ConsumerScan {
+    let desktop_roots = consumers
+        .iter()
+        .map(|(pid, started_at_epoch_millis)| ConsumerIdentity {
+            role: ConsumerRole::Desktop,
+            pid: *pid,
+            started_at_epoch_millis: *started_at_epoch_millis,
+        })
+        .collect::<Vec<_>>();
     ConsumerScan {
         desktop: ConsumerStatus::Running,
         cli: ConsumerStatus::Stopped,
-        identities: consumers
-            .iter()
-            .map(|(pid, started_at_epoch_millis)| ConsumerIdentity {
-                role: ConsumerRole::Desktop,
-                pid: *pid,
-                started_at_epoch_millis: *started_at_epoch_millis,
-            })
-            .collect(),
+        identities: desktop_roots.clone(),
+        desktop_roots,
     }
 }
 

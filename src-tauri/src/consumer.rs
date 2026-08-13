@@ -1,5 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -31,6 +35,7 @@ pub struct ConsumerScan {
     pub desktop: ConsumerStatus,
     pub cli: ConsumerStatus,
     pub identities: Vec<ConsumerIdentity>,
+    pub desktop_roots: Vec<ConsumerIdentity>,
 }
 
 impl ConsumerScan {
@@ -39,6 +44,7 @@ impl ConsumerScan {
             desktop: ConsumerStatus::Unknown,
             cli: ConsumerStatus::Unknown,
             identities: Vec::new(),
+            desktop_roots: Vec::new(),
         }
     }
 
@@ -62,6 +68,274 @@ impl ConsumerScan {
 
 pub trait ConsumerScanner: Send + Sync {
     fn scan(&self) -> ConsumerScan;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DesktopPackage {
+    pub name: String,
+    pub family_name: String,
+    pub application_id: String,
+    pub install_location: PathBuf,
+}
+
+impl DesktopPackage {
+    fn aumid(&self) -> String {
+        format!("{}!{}", self.family_name, self.application_id)
+    }
+}
+
+pub trait DesktopPackageDiscovery: Send + Sync {
+    fn discover(&self) -> Result<Vec<DesktopPackage>, ()>;
+}
+
+pub trait DesktopActivator: Send + Sync {
+    fn activate(&self, aumid: &str) -> Result<(), ()>;
+}
+
+pub trait DesktopClock: Send + Sync {
+    fn now_epoch_millis(&self) -> u64;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopAction {
+    Start,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopSnapshot {
+    pub status: ConsumerStatus,
+    pub action: DesktopAction,
+    pub message_id: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopFailureCategory {
+    ActionUnavailable,
+    ActivationFailed,
+    LaunchNotObserved,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopFailure {
+    pub category: DesktopFailureCategory,
+    pub message_id: &'static str,
+}
+
+#[derive(Clone)]
+pub struct DesktopApplication {
+    discovery: Arc<dyn DesktopPackageDiscovery>,
+    scanner: Arc<dyn ConsumerScanner>,
+    activator: Arc<dyn DesktopActivator>,
+    clock: Arc<dyn DesktopClock>,
+    scan_attempts: usize,
+    scan_delay: Duration,
+}
+
+impl DesktopApplication {
+    pub fn new() -> Self {
+        Self::with_boundaries(
+            Arc::new(WindowsDesktopPackageDiscovery),
+            Arc::new(WindowsConsumerScanner::new()),
+            Arc::new(WindowsDesktopActivator),
+            Arc::new(SystemDesktopClock),
+            20,
+            Duration::from_millis(250),
+        )
+    }
+
+    pub fn with_boundaries(
+        discovery: Arc<dyn DesktopPackageDiscovery>,
+        scanner: Arc<dyn ConsumerScanner>,
+        activator: Arc<dyn DesktopActivator>,
+        clock: Arc<dyn DesktopClock>,
+        scan_attempts: usize,
+        scan_delay: Duration,
+    ) -> Self {
+        Self {
+            discovery,
+            scanner,
+            activator,
+            clock,
+            scan_attempts,
+            scan_delay,
+        }
+    }
+
+    pub fn inspect(&self) -> DesktopSnapshot {
+        let scan = self.scanner.scan();
+        if scan.desktop == ConsumerStatus::Unknown {
+            return desktop_snapshot(
+                ConsumerStatus::Unknown,
+                DesktopAction::Unavailable,
+                "desktop.identity_untrusted",
+            );
+        }
+        if scan.desktop == ConsumerStatus::Running {
+            return desktop_snapshot(
+                ConsumerStatus::Running,
+                DesktopAction::Unavailable,
+                "desktop.running",
+            );
+        }
+        match self.discovery.discover() {
+            Ok(packages) if packages.is_empty() => desktop_snapshot(
+                ConsumerStatus::Stopped,
+                DesktopAction::Unavailable,
+                "desktop.not_installed",
+            ),
+            Ok(packages) if packages.len() == 1 => desktop_snapshot(
+                ConsumerStatus::Stopped,
+                DesktopAction::Start,
+                "desktop.ready_to_start",
+            ),
+            Ok(_) => desktop_snapshot(
+                ConsumerStatus::Stopped,
+                DesktopAction::Unavailable,
+                "desktop.ambiguous_installation",
+            ),
+            Err(()) => desktop_snapshot(
+                ConsumerStatus::Unknown,
+                DesktopAction::Unavailable,
+                "desktop.discovery_failed",
+            ),
+        }
+    }
+
+    pub fn start(&self) -> Result<DesktopSnapshot, DesktopFailure> {
+        let before = self.scanner.scan();
+        if before.desktop != ConsumerStatus::Stopped {
+            return Err(desktop_failure(
+                DesktopFailureCategory::ActionUnavailable,
+                "desktop.action_unavailable",
+            ));
+        }
+        let packages = self.discovery.discover().map_err(|()| {
+            desktop_failure(
+                DesktopFailureCategory::ActionUnavailable,
+                "desktop.discovery_failed",
+            )
+        })?;
+        let [package] = packages.as_slice() else {
+            return Err(desktop_failure(
+                DesktopFailureCategory::ActionUnavailable,
+                if packages.is_empty() {
+                    "desktop.not_installed"
+                } else {
+                    "desktop.ambiguous_installation"
+                },
+            ));
+        };
+        let activation_started_at = self.clock.now_epoch_millis();
+        self.activator.activate(&package.aumid()).map_err(|()| {
+            desktop_failure(
+                DesktopFailureCategory::ActivationFailed,
+                "desktop.activation_failed",
+            )
+        })?;
+        for attempt in 0..self.scan_attempts.max(1) {
+            if attempt > 0 && !self.scan_delay.is_zero() {
+                thread::sleep(self.scan_delay);
+            }
+            let after = self.scanner.scan();
+            if after.desktop == ConsumerStatus::Running
+                && after.desktop_roots.iter().any(|root| {
+                    root.started_at_epoch_millis >= activation_started_at
+                        && !before.desktop_roots.contains(root)
+                })
+            {
+                return Ok(desktop_snapshot(
+                    ConsumerStatus::Running,
+                    DesktopAction::Unavailable,
+                    "desktop.running",
+                ));
+            }
+        }
+        Err(desktop_failure(
+            DesktopFailureCategory::LaunchNotObserved,
+            "desktop.launch_not_observed",
+        ))
+    }
+}
+
+impl Default for DesktopApplication {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn desktop_snapshot(
+    status: ConsumerStatus,
+    action: DesktopAction,
+    message_id: &'static str,
+) -> DesktopSnapshot {
+    DesktopSnapshot {
+        status,
+        action,
+        message_id,
+    }
+}
+
+fn desktop_failure(category: DesktopFailureCategory, message_id: &'static str) -> DesktopFailure {
+    DesktopFailure {
+        category,
+        message_id,
+    }
+}
+
+#[derive(Debug, Default)]
+struct SystemDesktopClock;
+
+impl DesktopClock for SystemDesktopClock {
+    fn now_epoch_millis(&self) -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX)
+    }
+}
+
+#[derive(Debug, Default)]
+struct WindowsDesktopPackageDiscovery;
+
+impl DesktopPackageDiscovery for WindowsDesktopPackageDiscovery {
+    fn discover(&self) -> Result<Vec<DesktopPackage>, ()> {
+        #[cfg(windows)]
+        {
+            discover_windows_desktop_packages()
+        }
+        #[cfg(not(windows))]
+        {
+            Err(())
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct WindowsDesktopActivator;
+
+impl DesktopActivator for WindowsDesktopActivator {
+    fn activate(&self, aumid: &str) -> Result<(), ()> {
+        #[cfg(windows)]
+        {
+            Command::new("explorer.exe")
+                .arg(format!(r"shell:AppsFolder\{aumid}"))
+                .spawn()
+                .map(|_| ())
+                .map_err(|_| ())
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = aumid;
+            Err(())
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -205,7 +479,78 @@ fn classify_processes(processes: &[FixtureProcess]) -> ConsumerScan {
             ConsumerStatus::Stopped
         },
         identities,
+        desktop_roots: desktop_roots
+            .iter()
+            .filter_map(|pid| by_pid.get(pid))
+            .map(|process| ConsumerIdentity {
+                role: ConsumerRole::Desktop,
+                pid: process.pid,
+                started_at_epoch_millis: process.started_at_epoch_millis,
+            })
+            .collect(),
     }
+}
+
+#[cfg(windows)]
+fn discover_windows_desktop_packages() -> Result<Vec<DesktopPackage>, ()> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "PascalCase")]
+    struct PackageRecord {
+        name: String,
+        family_name: String,
+        application_id: String,
+        install_location: PathBuf,
+    }
+
+    const SCRIPT: &str = r#"
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$packages = @(
+  Get-AppxPackage -PackageTypeFilter Main |
+    Where-Object { $_.Name -in @('OpenAI.Codex', 'OpenAI.ChatGPT') } |
+    ForEach-Object {
+      $package = $_
+      $manifest = Get-AppxPackageManifest -Package $package.PackageFullName
+      @($manifest.Package.Applications.Application) | ForEach-Object {
+        [pscustomobject]@{
+          Name = $package.Name
+          FamilyName = $package.PackageFamilyName
+          ApplicationId = $_.Id
+          InstallLocation = $package.InstallLocation
+        }
+      }
+    }
+)
+ConvertTo-Json -Compress -InputObject $packages
+"#;
+    let system_root = std::env::var_os("SystemRoot").ok_or(())?;
+    let powershell = PathBuf::from(system_root)
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+    let output = Command::new(powershell)
+        .args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
+        .output()
+        .map_err(|_| ())?;
+    if !output.status.success() {
+        return Err(());
+    }
+    let records = serde_json::from_slice::<Vec<PackageRecord>>(&output.stdout).map_err(|_| ())?;
+    Ok(records
+        .into_iter()
+        .filter(|record| {
+            !record.family_name.trim().is_empty()
+                && !record.application_id.trim().is_empty()
+                && record.install_location.is_absolute()
+        })
+        .map(|record| DesktopPackage {
+            name: record.name,
+            family_name: record.family_name,
+            application_id: record.application_id,
+            install_location: record.install_location,
+        })
+        .collect())
 }
 
 fn is_desktop_root(process: &&FixtureProcess) -> bool {

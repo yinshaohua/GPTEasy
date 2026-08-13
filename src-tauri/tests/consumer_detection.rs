@@ -49,6 +49,8 @@ fn recognizes_desktop_root_and_its_bundled_codex_child_from_process_evidence() {
     assert_eq!(scan.identities[0].pid, 100);
     assert_eq!(scan.identities[1].role, ConsumerRole::Desktop);
     assert_eq!(scan.identities[1].pid, 101);
+    assert_eq!(scan.desktop_roots.len(), 1);
+    assert_eq!(scan.desktop_roots[0].pid, 100);
 }
 
 #[test]
@@ -134,6 +136,73 @@ fn electron_helper_is_not_classified_as_a_desktop_root() {
     assert_eq!(scan.desktop, ConsumerStatus::Stopped);
     assert_eq!(scan.cli, ConsumerStatus::Stopped);
     assert!(scan.identities.is_empty());
+}
+
+#[test]
+fn renderer_gpu_network_and_crashpad_helpers_are_never_controllable_desktop_roots() {
+    let helpers = ["renderer", "gpu-process", "utility", "crashpad-handler"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, _helper_type)| {
+            let mut helper = process(
+                110 + index as u32,
+                100,
+                1_100 + index as u64,
+                "ChatGPT.exe",
+                r"C:\Program Files\WindowsApps\OpenAI.ChatGPT_1.2.3_x64__publisher\ChatGPT.exe",
+            );
+            helper.electron_helper = true;
+            helper
+        })
+        .collect::<Vec<_>>();
+
+    let scan = classify_fixture(&helpers);
+
+    assert_eq!(scan.desktop, ConsumerStatus::Stopped);
+    assert!(scan.desktop_roots.is_empty());
+}
+
+#[test]
+fn bundled_codex_uses_the_full_ancestor_chain_but_codex_plus_plus_is_excluded() {
+    let mut renderer = process(
+        101,
+        100,
+        1_001,
+        "ChatGPT.exe",
+        r"C:\Program Files\WindowsApps\OpenAI.ChatGPT_1.2.3_x64__publisher\ChatGPT.exe",
+    );
+    renderer.electron_helper = true;
+    let scan = classify_fixture(&[
+        process(
+            100,
+            1,
+            1_000,
+            "ChatGPT.exe",
+            r"C:\Program Files\WindowsApps\OpenAI.ChatGPT_1.2.3_x64__publisher\ChatGPT.exe",
+        ),
+        renderer,
+        process(
+            102,
+            101,
+            1_002,
+            "codex.exe",
+            r"C:\Program Files\WindowsApps\OpenAI.ChatGPT_1.2.3_x64__publisher\resources\codex\codex.exe",
+        ),
+        process(
+            500,
+            1,
+            5_000,
+            "Codex++.exe",
+            r"C:\Users\example\AppData\Local\CodexPlusPlus\Codex++.exe",
+        ),
+    ]);
+
+    assert_eq!(scan.desktop, ConsumerStatus::Running);
+    assert_eq!(scan.cli, ConsumerStatus::Stopped);
+    assert_eq!(scan.desktop_roots.len(), 1);
+    assert_eq!(scan.desktop_roots[0].pid, 100);
+    assert!(scan.identities.iter().any(|identity| identity.pid == 102));
+    assert!(scan.identities.iter().all(|identity| identity.pid != 500));
 }
 
 #[test]

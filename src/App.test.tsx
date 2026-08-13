@@ -1617,3 +1617,74 @@ describe("启动状态", () => {
     expect(screen.queryByText("Codex 环境")).not.toBeInTheDocument();
   });
 });
+
+describe("ChatGPT/Codex 桌面版命令", () => {
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  beforeEach(() => {
+    invoke.mockReset();
+    listen.mockReset();
+    listen.mockResolvedValue(() => undefined);
+  });
+
+  it("桌面版停止时从左栏确认启动，并以重新扫描结果显示运行中", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([]);
+      if (command === "get_desktop_snapshot") {
+        return Promise.resolve({
+          status: "stopped",
+          action: "start",
+          messageId: "desktop.ready_to_start",
+        });
+      }
+      if (command === "start_desktop_application") {
+        return Promise.resolve({
+          status: "running",
+          action: "unavailable",
+          messageId: "desktop.running",
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<App />);
+
+    const start = await screen.findByRole("button", { name: "启动 ChatGPT/Codex" });
+    await waitFor(() => expect(start).toBeEnabled());
+    expect(start.closest(".sidebar-command-area")?.nextElementSibling).toHaveTextContent("当前用户");
+    fireEvent.click(start);
+
+    expect(confirm).toHaveBeenCalledWith("将启动 OpenAI 官方 ChatGPT/Codex 桌面版。是否继续？");
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("start_desktop_application");
+    });
+    expect(await screen.findByText("ChatGPT/Codex 正在运行")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /重启 ChatGPT\/Codex/ })).not.toBeInTheDocument();
+  });
+
+  it("桌面身份检测不可信时禁用命令并显示稳定原因", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([]);
+      if (command === "get_desktop_snapshot") {
+        return Promise.resolve({
+          status: "unknown",
+          action: "unavailable",
+          messageId: "desktop.identity_untrusted",
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+
+    expect(await screen.findByRole("button", { name: "启动 ChatGPT/Codex" })).toBeDisabled();
+    expect(screen.getByText("无法可靠确认桌面版身份，启动已禁用。")).toBeInTheDocument();
+    expect(invoke.mock.calls.some(([command]) => command === "start_desktop_application")).toBe(false);
+  });
+});

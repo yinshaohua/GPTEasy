@@ -1004,6 +1004,7 @@ fn stopped_scan() -> ConsumerScan {
         desktop: ConsumerStatus::Stopped,
         cli: ConsumerStatus::Stopped,
         identities: Vec::new(),
+        desktop_roots: Vec::new(),
     }
 }
 
