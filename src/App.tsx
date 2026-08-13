@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import {
   FileCode2,
   LoaderCircle,
+  MessageSquare,
   RefreshCw,
   Server,
   ShieldAlert,
@@ -96,7 +97,12 @@ function Sidebar({ page, onNavigate }: { page: Page; onNavigate: (page: Page) =>
           onClick={() => onNavigate("providers")}
         >
           <Server size={18} aria-hidden="true" />
-          供应商
+          供应商管理
+        </button>
+        <button className="nav-item" type="button" disabled aria-disabled="true">
+          <MessageSquare size={18} aria-hidden="true" />
+          <span>会话管理</span>
+          <span className="nav-item-note">即将支持</span>
         </button>
         <button
           className="nav-item"

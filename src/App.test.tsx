@@ -78,7 +78,8 @@ describe("供应商创建", () => {
 
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "供应商" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "供应商管理" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "添加供应商" }));
     fireEvent.change(screen.getByLabelText("供应商名称"), {
       target: { value: "  Example Provider  " },
     });
@@ -95,10 +96,10 @@ describe("供应商创建", () => {
     fireEvent.click(screen.getByRole("button", { name: "验证供应商" }));
 
     expect(await screen.findByText("完整验证已通过")).toBeInTheDocument();
-    expect(screen.queryByText("Example Provider", { selector: ".provider-list-row strong" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "供应商目录" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
 
-    expect(await screen.findByText("Example Provider", { selector: ".provider-list-row strong" })).toBeInTheDocument();
+    expect(await screen.findByText("Example Provider", { selector: ".provider-row-name" })).toBeInTheDocument();
     const saveCall = invoke.mock.calls.find(([command]) => command === "save_verified_provider");
     expect(saveCall?.[1]).toEqual({ validationId: "validation-1", name: "  Example Provider  " });
     expect(JSON.stringify(saveCall?.[1])).not.toContain("secret-provider-key");
@@ -123,6 +124,8 @@ describe("供应商创建", () => {
     });
     render(<App />);
 
+    await screen.findByRole("heading", { name: "供应商管理" });
+    fireEvent.click(screen.getByRole("button", { name: "添加供应商" }));
     await screen.findByLabelText("服务地址");
     fireEvent.change(screen.getByLabelText("服务地址"), {
       target: { value: "https://provider.example/v1" },
@@ -175,13 +178,64 @@ describe("供应商创建", () => {
     });
     render(<App />);
 
+    await screen.findByRole("heading", { name: "供应商管理" });
+    fireEvent.click(screen.getByRole("button", { name: "添加供应商" }));
     const name = await screen.findByLabelText("供应商名称");
     fireEvent.change(name, { target: { value: "Unsaved" } });
     fireEvent.click(screen.getByRole("button", { name: "Codex 环境" }));
     expect(await screen.findByRole("heading", { name: "Codex 环境" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "供应商" }));
+    fireEvent.click(screen.getByRole("button", { name: "供应商管理" }));
 
-    expect(await screen.findByLabelText("供应商名称")).toHaveValue("");
+    expect(await screen.findByRole("heading", { name: "供应商目录" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("供应商名称")).not.toBeInTheDocument();
+  });
+
+  it("未验证的新供应商不能绕过验证保存", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([]);
+      if (command === "discover_provider_models") {
+        return Promise.resolve({ normalizedBaseUrl: "https://provider.example/v1", models: ["model-a"] });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "添加供应商" }));
+    fireEvent.change(screen.getByLabelText("供应商名称"), { target: { value: "Example" } });
+    fireEvent.change(screen.getByLabelText("服务地址"), {
+      target: { value: "https://provider.example/v1" },
+    });
+    fireEvent.change(screen.getByLabelText("API Key"), { target: { value: "secret" } });
+    fireEvent.click(screen.getByRole("button", { name: "获取模型" }));
+    await screen.findByRole("option", { name: "model-a" });
+    fireEvent.change(screen.getByLabelText("默认模型"), { target: { value: "model-a" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    expect(screen.getByRole("dialog", { name: "需要验证供应商" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "开始验证" })).toBeEnabled();
+    expect(invoke.mock.calls.some(([command]) => command === "save_verified_provider")).toBe(false);
+  });
+
+  it("返回详情时保留继续编辑选择，放弃后不持久化候选配置", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([]);
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "添加供应商" }));
+    fireEvent.change(screen.getByLabelText("供应商名称"), { target: { value: "Unsaved" } });
+    fireEvent.click(screen.getByRole("button", { name: "返回" }));
+
+    expect(screen.getByRole("dialog", { name: "放弃未保存修改？" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "继续编辑" }));
+    expect(screen.getByLabelText("供应商名称")).toHaveValue("Unsaved");
+    fireEvent.click(screen.getByRole("button", { name: "返回" }));
+    fireEvent.click(screen.getByRole("button", { name: "放弃修改" }));
+    expect(await screen.findByRole("heading", { name: "供应商目录" })).toBeInTheDocument();
+    expect(screen.queryByText("Unsaved")).not.toBeInTheDocument();
   });
 });
 
@@ -223,13 +277,14 @@ describe("验收凭据泄漏门禁", () => {
     });
 
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "编辑 Atlas" }));
+    fireEvent.click(await screen.findByRole("button", { name: "修改 Atlas" }));
     const apiKey = screen.getByLabelText("API Key") as HTMLInputElement;
     expect(apiKey).toHaveAttribute("type", "password");
     expect(apiKey).toHaveValue("");
 
     const screenshotAssist = `${document.body.textContent}\n${document.documentElement.outerHTML}`;
-    fireEvent.click(screen.getByRole("button", { name: "删除供应商" }));
+    fireEvent.click(screen.getByRole("button", { name: "返回" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除 Atlas" }));
     expect(notifications).toHaveLength(1);
     expect(screenshotAssist).not.toContain(apiKeyCanary);
     expect(notifications.join("\n")).not.toContain(apiKeyCanary);
@@ -249,6 +304,67 @@ describe("供应商目录生命周期", () => {
     invoke.mockReset();
     listen.mockReset();
     listen.mockResolvedValue(() => undefined);
+  });
+
+  it("目录仅通过显式操作切换，并同时显示验证与当前状态", async () => {
+    const current = {
+      id: "76149f67-0d76-4d41-b606-77ba244bffec",
+      name: "Current Provider",
+      baseUrl: "https://current.example/v1",
+      defaultModel: "model-current",
+      verifiedAtEpochSeconds: 1_786_140_100,
+      isCurrent: true,
+    };
+    const target = {
+      id: "68bf9ee2-3ba5-4517-b47e-12a11e038de4",
+      name: "Atlas",
+      baseUrl: "https://atlas.example/v1",
+      defaultModel: "model-a",
+      verifiedAtEpochSeconds: 1_786_140_000,
+      isCurrent: false,
+    };
+    const environment = {
+      state: "managed",
+      mode: "provider",
+      messageId: "environment.managed",
+      revision: "revision-1",
+      requiresTakeoverConfirmation: false,
+      requiresConsumerConfirmation: false,
+      impacts: [],
+      currentProvider: current,
+      restoreAvailability: "no_backup",
+      loginStatus: "logged_in",
+      pendingRestart: false,
+      consumers: { desktop: "stopped", cli: "stopped" },
+    };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([target, current]);
+      if (command === "get_environment_snapshot") return Promise.resolve(environment);
+      if (command === "apply_environment_provider") {
+        return Promise.resolve({ ...environment, currentProvider: target, revision: "revision-2" });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "供应商目录" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /会话管理/ })).toBeDisabled();
+    expect(await screen.findAllByText("已验证")).toHaveLength(2);
+    expect(screen.getByRole("button", { name: "Current Provider 当前使用" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Atlas" })).not.toBeInTheDocument();
+    expect(invoke.mock.calls.some(([command]) => command === "apply_environment_provider")).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "切换到 Atlas" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("apply_environment_provider", {
+        providerId: target.id,
+        confirmSwitchRisk: false,
+        expectedRevision: "revision-1",
+      });
+    });
+    expect(screen.getByRole("button", { name: "Atlas 当前使用" })).toBeDisabled();
   });
 
   it("从详情安全查看凭据，并覆盖改名、重验证和删除限制", async () => {
@@ -289,9 +405,9 @@ describe("供应商目录生命周期", () => {
     render(<App />);
 
     fireEvent.click(
-      await screen.findByRole("button", { name: "编辑 Atlas" }, { timeout: 5_000 }),
+      await screen.findByRole("button", { name: "修改 Atlas" }, { timeout: 5_000 }),
     );
-    expect(screen.getByRole("heading", { name: "Atlas" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "修改 Atlas" })).toBeInTheDocument();
     const apiKey = screen.getByLabelText("API Key") as HTMLInputElement;
     expect(apiKey).toHaveAttribute("type", "password");
     expect(apiKey).toHaveValue("");
@@ -317,19 +433,18 @@ describe("供应商目录生命周期", () => {
     });
     expect(invoke.mock.calls.some(([command]) => command === "validate_provider_update")).toBe(false);
 
-    fireEvent.click(screen.getByRole("button", { name: "重新验证" }));
+    fireEvent.click(screen.getByRole("button", { name: "验证 Atlas Renamed" }));
     await waitFor(() => {
       expect(invoke.mock.calls.some(([command]) => command === "revalidate_provider")).toBe(true);
     });
-    fireEvent.click(screen.getByRole("button", { name: "删除供应商" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除 Atlas Renamed" }));
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("delete_provider", { providerId: first.id });
     });
-    expect(screen.queryByRole("button", { name: "编辑 Atlas Renamed" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "修改 Atlas Renamed" })).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "编辑 Current Provider" }));
-    expect(screen.getAllByText("当前供应商")).not.toHaveLength(0);
-    expect(screen.getByRole("button", { name: "删除供应商" })).toBeDisabled();
+    expect(screen.getAllByText("当前使用")).not.toHaveLength(0);
+    expect(screen.getByRole("button", { name: "删除 Current Provider" })).toBeDisabled();
   }, 10_000);
 
   it("非当前供应商关键字段在重新验证前不会更新目录", async () => {
@@ -372,12 +487,16 @@ describe("供应商目录生命周期", () => {
 
     render(<App />);
     fireEvent.click(
-      await screen.findByRole("button", { name: "编辑 Atlas" }, { timeout: 5_000 }),
+      await screen.findByRole("button", { name: "修改 Atlas" }, { timeout: 5_000 }),
     );
     fireEvent.change(screen.getByLabelText("服务地址"), {
       target: { value: "https://atlas.example/next/v1" },
     });
-    expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "保存" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect(screen.getByRole("dialog", { name: "需要验证供应商" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "继续编辑" }));
+    expect(invoke.mock.calls.some(([command]) => command === "save_provider_update")).toBe(false);
     fireEvent.click(screen.getByRole("button", { name: "获取模型" }));
     expect(await screen.findByRole("option", { name: "model-b" })).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("默认模型"), { target: { value: "model-b" } });
@@ -452,7 +571,7 @@ describe("供应商目录生命周期", () => {
     fireEvent.click(
       await screen.findByRole(
         "button",
-        { name: "编辑 Current Provider" },
+        { name: "修改 Current Provider" },
         { timeout: 5_000 },
       ),
     );
@@ -880,7 +999,7 @@ describe("启动状态", () => {
     });
 
     render(<App />);
-    await screen.findByRole("heading", { name: "供应商" });
+    await screen.findByRole("heading", { name: "供应商管理" });
     fireEvent.click(screen.getByRole("button", { name: "Codex 环境" }));
 
     expect(await screen.findByRole("heading", { name: "本地状态已初始化" })).toBeInTheDocument();
