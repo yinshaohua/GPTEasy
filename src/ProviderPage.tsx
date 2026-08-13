@@ -103,6 +103,7 @@ export default function ProviderPage() {
   const [confirmation, setConfirmation] = useState<Confirmation>(null);
   const [restartPlan, setRestartPlan] = useState<RestartPlanRequest | null>(null);
   const [forceAuthorization, setForceAuthorization] = useState<string | null>(null);
+  const [forceExpectedRevision, setForceExpectedRevision] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [isRecommendedCandidate, setIsRecommendedCandidate] = useState(false);
   const [name, setName] = useState("");
@@ -614,11 +615,13 @@ export default function ProviderPage() {
   }
 
   async function forceCompleteRestart() {
-    if (!forceAuthorization) return;
+    if (!forceAuthorization || !forceExpectedRevision) return;
     const authorization = forceAuthorization;
+    const expectedRevision = forceExpectedRevision;
     setForceAuthorization(null);
+    setForceExpectedRevision(null);
     try {
-      applyConfigChange(await forceCompleteConfigRestart(authorization));
+      applyConfigChange(await forceCompleteConfigRestart(authorization, expectedRevision));
     } catch (error) {
       setEnvironmentFailure(asEnvironmentFailure(error));
     }
@@ -627,13 +630,9 @@ export default function ProviderPage() {
   function applyConfigChange(change: ConfigChangeResult) {
     applyEnvironmentSnapshot(change.environment);
     setForceAuthorization(change.forceAuthorization);
-    if (change.restartStatus === "restart_failed") {
-      setCatalogFeedback("配置已更新；桌面版未能重新启动，请手动启动。 ");
-    } else if (change.environment.consumers.cli === "running" && change.environment.pendingRestart) {
-      setCatalogFeedback("配置已更新；请在原终端退出并重新运行 Codex CLI。");
-    } else if (change.restartStatus === "deferred") {
-      setCatalogFeedback("配置已更新，已保留待重启状态。");
-    }
+    setForceExpectedRevision(change.forceExpectedRevision);
+    const feedback = restartPlanFeedback(change);
+    if (feedback) setCatalogFeedback(feedback);
   }
 
   function applyEnvironmentSnapshot(updated: EnvironmentSnapshot) {
@@ -1081,14 +1080,17 @@ export default function ProviderPage() {
           onCancel={() => setRestartPlan(null)}
         />
       )}
-      {forceAuthorization && (
+      {forceAuthorization && forceExpectedRevision && (
         <ConfirmationDialog
           title="桌面版未能正常关闭"
           message="配置已经更新。强制关闭会立即中断正在运行的任务；Codex CLI 不会关闭。"
           primaryLabel="强制关闭并重启"
           secondaryLabel="稍后手动重启"
           onPrimary={() => void forceCompleteRestart()}
-          onSecondary={() => setForceAuthorization(null)}
+          onSecondary={() => {
+            setForceAuthorization(null);
+            setForceExpectedRevision(null);
+          }}
           danger
         />
       )}
@@ -1109,6 +1111,29 @@ export default function ProviderPage() {
       )}
     </>
   );
+}
+
+function restartPlanFeedback(change: ConfigChangeResult): string {
+  const messages: string[] = [];
+  if (change.restartStatus === "restart_failed") {
+    if (
+      change.restartMessageId === "desktop.activation_failed" ||
+      change.restartMessageId === "desktop.launch_not_observed"
+    ) {
+      messages.push("配置已更新；桌面版未能重新启动，请手动启动。");
+    } else {
+      messages.push("配置已更新；桌面版仍在运行，请稍后手动退出并重新启动。");
+    }
+  } else if (change.restartStatus === "deferred") {
+    messages.push("配置已更新，已保留待重启状态。");
+  }
+  if (
+    change.environment.consumers.cli !== "stopped" &&
+    change.environment.pendingRestart
+  ) {
+    messages.push("请在原终端退出并重新运行 Codex CLI。");
+  }
+  return messages.join(" ");
 }
 
 const restoreAvailabilityMessages = {

@@ -64,6 +64,7 @@ export interface ConfigChangeResult {
   restartStatus: RestartPlanStatus;
   restartMessageId: string | null;
   forceAuthorization: string | null;
+  forceExpectedRevision: string | null;
 }
 
 export function getEnvironmentSnapshot(): Promise<EnvironmentSnapshot> {
@@ -108,9 +109,13 @@ export function switchToOpenAiLogin(
 
 export function forceCompleteConfigRestart(
   forceAuthorization: string,
+  expectedRevision: string,
 ): Promise<ConfigChangeResult> {
   if (isBrowserPreview()) return Promise.reject(previewFailure);
-  return invoke<ConfigChangeResult>("force_complete_config_restart", { forceAuthorization });
+  return invoke<ConfigChangeResult>("force_complete_config_restart", {
+    forceAuthorization,
+    expectedRevision,
+  });
 }
 
 export function asEnvironmentFailure(error: unknown): EnvironmentFailure {

@@ -243,11 +243,12 @@ pub(crate) async fn force_complete_config_restart(
     state: State<'_, EnvironmentRuntime>,
     desktop: State<'_, DesktopRuntime>,
     force_authorization: String,
+    expected_revision: String,
 ) -> Result<ConfigChangeResult, EnvironmentFailure> {
     let application = state.application.clone();
     let desktop = desktop.application.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        application.force_complete_restart_plan(&desktop, &force_authorization)
+        application.force_complete_restart_plan(&desktop, &force_authorization, &expected_revision)
     })
     .await
     .map_err(|_| environment_task_failed())?;

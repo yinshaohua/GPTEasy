@@ -59,6 +59,7 @@ pub struct ConfigChangeResult {
     pub restart_status: RestartPlanStatus,
     pub restart_message_id: Option<&'static str>,
     pub force_authorization: Option<String>,
+    pub force_expected_revision: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -775,7 +776,7 @@ impl EnvironmentApplication {
 
     pub fn apply_provider_with_restart_plan(
         &self,
-        _desktop: &DesktopApplication,
+        desktop: &DesktopApplication,
         provider_id: &str,
         decision: RestartDecision,
         expected_revision: &str,
@@ -785,7 +786,7 @@ impl EnvironmentApplication {
         }
         let consumer_scan = self.consumer_scanner.scan();
         let environment = self.apply_provider_at_revision(provider_id, true, expected_revision)?;
-        self.complete_restart_plan(_desktop, decision, consumer_scan, environment)
+        self.complete_restart_plan(desktop, decision, consumer_scan, environment)
     }
 
     pub(crate) fn save_and_apply_provider_update_with_restart_plan(
@@ -806,24 +807,37 @@ impl EnvironmentApplication {
         &self,
         desktop: &DesktopApplication,
         force_authorization: &str,
+        expected_revision: &str,
     ) -> Result<ConfigChangeResult, EnvironmentFailure> {
+        let _guard = self
+            .operation_lock
+            .lock()
+            .map_err(|_| state_unavailable())?;
+        let connection = self.open_state()?;
+        let current = self.inspect_environment(&connection)?;
+        if current.revision != expected_revision {
+            return Err(concurrent_modification());
+        }
         match desktop.force_restart(force_authorization) {
             Ok(result) if result.status == DesktopRestartStatus::Restarted => {
-                let environment = self.complete_successful_desktop_restart()?;
+                let environment =
+                    self.complete_successful_desktop_restart(&connection, expected_revision)?;
                 Ok(ConfigChangeResult {
                     cancelled: false,
                     environment,
                     restart_status: RestartPlanStatus::Restarted,
                     restart_message_id: Some(result.message_id),
                     force_authorization: None,
+                    force_expected_revision: None,
                 })
             }
             Ok(result) => Ok(ConfigChangeResult {
                 cancelled: false,
-                environment: self.inspect()?,
+                environment: self.inspect_environment(&connection)?,
                 restart_status: RestartPlanStatus::CloseTimedOut,
                 restart_message_id: Some(result.message_id),
                 force_authorization: result.force_authorization,
+                force_expected_revision: Some(expected_revision.to_owned()),
             }),
             Err(failure) => {
                 let environment = if matches!(
@@ -831,9 +845,9 @@ impl EnvironmentApplication {
                     DesktopFailureCategory::ActivationFailed
                         | DesktopFailureCategory::LaunchNotObserved
                 ) {
-                    self.mark_desktop_start_required()?
+                    self.mark_desktop_start_required(&connection, expected_revision)?
                 } else {
-                    self.inspect()?
+                    self.inspect_environment(&connection)?
                 };
                 Ok(ConfigChangeResult {
                     cancelled: false,
@@ -841,6 +855,7 @@ impl EnvironmentApplication {
                     restart_status: RestartPlanStatus::RestartFailed,
                     restart_message_id: Some(failure.message_id),
                     force_authorization: None,
+                    force_expected_revision: None,
                 })
             }
         }
@@ -853,6 +868,7 @@ impl EnvironmentApplication {
             restart_status: RestartPlanStatus::Cancelled,
             restart_message_id: None,
             force_authorization: None,
+            force_expected_revision: None,
         })
     }
 
@@ -874,6 +890,7 @@ impl EnvironmentApplication {
                 environment,
                 restart_message_id: None,
                 force_authorization: None,
+                force_expected_revision: None,
             });
         }
         if consumer_scan.desktop != ConsumerStatus::Running
@@ -889,34 +906,41 @@ impl EnvironmentApplication {
                 environment,
                 restart_message_id: None,
                 force_authorization: None,
+                force_expected_revision: None,
             });
         }
 
         match desktop.restart(&consumer_scan.desktop_roots) {
             Ok(result) if result.status == DesktopRestartStatus::Restarted => {
-                let environment = self.complete_successful_desktop_restart()?;
+                let environment =
+                    self.complete_successful_desktop_restart_at_revision(&environment.revision)?;
                 Ok(ConfigChangeResult {
                     cancelled: false,
                     environment,
                     restart_status: RestartPlanStatus::Restarted,
                     restart_message_id: Some(result.message_id),
                     force_authorization: None,
+                    force_expected_revision: None,
                 })
             }
-            Ok(result) => Ok(ConfigChangeResult {
-                cancelled: false,
-                environment,
-                restart_status: RestartPlanStatus::CloseTimedOut,
-                restart_message_id: Some(result.message_id),
-                force_authorization: result.force_authorization,
-            }),
+            Ok(result) => {
+                let expected_revision = environment.revision.clone();
+                Ok(ConfigChangeResult {
+                    cancelled: false,
+                    environment,
+                    restart_status: RestartPlanStatus::CloseTimedOut,
+                    restart_message_id: Some(result.message_id),
+                    force_authorization: result.force_authorization,
+                    force_expected_revision: Some(expected_revision),
+                })
+            }
             Err(failure) => {
                 let environment = if matches!(
                     failure.category,
                     DesktopFailureCategory::ActivationFailed
                         | DesktopFailureCategory::LaunchNotObserved
                 ) {
-                    self.mark_desktop_start_required()?
+                    self.mark_desktop_start_required_at_revision(&environment.revision)?
                 } else {
                     environment
                 };
@@ -926,17 +950,33 @@ impl EnvironmentApplication {
                     restart_status: RestartPlanStatus::RestartFailed,
                     restart_message_id: Some(failure.message_id),
                     force_authorization: None,
+                    force_expected_revision: None,
                 })
             }
         }
     }
 
-    fn mark_desktop_start_required(&self) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
+    fn mark_desktop_start_required_at_revision(
+        &self,
+        expected_revision: &str,
+    ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
         let _guard = self
             .operation_lock
             .lock()
             .map_err(|_| state_unavailable())?;
         let connection = self.open_state()?;
+        self.mark_desktop_start_required(&connection, expected_revision)
+    }
+
+    fn mark_desktop_start_required(
+        &self,
+        connection: &Connection,
+        expected_revision: &str,
+    ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
+        let current = self.inspect_environment(connection)?;
+        if current.revision != expected_revision {
+            return Err(concurrent_modification());
+        }
         let context_json = connection
             .query_row(
                 "SELECT pending_restart_context FROM app_state WHERE singleton = 1",
@@ -968,14 +1008,27 @@ impl EnvironmentApplication {
         self.snapshot_with_consumer_scan(&connection, &scan)
     }
 
-    fn complete_successful_desktop_restart(
+    fn complete_successful_desktop_restart_at_revision(
         &self,
+        expected_revision: &str,
     ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
         let _guard = self
             .operation_lock
             .lock()
             .map_err(|_| state_unavailable())?;
         let connection = self.open_state()?;
+        self.complete_successful_desktop_restart(&connection, expected_revision)
+    }
+
+    fn complete_successful_desktop_restart(
+        &self,
+        connection: &Connection,
+        expected_revision: &str,
+    ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
+        let current = self.inspect_environment(connection)?;
+        if current.revision != expected_revision {
+            return Err(concurrent_modification());
+        }
         let context_json = connection
             .query_row(
                 "SELECT pending_restart_context FROM app_state WHERE singleton = 1",
@@ -995,7 +1048,7 @@ impl EnvironmentApplication {
             .consumers
             .retain(|identity| identity.role != ConsumerRole::Desktop);
         context.desktop_start_required = false;
-        if context.consumers.is_empty() {
+        if context.consumers.is_empty() && !context.detection_uncertain {
             connection
                 .execute(
                     "UPDATE app_state SET pending_restart = 0,

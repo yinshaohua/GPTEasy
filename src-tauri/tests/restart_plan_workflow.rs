@@ -10,14 +10,15 @@ use gpteasy_lib::consumer::{
     DesktopPackageDiscovery, DesktopProcessController,
 };
 use gpteasy_lib::environment::{
-    EnvironmentApplication, EnvironmentFailurePoint, EnvironmentFaultInjector, OpenAiLoginProbe,
-    RestartDecision, RestartPlanStatus,
+    EnvironmentApplication, EnvironmentFailureCategory, EnvironmentFailurePoint,
+    EnvironmentFaultInjector, OpenAiLoginProbe, RestartDecision, RestartPlanStatus,
 };
 use gpteasy_lib::state::{StatePaths, StateStore};
 use rusqlite::{Connection, params};
 use tempfile::TempDir;
 
 const PROVIDER_ID: &str = "9f319739-f219-48ee-be35-22e08d5402d7";
+const SECOND_PROVIDER_ID: &str = "6cde0dd7-9725-462a-ac79-864f5cf63f76";
 
 struct StoppedConsumers;
 
@@ -115,6 +116,19 @@ impl DesktopPackageDiscovery for PackageDiscovery {
 
 struct RecordingController {
     close_requests: Mutex<Vec<Vec<ConsumerIdentity>>>,
+    force_requests: Mutex<Vec<Vec<ConsumerIdentity>>>,
+}
+
+struct FailingForceController;
+
+impl DesktopProcessController for FailingForceController {
+    fn request_close(&self, _: &[ConsumerIdentity]) -> Result<(), DesktopBoundaryError> {
+        Ok(())
+    }
+
+    fn force_terminate(&self, _: &[ConsumerIdentity]) -> Result<(), DesktopBoundaryError> {
+        Err(DesktopBoundaryError)
+    }
 }
 
 impl DesktopProcessController for RecordingController {
@@ -126,7 +140,11 @@ impl DesktopProcessController for RecordingController {
         Ok(())
     }
 
-    fn force_terminate(&self, _: &[ConsumerIdentity]) -> Result<(), DesktopBoundaryError> {
+    fn force_terminate(&self, roots: &[ConsumerIdentity]) -> Result<(), DesktopBoundaryError> {
+        self.force_requests
+            .lock()
+            .expect("force requests lock")
+            .push(roots.to_vec());
         Ok(())
     }
 }
@@ -134,14 +152,15 @@ impl DesktopProcessController for RecordingController {
 struct UpdatingActivator {
     environment_scan: MutableScan,
     fail: bool,
-    keep_cli: bool,
+    cli_status: ConsumerStatus,
 }
 
 impl DesktopActivator for UpdatingActivator {
     fn activate(&self, _: &str) -> Result<(), DesktopBoundaryError> {
         if !self.fail {
-            *self.environment_scan.0.lock().expect("scan lock") =
-                running_desktop(self.keep_cli, 84, 9_000);
+            let mut scan = running_desktop(self.cli_status == ConsumerStatus::Running, 84, 9_000);
+            scan.cli = self.cli_status;
+            *self.environment_scan.0.lock().expect("scan lock") = scan;
             Ok(())
         } else {
             Err(DesktopBoundaryError)
@@ -189,9 +208,10 @@ fn desktop_fixture(
     initial: ConsumerScan,
     activation: Result<(), DesktopBoundaryError>,
 ) -> (DesktopApplication, Arc<RecordingController>) {
-    let keep_cli = initial.cli == ConsumerStatus::Running;
+    let cli_status = initial.cli;
     let controller = Arc::new(RecordingController {
         close_requests: Mutex::new(Vec::new()),
+        force_requests: Mutex::new(Vec::new()),
     });
     let new_desktop = running_desktop(false, 84, 9_000);
     let desktop = DesktopApplication::with_boundaries(
@@ -202,7 +222,7 @@ fn desktop_fixture(
         Arc::new(UpdatingActivator {
             environment_scan,
             fail: activation.is_err(),
-            keep_cli,
+            cli_status,
         }),
         controller.clone(),
         Arc::new(FixedClock),
@@ -210,6 +230,39 @@ fn desktop_fixture(
         Duration::ZERO,
     );
     (desktop, controller)
+}
+
+fn close_timeout_desktop(initial: ConsumerScan) -> (DesktopApplication, Arc<RecordingController>) {
+    let controller = Arc::new(RecordingController {
+        close_requests: Mutex::new(Vec::new()),
+        force_requests: Mutex::new(Vec::new()),
+    });
+    let desktop = DesktopApplication::with_boundaries(
+        Arc::new(PackageDiscovery),
+        Arc::new(SequenceScanner {
+            scans: Mutex::new(vec![initial.clone(), initial.clone(), initial].into()),
+        }),
+        Arc::new(NoActivation),
+        controller.clone(),
+        Arc::new(FixedClock),
+        1,
+        Duration::ZERO,
+    );
+    (desktop, controller)
+}
+
+fn failing_force_desktop(initial: ConsumerScan) -> DesktopApplication {
+    DesktopApplication::with_boundaries(
+        Arc::new(PackageDiscovery),
+        Arc::new(SequenceScanner {
+            scans: Mutex::new(vec![initial.clone(), initial.clone(), initial].into()),
+        }),
+        Arc::new(NoActivation),
+        Arc::new(FailingForceController),
+        Arc::new(FixedClock),
+        1,
+        Duration::ZERO,
+    )
 }
 
 struct FailsBeforeConfigWrite;
@@ -371,6 +424,47 @@ fn immediate_restart_keeps_pending_when_cli_remains_in_its_terminal() {
 }
 
 #[test]
+fn immediate_restart_keeps_pending_when_cli_detection_is_uncertain() {
+    let temp = TempDir::new().expect("temp dir");
+    let store = StateStore::new(StatePaths::from_root(temp.path().join("state")));
+    assert!(store.bootstrap().is_ready());
+    let connection = Connection::open(store.paths().database()).expect("open state database");
+    connection
+        .execute(
+            "INSERT INTO providers (
+                id, name, base_url, api_key, default_model, verified_at,
+                verification_fingerprint
+             ) VALUES (?1, 'Fixture Provider', 'https://fixture.example/v1',
+                       'test-key-not-real', 'fixture-model', '1775606400', 'fixture-fingerprint')",
+            params![PROVIDER_ID],
+        )
+        .expect("insert provider");
+    let mut initial = running_desktop(false, 42, 7_000);
+    initial.cli = ConsumerStatus::Unknown;
+    let environment_scan = MutableScan(Arc::new(Mutex::new(initial.clone())));
+    let environment = EnvironmentApplication::with_consumer_scanner(
+        store,
+        temp.path().join(".codex"),
+        Arc::new(environment_scan.clone()),
+    );
+    let (desktop, _) = desktop_fixture(environment_scan, initial, Ok(()));
+    let preview = environment.inspect().expect("inspect environment");
+
+    let result = environment
+        .apply_provider_with_restart_plan(
+            &desktop,
+            PROVIDER_ID,
+            RestartDecision::Immediate,
+            &preview.revision,
+        )
+        .expect("apply and restart desktop");
+
+    assert_eq!(result.restart_status, RestartPlanStatus::Restarted);
+    assert!(result.environment.pending_restart);
+    assert_eq!(result.environment.consumers.cli, ConsumerStatus::Unknown);
+}
+
+#[test]
 fn configuration_failure_never_requests_desktop_close() {
     let temp = TempDir::new().expect("temp dir");
     let store = StateStore::new(StatePaths::from_root(temp.path().join("state")));
@@ -513,4 +607,112 @@ fn openai_login_switch_uses_the_same_deferred_restart_plan() {
     );
     assert!(result.environment.pending_restart);
     assert_eq!(result.environment.consumers.cli, ConsumerStatus::Running);
+}
+
+#[test]
+fn stale_force_authorization_cannot_modify_a_newer_restart_plan() {
+    let temp = TempDir::new().expect("temp dir");
+    let store = StateStore::new(StatePaths::from_root(temp.path().join("state")));
+    assert!(store.bootstrap().is_ready());
+    let connection = Connection::open(store.paths().database()).expect("open state database");
+    for (id, name) in [
+        (PROVIDER_ID, "Fixture Provider"),
+        (SECOND_PROVIDER_ID, "Second Provider"),
+    ] {
+        connection
+            .execute(
+                "INSERT INTO providers (
+                    id, name, base_url, api_key, default_model, verified_at,
+                    verification_fingerprint
+                 ) VALUES (?1, ?2, 'https://fixture.example/v1',
+                           'test-key-not-real', 'fixture-model', '1775606400', ?3)",
+                params![id, name, format!("fingerprint-{id}")],
+            )
+            .expect("insert provider");
+    }
+    let initial = running_desktop(false, 42, 7_000);
+    let environment_scan = MutableScan(Arc::new(Mutex::new(initial.clone())));
+    let environment = EnvironmentApplication::with_consumer_scanner(
+        store,
+        temp.path().join(".codex"),
+        Arc::new(environment_scan),
+    );
+    let (desktop, controller) = close_timeout_desktop(initial);
+    let preview = environment.inspect().expect("inspect environment");
+
+    let timed_out = environment
+        .apply_provider_with_restart_plan(
+            &desktop,
+            PROVIDER_ID,
+            RestartDecision::Immediate,
+            &preview.revision,
+        )
+        .expect("commit first switch before close timeout");
+    assert_eq!(timed_out.restart_status, RestartPlanStatus::CloseTimedOut);
+    let authorization = timed_out.force_authorization.expect("force authorization");
+    let stale_revision = timed_out
+        .force_expected_revision
+        .expect("force expected revision");
+
+    let newer = environment
+        .apply_provider_with_restart_plan(
+            &desktop,
+            SECOND_PROVIDER_ID,
+            RestartDecision::Later,
+            &timed_out.environment.revision,
+        )
+        .expect("commit newer switch");
+
+    let failure = environment
+        .force_complete_restart_plan(&desktop, &authorization, &stale_revision)
+        .expect_err("stale force plan must be rejected");
+    assert_eq!(
+        failure.category,
+        EnvironmentFailureCategory::ConcurrentModification
+    );
+    assert!(newer.environment.pending_restart);
+    assert!(
+        controller
+            .force_requests
+            .lock()
+            .expect("force requests")
+            .is_empty()
+    );
+}
+
+#[test]
+fn force_termination_failure_returns_without_reentering_the_environment_lock() {
+    let (temp, store, _, _) = fixture();
+    let initial = running_desktop(false, 42, 7_000);
+    let environment_scan = MutableScan(Arc::new(Mutex::new(initial.clone())));
+    let environment = EnvironmentApplication::with_consumer_scanner(
+        store,
+        temp.path().join(".codex"),
+        Arc::new(environment_scan),
+    );
+    let desktop = failing_force_desktop(initial);
+    let preview = environment.inspect().expect("inspect environment");
+    let timed_out = environment
+        .apply_provider_with_restart_plan(
+            &desktop,
+            PROVIDER_ID,
+            RestartDecision::Immediate,
+            &preview.revision,
+        )
+        .expect("commit switch before close timeout");
+    let authorization = timed_out.force_authorization.expect("force authorization");
+    let expected_revision = timed_out
+        .force_expected_revision
+        .expect("force expected revision");
+
+    let result = environment
+        .force_complete_restart_plan(&desktop, &authorization, &expected_revision)
+        .expect("report force termination failure");
+
+    assert_eq!(result.restart_status, RestartPlanStatus::RestartFailed);
+    assert_eq!(
+        result.restart_message_id,
+        Some("desktop.force_terminate_failed")
+    );
+    assert!(result.environment.pending_restart);
 }

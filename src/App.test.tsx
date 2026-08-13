@@ -41,6 +41,7 @@ function configChange(environment: unknown, restartStatus = "deferred") {
     restartStatus,
     restartMessageId: null,
     forceAuthorization: null,
+    forceExpectedRevision: null,
   };
 }
 
@@ -1363,7 +1364,164 @@ describe("Codex 环境接管", () => {
         expectedRevision: "conflict-revision",
       });
     });
-    expect(await screen.findByText("配置已更新；请在原终端退出并重新运行 Codex CLI。")).toBeInTheDocument();
+    expect(await screen.findByText(/请在原终端退出并重新运行 Codex CLI/)).toBeInTheDocument();
+  });
+
+  it("激活失败时同时提示手动启动桌面版和原终端重启 CLI", async () => {
+    const provider = {
+      id: "90f00c5a-59a7-4936-a791-583d90b81b73",
+      name: "Failure Provider",
+      baseUrl: "https://failure.example/v1",
+      defaultModel: "model-a",
+      verifiedAtEpochSeconds: 1_786_140_900,
+      isCurrent: false,
+    };
+    const managed = {
+      state: "managed",
+      mode: "provider",
+      messageId: "environment.managed",
+      revision: "failure-revision",
+      requiresTakeoverConfirmation: false,
+      takeoverAvailable: true,
+      requiresConsumerConfirmation: true,
+      impacts: [],
+      currentProvider: null,
+      restoreAvailability: "no_backup",
+      loginStatus: "logged_in",
+      pendingRestart: false,
+      consumers: { desktop: "running", cli: "running" },
+    };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([provider]);
+      if (command === "get_environment_snapshot") return Promise.resolve(managed);
+      if (command === "apply_environment_provider") {
+        return Promise.resolve({
+          ...configChange({ ...managed, pendingRestart: true }),
+          restartStatus: "restart_failed",
+          restartMessageId: "desktop.activation_failed",
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "切换到 Failure Provider" }));
+    fireEvent.click(screen.getByRole("button", { name: "切换并重启桌面版" }));
+
+    expect(await screen.findByText(/桌面版未能重新启动，请手动启动/)).toHaveTextContent(
+      "请在原终端退出并重新运行 Codex CLI",
+    );
+  });
+
+  it("关闭失败时提示手动退出而不是误报需要启动桌面版", async () => {
+    const provider = {
+      id: "90f00c5a-59a7-4936-a791-583d90b81b73",
+      name: "Close Failure Provider",
+      baseUrl: "https://close-failure.example/v1",
+      defaultModel: "model-a",
+      verifiedAtEpochSeconds: 1_786_140_900,
+      isCurrent: false,
+    };
+    const managed = {
+      state: "managed",
+      mode: "provider",
+      messageId: "environment.managed",
+      revision: "close-failure-revision",
+      requiresTakeoverConfirmation: false,
+      takeoverAvailable: true,
+      requiresConsumerConfirmation: true,
+      impacts: [],
+      currentProvider: null,
+      restoreAvailability: "no_backup",
+      loginStatus: "logged_in",
+      pendingRestart: false,
+      consumers: { desktop: "running", cli: "stopped" },
+    };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([provider]);
+      if (command === "get_environment_snapshot") return Promise.resolve(managed);
+      if (command === "apply_environment_provider") {
+        return Promise.resolve({
+          ...configChange({ ...managed, pendingRestart: true }),
+          restartStatus: "restart_failed",
+          restartMessageId: "desktop.close_failed",
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "切换到 Close Failure Provider" }));
+    fireEvent.click(screen.getByRole("button", { name: "切换并重启桌面版" }));
+
+    expect(await screen.findByText(/桌面版仍在运行，请稍后手动退出并重新启动/))
+      .not.toHaveTextContent("请手动启动");
+  });
+
+  it("强制完成重启时提交关闭授权对应的配置 revision", async () => {
+    const provider = {
+      id: "90f00c5a-59a7-4936-a791-583d90b81b73",
+      name: "Force Provider",
+      baseUrl: "https://force.example/v1",
+      defaultModel: "model-a",
+      verifiedAtEpochSeconds: 1_786_140_900,
+      isCurrent: false,
+    };
+    const managed = {
+      state: "managed",
+      mode: "provider",
+      messageId: "environment.managed",
+      revision: "before-force-revision",
+      requiresTakeoverConfirmation: false,
+      takeoverAvailable: true,
+      requiresConsumerConfirmation: true,
+      impacts: [],
+      currentProvider: null,
+      restoreAvailability: "no_backup",
+      loginStatus: "logged_in",
+      pendingRestart: false,
+      consumers: { desktop: "running", cli: "stopped" },
+    };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([provider]);
+      if (command === "get_environment_snapshot") return Promise.resolve(managed);
+      if (command === "apply_environment_provider") {
+        return Promise.resolve({
+          ...configChange({
+            ...managed,
+            revision: "force-plan-revision",
+            pendingRestart: true,
+          }, "close_timed_out"),
+          restartMessageId: "desktop.close_timed_out",
+          forceAuthorization: "force-plan-authorization",
+          forceExpectedRevision: "force-plan-revision",
+        });
+      }
+      if (command === "force_complete_config_restart") {
+        return Promise.resolve(configChange({
+          ...managed,
+          revision: "force-plan-revision",
+          pendingRestart: false,
+          consumers: { desktop: "stopped", cli: "stopped" },
+        }, "restarted"));
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "切换到 Force Provider" }));
+    fireEvent.click(screen.getByRole("button", { name: "切换并重启桌面版" }));
+    fireEvent.click(await screen.findByRole("button", { name: "强制关闭并重启" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("force_complete_config_restart", {
+        forceAuthorization: "force-plan-authorization",
+        expectedRevision: "force-plan-revision",
+      });
+    });
   });
 
   it("管理冲突无法安全解析时不提供强制覆盖", async () => {

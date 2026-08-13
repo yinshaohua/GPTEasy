@@ -281,7 +281,11 @@ fn plan_provider_action(snapshot: &EnvironmentSnapshot, provider_id: &str) -> Tr
         return TrayProviderAction::Ignore;
     }
     match snapshot.state {
-        EnvironmentState::External | EnvironmentState::Conflict => TrayProviderAction::OpenSettings,
+        EnvironmentState::External => TrayProviderAction::OpenSwitchPlan,
+        EnvironmentState::Conflict if snapshot.takeover_available => {
+            TrayProviderAction::OpenSwitchPlan
+        }
+        EnvironmentState::Conflict => TrayProviderAction::OpenSettings,
         EnvironmentState::Managed => TrayProviderAction::OpenSwitchPlan,
     }
 }
@@ -479,6 +483,13 @@ mod tests {
         let external = snapshot(EnvironmentState::External, None);
         assert_eq!(
             plan_provider_action(&external, "provider-id"),
+            TrayProviderAction::OpenSwitchPlan
+        );
+
+        let mut unsafe_conflict = snapshot(EnvironmentState::Conflict, None);
+        unsafe_conflict.takeover_available = false;
+        assert_eq!(
+            plan_provider_action(&unsafe_conflict, "provider-id"),
             TrayProviderAction::OpenSettings
         );
     }
