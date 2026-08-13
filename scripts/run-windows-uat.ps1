@@ -94,7 +94,10 @@ function Get-OfficialDesktopIdentity {
     $packages = @(
         Get-AppxPackage -Name 'OpenAI.Codex' -ErrorAction SilentlyContinue
         Get-AppxPackage -Name 'OpenAI.ChatGPT' -ErrorAction SilentlyContinue
-    ) | Where-Object { $_.Architecture.ToString() -eq 'X64' } |
+    ) | Where-Object {
+        $_.Architecture.ToString() -eq 'X64' -and
+        $_.PublisherId -eq '2p2nqsd0c76g0'
+    } |
         Sort-Object { [version]$_.Version } -Descending
     foreach ($package in $packages) {
         try {
@@ -401,6 +404,7 @@ $evidence = [ordered]@{
     }
     codexCliVersion = $codexVersion
     desktopCodexVersion = $desktopPackage.Version.ToString()
+    desktopPublisherId = $desktopPackage.PublisherId
     desktopApplicationId = $desktopIdentity.ApplicationId
     desktopAppUserModelId = $desktopIdentity.AppUserModelId
     providerCombinationFingerprint = $combinationFingerprint

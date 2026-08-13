@@ -141,9 +141,10 @@ if (-not $cliVersionMatch.Success -or
     [version]$desktopVersionMatch.Value -lt [version]'26.803.5235.0') {
     Add-GateError 'Evidence must record real Codex CLI and desktop Codex versions.'
 }
-if ([string]::IsNullOrWhiteSpace([string]$evidence.desktopApplicationId) -or
+if ($evidence.desktopPublisherId -ne '2p2nqsd0c76g0' -or
+    [string]::IsNullOrWhiteSpace([string]$evidence.desktopApplicationId) -or
     [string]$evidence.desktopAppUserModelId -notmatch '^[^!]+!\S+$') {
-    Add-GateError 'Evidence must record the dynamically discovered desktop Application Id and AUMID.'
+    Add-GateError 'Evidence must record an official OpenAI desktop publisher, Application Id and AUMID.'
 }
 if ([string]$evidence.providerCombinationFingerprint -notmatch '^[0-9a-f]{64}$' -or
     [string]$evidence.providerCombinationFingerprint -match '^0{64}$') {

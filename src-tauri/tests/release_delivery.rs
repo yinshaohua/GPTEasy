@@ -111,6 +111,7 @@ fn unsigned_uat_fixture() -> (TempDir, PathBuf, PathBuf, PathBuf) {
         "platform": { "os": "windows", "architecture": "x64", "build": 19045 },
         "codexCliVersion": "codex-cli 0.147.0",
         "desktopCodexVersion": "26.803.5235.0",
+        "desktopPublisherId": "2p2nqsd0c76g0",
         "desktopApplicationId": "Codex",
         "desktopAppUserModelId": "OpenAI.Codex_123!Codex",
         "providerCombinationFingerprint": "a".repeat(64),
@@ -272,6 +273,23 @@ fn windows_uat_operator_prompts_are_in_simplified_chinese() {
     assert!(
         !script.contains("$desktopPackage.Count -ne 1"),
         "desktop Codex detection must tolerate multiple registered package results"
+    );
+}
+
+#[test]
+fn windows_uat_requires_the_official_openai_desktop_package_publisher() {
+    let script = fs::read_to_string(repository_root().join("scripts/run-windows-uat.ps1"))
+        .expect("read Windows UAT script");
+
+    assert!(
+        script.contains("$_.PublisherId -eq '2p2nqsd0c76g0'"),
+        "UAT must only accept the official OpenAI desktop package publisher"
+    );
+    let readiness = fs::read_to_string(repository_root().join("scripts/test-release-readiness.ps1"))
+        .expect("read release readiness script");
+    assert!(
+        readiness.contains("$evidence.desktopPublisherId -ne '2p2nqsd0c76g0'"),
+        "release readiness must bind evidence to the official OpenAI desktop publisher"
     );
 }
 
