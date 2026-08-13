@@ -1,13 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import {
   Check,
-  Circle,
   Copy,
   Eye,
   EyeOff,
   ExternalLink,
   GripVertical,
-  KeyRound,
   LoaderCircle,
   Pencil,
   Plus,
@@ -17,6 +15,11 @@ import {
   Trash2,
   X,
 } from "lucide-react";
+
+import ProviderValidationDialog, {
+  type ProviderValidationSession,
+  type ProviderValidationSource,
+} from "./ProviderValidationDialog";
 
 import {
   asProviderFailure,
@@ -86,6 +89,8 @@ export default function ProviderPage() {
   const [validationStage, setValidationStage] = useState<
     ProviderValidationStage | "idle" | "complete"
   >("idle");
+  const [validationSession, setValidationSession] = useState<ProviderValidationSession | null>(null);
+  const [catalogFeedback, setCatalogFeedback] = useState("");
   const [copyStatus, setCopyStatus] = useState("");
   const apiKeyRef = useRef<HTMLInputElement | null>(null);
   const activeRequest = useRef<string | null>(null);
@@ -115,10 +120,21 @@ export default function ProviderPage() {
   }, []);
 
   useEffect(() => {
+    if (!catalogFeedback) return;
+    const timer = window.setTimeout(() => setCatalogFeedback(""), 5_000);
+    return () => window.clearTimeout(timer);
+  }, [catalogFeedback]);
+
+  useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void onProviderValidationProgress((progress) => {
-      if (progress.requestId === activeRequest.current) setValidationStage(progress.stage);
+      if (progress.requestId === activeRequest.current) {
+        setValidationStage(progress.stage);
+        setValidationSession((current) => current?.status === "running"
+          ? { ...current, stage: progress.stage, stageStartedAt: Date.now() }
+          : current);
+      }
     })
       .then((stopListening) => {
         if (disposed) stopListening();
@@ -248,11 +264,15 @@ export default function ProviderPage() {
   }
 
   async function runValidation() {
-    discardReceipt("models_confirmed");
+    discardReceipt();
     const requestId = createRequestId();
     activeRequest.current = requestId;
     setOperation("validating");
     setFailure(null);
+    setValidationSession(createValidationSession({
+      kind: "detail",
+      providerName: name.trim(),
+    }));
     try {
       const apiKey = apiKeyForRequest();
       const result = selected
@@ -268,10 +288,16 @@ export default function ProviderPage() {
       setReceipt(result);
       setOperation("verified");
       setValidationStage("complete");
+      setValidationSession((current) => current
+        ? { ...current, status: "succeeded", stage: "tool_round_trip" }
+        : current);
     } catch (error) {
-      setFailure(asProviderFailure(error));
+      const providerFailure = asProviderFailure(error);
+      setFailure(providerFailure);
       setOperation("idle");
-      setValidationStage("models_confirmed");
+      setValidationSession((current) => current
+        ? { ...current, status: "failed", failure: providerFailure }
+        : current);
     } finally {
       activeRequest.current = null;
     }
@@ -285,15 +311,26 @@ export default function ProviderPage() {
     activeRequest.current = requestId;
     setOperation("revalidating");
     setFailure(null);
+    setCatalogFeedback("");
+    setValidationSession(createValidationSession({
+      kind: "catalog",
+      providerName: target.name,
+    }));
     try {
       const updated = await revalidateProvider(requestId, target.id);
       replaceProvider(updated);
       setOperation("idle");
       setValidationStage("complete");
+      setValidationSession((current) => current
+        ? { ...current, status: "succeeded", stage: "tool_round_trip" }
+        : current);
     } catch (error) {
-      setFailure(asProviderFailure(error));
+      const providerFailure = asProviderFailure(error);
+      setFailure(providerFailure);
       setOperation("idle");
-      setValidationStage("models_confirmed");
+      setValidationSession((current) => current
+        ? { ...current, status: "failed", failure: providerFailure }
+        : current);
     } finally {
       activeRequest.current = null;
     }
@@ -301,6 +338,17 @@ export default function ProviderPage() {
 
   async function cancelCurrentRequest() {
     if (activeRequest.current) await cancelProviderRequest(activeRequest.current);
+  }
+
+  function closeValidationSession() {
+    if (!validationSession || validationSession.status === "running") return;
+    if (validationSession.source.kind === "catalog") {
+      setCatalogFeedback(validationSession.status === "succeeded"
+        ? `${validationSession.source.providerName} 重新验证成功。`
+        : `${validationSession.source.providerName} 最近验证失败。`);
+      setFailure(null);
+    }
+    setValidationSession(null);
   }
 
   async function saveProvider() {
@@ -596,6 +644,9 @@ export default function ProviderPage() {
                     {provider.isCurrent && (
                       <span className="current-badge">{providerMessages.currentProvider}</span>
                     )}
+                    <span className="provider-verified-time">
+                      验证于 {formatVerifiedAt(provider.verifiedAtEpochSeconds)}
+                    </span>
                   </div>
                   <span className="provider-row-url" title={provider.baseUrl}>{provider.baseUrl}</span>
                   <span className="provider-row-model" title={provider.defaultModel}>
@@ -656,11 +707,7 @@ export default function ProviderPage() {
               <p className="empty-catalog-note">{providerMessages.emptyCatalog}</p>
             )}
           </div>
-          {failure && (
-            <p className="validation-error" role="alert">
-              {providerFailureMessages[failure.messageId] ?? providerMessages.validationFallback}
-            </p>
-          )}
+          {catalogFeedback && <p className="catalog-feedback" role="status">{catalogFeedback}</p>}
         </section>
       ) : (
         <section className="provider-detail" aria-labelledby="provider-editor-heading">
@@ -775,19 +822,20 @@ export default function ProviderPage() {
             </button>
           </div>
 
-          <ValidationStatus
-            modelsReady={models.length > 0}
-            operation={operation}
-            stage={validationStage}
-            failure={failure}
-          />
+          {failure && !validationSession && (
+            <p className="inline-error" id="provider-validation-error" role="alert">
+              {providerFailureMessages[failure.messageId] ?? providerMessages.validationFallback}
+            </p>
+          )}
 
           <div className="detail-actions">
             <div className="detail-validation-action">
               {operation === "discovering" || operation === "validating" ? (
                 <button className="secondary-button" type="button" onClick={() => void cancelCurrentRequest()}>
                   <X size={17} aria-hidden="true" />
-                  {providerMessages.cancelRequest}
+                  {operation === "validating"
+                    ? providerMessages.cancelValidation
+                    : providerMessages.cancelRequest}
                 </button>
               ) : (
                 <button
@@ -847,6 +895,13 @@ export default function ProviderPage() {
           primaryDisabled={!canValidate}
         />
       )}
+      {validationSession && (
+        <ProviderValidationDialog
+          session={validationSession}
+          onCancel={() => void cancelCurrentRequest()}
+          onClose={closeValidationSession}
+        />
+      )}
     </>
   );
 }
@@ -893,72 +948,6 @@ function ConfirmationDialog({
   );
 }
 
-function ValidationStatus({
-  modelsReady,
-  operation,
-  stage,
-  failure,
-}: {
-  modelsReady: boolean;
-  operation: Operation;
-  stage: ProviderValidationStage | "idle" | "complete";
-  failure: ProviderFailure | null;
-}) {
-  const verified = stage === "complete" || operation === "verified" || operation === "saving";
-  return (
-    <div className="validation-panel" aria-live="polite">
-      <div className="validation-title">
-        <KeyRound size={18} aria-hidden="true" />
-        <strong>{verified ? providerMessages.validationPassed : providerMessages.validationTitle}</strong>
-      </div>
-      <ol className="validation-steps">
-        <ValidationStep
-          complete={modelsReady}
-          active={operation === "discovering"}
-          label={providerMessages.modelsConfirmed}
-        />
-        <ValidationStep
-          complete={stage === "tool_round_trip" || stage === "complete"}
-          active={stage === "responses_stream"}
-          label={providerMessages.responsesStream}
-        />
-        <ValidationStep
-          complete={stage === "complete"}
-          active={stage === "tool_round_trip"}
-          label={providerMessages.toolRoundTrip}
-        />
-      </ol>
-      {failure && (
-        <div className="validation-error" id="provider-validation-error" role="alert">
-          <p>{providerFailureMessages[failure.messageId] ?? providerMessages.validationFallback}</p>
-          <details>
-            <summary>{providerMessages.technicalDetails}</summary>
-            <code>{failure.category}</code>
-          </details>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function ValidationStep({ complete, active, label }: { complete: boolean; active: boolean; label: string }) {
-  return (
-    <li
-      className={complete ? "is-complete" : active ? "is-active" : undefined}
-      aria-current={active ? "step" : undefined}
-    >
-      {complete ? (
-        <Check size={15} aria-hidden="true" />
-      ) : active ? (
-        <LoaderCircle className="is-spinning" size={15} aria-hidden="true" />
-      ) : (
-        <Circle size={15} aria-hidden="true" />
-      )}
-      {label}
-    </li>
-  );
-}
-
 function candidateStatus(
   operation: Operation,
   stage: ProviderValidationStage | "idle" | "complete",
@@ -970,6 +959,27 @@ function candidateStatus(
     return providerMessages.candidateVerified;
   }
   return providerMessages.candidateUnverified;
+}
+
+function createValidationSession(source: ProviderValidationSource): ProviderValidationSession {
+  return {
+    source,
+    status: "running",
+    stage: "models_confirmed",
+    stageStartedAt: Date.now(),
+    failure: null,
+  };
+}
+
+function formatVerifiedAt(epochSeconds: number): string {
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).format(new Date(epochSeconds * 1_000));
 }
 
 let requestSequence = 0;

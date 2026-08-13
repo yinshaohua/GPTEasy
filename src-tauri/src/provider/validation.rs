@@ -227,6 +227,7 @@ impl ProviderValidator {
         let first = self
             .post_sse(base_url, api_key, &first_payload, cancellation.clone())
             .await?;
+        progress(ProviderValidationStage::ToolRoundTrip);
         let mut calls = first.function_calls.into_iter();
         let call = calls.next().ok_or_else(|| {
             ProviderFailure::new(
@@ -255,8 +256,6 @@ impl ProviderValidator {
                 "provider.tool_arguments_invalid",
             ));
         }
-        progress(ProviderValidationStage::ToolRoundTrip);
-
         let function_call_item = json!({
             "type": "function_call",
             "call_id": call.call_id,

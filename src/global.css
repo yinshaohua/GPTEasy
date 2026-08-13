@@ -480,14 +480,6 @@ select:focus-visible {
   gap: 2px;
 }
 
-.validation-title strong {
-  margin: 0;
-  color: var(--text);
-  font-size: 15px;
-  line-height: 1.4;
-  letter-spacing: 0;
-}
-
 .pane-note,
 .empty-list {
   color: var(--text-muted);
@@ -749,52 +741,6 @@ select:focus-visible {
   background: var(--surface-muted);
 }
 
-.validation-panel {
-  margin-top: 18px;
-  padding: 14px;
-  background: var(--surface-muted);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-}
-
-.validation-title {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.validation-steps {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-  margin: 12px 0 0;
-  padding: 0;
-  list-style: none;
-}
-
-.validation-steps li {
-  display: flex;
-  align-items: flex-start;
-  gap: 6px;
-  min-width: 0;
-  color: var(--text-muted);
-  font-size: 12px;
-  line-height: 1.4;
-}
-
-.validation-steps li svg {
-  flex: 0 0 auto;
-  margin-top: 1px;
-}
-
-.validation-steps .is-complete {
-  color: var(--accent);
-}
-
-.validation-steps .is-active {
-  color: var(--text);
-}
-
 .validation-error {
   margin-top: 12px;
   padding-top: 10px;
@@ -816,6 +762,128 @@ select:focus-visible {
   margin-top: 6px;
   color: var(--text-muted);
   overflow-wrap: anywhere;
+}
+
+.validation-dialog {
+  width: min(560px, 100%);
+  padding: 20px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 18px 48px rgb(0 0 0 / 24%);
+}
+
+.validation-dialog-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.validation-dialog-header h2,
+.validation-dialog-header p {
+  margin: 0;
+}
+
+.validation-dialog-header h2 {
+  font-size: 17px;
+  line-height: 1.4;
+}
+
+.validation-dialog-header p {
+  margin-top: 3px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.validation-result {
+  flex: 0 0 auto;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.validation-result.is-succeeded {
+  color: var(--accent);
+}
+
+.validation-result.is-failed {
+  color: var(--danger);
+}
+
+.validation-dialog-steps {
+  display: grid;
+  gap: 0;
+  margin: 18px 0 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--border);
+}
+
+.validation-dialog-step {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  gap: 10px;
+  min-height: 64px;
+  padding: 12px 0;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+}
+
+.validation-dialog-step.is-active {
+  color: var(--text);
+}
+
+.validation-dialog-step.is-complete {
+  color: var(--accent);
+}
+
+.validation-dialog-step.is-failed {
+  color: var(--danger);
+}
+
+.validation-step-icon {
+  display: inline-flex;
+  padding-top: 1px;
+}
+
+.validation-step-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.validation-step-copy strong {
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+.validation-step-state,
+.validation-waiting {
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.validation-waiting {
+  color: var(--text-muted);
+}
+
+.validation-dialog-actions {
+  margin-top: 18px;
+}
+
+.catalog-feedback {
+  margin: 12px 0 0;
+  color: var(--accent);
+  font-size: 13px;
+}
+
+.provider-verified-time {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 400;
+  white-space: nowrap;
 }
 
 .detail-actions {
@@ -1041,7 +1109,6 @@ select:focus-visible {
   }
 
   .model-row,
-  .validation-steps,
   .impact-row {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -1061,7 +1128,7 @@ select:focus-visible {
   .command-button,
   .secondary-button,
   .field-icon-button,
-  .validation-panel {
+  .validation-dialog {
     border: 1px solid CanvasText;
   }
 }

@@ -10,7 +10,8 @@ use gpteasy_lib::environment::{
 };
 use gpteasy_lib::provider::{
     DiscoveryInput, ProviderApplication, ProviderFailureCategory, ProviderUpdateDiscoveryInput,
-    ProviderUpdateValidationInput, ProviderValidationInput, ProviderValidator, ValidationTimeouts,
+    ProviderUpdateValidationInput, ProviderValidationInput, ProviderValidationStage,
+    ProviderValidator, ValidationTimeouts,
 };
 use gpteasy_lib::state::{StatePaths, StateStore};
 use rusqlite::Connection;
@@ -148,6 +149,69 @@ async fn validation_completes_a_fragmented_strict_tool_round_trip() {
     assert_eq!(first["parallel_tool_calls"], false);
     let second: Value = serde_json::from_slice(request_body(&requests[2])).expect("second payload");
     assert_eq!(second["input"][1]["call_id"], second["input"][2]["call_id"]);
+}
+
+#[tokio::test]
+async fn validation_reports_ordered_stages_without_exposing_credentials() {
+    let server = ValidationServer::start(ValidationScenario::Success);
+    let input = ProviderValidationInput {
+        base_url: server.base_url,
+        api_key: "stage-secret-canary".to_owned(),
+        default_model: "model-a".to_owned(),
+    };
+    let debug_input = format!("{input:?}");
+    let stages = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured_stages = Arc::clone(&stages);
+
+    let evidence = validator()
+        .validate_provider_with_progress(input, Default::default(), move |stage| {
+            captured_stages.lock().expect("capture stage").push(stage);
+        })
+        .await
+        .expect("validation succeeds");
+
+    assert_eq!(
+        *stages.lock().expect("validation stages"),
+        [
+            ProviderValidationStage::ModelsConfirmed,
+            ProviderValidationStage::ResponsesStream,
+            ProviderValidationStage::ToolRoundTrip,
+        ]
+    );
+    let observable_output = format!("{debug_input}\n{evidence:?}");
+    assert!(!observable_output.contains("stage-secret-canary"));
+    assert!(debug_input.contains("[redacted]"));
+
+    let invalid_server = ValidationServer::start(ValidationScenario::WrongNonce);
+    let failure_stages = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured_failure_stages = Arc::clone(&failure_stages);
+    let failure = validator()
+        .validate_provider_with_progress(
+            ProviderValidationInput {
+                base_url: invalid_server.base_url,
+                api_key: "failure-secret-canary".to_owned(),
+                default_model: "model-a".to_owned(),
+            },
+            Default::default(),
+            move |stage| {
+                captured_failure_stages
+                    .lock()
+                    .expect("capture failure stage")
+                    .push(stage);
+            },
+        )
+        .await
+        .expect_err("invalid strict tool arguments fail validation");
+    assert_eq!(failure.category, ProviderFailureCategory::ToolCall);
+    assert_eq!(
+        *failure_stages.lock().expect("failure stages"),
+        [
+            ProviderValidationStage::ModelsConfirmed,
+            ProviderValidationStage::ResponsesStream,
+            ProviderValidationStage::ToolRoundTrip,
+        ]
+    );
+    assert!(!format!("{failure:?}").contains("failure-secret-canary"));
 }
 
 #[tokio::test]
@@ -622,6 +686,39 @@ async fn failed_cancelled_or_discarded_validation_never_changes_persistent_state
             .bootstrap()
             .contents
             .expect("state after post-success cancellation"),
+        before
+    );
+}
+
+#[tokio::test]
+async fn failed_catalog_revalidation_keeps_verification_time_and_current_provider() {
+    let temp = TempDir::new().expect("temp state directory");
+    let store = StateStore::new(StatePaths::from_root(temp.path()));
+    assert!(store.bootstrap().is_ready());
+    let application = ProviderApplication::new(store.clone(), validator());
+    let valid_server = ValidationServer::start(ValidationScenario::Success);
+    let provider = create_provider(
+        &application,
+        "revalidation-create",
+        valid_server.base_url,
+        "Revalidation Target",
+        "revalidation-secret-canary",
+    )
+    .await;
+    mark_current_provider(&store, &provider.id);
+    let before = application.list_providers().expect("catalog before failure");
+
+    let failure = application
+        .revalidate_provider("failed-catalog-revalidation".to_owned(), provider.id)
+        .await
+        .expect_err("unavailable provider fails revalidation");
+
+    assert!(matches!(
+        failure.category,
+        ProviderFailureCategory::Transport | ProviderFailureCategory::ResponseHeaderTimeout
+    ));
+    assert_eq!(
+        application.list_providers().expect("catalog after failure"),
         before
     );
 }

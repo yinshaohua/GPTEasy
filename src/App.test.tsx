@@ -95,8 +95,9 @@ describe("供应商创建", () => {
     fireEvent.change(screen.getByLabelText("默认模型"), { target: { value: "model-b" } });
     fireEvent.click(screen.getByRole("button", { name: "验证供应商" }));
 
-    expect(await screen.findByText("完整验证已通过")).toBeInTheDocument();
+    expect(await screen.findByText("验证通过")).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "供应商目录" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "完成" }));
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
 
     expect(await screen.findByText("Example Provider", { selector: ".provider-row-name" })).toBeInTheDocument();
@@ -145,7 +146,7 @@ describe("供应商创建", () => {
     act(() => {
       progressListener({ payload: { requestId, stage: "responses_stream" } });
     });
-    expect(screen.getByText("Responses 流式响应").closest("li")).toHaveAttribute(
+    expect(screen.getByText("Responses API 流式响应").closest("li")).toHaveAttribute(
       "aria-current",
       "step",
     );
@@ -167,7 +168,8 @@ describe("供应商创建", () => {
         verifiedAtEpochSeconds: 1_786_140_000,
       });
     });
-    expect(await screen.findByText("完整验证已通过")).toBeInTheDocument();
+    expect(await screen.findByText("验证通过")).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "供应商验证" })).toBeInTheDocument();
   }, 10_000);
 
   it("离开供应商页会丢弃未保存输入", async () => {
@@ -236,6 +238,171 @@ describe("供应商创建", () => {
     fireEvent.click(screen.getByRole("button", { name: "放弃修改" }));
     expect(await screen.findByRole("heading", { name: "供应商目录" })).toBeInTheDocument();
     expect(screen.queryByText("Unsaved")).not.toBeInTheDocument();
+  });
+});
+
+describe("逐项供应商验证弹窗", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  beforeEach(() => {
+    invoke.mockReset();
+    listen.mockReset();
+    listen.mockResolvedValue(() => undefined);
+  });
+
+  it("验证期间显示阶段计时和等待状态，且只能明确取消", async () => {
+    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({
+      matches: true,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    }));
+    let rejectValidation: (reason: object) => void = () => undefined;
+    const validation = new Promise<object>((_resolve, reject) => {
+      rejectValidation = reject;
+    });
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([]);
+      if (command === "discover_provider_models") {
+        return Promise.resolve({
+          normalizedBaseUrl: "https://provider.example/v1",
+          models: ["model-a"],
+        });
+      }
+      if (command === "validate_provider") return validation;
+      if (command === "cancel_provider_request") {
+        rejectValidation({ category: "cancelled", messageId: "provider.request_cancelled" });
+        return Promise.resolve(true);
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "添加供应商" }));
+    fireEvent.change(screen.getByLabelText("服务地址"), {
+      target: { value: "https://provider.example/v1" },
+    });
+    fireEvent.change(screen.getByLabelText("API Key"), { target: { value: "secret" } });
+    fireEvent.click(screen.getByRole("button", { name: "获取模型" }));
+    await screen.findByRole("option", { name: "model-a" });
+    fireEvent.change(screen.getByLabelText("默认模型"), { target: { value: "model-a" } });
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "验证供应商" }));
+
+    const dialog = screen.getByRole("dialog", { name: "供应商验证" });
+    expect(dialog).toHaveTextContent("模型确认");
+    expect(dialog).toHaveTextContent("Responses API 流式响应");
+    expect(dialog).toHaveTextContent("工具调用闭环");
+    expect(dialog).toHaveTextContent("未开始");
+    expect(dialog).toHaveTextContent(/已用 \d+ 秒/);
+    expect(screen.queryByText(/%/)).not.toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "取消验证" })).toHaveLength(2);
+
+    expect(dialog.querySelector(".is-spinning")).not.toBeInTheDocument();
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    fireEvent.click(dialog.parentElement!);
+    expect(screen.getByRole("dialog", { name: "供应商验证" })).toBeInTheDocument();
+
+    await act(async () => {
+      vi.advanceTimersByTime(16_000);
+    });
+    expect(screen.getByText("仍在等待供应商响应")).toBeInTheDocument();
+    vi.useRealTimers();
+
+    const cancelButtons = screen.getAllByRole("button", { name: "取消验证" });
+    fireEvent.click(cancelButtons[cancelButtons.length - 1]);
+    await act(async () => Promise.resolve());
+    expect(invoke).toHaveBeenCalledWith(
+      "cancel_provider_request",
+      expect.objectContaining({ requestId: expect.any(String) }),
+    );
+    expect(screen.getByRole("dialog", { name: "供应商验证" })).toBeInTheDocument();
+    expect(await screen.findByText("请求已取消。")).toBeInTheDocument();
+    expect(screen.getByText("失败", { selector: ".validation-step-state" })).toBeInTheDocument();
+    expect(screen.getByText("cancelled · provider.request_cancelled")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "返回修改" }));
+    expect(screen.queryByRole("dialog", { name: "供应商验证" })).not.toBeInTheDocument();
+  }, 10_000);
+
+  it("目录重新验证在用户完成后更新验证时间并只显示页面内反馈", async () => {
+    const notification = vi.fn();
+    vi.stubGlobal("Notification", notification);
+    const provider = {
+      id: "68bf9ee2-3ba5-4517-b47e-12a11e038de4",
+      name: "Atlas",
+      baseUrl: "https://atlas.example/v1",
+      defaultModel: "model-a",
+      verifiedAtEpochSeconds: 1_786_140_000,
+      isCurrent: false,
+    };
+    const updated = { ...provider, verifiedAtEpochSeconds: 1_786_140_900 };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([provider]);
+      if (command === "revalidate_provider") return Promise.resolve(updated);
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+    const originalVerifiedAt = (await screen.findByText(/^验证于 /)).textContent;
+    fireEvent.click(await screen.findByRole("button", { name: "验证 Atlas" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "供应商验证" });
+    expect(dialog).toHaveTextContent("验证通过");
+    expect(screen.queryByText("Atlas 重新验证成功。", { selector: "[role='status']" })).not.toBeInTheDocument();
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "完成" }));
+
+    expect(screen.queryByRole("dialog", { name: "供应商验证" })).not.toBeInTheDocument();
+    expect(screen.getByText("Atlas 重新验证成功。", { selector: "[role='status']" })).toBeInTheDocument();
+    expect(screen.getByText(/^验证于 /).textContent).not.toBe(originalVerifiedAt);
+    expect(screen.getByText("已验证")).toBeInTheDocument();
+    expect(invoke.mock.calls.some(([command]) => command === "apply_environment_provider")).toBe(false);
+    expect(notification).not.toHaveBeenCalled();
+    act(() => vi.advanceTimersByTime(5_001));
+    expect(screen.queryByText("Atlas 重新验证成功。")).not.toBeInTheDocument();
+    vi.useRealTimers();
+  });
+
+  it("目录重新验证失败保留原验证时间、供应商和当前环境", async () => {
+    const provider = {
+      id: "68bf9ee2-3ba5-4517-b47e-12a11e038de4",
+      name: "Atlas",
+      baseUrl: "https://atlas.example/v1",
+      defaultModel: "model-a",
+      verifiedAtEpochSeconds: 1_786_140_000,
+      isCurrent: true,
+    };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([provider]);
+      if (command === "revalidate_provider") {
+        return Promise.reject({
+          category: "authentication",
+          messageId: "provider.authentication_failed",
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+    const originalVerifiedAt = (await screen.findByText(/^验证于 /)).textContent;
+    fireEvent.click(await screen.findByRole("button", { name: "验证 Atlas" }));
+
+    expect(await screen.findByText("API Key 未通过供应商认证。")).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "供应商验证" })).toHaveTextContent("验证失败");
+    fireEvent.click(screen.getByRole("button", { name: "完成" }));
+
+    expect(screen.getByText("Atlas 最近验证失败。", { selector: "[role='status']" })).toBeInTheDocument();
+    expect(screen.getByText(/^验证于 /).textContent).toBe(originalVerifiedAt);
+    expect(screen.getByRole("button", { name: "Atlas 当前使用" })).toBeDisabled();
+    expect(screen.getByText("已验证")).toBeInTheDocument();
+    expect(invoke.mock.calls.some(([command]) => command === "apply_environment_provider")).toBe(false);
   });
 });
 
@@ -349,7 +516,8 @@ describe("供应商目录生命周期", () => {
     expect(await screen.findByRole("option", { name: "dayway-model" })).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("默认模型"), { target: { value: "dayway-model" } });
     fireEvent.click(screen.getByRole("button", { name: "验证供应商" }));
-    expect(await screen.findByText("完整验证已通过")).toBeInTheDocument();
+    expect(await screen.findByText("验证通过")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "完成" }));
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("save_dayway_provider", {
@@ -439,7 +607,8 @@ describe("供应商目录生命周期", () => {
     await screen.findByRole("option", { name: "model-a" });
     fireEvent.change(screen.getByLabelText("默认模型"), { target: { value: "model-a" } });
     fireEvent.click(screen.getByRole("button", { name: "验证供应商" }));
-    await screen.findByText("完整验证已通过");
+    await screen.findByText("验证通过");
+    fireEvent.click(screen.getByRole("button", { name: "完成" }));
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
 
     await waitFor(() => expect(saveAttempts).toBe(2));
@@ -655,9 +824,10 @@ describe("供应商目录生命周期", () => {
     expect(await screen.findByRole("option", { name: "model-b" })).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("默认模型"), { target: { value: "model-b" } });
     fireEvent.click(screen.getByRole("button", { name: "验证更新" }));
-    expect(await screen.findByText("完整验证已通过")).toBeInTheDocument();
+    expect(await screen.findByText("验证通过")).toBeInTheDocument();
     expect(invoke.mock.calls.some(([command]) => command === "save_provider_update")).toBe(false);
 
+    fireEvent.click(screen.getByRole("button", { name: "完成" }));
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("save_provider_update", {
