@@ -260,7 +260,7 @@ describe("供应商创建", () => {
     expect(screen.getByRole("dialog", { name: "供应商验证" })).toBeInTheDocument();
   }, 10_000);
 
-  it("离开供应商页会丢弃未保存输入", async () => {
+  it("从详情返回时明确放弃未保存输入", async () => {
     invoke.mockImplementation((command: string) => {
       if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
       if (command === "list_providers") return Promise.resolve([]);
@@ -272,9 +272,8 @@ describe("供应商创建", () => {
     fireEvent.click(screen.getByRole("button", { name: "添加供应商" }));
     const name = await screen.findByLabelText("供应商名称");
     fireEvent.change(name, { target: { value: "Unsaved" } });
-    fireEvent.click(screen.getByRole("button", { name: "Codex 环境" }));
-    expect(await screen.findByRole("heading", { name: "Codex 环境" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "供应商管理" }));
+    fireEvent.click(screen.getByRole("button", { name: "返回" }));
+    fireEvent.click(screen.getByRole("button", { name: "放弃修改" }));
 
     expect(await screen.findByRole("heading", { name: "供应商目录" })).toBeInTheDocument();
     expect(screen.queryByLabelText("供应商名称")).not.toBeInTheDocument();
@@ -1090,6 +1089,63 @@ describe("Codex 环境接管", () => {
     listen.mockResolvedValue(() => undefined);
   });
 
+  it("环境读取失败时仍展示已保存的供应商目录", async () => {
+    const provider = {
+      id: "90f00c5a-59a7-4936-a791-583d90b81b73",
+      name: "Available Provider",
+      baseUrl: "https://available.example/v1",
+      defaultModel: "model-a",
+      verifiedAtEpochSeconds: 1_786_140_900,
+      isCurrent: false,
+    };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([provider]);
+      if (command === "get_environment_snapshot") return Promise.reject(new Error("unavailable"));
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText("Available Provider")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("无法读取当前用户 Codex 环境");
+    expect(screen.queryByText("无法读取供应商目录")).not.toBeInTheDocument();
+  });
+
+  it("在供应商管理中展示环境状态与完整底部操作，不再保留旧环境入口", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([]);
+      if (command === "get_environment_snapshot") {
+        return Promise.resolve({
+          state: "external",
+          mode: null,
+          messageId: "environment.external",
+          revision: "merged-page-revision",
+          requiresTakeoverConfirmation: true,
+          restoreAvailability: "no_backup",
+          loginStatus: "logged_in",
+          pendingRestart: true,
+          consumers: { desktop: "unknown", cli: "running" },
+          impacts: [],
+          currentProvider: null,
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "供应商管理" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "外部配置" })).toBeInTheDocument();
+    expect(screen.getByText("待重启")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "恢复上次配置" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "切换到 OpenAI 登录模式" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /选择 WSL2 供应商/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /导出 Linux 脚本/ })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Codex 环境" })).not.toBeInTheDocument();
+  });
+
   it("先展示替换范围，再由用户确认接管外部配置", async () => {
     const provider = {
       id: "90f00c5a-59a7-4936-a791-583d90b81b73",
@@ -1133,19 +1189,12 @@ describe("Codex 环境接管", () => {
       }
       return Promise.resolve(undefined);
     });
-    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
 
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "Codex 环境" }));
 
-    expect(await screen.findByRole("heading", { name: "Codex 环境" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "外部配置" })).toBeInTheDocument();
-    expect(screen.getByText("config.toml")).toBeInTheDocument();
-    expect(screen.getByText("auth.json")).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText("要应用的供应商"), {
-      target: { value: provider.id },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "确认接管并应用" }));
+    expect(await screen.findByRole("heading", { name: "外部配置" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "切换到 Applied Provider" }));
 
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("apply_environment_provider", {
@@ -1154,6 +1203,11 @@ describe("Codex 环境接管", () => {
         expectedRevision: "external-revision",
       });
     });
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("将接管外部配置并应用“Applied Provider”"));
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("config.toml：model、model_provider、model_providers.<provider-id>"));
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("auth.json：auth_mode、OPENAI_API_KEY"));
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("无法确认桌面版状态"));
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("无法确认 Codex CLI 状态"));
     expect(await screen.findByText("当前供应商：Applied Provider")).toBeInTheDocument();
   });
 
@@ -1171,6 +1225,7 @@ describe("Codex 环境接管", () => {
       messageId: "environment.managed_conflict",
       revision: "conflict-revision",
       requiresTakeoverConfirmation: true,
+      takeoverAvailable: true,
       impacts: [
         {
           artifact: "config",
@@ -1203,11 +1258,7 @@ describe("Codex 环境接管", () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
 
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "Codex 环境" }));
-    fireEvent.change(await screen.findByLabelText("要应用的供应商"), {
-      target: { value: provider.id },
-    });
-    const takeover = screen.getByRole("button", { name: "确认接管并应用" });
+    const takeover = await screen.findByRole("button", { name: "切换到 Recovery Provider" });
     expect(takeover).toBeEnabled();
     fireEvent.click(takeover);
 
@@ -1218,6 +1269,44 @@ describe("Codex 环境接管", () => {
         expectedRevision: "conflict-revision",
       });
     });
+  });
+
+  it("管理冲突无法安全解析时不提供强制覆盖", async () => {
+    const provider = {
+      id: "90f00c5a-59a7-4936-a791-583d90b81b73",
+      name: "Blocked Provider",
+      baseUrl: "https://blocked.example/v1",
+      defaultModel: "model-a",
+      verifiedAtEpochSeconds: 1_786_140_900,
+      isCurrent: false,
+    };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([provider]);
+      if (command === "get_environment_snapshot") {
+        return Promise.resolve({
+          state: "conflict",
+          mode: null,
+          messageId: "environment.managed_conflict",
+          revision: "unsafe-conflict-revision",
+          requiresTakeoverConfirmation: true,
+          takeoverAvailable: false,
+          restoreAvailability: "no_backup",
+          loginStatus: "not_logged_in",
+          pendingRestart: false,
+          consumers: { desktop: "stopped", cli: "stopped" },
+          impacts: [],
+          currentProvider: null,
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText("无法安全解析当前配置，不能强制覆盖。")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "切换到 Blocked Provider" })).toBeDisabled();
+    expect(invoke.mock.calls.some(([command]) => command === "apply_environment_provider")).toBe(false);
   });
 
   it("只在最近配置可安全恢复时允许用户确认恢复", async () => {
@@ -1235,6 +1324,11 @@ describe("Codex 环境接管", () => {
       revision: "managed-revision",
       requiresTakeoverConfirmation: false,
       restoreAvailability: "available",
+      restorePreview: {
+        artifacts: ["config", "credentials"],
+        targetMode: null,
+        targetProvider: null,
+      },
       impacts: [
         {
           artifact: "config",
@@ -1249,28 +1343,36 @@ describe("Codex 环境接管", () => {
       ],
       currentProvider: provider,
     };
+    let finishRestore!: (snapshot: unknown) => void;
     invoke.mockImplementation((command: string) => {
       if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
       if (command === "list_providers") return Promise.resolve([provider]);
       if (command === "get_environment_snapshot") return Promise.resolve(managed);
       if (command === "restore_last_environment_config") {
-        return Promise.resolve({
-          ...managed,
-          state: "external",
-          messageId: "environment.external",
-          revision: "restored-revision",
-          currentProvider: null,
+        return new Promise((resolve) => {
+          finishRestore = resolve;
         });
       }
       return Promise.resolve(undefined);
     });
-    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
 
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "Codex 环境" }));
-    const restore = await screen.findByRole("button", { name: "恢复上次配置" });
+    await screen.findByRole("heading", { name: "已由 GPTEasy 管理" });
+    const restore = screen.getByRole("button", { name: "恢复上次配置" });
     expect(restore).toBeEnabled();
     fireEvent.click(restore);
+
+    expect(confirm).toHaveBeenCalledWith("将恢复 config.toml、auth.json，恢复后为外部配置。是否继续？");
+    expect(screen.getByText("正在恢复上次配置。")).toBeInTheDocument();
+
+    finishRestore({
+      ...managed,
+      state: "external",
+      messageId: "environment.external",
+      revision: "restored-revision",
+      currentProvider: null,
+    });
 
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("restore_last_environment_config", {
@@ -1300,13 +1402,13 @@ describe("Codex 环境接管", () => {
     });
 
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "Codex 环境" }));
 
-    expect(await screen.findByRole("button", { name: "恢复上次配置" })).toBeDisabled();
+    await screen.findByRole("heading", { name: "已由 GPTEasy 管理" });
+    expect(screen.getByRole("button", { name: "恢复上次配置" })).toBeDisabled();
     expect(screen.getByText("受管工件在最近一次修改后发生变化，恢复已禁用。")).toBeInTheDocument();
   });
 
-  it("展示认证与消费者状态，并只从环境页确认切换到 OpenAI 登录模式", async () => {
+  it("展示认证与消费者状态，并从供应商管理确认切换到 OpenAI 登录模式", async () => {
     const external = {
       state: "external",
       mode: null,
@@ -1341,12 +1443,11 @@ describe("Codex 环境接管", () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
 
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "Codex 环境" }));
 
-    expect(await screen.findByText("外部配置", { selector: "dd" })).toBeInTheDocument();
-    expect(screen.getByText("桌面 Codex").nextElementSibling).toHaveTextContent("无法确认");
+    expect(await screen.findByRole("heading", { name: "外部配置" })).toBeInTheDocument();
+    expect(screen.getByText("桌面版").nextElementSibling).toHaveTextContent("无法确认");
     expect(screen.getByText("Codex CLI").nextElementSibling).toHaveTextContent("无法确认");
-    expect(screen.getByText("待重启").nextElementSibling).toHaveTextContent("需要重启消费者");
+    expect(screen.getByText("待重启").nextElementSibling).toHaveTextContent("是");
     fireEvent.click(screen.getByRole("button", { name: "切换到 OpenAI 登录模式" }));
 
     await waitFor(() => {
@@ -1355,7 +1456,7 @@ describe("Codex 环境接管", () => {
         expectedRevision: "openai-ready-revision",
       });
     });
-    expect(await screen.findByText("OpenAI 登录模式", { selector: "dd" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "OpenAI 登录模式" })).toBeInTheDocument();
   });
 
   it("登录缺失或不可判断时解释原因且不发起 OpenAI 模式写入", async () => {
@@ -1387,7 +1488,6 @@ describe("Codex 环境接管", () => {
       });
 
       render(<App />);
-      fireEvent.click(await screen.findByRole("button", { name: "Codex 环境" }));
 
       expect(await screen.findByText(message)).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "切换到 OpenAI 登录模式" })).toBeDisabled();
@@ -1438,10 +1538,9 @@ describe("Codex 环境接管", () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
 
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "Codex 环境" }));
 
     expect(await screen.findByText("OpenAI 登录已在外部失效；当前模式保持不变。")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "确认返回供应商模式" }));
+    fireEvent.click(screen.getByRole("button", { name: "切换到 Return Provider" }));
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("apply_environment_provider", {
         providerId: provider.id,
@@ -1463,21 +1562,38 @@ describe("启动状态", () => {
     listen.mockResolvedValue(() => undefined);
   });
 
-  it("向用户说明全新状态已初始化且不会创建 Codex 配置", async () => {
+  it("全新状态直接展示供应商管理且不会创建 Codex 配置", async () => {
     invoke.mockImplementation((command: string) => {
       if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
       if (command === "list_providers") return Promise.resolve([]);
+      if (command === "get_environment_snapshot") {
+        return Promise.resolve({
+          state: "external",
+          mode: null,
+          messageId: "environment.external",
+          revision: "fresh-revision",
+          requiresTakeoverConfirmation: true,
+          takeoverAvailable: true,
+          impacts: [],
+          currentProvider: null,
+          restoreAvailability: "no_backup",
+          restorePreview: null,
+          loginStatus: "not_logged_in",
+          pendingRestart: false,
+          requiresConsumerConfirmation: true,
+          consumers: { desktop: "unknown", cli: "unknown" },
+        });
+      }
       return Promise.resolve(undefined);
     });
 
     render(<App />);
     await screen.findByRole("heading", { name: "供应商管理" });
-    fireEvent.click(screen.getByRole("button", { name: "Codex 环境" }));
 
-    expect(await screen.findByRole("heading", { name: "本地状态已初始化" })).toBeInTheDocument();
-    expect(screen.getByText("尚未创建")).toBeInTheDocument();
-    expect(screen.getByText("已检测到登录")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "外部配置" })).toBeInTheDocument();
+    expect(screen.getByText("尚未建立有效的 GPTEasy 供应商 ID。")).toBeInTheDocument();
     expect(invoke).toHaveBeenCalledWith("get_startup_snapshot");
+    expect(invoke.mock.calls.some(([command]) => command.startsWith("apply_"))).toBe(false);
   });
 
   it("数据库来自更高版本时只显示阻断状态", async () => {

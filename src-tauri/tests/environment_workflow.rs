@@ -706,6 +706,7 @@ fn confirmed_retakeover_repairs_a_drifted_but_well_formed_managed_block() {
     let snapshot = application.inspect().expect("inspect managed drift");
     assert_eq!(snapshot.state, EnvironmentState::Conflict);
     assert!(snapshot.requires_takeover_confirmation);
+    assert!(snapshot.takeover_available);
     let unconfirmed = application
         .apply_provider(PROVIDER_ID, false)
         .expect_err("retakeover requires confirmation");
@@ -1042,6 +1043,42 @@ fn returning_from_openai_to_a_provider_requires_confirmation_without_backing_up_
         .flatten()
         .collect::<Vec<_>>();
     assert!(!String::from_utf8_lossy(&backup_contents).contains(OPENAI_TOKEN_CANARY));
+}
+
+#[test]
+fn restoring_a_provider_switch_returns_to_openai_login_mode() {
+    let (temp, store, _) = fixture();
+    let codex_home = temp.path().join(".codex");
+    fs::create_dir_all(&codex_home).expect("create Codex fixture");
+    fs::write(codex_home.join("config.toml"), b"custom_flag = true\n")
+        .expect("write external config");
+    fs::write(
+        codex_home.join("auth.json"),
+        br#"{"auth_mode":"chatgpt","tokens":{"access_token":"private"}}"#,
+    )
+    .expect("write login credentials");
+    let application = EnvironmentApplication::with_login_probe(
+        store,
+        &codex_home,
+        Arc::new(FixedLoginProbe(LoginStatus::LoggedIn)),
+    );
+    let external = application.inspect().expect("inspect external environment");
+    let openai = application
+        .switch_to_openai_login(true, &external.revision)
+        .expect("establish OpenAI login mode");
+    let provider = application
+        .apply_provider_at_revision(PROVIDER_ID, true, &openai.revision)
+        .expect("switch to provider mode");
+    let preview = provider.restore_preview.as_ref().expect("restore preview");
+    assert_eq!(preview.target_mode, Some(AuthenticationMode::OpenaiLogin));
+
+    let restored = application
+        .restore_last_config(true, &provider.revision)
+        .expect("restore OpenAI login mode");
+
+    assert_eq!(restored.state, EnvironmentState::Managed);
+    assert_eq!(restored.mode, Some(AuthenticationMode::OpenaiLogin));
+    assert!(restored.current_provider.is_none());
 }
 
 #[test]
@@ -1446,6 +1483,13 @@ fn confirmed_restore_returns_only_the_latest_managed_artifacts_to_their_previous
         .apply_provider(PROVIDER_ID, true)
         .expect("apply provider before restore");
     assert_eq!(applied.restore_availability, RestoreAvailability::Available);
+    let preview = applied.restore_preview.expect("available restore preview");
+    assert_eq!(
+        preview.artifacts,
+        vec![ArtifactKind::Config, ArtifactKind::Credentials]
+    );
+    assert_eq!(preview.target_mode, None);
+    assert!(preview.target_provider.is_none());
     let applied_config = fs::read(codex_home.join("config.toml")).expect("read applied config");
     let applied_credentials =
         fs::read(codex_home.join("auth.json")).expect("read applied credentials");
@@ -1567,6 +1611,84 @@ fn restore_rejects_a_corrupted_latest_completed_backup_without_falling_back() {
 }
 
 #[test]
+fn restore_rejects_inconsistent_preview_metadata() {
+    let (temp, _, application) = fixture();
+    let codex_home = temp.path().join(".codex");
+    application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("apply provider before tampering with preview metadata");
+    let manifest_path = latest_backup_path(&codex_home).join("manifest.json");
+    let mut manifest: Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("read backup manifest"))
+            .expect("parse backup manifest");
+    manifest["previousMode"] = Value::String("provider".to_owned());
+    manifest["previousProviderId"] = Value::Null;
+    fs::write(
+        manifest_path,
+        serde_json::to_vec_pretty(&manifest).expect("serialize tampered manifest"),
+    )
+    .expect("tamper preview metadata");
+
+    let snapshot = application
+        .inspect()
+        .expect("inspect tampered preview metadata");
+
+    assert_eq!(
+        snapshot.restore_availability,
+        RestoreAvailability::InvalidBackup
+    );
+    assert!(snapshot.restore_preview.is_none());
+}
+
+#[test]
+fn legacy_backup_without_restore_metadata_infers_its_provider_target() {
+    let (temp, store, application) = fixture();
+    let codex_home = temp.path().join(".codex");
+    let next_id = "924b6c4b-889c-44af-9bd3-e4892e42dac1";
+    insert_provider_values(
+        &store,
+        next_id,
+        "Next Provider",
+        "https://next.example/v1",
+        "next-key",
+        "next-model",
+        "next-fingerprint",
+    );
+    application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("apply first provider");
+    application
+        .apply_provider(next_id, true)
+        .expect("apply second provider");
+    let manifest_path = latest_backup_path(&codex_home).join("manifest.json");
+    let mut manifest: Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("read backup manifest"))
+            .expect("parse backup manifest");
+    let object = manifest.as_object_mut().expect("manifest object");
+    object.remove("previousMode");
+    object.remove("previousProviderId");
+    object.remove("restoreTargetRecorded");
+    fs::write(
+        manifest_path,
+        serde_json::to_vec_pretty(&manifest).expect("serialize legacy manifest"),
+    )
+    .expect("write legacy manifest");
+
+    let snapshot = application.inspect().expect("inspect legacy backup");
+    let preview = snapshot.restore_preview.expect("legacy restore preview");
+
+    assert_eq!(
+        snapshot.restore_availability,
+        RestoreAvailability::Available
+    );
+    assert_eq!(preview.target_mode, Some(AuthenticationMode::Provider));
+    assert_eq!(
+        preview.target_provider.map(|provider| provider.id),
+        Some(PROVIDER_ID.to_owned())
+    );
+}
+
+#[test]
 fn restore_uses_only_the_immediately_previous_completed_configuration() {
     let (temp, store, application) = fixture();
     let codex_home = temp.path().join(".codex");
@@ -1588,6 +1710,15 @@ fn restore_uses_only_the_immediately_previous_completed_configuration() {
     let second = application
         .apply_provider(next_id, true)
         .expect("apply second provider");
+    let preview = second.restore_preview.as_ref().expect("restore preview");
+    assert_eq!(preview.target_mode, Some(AuthenticationMode::Provider));
+    assert_eq!(
+        preview
+            .target_provider
+            .as_ref()
+            .map(|provider| provider.id.as_str()),
+        Some(PROVIDER_ID)
+    );
 
     let restored = application
         .restore_last_config(true, &second.revision)
@@ -1612,6 +1743,47 @@ fn restore_uses_only_the_immediately_previous_completed_configuration() {
         2,
         "restore must not delete either verified provider"
     );
+}
+
+#[test]
+fn restore_is_disabled_when_its_previous_provider_no_longer_exists() {
+    let (temp, store, application) = fixture();
+    let codex_home = temp.path().join(".codex");
+    let next_id = "924b6c4b-889c-44af-9bd3-e4892e42dac1";
+    insert_provider_values(
+        &store,
+        next_id,
+        "Next Provider",
+        "https://next.example/v1",
+        "next-key",
+        "next-model",
+        "next-fingerprint",
+    );
+    application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("apply first provider");
+    let second = application
+        .apply_provider(next_id, true)
+        .expect("apply second provider");
+    Connection::open(store.paths().database())
+        .expect("open state database")
+        .execute("DELETE FROM providers WHERE id = ?1", [PROVIDER_ID])
+        .expect("delete previous provider");
+
+    let snapshot = application
+        .inspect()
+        .expect("inspect missing restore provider");
+
+    assert_eq!(
+        snapshot.restore_availability,
+        RestoreAvailability::InvalidBackup
+    );
+    assert!(snapshot.restore_preview.is_none());
+    let failure = application
+        .restore_last_config(true, &second.revision)
+        .expect_err("restore must reject a missing target provider");
+    assert_eq!(failure.category, EnvironmentFailureCategory::BackupInvalid);
+    assert!(codex_home.join("config.toml").exists());
 }
 
 #[test]
@@ -1752,6 +1924,7 @@ fn duplicate_or_damaged_managed_metadata_is_rejected_without_new_backup() {
         fs::write(&config_path, &damaged).expect("write damaged config");
         let preview = application.inspect().expect("inspect damaged config");
         assert_eq!(preview.state, EnvironmentState::Conflict, "{damage}");
+        assert!(!preview.takeover_available, "{damage}");
         let backup_root = codex_home.join(".gpteasy-backups");
         let backup_count = fs::read_dir(&backup_root)
             .expect("read initial backup")

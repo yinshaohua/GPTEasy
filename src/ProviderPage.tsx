@@ -1,15 +1,19 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  AlertTriangle,
   Check,
+  CheckCircle2,
   Copy,
   Eye,
   EyeOff,
   ExternalLink,
   GripVertical,
   LoaderCircle,
+  LogIn,
   Pencil,
   Plus,
   RefreshCw,
+  RotateCcw,
   Server,
   ShieldCheck,
   Trash2,
@@ -52,8 +56,18 @@ import {
   applyEnvironmentProvider,
   asEnvironmentFailure,
   getEnvironmentSnapshot,
+  restoreLastEnvironmentConfig,
+  switchToOpenAiLogin,
+  type EnvironmentFailure,
+  type EnvironmentSnapshot,
 } from "./contracts/environment";
-import { providerFailureMessages, providerMessages } from "./messages";
+import {
+  authenticationModeMessages,
+  consumerStatusMessages,
+  environmentStateMessages,
+  providerFailureMessages,
+  providerMessages,
+} from "./messages";
 
 type Operation =
   | "idle"
@@ -73,6 +87,10 @@ const DAYWAY_BASE_URL = "https://dayway.site/v1";
 export default function ProviderPage() {
   const [providers, setProviders] = useState<ProviderSummary[]>([]);
   const [listState, setListState] = useState<"loading" | "ready" | "error">("loading");
+  const [environment, setEnvironment] = useState<EnvironmentSnapshot | null>(null);
+  const [environmentState, setEnvironmentState] = useState<"loading" | "ready" | "error">("loading");
+  const [environmentFailure, setEnvironmentFailure] = useState<EnvironmentFailure | null>(null);
+  const [environmentOperation, setEnvironmentOperation] = useState<"idle" | "restoring" | "switching_mode">("idle");
   const [view, setView] = useState<PageView>("catalog");
   const [confirmation, setConfirmation] = useState<Confirmation>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -113,6 +131,16 @@ export default function ProviderPage() {
       })
       .catch(() => {
         if (mounted) setListState("error");
+      });
+    void getEnvironmentSnapshot()
+      .then((snapshot) => {
+        if (mounted) {
+          setEnvironment(snapshot);
+          setEnvironmentState("ready");
+        }
+      })
+      .catch(() => {
+        if (mounted) setEnvironmentState("error");
       });
     return () => {
       mounted = false;
@@ -482,24 +510,24 @@ export default function ProviderPage() {
   }
 
   async function switchCatalogProvider(provider: ProviderSummary) {
-    if (provider.isCurrent) return;
+    if (provider.isCurrent || !environment || !canApplyProvider(environment)) return;
     setOperation("saving");
-    setFailure(null);
+    setEnvironmentFailure(null);
     try {
-      const snapshot = await getEnvironmentSnapshot();
       const confirmSwitchRisk =
-        snapshot.mode === "openai_login" ||
-        snapshot.requiresTakeoverConfirmation ||
-        (snapshot.requiresConsumerConfirmation ?? true);
-      if (confirmSwitchRisk && !window.confirm(providerMessages.switchConfirmation)) {
+        environment.mode === "openai_login" ||
+        environment.requiresTakeoverConfirmation ||
+        environment.requiresConsumerConfirmation;
+      if (confirmSwitchRisk && !window.confirm(switchConfirmation(environment, provider))) {
         setOperation("idle");
         return;
       }
       const updated = await applyEnvironmentProvider(
         provider.id,
         confirmSwitchRisk,
-        snapshot.revision,
+        environment.revision,
       );
+      setEnvironment(updated);
       setProviders((current) =>
         current.map((item) => ({
           ...item,
@@ -508,13 +536,55 @@ export default function ProviderPage() {
       );
     } catch (error) {
       const environmentFailure = asEnvironmentFailure(error);
-      setFailure({
-        category: "state_unavailable",
-        messageId: environmentFailure.messageId,
-      });
+      setEnvironmentFailure(environmentFailure);
     } finally {
       setOperation("idle");
     }
+  }
+
+  async function restoreLatest() {
+    if (!environment || environment.restoreAvailability !== "available") return;
+    const preview = environment.restorePreview;
+    const artifacts = preview?.artifacts.map(artifactName).join("、") || "Codex 配置工件";
+    const target = preview?.targetProvider
+      ? `供应商“${preview.targetProvider.name}”`
+      : preview?.targetMode === "openai_login"
+        ? "OpenAI 登录模式"
+        : "外部配置";
+    if (!window.confirm(`将恢复 ${artifacts}，恢复后为${target}。是否继续？`)) return;
+    setEnvironmentOperation("restoring");
+    setEnvironmentFailure(null);
+    try {
+      const updated = await restoreLastEnvironmentConfig(true, environment.revision);
+      applyEnvironmentSnapshot(updated);
+    } catch (error) {
+      setEnvironmentFailure(asEnvironmentFailure(error));
+    } finally {
+      setEnvironmentOperation("idle");
+    }
+  }
+
+  async function enableOpenAiLogin() {
+    if (!environment || environment.loginStatus !== "logged_in" || environment.mode === "openai_login") return;
+    if (!window.confirm("将退出供应商模式并使用 Codex 已有的 OpenAI 登录；Codex 登录凭据不会被修改。是否继续？")) return;
+    setEnvironmentOperation("switching_mode");
+    setEnvironmentFailure(null);
+    try {
+      const updated = await switchToOpenAiLogin(true, environment.revision);
+      applyEnvironmentSnapshot(updated);
+    } catch (error) {
+      setEnvironmentFailure(asEnvironmentFailure(error));
+    } finally {
+      setEnvironmentOperation("idle");
+    }
+  }
+
+  function applyEnvironmentSnapshot(updated: EnvironmentSnapshot) {
+    setEnvironment(updated);
+    setProviders((current) => current.map((provider) => ({
+      ...provider,
+      isCurrent: provider.id === updated.currentProvider?.id,
+    })));
   }
 
   async function toggleApiKey() {
@@ -607,6 +677,11 @@ export default function ProviderPage() {
       </header>
 
       {view === "catalog" ? (
+        <>
+        <EnvironmentSummary
+          state={environmentState}
+          snapshot={environment}
+        />
         <section className="provider-catalog" aria-labelledby="provider-catalog-heading">
           <div className="catalog-heading">
             <div>
@@ -727,7 +802,7 @@ export default function ProviderPage() {
                     className="command-button compact"
                     type="button"
                     onClick={() => void switchCatalogProvider(provider)}
-                    disabled={provider.isCurrent || busy}
+                    disabled={provider.isCurrent || busy || !environment || !canApplyProvider(environment)}
                     aria-label={provider.isCurrent ? `${provider.name} 当前使用` : `切换到 ${provider.name}`}
                   >
                     <Check size={16} aria-hidden="true" />
@@ -740,8 +815,21 @@ export default function ProviderPage() {
               <p className="empty-catalog-note">{providerMessages.emptyCatalog}</p>
             )}
           </div>
+          {environment?.state === "conflict" && environment.takeoverAvailable === false && (
+            <p className="inline-error">无法安全解析当前配置，不能强制覆盖。</p>
+          )}
           {catalogFeedback && <p className="catalog-feedback" role="status">{catalogFeedback}</p>}
         </section>
+        <EnvironmentActions
+          snapshot={environment}
+          failure={environmentFailure}
+          busy={busy || environmentOperation !== "idle"}
+          restoring={environmentOperation === "restoring"}
+          switchingMode={environmentOperation === "switching_mode"}
+          onRestore={() => void restoreLatest()}
+          onSwitchMode={() => void enableOpenAiLogin()}
+        />
+        </>
       ) : (
         <section className="provider-detail" aria-labelledby="provider-editor-heading">
           <div className="detail-heading">
@@ -945,6 +1033,147 @@ export default function ProviderPage() {
       )}
     </>
   );
+}
+
+const restoreAvailabilityMessages = {
+  available: "可恢复到最近一次 GPTEasy 修改前的配置。",
+  no_backup: "尚无可恢复的 GPTEasy 配置修改。",
+  artifacts_changed: "受管工件在最近一次修改后发生变化，恢复已禁用。",
+  invalid_backup: "最近一次配置备份不完整，恢复已禁用。",
+  recovery_pending: "恢复协调完成前不能再次恢复。",
+} as const;
+
+function EnvironmentSummary({
+  state,
+  snapshot,
+}: {
+  state: "loading" | "ready" | "error";
+  snapshot: EnvironmentSnapshot | null;
+}) {
+  if (state === "loading") return <p className="environment-status-note">正在读取当前用户 Codex 环境</p>;
+  if (state === "error" || !snapshot) {
+    return <p className="environment-status-note is-error" role="alert">无法读取当前用户 Codex 环境。</p>;
+  }
+  const title = snapshot.mode
+    ? authenticationModeMessages[snapshot.mode]
+    : environmentStateMessages[snapshot.state];
+  return (
+    <section className={`environment-status-bar is-${snapshot.state}`} aria-labelledby="environment-status-heading">
+      {snapshot.state === "managed" ? <CheckCircle2 size={20} aria-hidden="true" /> : <AlertTriangle size={20} aria-hidden="true" />}
+      <div className="environment-status-copy">
+        <h2 id="environment-status-heading">{title}</h2>
+        <span>{snapshot.currentProvider ? `当前供应商：${snapshot.currentProvider.name}` : environmentDescription(snapshot)}</span>
+      </div>
+      <dl className="environment-status-facts">
+        <div><dt>桌面版</dt><dd>{consumerStatusMessages[snapshot.consumers?.desktop ?? "unknown"]}</dd></div>
+        <div><dt>Codex CLI</dt><dd>{consumerStatusMessages[snapshot.consumers?.cli ?? "unknown"]}</dd></div>
+        <div><dt>待重启</dt><dd>{snapshot.pendingRestart ? "是" : "否"}</dd></div>
+      </dl>
+    </section>
+  );
+}
+
+function EnvironmentActions({
+  snapshot,
+  failure,
+  busy,
+  restoring,
+  switchingMode,
+  onRestore,
+  onSwitchMode,
+}: {
+  snapshot: EnvironmentSnapshot | null;
+  failure: EnvironmentFailure | null;
+  busy: boolean;
+  restoring: boolean;
+  switchingMode: boolean;
+  onRestore: () => void;
+  onSwitchMode: () => void;
+}) {
+  const restoreAvailability = snapshot?.restoreAvailability ?? "no_backup";
+  const openAiReason = !snapshot
+    ? "环境状态不可用。"
+    : snapshot.mode === "openai_login"
+      ? "当前已是 OpenAI 登录模式。"
+      : snapshot.loginStatus === "not_logged_in"
+        ? "请先在 Codex 中完成 OpenAI 登录。"
+        : snapshot.loginStatus === "unavailable"
+          ? "无法确认 Codex 登录状态，已阻止切换。"
+          : "使用 Codex 已有的 OpenAI 登录。";
+  return (
+    <section className="environment-tools" aria-label="Codex 环境操作">
+      <div className="environment-tool">
+        <button className="secondary-button" type="button" onClick={onRestore} disabled={busy || restoreAvailability !== "available"}>
+          {restoring ? <LoaderCircle className="is-spinning" size={17} aria-hidden="true" /> : <RotateCcw size={17} aria-hidden="true" />}
+          恢复上次配置
+        </button>
+        <span>{restoring ? "正在恢复上次配置。" : restoreAvailabilityMessages[restoreAvailability]}</span>
+      </div>
+      <div className="environment-tool">
+        <button className="secondary-button" type="button" onClick={onSwitchMode} disabled={busy || !snapshot || snapshot.mode === "openai_login" || snapshot.loginStatus !== "logged_in"}>
+          {switchingMode ? <LoaderCircle className="is-spinning" size={17} aria-hidden="true" /> : <LogIn size={17} aria-hidden="true" />}
+          切换到 OpenAI 登录模式
+        </button>
+        <span>{openAiReason}</span>
+      </div>
+      <button className="secondary-button upcoming-command" type="button" disabled>选择 WSL2 供应商 <span>即将支持</span></button>
+      <button className="secondary-button upcoming-command" type="button" disabled>导出 Linux 脚本 <span>即将支持</span></button>
+      {failure && <p className="inline-error environment-tool-error" role="alert">{environmentFailureMessage(failure.messageId)}</p>}
+    </section>
+  );
+}
+
+function environmentDescription(snapshot: EnvironmentSnapshot): string {
+  if (snapshot.mode === "openai_login") {
+    return snapshot.loginStatus === "logged_in"
+      ? "Codex 已有本地 OpenAI 登录凭据。"
+      : snapshot.loginStatus === "not_logged_in"
+        ? "OpenAI 登录已在外部失效；当前模式保持不变。"
+        : "无法确认 OpenAI 登录状态；当前模式保持不变。";
+  }
+  return snapshot.state === "conflict"
+    ? "配置所有权无法安全确认。"
+    : "尚未建立有效的 GPTEasy 供应商 ID。";
+}
+
+function switchConfirmation(snapshot: EnvironmentSnapshot, provider: ProviderSummary): string {
+  const context = snapshot.mode === "openai_login"
+    ? "将退出 OpenAI 登录模式"
+    : snapshot.state === "external"
+      ? "将接管外部配置"
+      : snapshot.state === "conflict"
+        ? "将重新接管管理冲突"
+        : "将切换当前供应商";
+  const impacts = snapshot.impacts.map((impact) => `${artifactName(impact.artifact)}：${impact.fields.join("、")}`).join("；");
+  const desktop = snapshot.consumers?.desktop ?? "unknown";
+  const cli = snapshot.consumers?.cli ?? "unknown";
+  const desktopRisk = desktop === "running" ? "ChatGPT/Codex 桌面版正在运行" : desktop === "unknown" ? "无法确认桌面版状态" : "桌面版未运行";
+  const cliRisk = cli === "running" ? "Codex CLI 正在运行且不会被关闭" : cli === "unknown" ? "无法确认 Codex CLI 状态" : "Codex CLI 未运行";
+  return `${context}并应用“${provider.name}”。将修改：${impacts || "无可安全解析的工件范围"}。${desktopRisk}；${cliRisk}。是否继续？`;
+}
+
+function artifactName(artifact: "config" | "credentials"): string {
+  return artifact === "config" ? "config.toml" : "auth.json";
+}
+
+function canApplyProvider(snapshot: EnvironmentSnapshot): boolean {
+  return snapshot.state !== "conflict" || snapshot.takeoverAvailable;
+}
+
+function environmentFailureMessage(messageId: string): string {
+  const messages: Record<string, string> = {
+    "environment.state_unavailable": "无法读取 Codex 环境状态。",
+    "environment.provider_not_found": "所选供应商已不存在，请刷新后重试。",
+    "environment.managed_conflict": "管理区块已被外部修改，当前操作已停止。",
+    "environment.config_invalid": "config.toml 无法安全迁移。",
+    "environment.credentials_invalid": "auth.json 无法安全保留字段。",
+    "environment.restore_unavailable": "当前没有可安全恢复的最近配置。",
+    "environment.restore_conflict": "受管工件已发生外部变化，恢复已停止。",
+    "environment.backup_invalid": "最近一次配置备份不完整，无法安全恢复。",
+    "environment.openai_login_required": "请先在 Codex 中完成 OpenAI 登录。",
+    "environment.openai_login_unavailable": "无法确认 Codex 登录状态，已阻止切换。",
+  };
+  return messages[messageId] ?? providerFailureMessages[messageId] ?? "Codex 环境未发生变化，请重试。";
 }
 
 function AddressSuggestionDialog({

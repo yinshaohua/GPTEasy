@@ -27,12 +27,18 @@ export interface EnvironmentSnapshot {
   messageId: string;
   revision: string;
   requiresTakeoverConfirmation: boolean;
+  takeoverAvailable: boolean;
   impacts: ArtifactImpact[];
   currentProvider: ProviderSummary | null;
   restoreAvailability: RestoreAvailability;
+  restorePreview: {
+    artifacts: ArtifactKind[];
+    targetMode: AuthenticationMode | null;
+    targetProvider: ProviderSummary | null;
+  } | null;
   loginStatus: LoginStatus;
   pendingRestart: boolean;
-  requiresConsumerConfirmation?: boolean;
+  requiresConsumerConfirmation: boolean;
   consumers: {
     desktop: ConsumerStatus;
     cli: ConsumerStatus;
@@ -108,7 +114,9 @@ const previewSnapshot: EnvironmentSnapshot = {
   messageId: "environment.external",
   revision: "browser-preview",
   requiresTakeoverConfirmation: true,
+  takeoverAvailable: true,
   restoreAvailability: "no_backup",
+  restorePreview: null,
   impacts: [
     {
       artifact: "config",

@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
 import {
-  FileCode2,
   LoaderCircle,
   MessageSquare,
   RefreshCw,
@@ -8,7 +7,6 @@ import {
   ShieldAlert,
 } from "lucide-react";
 
-import EnvironmentPage from "./EnvironmentPage";
 import ProviderPage from "./ProviderPage";
 import {
   getStartupSnapshot,
@@ -26,11 +24,8 @@ type ViewState =
   | { kind: "loaded"; snapshot: StartupSnapshot }
   | { kind: "error" };
 
-type Page = "providers" | "codex";
-
 export default function App() {
   const [state, setState] = useState<ViewState>({ kind: "loading" });
-  const [page, setPage] = useState<Page>("providers");
 
   const load = useCallback(async (refresh: boolean) => {
     try {
@@ -61,13 +56,9 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <Sidebar page={page} onNavigate={setPage} />
+      <Sidebar />
       <main className="main-content">
-        {page === "providers" ? (
-          <ProviderPage />
-        ) : (
-          <EnvironmentPage startup={state.snapshot} />
-        )}
+        <ProviderPage />
       </main>
     </div>
   );
@@ -85,7 +76,7 @@ function Shell({ children }: { children: React.ReactNode }) {
   );
 }
 
-function Sidebar({ page, onNavigate }: { page: Page; onNavigate: (page: Page) => void }) {
+function Sidebar() {
   return (
     <aside className="sidebar" aria-label="应用导航">
       <Brand />
@@ -93,8 +84,7 @@ function Sidebar({ page, onNavigate }: { page: Page; onNavigate: (page: Page) =>
         <button
           className="nav-item"
           type="button"
-          aria-current={page === "providers" ? "page" : undefined}
-          onClick={() => onNavigate("providers")}
+          aria-current="page"
         >
           <Server size={18} aria-hidden="true" />
           供应商管理
@@ -103,15 +93,6 @@ function Sidebar({ page, onNavigate }: { page: Page; onNavigate: (page: Page) =>
           <MessageSquare size={18} aria-hidden="true" />
           <span>会话管理</span>
           <span className="nav-item-note">即将支持</span>
-        </button>
-        <button
-          className="nav-item"
-          type="button"
-          aria-current={page === "codex" ? "page" : undefined}
-          onClick={() => onNavigate("codex")}
-        >
-          <FileCode2 size={18} aria-hidden="true" />
-          Codex 环境
         </button>
       </nav>
       <div className="sidebar-meta">当前用户</div>

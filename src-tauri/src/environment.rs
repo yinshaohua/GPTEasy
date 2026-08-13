@@ -33,7 +33,7 @@ pub enum EnvironmentState {
     Conflict,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthenticationMode {
     Provider,
@@ -84,13 +84,23 @@ pub struct EnvironmentSnapshot {
     pub message_id: &'static str,
     pub revision: String,
     pub requires_takeover_confirmation: bool,
+    pub takeover_available: bool,
     pub impacts: Vec<ArtifactImpact>,
     pub current_provider: Option<ProviderSummary>,
     pub restore_availability: RestoreAvailability,
+    pub restore_preview: Option<RestorePreview>,
     pub login_status: LoginStatus,
     pub pending_restart: bool,
     pub requires_consumer_confirmation: bool,
     pub consumers: ConsumerStatuses,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestorePreview {
+    pub artifacts: Vec<ArtifactKind>,
+    pub target_mode: Option<AuthenticationMode>,
+    pub target_provider: Option<ProviderSummary>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -449,6 +459,7 @@ impl EnvironmentApplication {
         if has_pending_operation(&connection)? {
             return Err(restore_unavailable());
         }
+        let before = self.inspect_environment(&connection)?;
         let config = read_artifact(&self.codex_home.join("config.toml"))?;
         let credentials = read_artifact(&self.codex_home.join("auth.json"))?;
         if environment_revision(&config, &credentials) != expected_revision {
@@ -457,6 +468,7 @@ impl EnvironmentApplication {
         let consumer_scan = self.consumer_scanner.scan();
         let mut restart_context = pending_restart_context(&consumer_scan);
         let backup = latest_completed_backup(&self.codex_home)?.ok_or_else(restore_unavailable)?;
+        let restore_target = backup.restore_target(&connection)?;
         let managed_current =
             reconciled_applied_provider(&connection, &config, Some(&credentials))?.is_some();
         if !backup.matches_current(&config, &credentials, managed_current) {
@@ -465,11 +477,17 @@ impl EnvironmentApplication {
                 "environment.restore_conflict",
             ));
         }
-        let prepared = PreparedRestore::new(&self.codex_home, config, credentials, backup)?;
+        let prepared = PreparedRestore::new(
+            &self.codex_home,
+            config,
+            credentials,
+            backup,
+            restore_target,
+        )?;
         if self.faults.fails_backup_creation() {
             return Err(backup_failed());
         }
-        let rollback_backup = create_restore_backup(&self.codex_home, &prepared)?;
+        let rollback_backup = create_restore_backup(&self.codex_home, &prepared, &before)?;
         self.check_interruption(EnvironmentFailurePoint::AfterBackupCompleted)?;
         persist_pending_restore(
             &mut connection,
@@ -606,7 +624,7 @@ impl EnvironmentApplication {
         if self.faults.fails_backup_creation() {
             return Err(backup_failed());
         }
-        let backup = create_openai_backup(&self.codex_home, &prepared)?;
+        let backup = create_openai_backup(&self.codex_home, &prepared, &before)?;
         self.check_interruption(EnvironmentFailurePoint::AfterBackupCompleted)?;
         persist_pending_openai(
             &mut connection,
@@ -775,7 +793,7 @@ impl EnvironmentApplication {
         if self.faults.fails_backup_creation() {
             return Err(backup_failed());
         }
-        let backup = create_backup(&self.codex_home, &prepared)?;
+        let backup = create_backup(&self.codex_home, &prepared, &before)?;
         self.check_interruption(EnvironmentFailurePoint::AfterBackupCompleted)?;
         let mut restart_context = pending_restart_context(&consumer_scan);
         persist_pending(connection, &prepared, &backup, restart_context.as_ref())?;
@@ -1053,15 +1071,15 @@ fn fingerprints_match(current: &Option<String>, expected: &Option<String>, affec
     !affected || current == expected
 }
 
-fn inspect_restore_availability(
+fn inspect_restore(
     connection: &Connection,
     codex_home: &Path,
     config: &ArtifactBytes,
     credentials: &ArtifactBytes,
-) -> RestoreAvailability {
+) -> (RestoreAvailability, Option<RestorePreview>) {
     match has_pending_operation(connection) {
-        Ok(true) => return RestoreAvailability::RecoveryPending,
-        Err(_) => return RestoreAvailability::InvalidBackup,
+        Ok(true) => return (RestoreAvailability::RecoveryPending, None),
+        Err(_) => return (RestoreAvailability::InvalidBackup, None),
         Ok(false) => {}
     }
     match latest_completed_backup(codex_home) {
@@ -1072,13 +1090,16 @@ fn inspect_restore_availability(
                     .flatten()
                     .is_some();
             if backup.matches_current(config, credentials, managed_current) {
-                RestoreAvailability::Available
+                match backup.restore_preview(connection) {
+                    Ok(preview) => (RestoreAvailability::Available, Some(preview)),
+                    Err(_) => (RestoreAvailability::InvalidBackup, None),
+                }
             } else {
-                RestoreAvailability::ArtifactsChanged
+                (RestoreAvailability::ArtifactsChanged, None)
             }
         }
-        Ok(None) => RestoreAvailability::NoBackup,
-        Err(_) => RestoreAvailability::InvalidBackup,
+        Ok(None) => (RestoreAvailability::NoBackup, None),
+        Err(_) => (RestoreAvailability::InvalidBackup, None),
     }
 }
 
@@ -1090,8 +1111,8 @@ fn inspect_environment(
     let config = read_artifact(&codex_home.join("config.toml"))?;
     let credentials = read_artifact(&codex_home.join("auth.json"))?;
     let revision = environment_revision(&config, &credentials);
-    let restore_availability =
-        inspect_restore_availability(connection, codex_home, &config, &credentials);
+    let (restore_availability, restore_preview) =
+        inspect_restore(connection, codex_home, &config, &credentials);
     let impacts = vec![
         ArtifactImpact {
             artifact: ArtifactKind::Config,
@@ -1122,10 +1143,11 @@ fn inspect_environment(
         )
         .map_err(|_| state_unavailable())?;
     if recovery_conflict {
-        return Ok(conflict_snapshot(
+        return Ok(unsafe_conflict_snapshot(
             impacts,
             revision,
             restore_availability,
+            &restore_preview,
             login_status,
             pending_restart,
         ));
@@ -1160,9 +1182,10 @@ fn inspect_environment(
                         OpenAiConfigState::External
                     }
                     ManagedBlock::None => OpenAiConfigState::OpenAi,
-                    ManagedBlock::Valid(_) | ManagedBlock::Conflict => OpenAiConfigState::Conflict,
+                    ManagedBlock::Valid(_) => OpenAiConfigState::Conflict,
+                    ManagedBlock::Conflict => OpenAiConfigState::UnsafeConflict,
                 },
-                None => OpenAiConfigState::Conflict,
+                None => OpenAiConfigState::UnsafeConflict,
             },
         };
         if openai_config_state == OpenAiConfigState::External {
@@ -1170,18 +1193,35 @@ fn inspect_environment(
                 impacts,
                 revision,
                 restore_availability,
+                &restore_preview,
                 login_status,
                 pending_restart,
             ));
         }
-        if openai_config_state == OpenAiConfigState::Conflict {
-            return Ok(conflict_snapshot(
-                impacts,
-                revision,
-                restore_availability,
-                login_status,
-                pending_restart,
-            ));
+        if matches!(
+            openai_config_state,
+            OpenAiConfigState::Conflict | OpenAiConfigState::UnsafeConflict
+        ) {
+            let snapshot = if openai_config_state == OpenAiConfigState::UnsafeConflict {
+                unsafe_conflict_snapshot(
+                    impacts,
+                    revision,
+                    restore_availability,
+                    &restore_preview,
+                    login_status,
+                    pending_restart,
+                )
+            } else {
+                conflict_snapshot(
+                    impacts,
+                    revision,
+                    restore_availability,
+                    &restore_preview,
+                    login_status,
+                    pending_restart,
+                )
+            };
+            return Ok(snapshot);
         }
         return Ok(EnvironmentSnapshot {
             state: EnvironmentState::Managed,
@@ -1193,9 +1233,11 @@ fn inspect_environment(
             },
             revision,
             requires_takeover_confirmation: true,
+            takeover_available: true,
             impacts,
             current_provider: None,
             restore_availability,
+            restore_preview,
             login_status,
             pending_restart,
             requires_consumer_confirmation: false,
@@ -1219,6 +1261,7 @@ fn inspect_environment(
                 impacts,
                 revision,
                 restore_availability,
+                &restore_preview,
                 login_status,
                 pending_restart,
             )
@@ -1227,6 +1270,7 @@ fn inspect_environment(
                 impacts,
                 revision,
                 restore_availability,
+                &restore_preview,
                 login_status,
                 pending_restart,
             )
@@ -1235,10 +1279,11 @@ fn inspect_environment(
     let config_text = match std::str::from_utf8(config_bytes) {
         Ok(text) => text,
         Err(_) => {
-            return Ok(conflict_snapshot(
+            return Ok(unsafe_conflict_snapshot(
                 impacts,
                 revision,
                 restore_availability,
+                &restore_preview,
                 login_status,
                 pending_restart,
             ));
@@ -1247,20 +1292,22 @@ fn inspect_environment(
     let document = match config_text.parse::<DocumentMut>() {
         Ok(document) => document,
         Err(_) => {
-            return Ok(conflict_snapshot(
+            return Ok(unsafe_conflict_snapshot(
                 impacts,
                 revision,
                 restore_availability,
+                &restore_preview,
                 login_status,
                 pending_restart,
             ));
         }
     };
     if ensure_file_credential_store(Some(config_bytes)).is_err() {
-        return Ok(conflict_snapshot(
+        return Ok(unsafe_conflict_snapshot(
             impacts,
             revision,
             restore_availability,
+            &restore_preview,
             login_status,
             pending_restart,
         ));
@@ -1272,6 +1319,7 @@ fn inspect_environment(
                     impacts,
                     revision,
                     restore_availability,
+                    &restore_preview,
                     login_status,
                     pending_restart,
                 )
@@ -1280,16 +1328,18 @@ fn inspect_environment(
                     impacts,
                     revision,
                     restore_availability,
+                    &restore_preview,
                     login_status,
                     pending_restart,
                 )
             });
         }
         ManagedBlock::Conflict => {
-            return Ok(conflict_snapshot(
+            return Ok(unsafe_conflict_snapshot(
                 impacts,
                 revision,
                 restore_availability,
+                &restore_preview,
                 login_status,
                 pending_restart,
             ));
@@ -1297,19 +1347,21 @@ fn inspect_environment(
         ManagedBlock::Valid(block) => block,
     };
     if managed.recovered_desktop_rewrite && last_applied_provider.is_none() {
-        return Ok(conflict_snapshot(
+        return Ok(unsafe_conflict_snapshot(
             impacts,
             revision,
             restore_availability,
+            &restore_preview,
             login_status,
             pending_restart,
         ));
     }
     if !managed_block_is_root_scoped(&document, config_text, &managed) {
-        return Ok(conflict_snapshot(
+        return Ok(unsafe_conflict_snapshot(
             impacts,
             revision,
             restore_availability,
+            &restore_preview,
             login_status,
             pending_restart,
         ));
@@ -1322,6 +1374,7 @@ fn inspect_environment(
                     impacts,
                     revision,
                     restore_availability,
+                    &restore_preview,
                     login_status,
                     pending_restart,
                 )
@@ -1330,6 +1383,7 @@ fn inspect_environment(
                     impacts,
                     revision,
                     restore_availability,
+                    &restore_preview,
                     login_status,
                     pending_restart,
                 )
@@ -1342,6 +1396,7 @@ fn inspect_environment(
             impacts,
             revision,
             restore_availability,
+            &restore_preview,
             login_status,
             pending_restart,
         ));
@@ -1351,6 +1406,7 @@ fn inspect_environment(
             impacts,
             revision,
             restore_availability,
+            &restore_preview,
             login_status,
             pending_restart,
         ));
@@ -1362,6 +1418,7 @@ fn inspect_environment(
             impacts,
             revision,
             restore_availability,
+            &restore_preview,
             login_status,
             pending_restart,
         ));
@@ -1372,6 +1429,7 @@ fn inspect_environment(
             impacts,
             revision,
             restore_availability,
+            &restore_preview,
             login_status,
             pending_restart,
         ));
@@ -1383,9 +1441,11 @@ fn inspect_environment(
         message_id: "environment.managed",
         revision,
         requires_takeover_confirmation: false,
+        takeover_available: true,
         impacts,
         current_provider: Some(provider.summary(true)),
         restore_availability,
+        restore_preview,
         login_status,
         pending_restart,
         requires_consumer_confirmation: false,
@@ -1398,12 +1458,14 @@ enum OpenAiConfigState {
     OpenAi,
     External,
     Conflict,
+    UnsafeConflict,
 }
 
 fn external_snapshot(
     impacts: Vec<ArtifactImpact>,
     revision: String,
     restore_availability: RestoreAvailability,
+    restore_preview: &Option<RestorePreview>,
     login_status: LoginStatus,
     pending_restart: bool,
 ) -> EnvironmentSnapshot {
@@ -1413,9 +1475,11 @@ fn external_snapshot(
         message_id: "environment.external",
         revision,
         requires_takeover_confirmation: true,
+        takeover_available: true,
         impacts,
         current_provider: None,
         restore_availability,
+        restore_preview: restore_preview.clone(),
         login_status,
         pending_restart,
         requires_consumer_confirmation: false,
@@ -1427,6 +1491,7 @@ fn conflict_snapshot(
     impacts: Vec<ArtifactImpact>,
     revision: String,
     restore_availability: RestoreAvailability,
+    restore_preview: &Option<RestorePreview>,
     login_status: LoginStatus,
     pending_restart: bool,
 ) -> EnvironmentSnapshot {
@@ -1436,14 +1501,36 @@ fn conflict_snapshot(
         message_id: "environment.managed_conflict",
         revision,
         requires_takeover_confirmation: true,
+        takeover_available: true,
         impacts,
         current_provider: None,
         restore_availability,
+        restore_preview: restore_preview.clone(),
         login_status,
         pending_restart,
         requires_consumer_confirmation: false,
         consumers: unknown_consumers(),
     }
+}
+
+fn unsafe_conflict_snapshot(
+    impacts: Vec<ArtifactImpact>,
+    revision: String,
+    restore_availability: RestoreAvailability,
+    restore_preview: &Option<RestorePreview>,
+    login_status: LoginStatus,
+    pending_restart: bool,
+) -> EnvironmentSnapshot {
+    let mut snapshot = conflict_snapshot(
+        impacts,
+        revision,
+        restore_availability,
+        restore_preview,
+        login_status,
+        pending_restart,
+    );
+    snapshot.takeover_available = false;
+    snapshot
 }
 
 fn unknown_consumers() -> ConsumerStatuses {
@@ -1740,7 +1827,6 @@ impl PreparedArtifact {
 
 #[derive(Debug, Clone)]
 struct CompletedBackup {
-    path: PathBuf,
     manifest: BackupManifest,
     config: ArtifactBytes,
     credentials: ArtifactBytes,
@@ -1767,6 +1853,98 @@ impl CompletedBackup {
             managed_current,
         )
     }
+
+    fn restore_preview(
+        &self,
+        connection: &Connection,
+    ) -> Result<RestorePreview, EnvironmentFailure> {
+        let artifacts = [
+            self.manifest
+                .config_affected
+                .then_some(ArtifactKind::Config),
+            self.manifest
+                .credentials_affected
+                .then_some(ArtifactKind::Credentials),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let target = self.restore_target(connection)?;
+        let target_provider = match (target.mode, target.provider_id.as_deref()) {
+            (Some(AuthenticationMode::Provider), Some(provider_id)) => Some(
+                load_provider(connection, provider_id)
+                    .map_err(|_| backup_invalid())?
+                    .summary(false),
+            ),
+            _ => None,
+        };
+        Ok(RestorePreview {
+            artifacts,
+            target_mode: target.mode,
+            target_provider,
+        })
+    }
+
+    fn restore_target(&self, connection: &Connection) -> Result<RestoreTarget, EnvironmentFailure> {
+        if self.manifest.restore_target_recorded {
+            let target = RestoreTarget {
+                mode: self.manifest.previous_mode,
+                provider_id: self.manifest.previous_provider_id.clone(),
+            };
+            if let Some(provider_id) = target.provider_id.as_deref() {
+                load_provider(connection, provider_id).map_err(|_| backup_invalid())?;
+            }
+            return Ok(target);
+        }
+        infer_legacy_restore_target(connection, self)
+    }
+}
+
+fn infer_legacy_restore_target(
+    connection: &Connection,
+    backup: &CompletedBackup,
+) -> Result<RestoreTarget, EnvironmentFailure> {
+    if let Some(config_bytes) = backup.config.bytes.as_deref() {
+        let text = std::str::from_utf8(config_bytes).map_err(|_| backup_invalid())?;
+        let document = text.parse::<DocumentMut>().map_err(|_| backup_invalid())?;
+        match managed_block(text) {
+            ManagedBlock::Valid(managed) => {
+                if !managed_block_is_root_scoped(&document, text, &managed) {
+                    return Err(backup_invalid());
+                }
+                let provider = load_provider(connection, &managed.provider_id)
+                    .map_err(|_| backup_invalid())?;
+                if !managed_config_matches(&document, &provider) {
+                    return Err(backup_invalid());
+                }
+                return Ok(RestoreTarget {
+                    mode: Some(AuthenticationMode::Provider),
+                    provider_id: Some(provider.id),
+                });
+            }
+            ManagedBlock::Conflict => return Err(backup_invalid()),
+            ManagedBlock::None => {}
+        }
+    }
+    let field_auth_mode = backup
+        .manifest
+        .credential_fields
+        .as_ref()
+        .and_then(|fields| fields.auth_mode.as_ref())
+        .and_then(Value::as_str);
+    let artifact_auth_mode = backup
+        .credentials
+        .bytes
+        .as_deref()
+        .and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok())
+        .and_then(|value| value.get("auth_mode").cloned())
+        .and_then(|value| value.as_str().map(str::to_owned));
+    Ok(RestoreTarget {
+        mode: (field_auth_mode == Some("chatgpt")
+            || artifact_auth_mode.as_deref() == Some("chatgpt"))
+        .then_some(AuthenticationMode::OpenaiLogin),
+        provider_id: None,
+    })
 }
 
 fn artifact_matches_completed_operation(
@@ -1784,7 +1962,14 @@ struct PreparedRestore {
     operation_id: String,
     config: PreparedRestoreArtifact,
     credentials: Option<PreparedRestoreArtifact>,
-    source_backup: PathBuf,
+    target: RestoreTarget,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RestoreTarget {
+    mode: Option<AuthenticationMode>,
+    provider_id: Option<String>,
 }
 
 impl PreparedRestore {
@@ -1793,6 +1978,7 @@ impl PreparedRestore {
         config: ArtifactBytes,
         credentials: ArtifactBytes,
         backup: CompletedBackup,
+        target: RestoreTarget,
     ) -> Result<Self, EnvironmentFailure> {
         let preserve_current_config =
             backup.manifest.old_config_fingerprint == backup.manifest.new_config_fingerprint;
@@ -1831,7 +2017,7 @@ impl PreparedRestore {
                     ArtifactKind::Credentials,
                 )
             }),
-            source_backup: backup.path,
+            target,
         })
     }
 
@@ -2080,10 +2266,8 @@ fn persist_pending_restore(
     backup: &Path,
     restart_context: Option<&PendingRestartContext>,
 ) -> Result<(), EnvironmentFailure> {
-    let target_snapshot = serde_json::json!({
-        "sourceBackup": prepared.source_backup.to_string_lossy(),
-    })
-    .to_string();
+    let target_snapshot =
+        serde_json::to_string(&prepared.target).map_err(|_| state_unavailable())?;
     let restart_context = serialize_restart_context(restart_context)?;
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -2314,6 +2498,8 @@ fn commit_recovered_state(
         .transpose()
         .map_err(|_| state_unavailable())?;
     if pending.operation_kind == "restore_latest" {
+        let target: RestoreTarget =
+            serde_json::from_str(&pending.target_snapshot_json).map_err(|_| state_unavailable())?;
         let credentials = (pending.old_credentials_fingerprint.is_some()
             || pending.new_credentials_fingerprint.is_some())
         .then_some(credentials);
@@ -2323,6 +2509,7 @@ fn commit_recovered_state(
             config,
             credentials,
             restart_context.as_ref(),
+            Some(&target),
         );
     }
     if pending.operation_kind == "switch_openai_login" {
@@ -2416,6 +2603,7 @@ fn commit_restored_state(
             .as_ref()
             .map(|credentials| &credentials.target),
         restart_context,
+        Some(&prepared.target),
     )
 }
 
@@ -2425,7 +2613,11 @@ fn commit_reconciled_state(
     config: &ArtifactBytes,
     credentials: Option<&ArtifactBytes>,
     restart_context: Option<&PendingRestartContext>,
+    restore_target: Option<&RestoreTarget>,
 ) -> Result<(), EnvironmentFailure> {
+    if restore_target.is_some_and(|target| target.mode == Some(AuthenticationMode::OpenaiLogin)) {
+        return commit_recovered_openai_state(connection, operation_id, restart_context);
+    }
     let applied = reconciled_applied_provider(connection, config, credentials)?;
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -2552,6 +2744,12 @@ struct BackupManifest {
     new_credentials_fingerprint: Option<String>,
     #[serde(default)]
     credential_fields: Option<CredentialFieldsBackup>,
+    #[serde(default)]
+    previous_mode: Option<AuthenticationMode>,
+    #[serde(default)]
+    previous_provider_id: Option<String>,
+    #[serde(default)]
+    restore_target_recorded: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2591,6 +2789,7 @@ fn credential_fields_backup(
 fn create_backup(
     codex_home: &Path,
     prepared: &PreparedSwitch,
+    before: &EnvironmentSnapshot,
 ) -> Result<PathBuf, EnvironmentFailure> {
     let root = codex_home.join(".gpteasy-backups");
     reject_redirect(&root)?;
@@ -2628,6 +2827,12 @@ fn create_backup(
             old_credentials_fingerprint: prepared.credentials.old_fingerprint.clone(),
             new_credentials_fingerprint: Some(prepared.credentials.new_fingerprint.clone()),
             credential_fields,
+            previous_mode: before.mode,
+            previous_provider_id: before
+                .current_provider
+                .as_ref()
+                .map(|provider| provider.id.clone()),
+            restore_target_recorded: true,
         })
         .map_err(|_| backup_failed())?;
         write_new_synced(&operation.join("manifest.json"), &manifest)
@@ -2643,6 +2848,7 @@ fn create_backup(
 fn create_openai_backup(
     codex_home: &Path,
     prepared: &PreparedOpenAiSwitch,
+    before: &EnvironmentSnapshot,
 ) -> Result<PathBuf, EnvironmentFailure> {
     let root = codex_home.join(".gpteasy-backups");
     reject_redirect(&root)?;
@@ -2669,6 +2875,12 @@ fn create_openai_backup(
             old_credentials_fingerprint: None,
             new_credentials_fingerprint: None,
             credential_fields: None,
+            previous_mode: before.mode,
+            previous_provider_id: before
+                .current_provider
+                .as_ref()
+                .map(|provider| provider.id.clone()),
+            restore_target_recorded: true,
         })
         .map_err(|_| backup_failed())?;
         write_new_synced(&operation.join("manifest.json"), &manifest)
@@ -2684,6 +2896,7 @@ fn create_openai_backup(
 fn create_restore_backup(
     codex_home: &Path,
     prepared: &PreparedRestore,
+    before: &EnvironmentSnapshot,
 ) -> Result<PathBuf, EnvironmentFailure> {
     let root = codex_home.join(".gpteasy-backups");
     reject_redirect(&root)?;
@@ -2735,6 +2948,12 @@ fn create_restore_backup(
                 .as_ref()
                 .and_then(|credentials| credentials.target_fingerprint.clone()),
             credential_fields,
+            previous_mode: before.mode,
+            previous_provider_id: before
+                .current_provider
+                .as_ref()
+                .map(|provider| provider.id.clone()),
+            restore_target_recorded: true,
         })
         .map_err(|_| backup_failed())?;
         write_new_synced(&operation.join("manifest.json"), &manifest)
@@ -2845,10 +3064,23 @@ fn load_completed_backup(path: PathBuf) -> Result<CompletedBackup, EnvironmentFa
         .file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.ends_with(&manifest.operation_id));
+    let previous_target_valid = match (
+        manifest.restore_target_recorded,
+        manifest.previous_mode,
+        manifest.previous_provider_id.as_deref(),
+    ) {
+        (true, Some(AuthenticationMode::Provider), Some(provider_id)) => {
+            Uuid::parse_str(provider_id).is_ok()
+        }
+        (true, Some(AuthenticationMode::OpenaiLogin) | None, None) => true,
+        (false, None, None) => true,
+        _ => false,
+    };
     if manifest.format_version != BACKUP_FORMAT_VERSION
         || !valid_kind
         || Uuid::parse_str(&manifest.operation_id).is_err()
         || !operation_name_matches
+        || !previous_target_valid
         || !manifest.config_affected
         || manifest.config_existed != manifest.old_config_fingerprint.is_some()
         || (manifest.credentials_affected
@@ -2892,7 +3124,6 @@ fn load_completed_backup(path: PathBuf) -> Result<CompletedBackup, EnvironmentFa
         )?
     };
     Ok(CompletedBackup {
-        path,
         manifest,
         config,
         credentials,
