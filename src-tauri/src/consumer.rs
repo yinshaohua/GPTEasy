@@ -68,6 +68,10 @@ impl ConsumerScan {
 
 pub trait ConsumerScanner: Send + Sync {
     fn scan(&self) -> ConsumerScan;
+
+    fn scan_for_packages(&self, _packages: &[DesktopPackage]) -> ConsumerScan {
+        self.scan()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,36 +171,40 @@ impl DesktopApplication {
     }
 
     pub fn inspect(&self) -> DesktopSnapshot {
-        let scan = self.scanner.scan();
-        if scan.desktop == ConsumerStatus::Unknown {
-            return desktop_snapshot(
-                ConsumerStatus::Unknown,
-                DesktopAction::Unavailable,
-                "desktop.identity_untrusted",
-            );
-        }
-        if scan.desktop == ConsumerStatus::Running {
-            return desktop_snapshot(
-                ConsumerStatus::Running,
-                DesktopAction::Unavailable,
-                "desktop.running",
-            );
-        }
         match self.discovery.discover() {
             Ok(packages) if packages.is_empty() => desktop_snapshot(
                 ConsumerStatus::Stopped,
                 DesktopAction::Unavailable,
                 "desktop.not_installed",
             ),
-            Ok(packages) if packages.len() == 1 => desktop_snapshot(
-                ConsumerStatus::Stopped,
-                DesktopAction::Start,
-                "desktop.ready_to_start",
-            ),
-            Ok(_) => desktop_snapshot(
+            Ok(packages) if packages.len() == 1 => {
+                let scan = self.scanner.scan_for_packages(&packages);
+                match scan.desktop {
+                    ConsumerStatus::Unknown => desktop_snapshot(
+                        ConsumerStatus::Unknown,
+                        DesktopAction::Unavailable,
+                        "desktop.identity_untrusted",
+                    ),
+                    ConsumerStatus::Running => desktop_snapshot(
+                        ConsumerStatus::Running,
+                        DesktopAction::Unavailable,
+                        "desktop.running",
+                    ),
+                    ConsumerStatus::Stopped => desktop_snapshot(
+                        ConsumerStatus::Stopped,
+                        DesktopAction::Start,
+                        "desktop.ready_to_start",
+                    ),
+                }
+            }
+            Ok(packages) => desktop_snapshot(
                 ConsumerStatus::Stopped,
                 DesktopAction::Unavailable,
-                "desktop.ambiguous_installation",
+                if has_multiple_package_families(&packages) {
+                    "desktop.ambiguous_installation"
+                } else {
+                    "desktop.discovery_failed"
+                },
             ),
             Err(()) => desktop_snapshot(
                 ConsumerStatus::Unknown,
@@ -207,13 +215,6 @@ impl DesktopApplication {
     }
 
     pub fn start(&self) -> Result<DesktopSnapshot, DesktopFailure> {
-        let before = self.scanner.scan();
-        if before.desktop != ConsumerStatus::Stopped {
-            return Err(desktop_failure(
-                DesktopFailureCategory::ActionUnavailable,
-                "desktop.action_unavailable",
-            ));
-        }
         let packages = self.discovery.discover().map_err(|()| {
             desktop_failure(
                 DesktopFailureCategory::ActionUnavailable,
@@ -225,11 +226,20 @@ impl DesktopApplication {
                 DesktopFailureCategory::ActionUnavailable,
                 if packages.is_empty() {
                     "desktop.not_installed"
-                } else {
+                } else if has_multiple_package_families(&packages) {
                     "desktop.ambiguous_installation"
+                } else {
+                    "desktop.discovery_failed"
                 },
             ));
         };
+        let before = self.scanner.scan_for_packages(&packages);
+        if before.desktop != ConsumerStatus::Stopped {
+            return Err(desktop_failure(
+                DesktopFailureCategory::ActionUnavailable,
+                "desktop.action_unavailable",
+            ));
+        }
         let activation_started_at = self.clock.now_epoch_millis();
         self.activator.activate(&package.aumid()).map_err(|()| {
             desktop_failure(
@@ -241,7 +251,7 @@ impl DesktopApplication {
             if attempt > 0 && !self.scan_delay.is_zero() {
                 thread::sleep(self.scan_delay);
             }
-            let after = self.scanner.scan();
+            let after = self.scanner.scan_for_packages(&packages);
             if after.desktop == ConsumerStatus::Running
                 && after.desktop_roots.iter().any(|root| {
                     root.started_at_epoch_millis >= activation_started_at
@@ -260,6 +270,15 @@ impl DesktopApplication {
             "desktop.launch_not_observed",
         ))
     }
+}
+
+fn has_multiple_package_families(packages: &[DesktopPackage]) -> bool {
+    packages
+        .iter()
+        .map(|package| package.family_name.to_ascii_lowercase())
+        .collect::<HashSet<_>>()
+        .len()
+        > 1
 }
 
 impl Default for DesktopApplication {
@@ -351,10 +370,26 @@ impl ConsumerScanner for WindowsConsumerScanner {
     fn scan(&self) -> ConsumerScan {
         #[cfg(windows)]
         {
-            scan_windows().unwrap_or_else(|_| ConsumerScan::unknown())
+            scan_windows(None).unwrap_or_else(|_| ConsumerScan::unknown())
         }
         #[cfg(not(windows))]
         {
+            ConsumerScan::unknown()
+        }
+    }
+
+    fn scan_for_packages(&self, packages: &[DesktopPackage]) -> ConsumerScan {
+        #[cfg(windows)]
+        {
+            let install_locations = packages
+                .iter()
+                .map(|package| package.install_location.clone())
+                .collect::<Vec<_>>();
+            scan_windows(Some(&install_locations)).unwrap_or_else(|_| ConsumerScan::unknown())
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = packages;
             ConsumerScan::unknown()
         }
     }
@@ -379,10 +414,20 @@ pub struct FixtureProcess {
 }
 
 pub fn classify_fixture(processes: &[FixtureProcess]) -> ConsumerScan {
-    classify_processes(processes)
+    classify_processes(processes, None)
 }
 
-fn classify_processes(processes: &[FixtureProcess]) -> ConsumerScan {
+pub fn classify_fixture_for_packages(
+    processes: &[FixtureProcess],
+    install_locations: &[PathBuf],
+) -> ConsumerScan {
+    classify_processes(processes, Some(install_locations))
+}
+
+fn classify_processes(
+    processes: &[FixtureProcess],
+    install_locations: Option<&[PathBuf]>,
+) -> ConsumerScan {
     let available = processes
         .iter()
         .filter(|process| process.access == ProcessAccess::Available)
@@ -393,18 +438,19 @@ fn classify_processes(processes: &[FixtureProcess]) -> ConsumerScan {
         .collect::<HashMap<_, _>>();
     let desktop_roots = available
         .iter()
-        .filter(|process| is_desktop_root(process))
+        .filter(|process| is_desktop_root(process, install_locations))
         .map(|process| process.pid)
         .collect::<HashSet<_>>();
     let desktop_children = available
         .iter()
         .filter(|process| {
-            is_bundled_codex(process) && has_desktop_ancestor(process, &by_pid, &desktop_roots)
+            is_bundled_codex(process, install_locations)
+                && has_desktop_ancestor(process, &by_pid, &desktop_roots)
         })
         .map(|process| process.pid)
         .collect::<HashSet<_>>();
     let orphaned_bundled = available.iter().any(|process| {
-        is_bundled_codex(process)
+        is_bundled_codex(process, install_locations)
             && !desktop_roots.contains(&process.pid)
             && !has_desktop_ancestor(process, &by_pid, &desktop_roots)
     });
@@ -412,7 +458,7 @@ fn classify_processes(processes: &[FixtureProcess]) -> ConsumerScan {
         .iter()
         .filter(|process| {
             is_codex_name(&process.name)
-                && !is_bundled_codex(process)
+                && !is_bundled_codex(process, install_locations)
                 && !process.electron_helper
                 && !desktop_roots.contains(&process.pid)
                 && !has_desktop_ancestor(process, &by_pid, &desktop_roots)
@@ -421,7 +467,7 @@ fn classify_processes(processes: &[FixtureProcess]) -> ConsumerScan {
         .collect::<Vec<_>>();
     let untrusted_cli = available.iter().any(|process| {
         is_codex_name(&process.name)
-            && !is_bundled_codex(process)
+            && !is_bundled_codex(process, install_locations)
             && !process.electron_helper
             && !desktop_roots.contains(&process.pid)
             && !has_desktop_ancestor(process, &by_pid, &desktop_roots)
@@ -437,7 +483,7 @@ fn classify_processes(processes: &[FixtureProcess]) -> ConsumerScan {
 
     let desktop_running = !desktop_roots.is_empty() || !desktop_children.is_empty();
     let cli_running = !cli.is_empty();
-    let mut identities = desktop_roots
+    let mut root_identities = desktop_roots
         .iter()
         .filter_map(|pid| by_pid.get(pid))
         .map(|process| ConsumerIdentity {
@@ -445,6 +491,11 @@ fn classify_processes(processes: &[FixtureProcess]) -> ConsumerScan {
             pid: process.pid,
             started_at_epoch_millis: process.started_at_epoch_millis,
         })
+        .collect::<Vec<_>>();
+    root_identities.sort_by_key(|identity| identity.pid);
+    let mut identities = root_identities
+        .iter()
+        .cloned()
         .chain(
             desktop_children
                 .iter()
@@ -464,7 +515,7 @@ fn classify_processes(processes: &[FixtureProcess]) -> ConsumerScan {
     identities.sort_by_key(|identity| (identity.role as u8, identity.pid));
 
     ConsumerScan {
-        desktop: if desktop_denied || orphaned_bundled || untrusted_cli {
+        desktop: if desktop_denied || orphaned_bundled {
             ConsumerStatus::Unknown
         } else if desktop_running {
             ConsumerStatus::Running
@@ -479,15 +530,7 @@ fn classify_processes(processes: &[FixtureProcess]) -> ConsumerScan {
             ConsumerStatus::Stopped
         },
         identities,
-        desktop_roots: desktop_roots
-            .iter()
-            .filter_map(|pid| by_pid.get(pid))
-            .map(|process| ConsumerIdentity {
-                role: ConsumerRole::Desktop,
-                pid: process.pid,
-                started_at_epoch_millis: process.started_at_epoch_millis,
-            })
-            .collect(),
+        desktop_roots: root_identities,
     }
 }
 
@@ -512,12 +555,16 @@ $packages = @(
       $package = $_
       $manifest = Get-AppxPackageManifest -Package $package.PackageFullName
       @($manifest.Package.Applications.Application) | ForEach-Object {
-        [pscustomobject]@{
-          Name = $package.Name
-          FamilyName = $package.PackageFamilyName
-          ApplicationId = $_.Id
-          InstallLocation = $package.InstallLocation
-        }
+        $_
+      } | Where-Object {
+        [IO.Path]::GetFileNameWithoutExtension([string]$_.Executable) -in @('ChatGPT', 'Codex')
+      } | ForEach-Object {
+          [pscustomobject]@{
+            Name = $package.Name
+            FamilyName = $package.PackageFamilyName
+            ApplicationId = $_.Id
+            InstallLocation = $package.InstallLocation
+          }
       }
     }
 )
@@ -553,10 +600,10 @@ ConvertTo-Json -Compress -InputObject $packages
         .collect())
 }
 
-fn is_desktop_root(process: &&FixtureProcess) -> bool {
+fn is_desktop_root(process: &&FixtureProcess, install_locations: Option<&[PathBuf]>) -> bool {
     is_desktop_name(&process.name)
-        && is_packaged_openai_desktop(&process.executable)
-        && !is_bundled_codex(process)
+        && is_discovered_openai_desktop(&process.executable, install_locations)
+        && !is_bundled_codex(process, install_locations)
         && !process.electron_helper
 }
 
@@ -578,7 +625,12 @@ fn normalized_stem(name: &str) -> Option<String> {
         .map(|stem| stem.to_ascii_lowercase())
 }
 
-fn is_packaged_openai_desktop(path: &Path) -> bool {
+fn is_discovered_openai_desktop(path: &Path, install_locations: Option<&[PathBuf]>) -> bool {
+    if let Some(install_locations) = install_locations {
+        return install_locations
+            .iter()
+            .any(|install_location| path_is_within(path, install_location));
+    }
     let normalized = path
         .to_string_lossy()
         .replace('/', "\\")
@@ -587,13 +639,29 @@ fn is_packaged_openai_desktop(path: &Path) -> bool {
         || normalized.contains("\\windowsapps\\openai.chatgpt_")
 }
 
-fn is_bundled_codex(process: &FixtureProcess) -> bool {
+fn path_is_within(path: &Path, root: &Path) -> bool {
+    let path = normalized_windows_path(path);
+    let mut root = normalized_windows_path(root);
+    root.push('\\');
+    path.starts_with(&root)
+}
+
+fn normalized_windows_path(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_ascii_lowercase()
+}
+
+fn is_bundled_codex(process: &FixtureProcess, install_locations: Option<&[PathBuf]>) -> bool {
     let normalized = process
         .executable
         .to_string_lossy()
         .replace('/', "\\")
         .to_ascii_lowercase();
-    normalized.contains("\\resources\\codex\\") && is_codex_name(&process.name)
+    normalized.contains("\\resources\\codex\\")
+        && is_codex_name(&process.name)
+        && is_discovered_openai_desktop(&process.executable, install_locations)
 }
 
 fn is_trusted_cli_path(path: &Path) -> bool {
@@ -626,7 +694,7 @@ fn has_desktop_ancestor(
 }
 
 #[cfg(windows)]
-fn scan_windows() -> Result<ConsumerScan, ()> {
+fn scan_windows(install_locations: Option<&[PathBuf]>) -> Result<ConsumerScan, ()> {
     use std::mem::size_of;
 
     use sysinfo::{Pid, System, get_current_pid};
@@ -705,7 +773,7 @@ fn scan_windows() -> Result<ConsumerScan, ()> {
     unsafe {
         CloseHandle(snapshot);
     }
-    Ok(classify_processes(&processes))
+    Ok(classify_processes(&processes, install_locations))
 }
 
 #[cfg(windows)]

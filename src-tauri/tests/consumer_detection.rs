@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use gpteasy_lib::consumer::{
     ConsumerRole, ConsumerScanner, ConsumerStatus, FixtureProcess, ProcessAccess,
-    WindowsConsumerScanner, classify_fixture,
+    WindowsConsumerScanner, classify_fixture, classify_fixture_for_packages,
 };
 
 fn process(
@@ -100,9 +100,28 @@ fn codex_name_without_a_trusted_install_path_is_unknown() {
         r"C:\tools\unrelated\codex.exe",
     )]);
 
-    assert_eq!(scan.desktop, ConsumerStatus::Unknown);
+    assert_eq!(scan.desktop, ConsumerStatus::Stopped);
     assert_eq!(scan.cli, ConsumerStatus::Unknown);
     assert!(scan.identities.is_empty());
+}
+
+#[test]
+fn desktop_root_must_belong_to_a_dynamically_discovered_install_location() {
+    let scan = classify_fixture_for_packages(
+        &[process(
+            100,
+            1,
+            1_000,
+            "ChatGPT.exe",
+            r"C:\Program Files\WindowsApps\OpenAI.ChatGPT_forged\ChatGPT.exe",
+        )],
+        &[PathBuf::from(
+            r"C:\Program Files\WindowsApps\OpenAI.Codex_real",
+        )],
+    );
+
+    assert_eq!(scan.desktop, ConsumerStatus::Stopped);
+    assert!(scan.desktop_roots.is_empty());
 }
 
 #[test]

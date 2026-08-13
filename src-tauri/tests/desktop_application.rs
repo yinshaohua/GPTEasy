@@ -23,6 +23,7 @@ impl DesktopPackageDiscovery for FixtureDiscovery {
 #[derive(Debug)]
 struct FixtureScanner {
     scans: Mutex<VecDeque<ConsumerScan>>,
+    package_scans: Mutex<Vec<Vec<PathBuf>>>,
 }
 
 impl ConsumerScanner for FixtureScanner {
@@ -33,6 +34,19 @@ impl ConsumerScanner for FixtureScanner {
         } else {
             scans.front().cloned().expect("fixture scan")
         }
+    }
+
+    fn scan_for_packages(&self, packages: &[DesktopPackage]) -> ConsumerScan {
+        self.package_scans
+            .lock()
+            .expect("package scan fixture lock")
+            .push(
+                packages
+                    .iter()
+                    .map(|package| package.install_location.clone())
+                    .collect(),
+            );
+        self.scan()
     }
 }
 
@@ -104,6 +118,7 @@ fn application(
         Arc::new(FixtureDiscovery { packages }),
         Arc::new(FixtureScanner {
             scans: Mutex::new(scans.into()),
+            package_scans: Mutex::new(Vec::new()),
         }),
         activator.clone(),
         Arc::new(FixtureClock(8_500)),
@@ -140,6 +155,23 @@ fn multiple_official_package_candidates_disable_ambiguous_activation() {
 
     assert_eq!(snapshot.action, DesktopAction::Unavailable);
     assert_eq!(snapshot.message_id, "desktop.ambiguous_installation");
+}
+
+#[test]
+fn multiple_desktop_entries_in_one_package_are_not_reported_as_multiple_packages() {
+    let (application, _) = application(
+        vec![
+            package("OpenAI.Codex", "OpenAI.Codex_publisher", "ChatGPT"),
+            package("OpenAI.Codex", "OpenAI.Codex_publisher", "Codex"),
+        ],
+        vec![scan(ConsumerStatus::Stopped, &[])],
+        Ok(()),
+    );
+
+    let snapshot = application.inspect();
+
+    assert_eq!(snapshot.action, DesktopAction::Unavailable);
+    assert_eq!(snapshot.message_id, "desktop.discovery_failed");
 }
 
 #[test]
