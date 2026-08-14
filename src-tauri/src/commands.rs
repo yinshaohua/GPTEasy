@@ -46,8 +46,8 @@ impl ProviderRuntime {
         self.application.list_providers()
     }
 
-    pub(crate) fn cancel_all_requests(&self) -> usize {
-        self.application.cancel_all_requests()
+    pub(crate) fn shutdown_requests(&self) -> usize {
+        self.application.shutdown_requests()
     }
 }
 

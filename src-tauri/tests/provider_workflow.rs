@@ -614,21 +614,24 @@ async fn validation_distinguishes_first_event_timeout_and_user_cancellation() {
 }
 
 #[tokio::test]
-async fn application_exit_cancellation_stops_all_active_provider_requests() {
+async fn application_shutdown_stops_concurrent_and_future_provider_requests() {
     let temp = TempDir::new().expect("temp state directory");
     let store = StateStore::new(StatePaths::from_root(temp.path()));
     assert!(store.bootstrap().is_ready());
     let application = Arc::new(ProviderApplication::new(store, validator()));
     let mut tasks = Vec::new();
+    let mut servers = Vec::new();
     for request_id in ["exit-cancel-a", "exit-cancel-b"] {
         let server = ValidationServer::start(ValidationScenario::IdleBeforeFirstEvent);
+        let base_url = server.base_url.clone();
+        servers.push(server);
         let task_application = Arc::clone(&application);
         tasks.push(tokio::spawn(async move {
             task_application
                 .validate_provider(
                     request_id.to_owned(),
                     ProviderValidationInput {
-                        base_url: server.base_url,
+                        base_url,
                         api_key: "test-provider-key".to_owned(),
                         default_model: "model-a".to_owned(),
                     },
@@ -636,9 +639,15 @@ async fn application_exit_cancellation_stops_all_active_provider_requests() {
                 .await
         }));
     }
-    tokio::time::sleep(Duration::from_millis(25)).await;
+    tokio::task::spawn_blocking(move || {
+        for server in &mut servers {
+            server.wait_until_streaming();
+        }
+    })
+    .await
+    .expect("wait for provider requests to start streaming");
 
-    assert_eq!(application.cancel_all_requests(), 2);
+    assert_eq!(application.shutdown_requests(), 2);
     for task in tasks {
         let failure = task
             .await
@@ -646,6 +655,19 @@ async fn application_exit_cancellation_stops_all_active_provider_requests() {
             .expect_err("exit cancellation must stop provider request");
         assert_eq!(failure.category, ProviderFailureCategory::Cancelled);
     }
+
+    let failure = application
+        .validate_provider(
+            "exit-cancel-late".to_owned(),
+            ProviderValidationInput {
+                base_url: "http://127.0.0.1:1".to_owned(),
+                api_key: "test-provider-key".to_owned(),
+                default_model: "model-a".to_owned(),
+            },
+        )
+        .await
+        .expect_err("application shutdown must reject future provider requests");
+    assert_eq!(failure.category, ProviderFailureCategory::Cancelled);
 }
 
 #[tokio::test]
@@ -1757,7 +1779,12 @@ impl PathFixValidationServer {
                     _ => {
                         let payload: Value = serde_json::from_slice(request_body(&request))
                             .expect("path-fix validation payload");
-                        write_validation_sse(&mut stream, ValidationScenario::Success, &payload);
+                        write_validation_sse(
+                            &mut stream,
+                            ValidationScenario::Success,
+                            &payload,
+                            None,
+                        );
                     }
                 }
             }
@@ -1791,6 +1818,7 @@ enum ValidationScenario {
 struct ValidationServer {
     base_url: String,
     requests: mpsc::Receiver<Vec<Vec<u8>>>,
+    streaming: Option<mpsc::Receiver<()>>,
 }
 
 impl ValidationServer {
@@ -1802,6 +1830,13 @@ impl ValidationServer {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind validation provider");
         let address = listener.local_addr().expect("validation provider address");
         let (sender, requests) = mpsc::channel();
+        let (streaming_sender, streaming) =
+            if matches!(scenario, ValidationScenario::IdleBeforeFirstEvent) {
+                let (sender, receiver) = mpsc::channel();
+                (Some(sender), Some(receiver))
+            } else {
+                (None, None)
+            };
         thread::spawn(move || {
             let mut captured = Vec::new();
             let request_count = match scenario {
@@ -1826,7 +1861,12 @@ impl ValidationServer {
                 } else {
                     let payload: Value =
                         serde_json::from_slice(request_body(&request)).expect("validation payload");
-                    write_validation_sse(&mut stream, scenario, &payload);
+                    write_validation_sse(
+                        &mut stream,
+                        scenario,
+                        &payload,
+                        streaming_sender.as_ref(),
+                    );
                 }
                 captured.push(request);
             }
@@ -1835,7 +1875,16 @@ impl ValidationServer {
         Self {
             base_url: format!("http://{address}"),
             requests,
+            streaming,
         }
+    }
+
+    fn wait_until_streaming(&mut self) {
+        self.streaming
+            .take()
+            .expect("validation server does not stream")
+            .recv_timeout(Duration::from_secs(2))
+            .expect("validation request did not start streaming");
     }
 }
 
@@ -1897,6 +1946,7 @@ fn write_validation_sse(
     stream: &mut std::net::TcpStream,
     scenario: ValidationScenario,
     payload: &Value,
+    streaming: Option<&mpsc::Sender<()>>,
 ) {
     if matches!(scenario, ValidationScenario::IdleBeforeFirstEvent) {
         stream
@@ -1905,6 +1955,10 @@ fn write_validation_sse(
             )
             .expect("write idle SSE headers");
         stream.flush().expect("flush idle SSE headers");
+        streaming
+            .expect("idle validation signal is missing")
+            .send(())
+            .expect("idle validation signal is not observed");
         thread::sleep(Duration::from_millis(250));
         return;
     }

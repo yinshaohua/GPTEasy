@@ -256,9 +256,14 @@ impl ProviderFailure {
 pub struct ProviderApplication {
     state_store: StateStore,
     validator: ProviderValidator,
-    active_requests: Mutex<HashMap<String, CancellationToken>>,
+    requests: Mutex<RequestRegistry>,
     verified_candidates: Mutex<HashMap<String, VerifiedCandidate>>,
     validation_receipt_ttl: Duration,
+}
+
+struct RequestRegistry {
+    accepting_requests: bool,
+    active: HashMap<String, CancellationToken>,
 }
 
 #[derive(Debug)]
@@ -321,7 +326,10 @@ impl ProviderApplication {
         Self {
             state_store,
             validator,
-            active_requests: Mutex::new(HashMap::new()),
+            requests: Mutex::new(RequestRegistry {
+                accepting_requests: true,
+                active: HashMap::new(),
+            }),
             verified_candidates: Mutex::new(HashMap::new()),
             validation_receipt_ttl,
         }
@@ -476,18 +484,15 @@ impl ProviderApplication {
         target: ValidationTarget,
     ) -> Result<ProviderValidationReceipt, ProviderFailure> {
         let validation_id = Uuid::new_v4().to_string();
-        let mut requests = self
-            .active_requests
-            .lock()
-            .map_err(|_| state_unavailable())?;
+        let mut requests = self.requests.lock().map_err(|_| state_unavailable())?;
         if cancellation.is_cancelled() {
-            requests.remove(&request_id);
+            requests.active.remove(&request_id);
             return Err(cancelled());
         }
         let mut candidates = match self.verified_candidates.lock() {
             Ok(candidates) => candidates,
             Err(_) => {
-                requests.remove(&request_id);
+                requests.active.remove(&request_id);
                 return Err(state_unavailable());
             }
         };
@@ -502,7 +507,7 @@ impl ProviderApplication {
                 target,
             },
         );
-        requests.remove(&request_id);
+        requests.active.remove(&request_id);
 
         Ok(ProviderValidationReceipt {
             validation_id,
@@ -516,10 +521,10 @@ impl ProviderApplication {
 
     pub fn cancel_request(&self, request_id: &str) -> bool {
         let active_cancelled = self
-            .active_requests
+            .requests
             .lock()
             .ok()
-            .and_then(|requests| requests.get(request_id).cloned())
+            .and_then(|requests| requests.active.get(request_id).cloned())
             .is_some_and(|cancellation| {
                 cancellation.cancel();
                 true
@@ -536,12 +541,14 @@ impl ProviderApplication {
         active_cancelled || candidate_removed
     }
 
-    pub fn cancel_all_requests(&self) -> usize {
-        let cancellations = self
-            .active_requests
-            .lock()
-            .map(|requests| requests.values().cloned().collect::<Vec<_>>())
-            .unwrap_or_default();
+    pub fn shutdown_requests(&self) -> usize {
+        let cancellations = self.requests.lock().map_or_else(
+            |_| Vec::new(),
+            |mut requests| {
+                requests.accepting_requests = false;
+                requests.active.values().cloned().collect::<Vec<_>>()
+            },
+        );
         for cancellation in &cancellations {
             cancellation.cancel();
         }
@@ -936,17 +943,19 @@ impl ProviderApplication {
             ));
         }
         let cancellation = CancellationToken::new();
-        let mut requests = self
-            .active_requests
-            .lock()
-            .map_err(|_| state_unavailable())?;
-        if requests.contains_key(request_id) {
+        let mut requests = self.requests.lock().map_err(|_| state_unavailable())?;
+        if !requests.accepting_requests {
+            return Err(cancelled());
+        }
+        if requests.active.contains_key(request_id) {
             return Err(ProviderFailure::new(
                 ProviderFailureCategory::InvalidInput,
                 "provider.request_already_running",
             ));
         }
-        requests.insert(request_id.to_owned(), cancellation.clone());
+        requests
+            .active
+            .insert(request_id.to_owned(), cancellation.clone());
         Ok(cancellation)
     }
 
@@ -993,8 +1002,8 @@ impl ProviderApplication {
     }
 
     fn finish_request(&self, request_id: &str) {
-        if let Ok(mut requests) = self.active_requests.lock() {
-            requests.remove(request_id);
+        if let Ok(mut requests) = self.requests.lock() {
+            requests.active.remove(request_id);
         }
     }
 }

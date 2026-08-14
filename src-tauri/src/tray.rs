@@ -261,7 +261,7 @@ fn execute_tray_effect(app: &AppHandle, effect: TrayEffect) {
         }
         TrayEffect::Exit => {
             app.state::<LifecycleRuntime>().request_exit();
-            app.state::<ProviderRuntime>().cancel_all_requests();
+            app.state::<ProviderRuntime>().shutdown_requests();
             app.exit(0);
         }
         TrayEffect::None => {}
