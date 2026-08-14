@@ -7,12 +7,14 @@ ADR 记录难以逆转且有真实取舍的决定。重建遵循 ADR-0009 的“
 - ADR-0002、0004-0007：技术栈、直接配置、身份、SQLite 和本地模式。
 - ADR-0009-0012：重建原则、Windows x64 范围、核心受管对象和验证/切换边界。
 - ADR-0013-0016：SQLite 明文凭据、两种模式、无草稿和保存并应用。
-- ADR-0017-0020：接管、恢复、外部修改和待重启。
+- ADR-0017-0019：接管、恢复和外部修改。
 - ADR-0021-0024：托盘生命周期、签名、单个未完成操作和数据库恢复。
+- ADR-0025：用户确认后的 ChatGPT/Codex 桌面版重启。
 
 ## Historical Or Deferred
 
 - ADR-0001 已被 ADR-0013 取代。
 - ADR-0003 的 Linux function 属于后续候选，不进入当前路线图。
 - ADR-0008 已被 ADR-0011 取代。
+- ADR-0020 已被 ADR-0025 取代。
 - 旧 GSD 管理文件已删除；当前代码曾交付的能力摘要见 [`docs/archive/implemented-features-2026-08-09.md`](../archive/implemented-features-2026-08-09.md)。

@@ -1,4 +1,6 @@
-# GPTEasy UI Contract
+# GPTEasy v0.1 UI Contract
+
+> 本文是已经交付的 v0.1 历史基线。v0.1 之后的当前目标见 [`PROVIDER-MANAGEMENT-SPEC.md`](./PROVIDER-MANAGEMENT-SPEC.md)。
 
 本合同只覆盖 Windows x64 首个可验收版本。界面只提供简体中文并始终跟随 Windows 主题，不包含搜索、分页、WSL2、Linux 脚本、DayWay、自动更新、诊断导出或登录启动设置。
 
