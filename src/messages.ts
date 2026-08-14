@@ -145,6 +145,8 @@ export const providerFailureMessages: Record<string, string> = {
   "environment.state_unavailable": "无法提交 Codex 环境状态，请重试。",
   "environment.managed_conflict": "Codex 环境存在管理冲突，未写入任何内容。",
   "environment.concurrent_modification": "Codex 配置已被其他程序修改，已重新读取环境实际状态。",
+  "environment.refresh_failed_after_change":
+    "配置变更失败，且无法重新读取环境实际状态。页面已清除过期状态，请稍后重试。",
   "environment.artifact_redirected": "Codex 工件使用了路径重定向，当前操作已停止。",
   "environment.artifact_write_failed": "无法安全写入 Codex 工件，旧状态已保留。",
   "environment.rollback_failed": "Codex 工件恢复未完成，请重新启动 GPTEasy 进行协调。",
@@ -174,6 +176,17 @@ export const providerMessages = {
   currentProvider: "当前使用",
   editProvider: "修改",
   switchProvider: "切换",
+  configChangeTitle: "确认配置切换",
+  configChangePrimary: "切换",
+  configChangeCancel: "取消",
+  configChangeConsumerRisk:
+    "运行中的 ChatGPT/Codex 桌面版或 Codex CLI 可能继续使用旧配置，直到它们自然退出。",
+  configChangePendingRestart:
+    "配置已更新。运行中的 Codex 消费者可能继续使用旧配置。",
+  configChangeOpenAiTarget: "将切换到 OpenAI 登录模式。",
+  configChangeProviderTarget: (name: string) => `将切换到“${name}”。`,
+  configChangeProviderUpdateTarget: (name: string) =>
+    `将保存并应用“${name}”的已验证更新。`,
   switchConfirmation: "将切换当前用户 Codex 环境使用的供应商。是否继续？",
   back: "返回",
   unsavedTitle: "放弃未保存修改？",

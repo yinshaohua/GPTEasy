@@ -1014,6 +1014,70 @@ describe("供应商目录生命周期", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("已重新读取环境实际状态");
   });
 
+  it("配置变更失败且环境重读失败时清除过期当前状态", async () => {
+    const current = {
+      id: "76149f67-0d76-4d41-b606-77ba244bffec",
+      name: "Stale Provider",
+      baseUrl: "https://stale.example/v1",
+      defaultModel: "model-stale",
+      verifiedAtEpochSeconds: 1_786_140_100,
+      isCurrent: true,
+    };
+    const target = {
+      id: "68bf9ee2-3ba5-4517-b47e-12a11e038de4",
+      name: "Target Provider",
+      baseUrl: "https://target.example/v1",
+      defaultModel: "model-target",
+      verifiedAtEpochSeconds: 1_786_140_000,
+      isCurrent: false,
+    };
+    const environment = {
+      state: "managed",
+      mode: "provider",
+      messageId: "environment.managed",
+      revision: "stale-revision",
+      requiresTakeoverConfirmation: false,
+      takeoverAvailable: true,
+      requiresConsumerConfirmation: false,
+      impacts: [],
+      currentProvider: current,
+      restoreAvailability: "no_backup",
+      restorePreview: null,
+      loginStatus: "logged_in",
+      pendingRestart: false,
+      consumers: { desktop: "stopped", cli: "stopped" },
+    };
+    let environmentReads = 0;
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([current, target]);
+      if (command === "get_environment_snapshot") {
+        environmentReads += 1;
+        return environmentReads === 1
+          ? Promise.resolve(environment)
+          : Promise.reject(new Error("environment unavailable"));
+      }
+      if (command === "apply_environment_provider") {
+        return Promise.reject({
+          category: "concurrent_modification",
+          messageId: "environment.concurrent_modification",
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "切换到 Target Provider" }));
+    fireEvent.click(screen.getByRole("button", { name: "切换" }));
+
+    expect(await screen.findByText("无法读取当前用户 Codex 环境。")).toBeInTheDocument();
+    expect(screen.getByText(/页面已清除过期状态/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Stale Provider 当前使用" }))
+      .not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Target Provider 当前使用" }))
+      .not.toBeInTheDocument();
+  });
+
   it("从详情安全查看凭据，并覆盖改名、重验证和删除限制", async () => {
     const first = {
       id: "68bf9ee2-3ba5-4517-b47e-12a11e038de4",

@@ -550,8 +550,12 @@ export default function ProviderPage() {
       const updated = await restoreLastEnvironmentConfig(true, environment.revision);
       applyEnvironmentSnapshot(updated);
     } catch (error) {
-      await refreshEnvironmentAfterFailure();
-      setEnvironmentFailure(asEnvironmentFailure(error));
+      const refreshed = await refreshEnvironmentAfterFailure();
+      const environmentFailure = asEnvironmentFailure(error);
+      setEnvironmentFailure(refreshed ? environmentFailure : {
+        ...environmentFailure,
+        messageId: "environment.refresh_failed_after_change",
+      });
     } finally {
       setRestoring(false);
     }
@@ -591,12 +595,23 @@ export default function ProviderPage() {
       }
       applyEnvironmentSnapshot(updated);
       if (updated.pendingRestart) {
-        setCatalogFeedback("配置已更新。运行中的 Codex 消费者可能继续使用旧配置。");
+        setCatalogFeedback(providerMessages.configChangePendingRestart);
       }
     } catch (error) {
-      await refreshEnvironmentAfterFailure();
-      if (request.kind === "provider_update") setFailure(asProviderFailure(error));
-      else setEnvironmentFailure(asEnvironmentFailure(error));
+      const refreshed = await refreshEnvironmentAfterFailure();
+      if (request.kind === "provider_update") {
+        const providerFailure = asProviderFailure(error);
+        setFailure(refreshed ? providerFailure : {
+          ...providerFailure,
+          messageId: "environment.refresh_failed_after_change",
+        });
+      } else {
+        const environmentFailure = asEnvironmentFailure(error);
+        setEnvironmentFailure(refreshed ? environmentFailure : {
+          ...environmentFailure,
+          messageId: "environment.refresh_failed_after_change",
+        });
+      }
     } finally {
       if (request.kind === "provider") setSwitchingProviderId(null);
       else if (request.kind === "openai") setSwitchingMode(false);
@@ -604,12 +619,19 @@ export default function ProviderPage() {
     }
   }
 
-  async function refreshEnvironmentAfterFailure() {
+  async function refreshEnvironmentAfterFailure(): Promise<boolean> {
     try {
       applyEnvironmentSnapshot(await getEnvironmentSnapshot());
       setEnvironmentState("ready");
+      return true;
     } catch {
+      setEnvironment(null);
+      setProviders((current) => current.map((provider) => ({
+        ...provider,
+        isCurrent: false,
+      })));
       setEnvironmentState("error");
+      return false;
     }
   }
 
@@ -1037,10 +1059,10 @@ export default function ProviderPage() {
       )}
       {configChangeRequest && (
         <ConfirmationDialog
-          title="确认配置切换"
+          title={providerMessages.configChangeTitle}
           message={configChangeMessage(configChangeRequest)}
-          primaryLabel="切换"
-          secondaryLabel="取消"
+          primaryLabel={providerMessages.configChangePrimary}
+          secondaryLabel={providerMessages.configChangeCancel}
           onPrimary={() => void executeConfigChange(configChangeRequest)}
           onSecondary={() => setConfigChangeRequest(null)}
         />
@@ -1159,12 +1181,14 @@ function EnvironmentActions({
 }
 
 function configChangeMessage(request: ConfigChangeRequest): string {
-  const risk = "运行中的 ChatGPT/Codex 桌面版或 Codex CLI 可能继续使用旧配置，直到它们自然退出。";
-  if (request.kind === "provider") return `将切换到“${request.provider.name}”。${risk}`;
-  if (request.kind === "provider_update") {
-    return `将保存并应用“${request.provider.name}”的已验证更新。${risk}`;
+  const risk = providerMessages.configChangeConsumerRisk;
+  if (request.kind === "provider") {
+    return `${providerMessages.configChangeProviderTarget(request.provider.name)}${risk}`;
   }
-  return `将切换到 OpenAI 登录模式；Codex 登录凭据不会被修改。${risk}`;
+  if (request.kind === "provider_update") {
+    return `${providerMessages.configChangeProviderUpdateTarget(request.provider.name)}${risk}`;
+  }
+  return `${providerMessages.configChangeOpenAiTarget}${risk}`;
 }
 
 function artifactName(artifact: "config" | "credentials"): string {
