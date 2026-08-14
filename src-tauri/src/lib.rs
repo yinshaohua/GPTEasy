@@ -3,6 +3,7 @@ mod commands;
 pub mod consumer;
 pub mod environment;
 pub mod provider;
+pub mod single_instance;
 pub mod startup;
 pub mod state;
 mod tray;
@@ -24,6 +25,7 @@ use commands::{
 use consumer::DesktopApplication;
 use environment::EnvironmentApplication;
 use provider::{ProviderApplication, ProviderValidator, ValidationTimeouts};
+use single_instance::{InstanceRole, acquire};
 use startup::StartupCoordinator;
 use state::{StatePaths, StateStore};
 use tauri::Manager;
@@ -31,10 +33,16 @@ use tray::LifecycleRuntime;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let executable = std::env::current_exe().expect("GPTEasy executable path is unavailable");
+    let primary_instance = match acquire(&executable).expect("GPTEasy single-instance setup failed")
+    {
+        InstanceRole::Primary(primary) => primary,
+        InstanceRole::Secondary => return,
+    };
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_notification::init())
-        .setup(|app| {
+        .setup(move |app| {
             let state_root = app.path().app_local_data_dir()?;
             let home = app.path().home_dir()?;
             let state_store = StateStore::new(StatePaths::from_root(state_root));
@@ -53,6 +61,13 @@ pub fn run() {
                 state_store,
                 ProviderValidator::new(ValidationTimeouts::default()),
             )));
+            let activation_handle = app.app_handle().clone();
+            app.manage(primary_instance.listen(move || {
+                let main_thread_handle = activation_handle.clone();
+                let _ = activation_handle.run_on_main_thread(move || {
+                    tray::show_settings(&main_thread_handle);
+                });
+            })?);
             tray::setup(app)?;
             Ok(())
         })

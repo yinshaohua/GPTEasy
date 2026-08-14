@@ -536,6 +536,18 @@ impl ProviderApplication {
         active_cancelled || candidate_removed
     }
 
+    pub fn cancel_all_requests(&self) -> usize {
+        let cancellations = self
+            .active_requests
+            .lock()
+            .map(|requests| requests.values().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        for cancellation in &cancellations {
+            cancellation.cancel();
+        }
+        cancellations.len()
+    }
+
     pub fn discard_validation(&self, validation_id: &str) {
         if let Ok(mut candidates) = self.verified_candidates.lock() {
             candidates.remove(validation_id);

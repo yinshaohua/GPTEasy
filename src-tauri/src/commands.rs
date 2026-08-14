@@ -45,6 +45,10 @@ impl ProviderRuntime {
     pub(crate) fn list(&self) -> Result<Vec<ProviderSummary>, ProviderFailure> {
         self.application.list_providers()
     }
+
+    pub(crate) fn cancel_all_requests(&self) -> usize {
+        self.application.cancel_all_requests()
+    }
 }
 
 impl EnvironmentRuntime {

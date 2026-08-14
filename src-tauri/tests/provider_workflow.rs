@@ -614,6 +614,41 @@ async fn validation_distinguishes_first_event_timeout_and_user_cancellation() {
 }
 
 #[tokio::test]
+async fn application_exit_cancellation_stops_all_active_provider_requests() {
+    let temp = TempDir::new().expect("temp state directory");
+    let store = StateStore::new(StatePaths::from_root(temp.path()));
+    assert!(store.bootstrap().is_ready());
+    let application = Arc::new(ProviderApplication::new(store, validator()));
+    let mut tasks = Vec::new();
+    for request_id in ["exit-cancel-a", "exit-cancel-b"] {
+        let server = ValidationServer::start(ValidationScenario::IdleBeforeFirstEvent);
+        let task_application = Arc::clone(&application);
+        tasks.push(tokio::spawn(async move {
+            task_application
+                .validate_provider(
+                    request_id.to_owned(),
+                    ProviderValidationInput {
+                        base_url: server.base_url,
+                        api_key: "test-provider-key".to_owned(),
+                        default_model: "model-a".to_owned(),
+                    },
+                )
+                .await
+        }));
+    }
+    tokio::time::sleep(Duration::from_millis(25)).await;
+
+    assert_eq!(application.cancel_all_requests(), 2);
+    for task in tasks {
+        let failure = task
+            .await
+            .expect("join provider request")
+            .expect_err("exit cancellation must stop provider request");
+        assert_eq!(failure.category, ProviderFailureCategory::Cancelled);
+    }
+}
+
+#[tokio::test]
 async fn a_verified_provider_is_persisted_only_after_explicit_save() {
     let temp = TempDir::new().expect("temp state directory");
     let store = StateStore::new(StatePaths::from_root(temp.path()));

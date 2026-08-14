@@ -90,6 +90,17 @@ function Get-GPTEasyProcesses([string]$ExecutablePath) {
         Where-Object { $_.ExecutablePath -and $_.ExecutablePath.Equals($ExecutablePath, [StringComparison]::OrdinalIgnoreCase) })
 }
 
+function Wait-GPTEasyProcessesExit([string]$ExecutablePath, [int]$TimeoutSeconds = 10) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        if (@(Get-GPTEasyProcesses $ExecutablePath).Count -eq 0) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 200
+    } while ([DateTime]::UtcNow -lt $deadline)
+    return $false
+}
+
 function Get-OfficialDesktopIdentity {
     $packages = @(
         Get-AppxPackage -Name 'OpenAI.Codex' -ErrorAction SilentlyContinue
@@ -294,6 +305,20 @@ $checks.Add([ordered]@{ id = 'install_current_user'; passed = $true })
 
 Start-Process -FilePath $app.FullName | Out-Null
 Confirm-UatStep $checks 'application_launch' '确认已安装的 GPTEasy 设置窗口可见且可正常操作。'
+$primaryProcesses = @(Get-GPTEasyProcesses $app.FullName)
+if ($primaryProcesses.Count -ne 1) {
+    throw "首次启动后应只有一个同路径 GPTEasy 进程，实际找到 $($primaryProcesses.Count) 个。"
+}
+$primaryProcessId = [uint32]$primaryProcesses[0].ProcessId
+Confirm-UatStep $checks 'single_instance_precondition' '最小化 GPTEasy 设置窗口，确认窗口已不在前台后输入 PASS。'
+Start-Process -FilePath $app.FullName | Out-Null
+Start-Sleep -Seconds 2
+$reactivatedProcesses = @(Get-GPTEasyProcesses $app.FullName)
+if ($reactivatedProcesses.Count -ne 1 -or [uint32]$reactivatedProcesses[0].ProcessId -ne $primaryProcessId) {
+    throw '第二次启动必须唤醒原实例，且不能留下第二个同路径 GPTEasy 进程。'
+}
+$checks.Add([ordered]@{ id = 'single_instance_process'; passed = $true })
+Confirm-UatStep $checks 'single_instance_activation' '确认第二次启动已显示、取消最小化并聚焦原设置窗口，且系统托盘中仍只有一个 GPTEasy 入口。'
 Confirm-UatStep $checks 'dayway_lifecycle' '打开 DayWay 官网入口，确认 URL 固定为 https://dayway.site；使用 provider.json 真实凭据配置 DayWay，确认名称和 https://dayway.site/v1 预填、实时模型发现及完整 Responses 流式工具调用验证。'
 Confirm-UatStep $checks 'real_provider_validation' '完成 DayWay 之外的真实供应商模型发现和 Responses 流式工具调用验证。'
 Confirm-UatStep $checks 'base_url_suggestion' '输入路径错误但同源的 BASE_URL，确认只在安全范围内串行探测并在完整验证后展示建议；明确拒绝或采用建议均不会静默保存。'
@@ -312,16 +337,17 @@ Confirm-UatStep $checks 'external_config_takeover' '创建有效的外部供应�
 Confirm-UatStep $checks 'managed_conflict' '从外部修改供应商 ID 或受管字段，确认 GPTEasy 阻止写入，直到用户明确处理管理冲突。'
 Confirm-UatStep $checks 'openai_login_mode' '明确处理管理冲突后切换到 OpenAI 登录模式，确认 GPTEasy 不读取、保存或删除登录令牌。'
 Confirm-UatStep $checks 'provider_combination_applied' '切回 provider.json 对应的供应商，并确认它成为当前供应商。'
-Confirm-UatStep $checks 'tray_residency' '关闭设置窗口，确认 GPTEasy 继续驻留托盘；从托盘重新打开设置，最后使用托盘中的“退出 GPTEasy”。'
+Confirm-UatStep $checks 'tray_residency' '关闭设置窗口，确认 GPTEasy 继续驻留且不会退出；再从托盘重新打开设置。'
 Confirm-UatStep $checks 'usability_200_percent' '将 Windows 缩放设为 200%，使用长 BASE_URL 和长模型 ID，确认目录、详情、验证弹窗和确认对话框无重叠且文本完整。'
 Confirm-UatStep $checks 'usability_reduced_motion' '启用减少动态效果，确认验证进度使用静态状态且所有操作仍可完成。'
 Confirm-UatStep $checks 'usability_high_contrast' '启用高对比度主题，确认状态、错误、按钮和焦点仍清晰可辨。'
 Confirm-UatStep $checks 'usability_keyboard' '仅用键盘完成除排序外的目录、详情、验证、保存、切换、恢复、重启确认和托盘前设置操作。'
+Confirm-UatStep $checks 'explicit_tray_exit' '使用托盘中的“退出 GPTEasy”，确认窗口和托盘入口均已关闭。'
 
-Start-Sleep -Seconds 1
-if (@(Get-GPTEasyProcesses $app.FullName).Count -ne 0) {
-    throw 'GPTEasy 仍在运行；覆盖安装前请使用托盘中的“退出 GPTEasy”。'
+if (-not (Wait-GPTEasyProcessesExit $app.FullName)) {
+    throw '明确退出后 10 秒内同路径 GPTEasy 进程未归零。'
 }
+$checks.Add([ordered]@{ id = 'explicit_exit_process_cleanup'; passed = $true })
 $appliedConfig = Get-Content -LiteralPath $codexConfig -Raw
 if (-not $appliedConfig.Contains($normalizedBaseUrl) -or
     -not $appliedConfig.Contains([string]$secret.model) -or
@@ -358,8 +384,7 @@ $checks.Add([ordered]@{ id = 'overwrite_install'; passed = $true })
 
 Start-Process -FilePath $app.FullName | Out-Null
 Confirm-UatStep $checks 'overwrite_launch' '确认覆盖安装后的应用可以启动，并保留供应商目录和环境状态；随后使用托盘中的“退出 GPTEasy”。'
-Start-Sleep -Seconds 1
-if (@(Get-GPTEasyProcesses $app.FullName).Count -ne 0) {
+if (-not (Wait-GPTEasyProcessesExit $app.FullName)) {
     throw 'GPTEasy 仍在运行；卸载前请使用托盘中的“退出 GPTEasy”。'
 }
 $stateHashBeforeUninstall = Get-Sha256File $stateDatabase

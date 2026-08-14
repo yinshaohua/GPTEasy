@@ -5,6 +5,7 @@ use tauri::menu::{CheckMenuItemBuilder, Menu, MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
 use tauri::{App, AppHandle, Emitter, Manager, Window, WindowEvent};
 use tauri_plugin_notification::NotificationExt;
+use tokio_util::sync::CancellationToken;
 
 use crate::commands::{EnvironmentRuntime, ProviderRuntime};
 use crate::environment::{AuthenticationMode, EnvironmentSnapshot, EnvironmentState};
@@ -20,6 +21,7 @@ const OBSERVATION_INTERVAL: Duration = Duration::from_secs(30);
 
 pub(crate) struct LifecycleRuntime {
     explicit_exit: AtomicBool,
+    background_cancellation: CancellationToken,
     state_store: StateStore,
 }
 
@@ -27,16 +29,22 @@ impl LifecycleRuntime {
     pub(crate) fn new(state_store: StateStore) -> Self {
         Self {
             explicit_exit: AtomicBool::new(false),
+            background_cancellation: CancellationToken::new(),
             state_store,
         }
     }
 
     fn request_exit(&self) {
         self.explicit_exit.store(true, Ordering::SeqCst);
+        self.background_cancellation.cancel();
     }
 
     fn should_hide_on_close(&self) -> bool {
         !self.explicit_exit.load(Ordering::SeqCst)
+    }
+
+    fn background_cancellation(&self) -> CancellationToken {
+        self.background_cancellation.clone()
     }
 }
 
@@ -253,6 +261,7 @@ fn execute_tray_effect(app: &AppHandle, effect: TrayEffect) {
         }
         TrayEffect::Exit => {
             app.state::<LifecycleRuntime>().request_exit();
+            app.state::<ProviderRuntime>().cancel_all_requests();
             app.exit(0);
         }
         TrayEffect::None => {}
@@ -310,7 +319,7 @@ fn plan_tray_effect(command: TrayCommand, snapshot: Option<&EnvironmentSnapshot>
     }
 }
 
-fn show_settings(app: &AppHandle) {
+pub(crate) fn show_settings(app: &AppHandle) {
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
@@ -331,11 +340,18 @@ fn show_settings(app: &AppHandle) {
 }
 
 fn start_pending_observer(app: AppHandle) {
+    let cancellation = app.state::<LifecycleRuntime>().background_cancellation();
     tauri::async_runtime::spawn(async move {
         let mut interval = tokio::time::interval(OBSERVATION_INTERVAL);
-        interval.tick().await;
+        tokio::select! {
+            _ = cancellation.cancelled() => return,
+            _ = interval.tick() => {}
+        }
         loop {
-            interval.tick().await;
+            tokio::select! {
+                _ = cancellation.cancelled() => break,
+                _ = interval.tick() => {}
+            }
             let inspect_handle = app.clone();
             let snapshot = tauri::async_runtime::spawn_blocking(move || {
                 let runtime = inspect_handle.state::<EnvironmentRuntime>();
@@ -348,6 +364,9 @@ fn start_pending_observer(app: AppHandle) {
             .await
             .ok()
             .flatten();
+            if cancellation.is_cancelled() {
+                break;
+            }
             if let Some(snapshot) = snapshot {
                 let _ = refresh_with_snapshot(&app, &snapshot);
             }
@@ -512,7 +531,9 @@ mod tests {
         let lifecycle = LifecycleRuntime::new(StateStore::new(StatePaths::from_root(temp.path())));
 
         assert!(lifecycle.should_hide_on_close());
+        assert!(!lifecycle.background_cancellation().is_cancelled());
         lifecycle.request_exit();
         assert!(!lifecycle.should_hide_on_close());
+        assert!(lifecycle.background_cancellation().is_cancelled());
     }
 }
