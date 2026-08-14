@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import { isBrowserPreview } from "./browser-preview";
-import type { ConfigChangeResult, RestartDecision } from "./environment";
+import type { EnvironmentSnapshot } from "./environment";
 
 export type ProviderFailureCategory =
   | "security_policy"
@@ -203,14 +203,12 @@ export function saveAndApplyProviderUpdate(
   validationId: string,
   providerId: string,
   name: string,
-  restartDecision: RestartDecision,
-): Promise<{ provider: ProviderSummary; configChange: ConfigChangeResult }> {
+): Promise<{ provider: ProviderSummary; environment: EnvironmentSnapshot }> {
   if (isBrowserPreview()) return Promise.reject(previewFailure);
-  return invoke<{ provider: ProviderSummary; configChange: ConfigChangeResult }>("save_and_apply_provider_update", {
+  return invoke<{ provider: ProviderSummary; environment: EnvironmentSnapshot }>("save_and_apply_provider_update", {
     validationId,
     providerId,
     name,
-    restartDecision,
   });
 }
 

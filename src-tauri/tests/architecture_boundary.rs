@@ -82,3 +82,43 @@ fn main_window_uses_the_compact_provider_management_size() {
     assert_eq!(window["minHeight"], 520);
     assert_eq!(window["resizable"], true);
 }
+
+#[test]
+fn config_changes_are_independent_from_desktop_lifecycle_contracts() {
+    let root = repository_root();
+    let commands =
+        fs::read_to_string(root.join("src-tauri/src/commands.rs")).expect("read Tauri commands");
+    let environment_contract = fs::read_to_string(root.join("src/contracts/environment.ts"))
+        .expect("read environment contract");
+    let provider_contract =
+        fs::read_to_string(root.join("src/contracts/provider.ts")).expect("read provider contract");
+    let provider_page =
+        fs::read_to_string(root.join("src/ProviderPage.tsx")).expect("read provider page");
+    let assembly =
+        fs::read_to_string(root.join("src-tauri/src/lib.rs")).expect("read Tauri assembly");
+
+    for removed_contract in [
+        "RestartDecision",
+        "ConfigChangeResult",
+        "restartDecision",
+        "forceAuthorization",
+        "forceExpectedRevision",
+    ] {
+        assert!(
+            !environment_contract.contains(removed_contract),
+            "environment contract still exposes {removed_contract}"
+        );
+        assert!(
+            !provider_contract.contains(removed_contract),
+            "provider contract still exposes {removed_contract}"
+        );
+    }
+
+    assert!(!commands.contains("apply_provider_with_restart_plan"));
+    assert!(!commands.contains("switch_to_openai_login_with_restart_plan"));
+    assert!(!commands.contains("save_and_apply_provider_update_with_restart_plan"));
+    assert!(!provider_page.contains("start_desktop_application"));
+    assert!(!provider_page.contains("restart_desktop_application"));
+    assert!(!provider_page.contains("force_restart_desktop_application"));
+    assert!(!assembly.contains("force_complete_config_restart"));
+}

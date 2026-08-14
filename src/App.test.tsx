@@ -34,17 +34,6 @@ const readySnapshot = {
   },
 };
 
-function configChange(environment: unknown, restartStatus = "deferred") {
-  return {
-    cancelled: false,
-    environment,
-    restartStatus,
-    restartMessageId: null,
-    forceAuthorization: null,
-    forceExpectedRevision: null,
-  };
-}
-
 describe("供应商创建", () => {
   afterEach(() => {
     cleanup();
@@ -833,7 +822,7 @@ describe("供应商目录生命周期", () => {
     expect(openAi).toHaveAccessibleDescription("使用 Codex 已有的 OpenAI 登录。");
   });
 
-  it("目录仅通过显式操作切换，并同时显示验证与当前状态", async () => {
+  it("设置页切换非当前供应商统一确认且契约不包含重启决策", async () => {
     const current = {
       id: "76149f67-0d76-4d41-b606-77ba244bffec",
       name: "Current Provider",
@@ -869,11 +858,11 @@ describe("供应商目录生命周期", () => {
       if (command === "list_providers") return Promise.resolve([target, current]);
       if (command === "get_environment_snapshot") return Promise.resolve(environment);
       if (command === "apply_environment_provider") {
-        return Promise.resolve(configChange({
+        return Promise.resolve({
           ...environment,
           currentProvider: target,
           revision: "revision-2",
-        }, "not_needed"));
+        });
       }
       return Promise.resolve(undefined);
     });
@@ -888,17 +877,23 @@ describe("供应商目录生命周期", () => {
     expect(invoke.mock.calls.some(([command]) => command === "apply_environment_provider")).toBe(false);
 
     fireEvent.click(screen.getByRole("button", { name: "切换到 Atlas" }));
+    const dialog = screen.getByRole("dialog", { name: "确认配置切换" });
+    expect(dialog).toHaveTextContent("Atlas");
+    expect(dialog).toHaveTextContent("运行中的 ChatGPT/Codex 桌面版或 Codex CLI 可能继续使用旧配置");
+    expect(dialog).not.toHaveTextContent("config.toml");
+    expect(dialog).not.toHaveTextContent("auth.json");
+    expect(dialog.getElementsByTagName("button")).toHaveLength(2);
+    fireEvent.click(screen.getByRole("button", { name: "切换" }));
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("apply_environment_provider", {
         providerId: target.id,
-        restartDecision: "later",
         expectedRevision: "revision-1",
       });
     });
     expect(screen.getByRole("button", { name: "Atlas 当前使用" })).toBeDisabled();
   });
 
-  it("托盘供应商选择打开同一个重启计划且不会直接写配置", async () => {
+  it("托盘供应商选择打开同一个简短确认且不会直接写配置", async () => {
     const provider = {
       id: "68bf9ee2-3ba5-4517-b47e-12a11e038de4",
       name: "Tray Provider",
@@ -943,10 +938,80 @@ describe("供应商目录生命周期", () => {
       trayListener({ payload: provider.id });
     });
 
-    expect(await screen.findByRole("dialog", { name: "确认配置切换" }))
-      .toHaveTextContent("Tray Provider");
+    const dialog = await screen.findByRole("dialog", { name: "确认配置切换" });
+    expect(dialog).toHaveTextContent("Tray Provider");
+    expect(dialog).toHaveTextContent("运行中的 ChatGPT/Codex 桌面版或 Codex CLI 可能继续使用旧配置");
+    expect(dialog).not.toHaveTextContent("重启");
+    expect(dialog.getElementsByTagName("button")).toHaveLength(2);
     expect(invoke.mock.calls.some(([command]) => command === "apply_environment_provider"))
       .toBe(false);
+  });
+
+  it("供应商切换只让发起控件忙碌且失败后先刷新环境实际状态", async () => {
+    const current = {
+      id: "76149f67-0d76-4d41-b606-77ba244bffec",
+      name: "Current Provider",
+      baseUrl: "https://current.example/v1",
+      defaultModel: "model-current",
+      verifiedAtEpochSeconds: 1_786_140_100,
+      isCurrent: true,
+    };
+    const target = {
+      id: "68bf9ee2-3ba5-4517-b47e-12a11e038de4",
+      name: "Concurrent Provider",
+      baseUrl: "https://concurrent.example/v1",
+      defaultModel: "model-a",
+      verifiedAtEpochSeconds: 1_786_140_000,
+      isCurrent: false,
+    };
+    const before = {
+      state: "managed",
+      mode: "provider",
+      messageId: "environment.managed",
+      revision: "concurrent-before",
+      requiresTakeoverConfirmation: false,
+      takeoverAvailable: true,
+      requiresConsumerConfirmation: false,
+      impacts: [],
+      currentProvider: current,
+      restoreAvailability: "no_backup",
+      restorePreview: null,
+      loginStatus: "logged_in",
+      pendingRestart: false,
+      consumers: { desktop: "stopped", cli: "stopped" },
+    };
+    let environmentReads = 0;
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([current, target]);
+      if (command === "get_environment_snapshot") {
+        environmentReads += 1;
+        return Promise.resolve(environmentReads === 1 ? before : {
+          ...before,
+          revision: "concurrent-after",
+          currentProvider: target,
+        });
+      }
+      if (command === "apply_environment_provider") {
+        return Promise.reject({
+          category: "concurrent_modification",
+          messageId: "environment.concurrent_modification",
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "切换到 Concurrent Provider" }));
+    fireEvent.click(screen.getByRole("button", { name: "切换" }));
+
+    const switchingButton = screen.getByRole("button", { name: "切换到 Concurrent Provider" });
+    const openAiButton = screen.getByRole("button", { name: "切换到 OpenAI 登录模式" });
+    expect(switchingButton.querySelector(".is-spinning")).toBeInTheDocument();
+    expect(openAiButton.querySelector(".is-spinning")).not.toBeInTheDocument();
+    await waitFor(() => expect(environmentReads).toBe(2));
+    expect(await screen.findByRole("button", { name: "Concurrent Provider 当前使用" })).toBeDisabled();
+    expect(screen.getByRole("alert")).toHaveTextContent("已重新读取环境实际状态");
   });
 
   it("从详情安全查看凭据，并覆盖改名、重验证和删除限制", async () => {
@@ -1108,7 +1173,7 @@ describe("供应商目录生命周期", () => {
     });
   }, 10_000);
 
-  it("当前供应商关键字段更新调用完整保存并应用用例", async () => {
+  it("当前供应商保存并应用并发失败后先刷新环境实际状态", async () => {
     const current = {
       id: "76149f67-0d76-4d41-b606-77ba244bffec",
       name: "Current Provider",
@@ -1131,10 +1196,17 @@ describe("供应商目录生命周期", () => {
       pendingRestart: false,
       consumers: { desktop: "running", cli: "stopped" },
     };
+    let environmentReads = 0;
     invoke.mockImplementation((command: string) => {
       if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
       if (command === "list_providers") return Promise.resolve([current]);
-      if (command === "get_environment_snapshot") return Promise.resolve(environment);
+      if (command === "get_environment_snapshot") {
+        environmentReads += 1;
+        return Promise.resolve(environmentReads === 1 ? environment : {
+          ...environment,
+          revision: "current-update-refreshed",
+        });
+      }
       if (command === "discover_provider_models_for_update") {
         return Promise.resolve({
           normalizedBaseUrl: "https://current.example/next/v1",
@@ -1151,19 +1223,9 @@ describe("供应商目录生命周期", () => {
         });
       }
       if (command === "save_and_apply_provider_update") {
-        const provider = {
-          ...current,
-          baseUrl: "https://current.example/next/v1",
-          defaultModel: "model-b",
-          verifiedAtEpochSeconds: 1_786_140_700,
-        };
-        return Promise.resolve({
-          provider,
-          configChange: configChange({
-            ...environment,
-            currentProvider: provider,
-            pendingRestart: true,
-          }),
+        return Promise.reject({
+          category: "save_and_apply_failed",
+          messageId: "environment.concurrent_modification",
         });
       }
       return Promise.resolve(undefined);
@@ -1185,25 +1247,27 @@ describe("供应商目录生命周期", () => {
     fireEvent.click(screen.getByRole("button", { name: "验证更新" }));
 
     const saveAndApply = await screen.findByRole("button", { name: "保存并应用" });
+    fireEvent.click(await screen.findByRole("button", { name: "完成" }));
     fireEvent.click(saveAndApply);
     const dialog = screen.getByRole("dialog", { name: "确认配置切换" });
     expect(dialog).toHaveTextContent("保存并应用“Current Provider”的已验证更新");
     expect(screen.getByRole("button", { name: "取消" })).toHaveFocus();
-    fireEvent.click(screen.getByRole("button", { name: "切换，稍后重启" }));
+    fireEvent.click(screen.getByRole("button", { name: "切换" }));
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("save_and_apply_provider_update", {
         validationId: "current-update-validation",
         providerId: current.id,
         name: current.name,
-        restartDecision: "later",
       });
     });
+    await waitFor(() => expect(environmentReads).toBe(2));
+    expect(screen.getByRole("alert")).toHaveTextContent("已重新读取环境实际状态");
     expect(
       invoke.mock.calls.some(([command]) => command === "save_provider_update"),
     ).toBe(false);
   }, 10_000);
 
-  it("当前供应商更新在无旧消费者且检测可信时直接保存并应用", async () => {
+  it("当前供应商更新在无旧消费者时仍需简短确认", async () => {
     const current = {
       id: "76149f67-0d76-4d41-b606-77ba244bffec",
       name: "Current Provider",
@@ -1254,7 +1318,7 @@ describe("供应商目录生命周期", () => {
         };
         return Promise.resolve({
           provider,
-          configChange: configChange({ ...environment, currentProvider: provider }),
+          environment: { ...environment, currentProvider: provider },
         });
       }
       return Promise.resolve(undefined);
@@ -1270,13 +1334,16 @@ describe("供应商目录生命周期", () => {
     fireEvent.change(screen.getByLabelText("默认模型"), { target: { value: "model-b" } });
     fireEvent.click(screen.getByRole("button", { name: "验证更新" }));
     fireEvent.click(await screen.findByRole("button", { name: "保存并应用" }));
+    expect(screen.getByRole("dialog", { name: "确认配置切换" })).toHaveTextContent(
+      "保存并应用“Current Provider”的已验证更新",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "切换" }));
 
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("save_and_apply_provider_update", {
         validationId: "quiet-current-update-validation",
         providerId: current.id,
         name: current.name,
-        restartDecision: "later",
       });
     });
     expect(screen.queryByRole("dialog", { name: "确认配置切换" })).not.toBeInTheDocument();
@@ -1388,7 +1455,7 @@ describe("Codex 环境接管", () => {
       if (command === "list_providers") return Promise.resolve([provider]);
       if (command === "get_environment_snapshot") return Promise.resolve(external);
       if (command === "apply_environment_provider") {
-        return Promise.resolve(configChange({
+        return Promise.resolve({
           ...external,
           state: "managed",
           messageId: "environment.managed",
@@ -1396,7 +1463,7 @@ describe("Codex 环境接管", () => {
           currentProvider: { ...provider, isCurrent: true },
           pendingRestart: true,
           consumers: { desktop: "unknown", cli: "unknown" },
-        }));
+        });
       }
       return Promise.resolve(undefined);
     });
@@ -1405,20 +1472,18 @@ describe("Codex 环境接管", () => {
     fireEvent.click(await screen.findByRole("button", { name: "切换到 Applied Provider" }));
 
     const dialog = screen.getByRole("dialog", { name: "确认配置切换" });
-    expect(dialog).toHaveTextContent("将接管外部配置并应用“Applied Provider”");
-    expect(dialog).toHaveTextContent("config.toml：model、model_provider、model_providers.<provider-id>");
-    expect(dialog).toHaveTextContent("auth.json：auth_mode、OPENAI_API_KEY");
-    expect(dialog).toHaveTextContent("无法确认桌面版状态");
-    expect(dialog).toHaveTextContent("无法确认 Codex CLI 状态");
+    expect(dialog).toHaveTextContent("将切换到“Applied Provider”");
+    expect(dialog).toHaveTextContent("运行中的 ChatGPT/Codex 桌面版或 Codex CLI 可能继续使用旧配置");
+    expect(dialog).not.toHaveTextContent("config.toml");
+    expect(dialog).not.toHaveTextContent("auth.json");
     fireEvent.click(screen.getByRole("button", { name: "取消" }));
     expect(invoke.mock.calls.some(([command]) => command === "apply_environment_provider")).toBe(false);
     fireEvent.click(screen.getByRole("button", { name: "切换到 Applied Provider" }));
-    fireEvent.click(screen.getByRole("button", { name: "切换，稍后重启" }));
+    fireEvent.click(screen.getByRole("button", { name: "切换" }));
 
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("apply_environment_provider", {
         providerId: provider.id,
-        restartDecision: "later",
         expectedRevision: "external-revision",
       });
     });
@@ -1465,7 +1530,7 @@ describe("Codex 环境接管", () => {
       if (command === "list_providers") return Promise.resolve([provider]);
       if (command === "get_environment_snapshot") return Promise.resolve(conflict);
       if (command === "apply_environment_provider") {
-        return Promise.resolve(configChange({
+        return Promise.resolve({
           ...conflict,
           state: "managed",
           messageId: "environment.managed",
@@ -1473,7 +1538,7 @@ describe("Codex 环境接管", () => {
           currentProvider: { ...provider, isCurrent: true },
           pendingRestart: true,
           consumers: { desktop: "running", cli: "running" },
-        }, "restarted"));
+        });
       }
       return Promise.resolve(undefined);
     });
@@ -1481,20 +1546,21 @@ describe("Codex 环境接管", () => {
     const takeover = await screen.findByRole("button", { name: "切换到 Recovery Provider" });
     expect(takeover).toBeEnabled();
     fireEvent.click(takeover);
-    expect(screen.getByRole("dialog", { name: "确认配置切换" })).toHaveTextContent("重新接管管理冲突");
-    fireEvent.click(screen.getByRole("button", { name: "切换并重启桌面版" }));
+    const dialog = screen.getByRole("dialog", { name: "确认配置切换" });
+    expect(dialog).toHaveTextContent("Recovery Provider");
+    expect(dialog).not.toHaveTextContent("重启");
+    fireEvent.click(screen.getByRole("button", { name: "切换" }));
 
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("apply_environment_provider", {
         providerId: provider.id,
-        restartDecision: "immediate",
         expectedRevision: "conflict-revision",
       });
     });
-    expect(await screen.findByText(/请在原终端退出并重新运行 Codex CLI/)).toBeInTheDocument();
+    expect(await screen.findByText(/运行中的 Codex 消费者可能继续使用旧配置/)).toBeInTheDocument();
   });
 
-  it("激活失败时同时提示手动启动桌面版和原终端重启 CLI", async () => {
+  it("运行中消费者只产生被动待重启反馈", async () => {
     const provider = {
       id: "90f00c5a-59a7-4936-a791-583d90b81b73",
       name: "Failure Provider",
@@ -1524,9 +1590,9 @@ describe("Codex 环境接管", () => {
       if (command === "get_environment_snapshot") return Promise.resolve(managed);
       if (command === "apply_environment_provider") {
         return Promise.resolve({
-          ...configChange({ ...managed, pendingRestart: true }),
-          restartStatus: "restart_failed",
-          restartMessageId: "desktop.activation_failed",
+          ...managed,
+          currentProvider: { ...provider, isCurrent: true },
+          pendingRestart: true,
         });
       }
       return Promise.resolve(undefined);
@@ -1534,14 +1600,18 @@ describe("Codex 环境接管", () => {
 
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "切换到 Failure Provider" }));
-    fireEvent.click(screen.getByRole("button", { name: "切换并重启桌面版" }));
+    fireEvent.click(screen.getByRole("button", { name: "切换" }));
 
-    expect(await screen.findByText(/桌面版未能重新启动，请手动启动/)).toHaveTextContent(
-      "请在原终端退出并重新运行 Codex CLI",
-    );
+    expect(await screen.findByText(/运行中的 Codex 消费者可能继续使用旧配置/))
+      .toBeInTheDocument();
+    expect(invoke.mock.calls.some(([command]) => [
+      "start_desktop_application",
+      "restart_desktop_application",
+      "force_restart_desktop_application",
+    ].includes(command))).toBe(false);
   });
 
-  it("关闭失败时提示手动退出而不是误报需要启动桌面版", async () => {
+  it("配置切换失败后不调用任何桌面控制命令", async () => {
     const provider = {
       id: "90f00c5a-59a7-4936-a791-583d90b81b73",
       name: "Close Failure Provider",
@@ -1570,10 +1640,9 @@ describe("Codex 环境接管", () => {
       if (command === "list_providers") return Promise.resolve([provider]);
       if (command === "get_environment_snapshot") return Promise.resolve(managed);
       if (command === "apply_environment_provider") {
-        return Promise.resolve({
-          ...configChange({ ...managed, pendingRestart: true }),
-          restartStatus: "restart_failed",
-          restartMessageId: "desktop.close_failed",
+        return Promise.reject({
+          category: "concurrent_modification",
+          messageId: "environment.concurrent_modification",
         });
       }
       return Promise.resolve(undefined);
@@ -1581,13 +1650,17 @@ describe("Codex 环境接管", () => {
 
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "切换到 Close Failure Provider" }));
-    fireEvent.click(screen.getByRole("button", { name: "切换并重启桌面版" }));
+    fireEvent.click(screen.getByRole("button", { name: "切换" }));
 
-    expect(await screen.findByText(/桌面版仍在运行，请稍后手动退出并重新启动/))
-      .not.toHaveTextContent("请手动启动");
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    expect(invoke.mock.calls.some(([command]) => [
+      "start_desktop_application",
+      "restart_desktop_application",
+      "force_restart_desktop_application",
+    ].includes(command))).toBe(false);
   });
 
-  it("强制完成重启时提交关闭授权对应的配置 revision", async () => {
+  it("配置切换结果不再提供强制完成重启入口", async () => {
     const provider = {
       id: "90f00c5a-59a7-4936-a791-583d90b81b73",
       name: "Force Provider",
@@ -1617,38 +1690,28 @@ describe("Codex 环境接管", () => {
       if (command === "get_environment_snapshot") return Promise.resolve(managed);
       if (command === "apply_environment_provider") {
         return Promise.resolve({
-          ...configChange({
-            ...managed,
-            revision: "force-plan-revision",
-            pendingRestart: true,
-          }, "close_timed_out"),
-          restartMessageId: "desktop.close_timed_out",
-          forceAuthorization: "force-plan-authorization",
-          forceExpectedRevision: "force-plan-revision",
-        });
-      }
-      if (command === "force_complete_config_restart") {
-        return Promise.resolve(configChange({
           ...managed,
           revision: "force-plan-revision",
-          pendingRestart: false,
-          consumers: { desktop: "stopped", cli: "stopped" },
-        }, "restarted"));
+          currentProvider: { ...provider, isCurrent: true },
+          pendingRestart: true,
+        });
       }
       return Promise.resolve(undefined);
     });
 
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "切换到 Force Provider" }));
-    fireEvent.click(screen.getByRole("button", { name: "切换并重启桌面版" }));
-    fireEvent.click(await screen.findByRole("button", { name: "强制关闭并重启" }));
+    fireEvent.click(screen.getByRole("button", { name: "切换" }));
 
     await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith("force_complete_config_restart", {
-        forceAuthorization: "force-plan-authorization",
-        expectedRevision: "force-plan-revision",
+      expect(invoke).toHaveBeenCalledWith("apply_environment_provider", {
+        providerId: provider.id,
+        expectedRevision: "before-force-revision",
       });
     });
+    expect(screen.queryByRole("button", { name: "强制关闭并重启" })).not.toBeInTheDocument();
+    expect(invoke.mock.calls.some(([command]) => command === "force_complete_config_restart"))
+      .toBe(false);
   });
 
   it("管理冲突无法安全解析时不提供强制覆盖", async () => {
@@ -1812,13 +1875,13 @@ describe("Codex 环境接管", () => {
       if (command === "list_providers") return Promise.resolve([]);
       if (command === "get_environment_snapshot") return Promise.resolve(external);
       if (command === "switch_to_openai_login") {
-        return Promise.resolve(configChange({
+        return Promise.resolve({
           ...external,
           state: "managed",
           mode: "openai_login",
           messageId: "environment.openai_login",
           revision: "openai-active-revision",
-        }));
+        });
       }
       return Promise.resolve(undefined);
     });
@@ -1829,13 +1892,12 @@ describe("Codex 环境接管", () => {
     expect(screen.queryByRole("heading", { name: "外部配置" })).not.toBeInTheDocument();
     fireEvent.click(openAiButton);
     const dialog = screen.getByRole("dialog", { name: "确认配置切换" });
-    expect(dialog).toHaveTextContent("退出供应商模式并使用 Codex 已有的 OpenAI 登录");
-    expect(screen.getByRole("button", { name: "切换并重启桌面版" })).toBeDisabled();
-    fireEvent.click(screen.getByRole("button", { name: "切换，稍后重启" }));
+    expect(dialog).toHaveTextContent("切换到 OpenAI 登录模式");
+    expect(dialog).not.toHaveTextContent("重启");
+    fireEvent.click(screen.getByRole("button", { name: "切换" }));
 
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("switch_to_openai_login", {
-        restartDecision: "later",
         expectedRevision: "openai-ready-revision",
       });
     });
@@ -1909,14 +1971,14 @@ describe("Codex 环境接管", () => {
       if (command === "list_providers") return Promise.resolve([provider]);
       if (command === "get_environment_snapshot") return Promise.resolve(openai);
       if (command === "apply_environment_provider") {
-        return Promise.resolve(configChange({
+        return Promise.resolve({
           ...openai,
           mode: "provider",
           messageId: "environment.managed",
           revision: "provider-revision",
           requiresTakeoverConfirmation: false,
           currentProvider: { ...provider, isCurrent: true },
-        }));
+        });
       }
       return Promise.resolve(undefined);
     });
@@ -1927,11 +1989,10 @@ describe("Codex 环境接管", () => {
       "OpenAI 登录已在外部失效；当前模式保持不变。",
     ));
     fireEvent.click(screen.getByRole("button", { name: "切换到 Return Provider" }));
-    fireEvent.click(screen.getByRole("button", { name: "切换，稍后重启" }));
+    fireEvent.click(screen.getByRole("button", { name: "切换" }));
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("apply_environment_provider", {
         providerId: provider.id,
-        restartDecision: "later",
         expectedRevision: "logged-out-openai-revision",
       });
     });

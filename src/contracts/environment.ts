@@ -7,14 +7,6 @@ import type { LoginStatus } from "./startup";
 export type EnvironmentState = "external" | "managed" | "conflict";
 export type AuthenticationMode = "provider" | "openai_login";
 export type ConsumerStatus = "running" | "stopped" | "unknown";
-export type RestartDecision = "immediate" | "later" | "cancel";
-export type RestartPlanStatus =
-  | "cancelled"
-  | "not_needed"
-  | "deferred"
-  | "restarted"
-  | "close_timed_out"
-  | "restart_failed";
 export type ArtifactKind = "config" | "credentials";
 export type ArtifactAction = "create" | "update";
 export type RestoreAvailability =
@@ -59,15 +51,6 @@ export interface EnvironmentFailure {
   messageId: string;
 }
 
-export interface ConfigChangeResult {
-  cancelled: boolean;
-  environment: EnvironmentSnapshot;
-  restartStatus: RestartPlanStatus;
-  restartMessageId: string | null;
-  forceAuthorization: string | null;
-  forceExpectedRevision: string | null;
-}
-
 export function getEnvironmentSnapshot(): Promise<EnvironmentSnapshot> {
   if (isBrowserPreview()) return Promise.resolve(previewSnapshot);
   return invoke<EnvironmentSnapshot>("get_environment_snapshot");
@@ -75,13 +58,11 @@ export function getEnvironmentSnapshot(): Promise<EnvironmentSnapshot> {
 
 export function applyEnvironmentProvider(
   providerId: string,
-  restartDecision: RestartDecision,
   expectedRevision: string,
-): Promise<ConfigChangeResult> {
+): Promise<EnvironmentSnapshot> {
   if (isBrowserPreview()) return Promise.reject(previewFailure);
-  return invoke<ConfigChangeResult>("apply_environment_provider", {
+  return invoke<EnvironmentSnapshot>("apply_environment_provider", {
     providerId,
-    restartDecision,
     expectedRevision,
   });
 }
@@ -98,23 +79,10 @@ export function restoreLastEnvironmentConfig(
 }
 
 export function switchToOpenAiLogin(
-  restartDecision: RestartDecision,
   expectedRevision: string,
-): Promise<ConfigChangeResult> {
+): Promise<EnvironmentSnapshot> {
   if (isBrowserPreview()) return Promise.reject(previewFailure);
-  return invoke<ConfigChangeResult>("switch_to_openai_login", {
-    restartDecision,
-    expectedRevision,
-  });
-}
-
-export function forceCompleteConfigRestart(
-  forceAuthorization: string,
-  expectedRevision: string,
-): Promise<ConfigChangeResult> {
-  if (isBrowserPreview()) return Promise.reject(previewFailure);
-  return invoke<ConfigChangeResult>("force_complete_config_restart", {
-    forceAuthorization,
+  return invoke<EnvironmentSnapshot>("switch_to_openai_login", {
     expectedRevision,
   });
 }

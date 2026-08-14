@@ -17,11 +17,7 @@ use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::consumer::DesktopApplication;
-use crate::environment::{
-    ConfigChangeResult, EnvironmentApplication, ProviderTarget, RestartDecision,
-    VerifiedProviderUpdate,
-};
+use crate::environment::{EnvironmentApplication, ProviderTarget, VerifiedProviderUpdate};
 use crate::state::StateStore;
 
 pub use validation::ProviderValidator;
@@ -266,17 +262,11 @@ struct RequestRegistry {
     active: HashMap<String, CancellationToken>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AppliedProviderUpdate {
     pub provider: ProviderSummary,
     pub environment: crate::environment::EnvironmentSnapshot,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PlannedProviderUpdate {
-    pub provider: ProviderSummary,
-    pub config_change: ConfigChangeResult,
 }
 
 #[derive(Clone)]
@@ -702,53 +692,6 @@ impl ProviderApplication {
         Ok(AppliedProviderUpdate {
             provider: summary,
             environment: snapshot,
-        })
-    }
-
-    pub fn save_and_apply_provider_update_with_restart_plan(
-        &self,
-        environment: &EnvironmentApplication,
-        desktop: &DesktopApplication,
-        validation_id: &str,
-        provider_id: &str,
-        name: &str,
-        decision: RestartDecision,
-    ) -> Result<PlannedProviderUpdate, ProviderFailure> {
-        if decision == RestartDecision::Cancel {
-            let config_change = environment.cancel_config_change().map_err(|failure| {
-                ProviderFailure::new(
-                    ProviderFailureCategory::SaveAndApplyFailed,
-                    failure.message_id,
-                )
-            })?;
-            return Ok(PlannedProviderUpdate {
-                provider: catalog::get_provider(&self.state_store, provider_id)?.summary,
-                config_change,
-            });
-        }
-        let update = self.prepare_verified_provider_update(validation_id, provider_id, name)?;
-        let config_change = environment
-            .save_and_apply_provider_update_with_restart_plan(desktop, update, decision)
-            .map_err(|failure| {
-                ProviderFailure::new(
-                    ProviderFailureCategory::SaveAndApplyFailed,
-                    failure.message_id,
-                )
-            })?;
-        let summary = config_change
-            .environment
-            .current_provider
-            .clone()
-            .ok_or_else(|| {
-                ProviderFailure::new(
-                    ProviderFailureCategory::SaveAndApplyFailed,
-                    "environment.state_unavailable",
-                )
-            })?;
-        self.discard_validation(validation_id);
-        Ok(PlannedProviderUpdate {
-            provider: summary,
-            config_change,
         })
     }
 
