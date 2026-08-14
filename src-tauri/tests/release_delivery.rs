@@ -290,8 +290,9 @@ fn windows_uat_requires_the_official_openai_desktop_package_publisher() {
         script.contains("$_.PublisherId -eq '2p2nqsd0c76g0'"),
         "UAT must only accept the official OpenAI desktop package publisher"
     );
-    let readiness = fs::read_to_string(repository_root().join("scripts/test-release-readiness.ps1"))
-        .expect("read release readiness script");
+    let readiness =
+        fs::read_to_string(repository_root().join("scripts/test-release-readiness.ps1"))
+            .expect("read release readiness script");
     assert!(
         readiness.contains("$evidence.desktopPublisherId -ne '2p2nqsd0c76g0'"),
         "release readiness must bind evidence to the official OpenAI desktop publisher"
