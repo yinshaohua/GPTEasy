@@ -66,3 +66,19 @@ fn bundle_is_windows_x64_current_user_nsis() {
     assert!(manifest.contains("target_arch = \"x86_64\""));
     assert!(manifest.contains("target_os = \"windows\""));
 }
+
+#[test]
+fn main_window_uses_the_compact_provider_management_size() {
+    let root = repository_root();
+    let config: Value = serde_json::from_str(
+        &fs::read_to_string(root.join("src-tauri/tauri.conf.json")).expect("read Tauri config"),
+    )
+    .expect("parse Tauri config");
+    let window = &config["app"]["windows"][0];
+
+    assert_eq!(window["width"], 1120);
+    assert_eq!(window["height"], 620);
+    assert_eq!(window["minWidth"], 680);
+    assert_eq!(window["minHeight"], 520);
+    assert_eq!(window["resizable"], true);
+}

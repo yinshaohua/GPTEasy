@@ -162,7 +162,6 @@ export const providerFailureMessages: Record<string, string> = {
 
 export const providerMessages = {
   pageTitle: "供应商管理",
-  pageSubtitle: "管理、验证和切换 Codex 使用的供应商",
   catalogTitle: "供应商目录",
   newProvider: "添加供应商",
   verifiedProviders: "已验证供应商",

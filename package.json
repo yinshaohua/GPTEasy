@@ -6,8 +6,10 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "check": "tsc --noEmit && eslint src vite.config.ts vitest.config.ts eslint.config.js",
+    "check": "tsc --noEmit && eslint src tests/ui playwright.config.ts vite.config.ts vitest.config.ts eslint.config.js",
     "test": "vitest run",
+    "pretest:layout": "npm run build",
+    "test:layout": "playwright test -c playwright.config.ts",
     "acceptance": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-acceptance-gate.ps1",
     "candidate:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows-candidate.ps1",
     "uat:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-windows-uat.ps1",
@@ -23,6 +25,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",
+    "@playwright/test": "^1.62.1",
     "@tauri-apps/cli": "^2.8.0",
     "@testing-library/jest-dom": "^6.6.3",
     "@testing-library/react": "^16.1.0",

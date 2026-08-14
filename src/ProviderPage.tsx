@@ -1,8 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  AlertTriangle,
   Check,
-  CheckCircle2,
   Copy,
   Eye,
   EyeOff,
@@ -66,9 +64,6 @@ import {
   type RestartDecision,
 } from "./contracts/environment";
 import {
-  authenticationModeMessages,
-  consumerStatusMessages,
-  environmentStateMessages,
   providerFailureMessages,
   providerMessages,
 } from "./messages";
@@ -725,10 +720,7 @@ export default function ProviderPage() {
   return (
     <>
       <header className="page-header">
-        <div>
-          <h1>{providerMessages.pageTitle}</h1>
-          <p>{providerMessages.pageSubtitle}</p>
-        </div>
+        <h1>{providerMessages.pageTitle}</h1>
         {view === "catalog" && (
           <button
             className="command-button compact"
@@ -744,16 +736,11 @@ export default function ProviderPage() {
 
       {view === "catalog" ? (
         <>
-        <EnvironmentSummary
-          state={environmentState}
-          snapshot={environment}
-        />
+        <EnvironmentReadNotice state={environmentState} />
         <section className="provider-catalog" aria-labelledby="provider-catalog-heading">
           <div className="catalog-heading">
-            <div>
-              <h2 id="provider-catalog-heading">{providerMessages.catalogTitle}</h2>
-              <span>{providers.length} 个已验证供应商</span>
-            </div>
+            <h2 id="provider-catalog-heading">{providerMessages.catalogTitle}</h2>
+            <span>{providers.length} 个已验证供应商</span>
           </div>
           {listState === "loading" && <p className="pane-note">{providerMessages.loadingCatalog}</p>}
           {listState === "error" && <p className="inline-error">{providerMessages.catalogUnavailable}</p>}
@@ -771,10 +758,7 @@ export default function ProviderPage() {
                   <span className="provider-row-model">尚未选择</span>
                 </div>
                 <div className="provider-row-actions">
-                  <button className="secondary-button compact" type="button" onClick={() => void visitDaywayWebsite()} aria-label="访问 DayWay 官网">
-                    <ExternalLink size={16} aria-hidden="true" />
-                    访问官网
-                  </button>
+                  <DaywayWebsiteButton onVisit={visitDaywayWebsite} />
                   <button className="command-button compact" type="button" onClick={configureDayway} disabled={busy} aria-label="配置 DayWay">
                     <Pencil size={16} aria-hidden="true" />
                     配置
@@ -818,9 +802,6 @@ export default function ProviderPage() {
                     {provider.isCurrent && (
                       <span className="current-badge">{providerMessages.currentProvider}</span>
                     )}
-                    <span className="provider-verified-time">
-                      验证于 {formatVerifiedAt(provider.verifiedAtEpochSeconds)}
-                    </span>
                   </div>
                   <span className="provider-row-url" title={provider.baseUrl}>{provider.baseUrl}</span>
                   <span className="provider-row-model" title={provider.defaultModel}>
@@ -829,40 +810,37 @@ export default function ProviderPage() {
                 </div>
                 <div className="provider-row-actions">
                   {provider.recommendationId === "dayway" && (
-                    <button className="secondary-button compact" type="button" onClick={() => void visitDaywayWebsite()} aria-label="访问 DayWay 官网">
-                      <ExternalLink size={16} aria-hidden="true" />
-                      访问官网
-                    </button>
+                    <DaywayWebsiteButton onVisit={visitDaywayWebsite} />
                   )}
                   <button
-                    className="secondary-button compact"
+                    className="secondary-button compact row-icon-button"
                     type="button"
                     onClick={() => void runRevalidation(provider)}
                     disabled={busy}
                     aria-label={`验证 ${provider.name}`}
+                    title="验证"
                   >
                     <RefreshCw size={16} aria-hidden="true" />
-                    验证
                   </button>
                   <button
-                    className="secondary-button compact"
+                    className="secondary-button compact row-icon-button"
                     type="button"
                     onClick={() => editProvider(provider)}
                     disabled={busy}
                     aria-label={`修改 ${provider.name}`}
+                    title={providerMessages.editProvider}
                   >
                     <Pencil size={16} aria-hidden="true" />
-                    {providerMessages.editProvider}
                   </button>
                   <button
-                    className="danger-button compact"
+                    className="danger-button compact row-icon-button"
                     type="button"
                     onClick={() => void deleteCatalogProvider(provider)}
                     disabled={provider.isCurrent || busy}
                     aria-label={`删除 ${provider.name}`}
+                    title={providerMessages.deleteProvider}
                   >
                     <Trash2 size={16} aria-hidden="true" />
-                    {providerMessages.deleteProvider}
                   </button>
                   <button
                     className="command-button compact"
@@ -1154,33 +1132,29 @@ const restoreAvailabilityMessages = {
   recovery_pending: "恢复协调完成前不能再次恢复。",
 } as const;
 
-function EnvironmentSummary({
+function EnvironmentReadNotice({
   state,
-  snapshot,
 }: {
   state: "loading" | "ready" | "error";
-  snapshot: EnvironmentSnapshot | null;
 }) {
   if (state === "loading") return <p className="environment-status-note">正在读取当前用户 Codex 环境</p>;
-  if (state === "error" || !snapshot) {
+  if (state === "error") {
     return <p className="environment-status-note is-error" role="alert">无法读取当前用户 Codex 环境。</p>;
   }
-  const title = snapshot.mode
-    ? authenticationModeMessages[snapshot.mode]
-    : environmentStateMessages[snapshot.state];
+  return null;
+}
+
+function DaywayWebsiteButton({ onVisit }: { onVisit: () => Promise<void> }) {
   return (
-    <section className={`environment-status-bar is-${snapshot.state}`} aria-labelledby="environment-status-heading">
-      {snapshot.state === "managed" ? <CheckCircle2 size={20} aria-hidden="true" /> : <AlertTriangle size={20} aria-hidden="true" />}
-      <div className="environment-status-copy">
-        <h2 id="environment-status-heading">{title}</h2>
-        <span>{snapshot.currentProvider ? `当前供应商：${snapshot.currentProvider.name}` : environmentDescription(snapshot)}</span>
-      </div>
-      <dl className="environment-status-facts">
-        <div><dt>桌面版</dt><dd>{consumerStatusMessages[snapshot.consumers?.desktop ?? "unknown"]}</dd></div>
-        <div><dt>Codex CLI</dt><dd>{consumerStatusMessages[snapshot.consumers?.cli ?? "unknown"]}</dd></div>
-        <div><dt>待重启</dt><dd>{snapshot.pendingRestart ? "是" : "否"}</dd></div>
-      </dl>
-    </section>
+    <button
+      className="secondary-button compact row-icon-button"
+      type="button"
+      onClick={() => void onVisit()}
+      aria-label="访问 DayWay 官网"
+      title="访问官网"
+    >
+      <ExternalLink size={16} aria-hidden="true" />
+    </button>
   );
 }
 
@@ -1205,7 +1179,11 @@ function EnvironmentActions({
   const openAiReason = !snapshot
     ? "环境状态不可用。"
     : snapshot.mode === "openai_login"
-      ? "当前已是 OpenAI 登录模式。"
+      ? snapshot.loginStatus === "not_logged_in"
+        ? "OpenAI 登录已在外部失效；当前模式保持不变。"
+        : snapshot.loginStatus === "unavailable"
+          ? "无法确认 OpenAI 登录状态；当前模式保持不变。"
+          : "当前已是 OpenAI 登录模式。"
       : snapshot.loginStatus === "not_logged_in"
         ? "请先在 Codex 中完成 OpenAI 登录。"
         : snapshot.loginStatus === "unavailable"
@@ -1213,38 +1191,31 @@ function EnvironmentActions({
           : "使用 Codex 已有的 OpenAI 登录。";
   return (
     <section className="environment-tools" aria-label="Codex 环境操作">
-      <div className="environment-tool">
-        <button className="secondary-button" type="button" onClick={onRestore} disabled={busy || restoreAvailability !== "available"}>
-          {restoring ? <LoaderCircle className="is-spinning" size={17} aria-hidden="true" /> : <RotateCcw size={17} aria-hidden="true" />}
-          恢复上次配置
-        </button>
-        <span>{restoring ? "正在恢复上次配置。" : restoreAvailabilityMessages[restoreAvailability]}</span>
-      </div>
-      <div className="environment-tool">
-        <button className="secondary-button" type="button" onClick={onSwitchMode} disabled={busy || !snapshot || snapshot.mode === "openai_login" || snapshot.loginStatus !== "logged_in"}>
-          {switchingMode ? <LoaderCircle className="is-spinning" size={17} aria-hidden="true" /> : <LogIn size={17} aria-hidden="true" />}
-          切换到 OpenAI 登录模式
-        </button>
-        <span>{openAiReason}</span>
-      </div>
+      <button
+        className="secondary-button environment-command"
+        type="button"
+        onClick={onRestore}
+        disabled={busy || restoreAvailability !== "available"}
+        aria-description={restoring ? "正在恢复上次配置。" : restoreAvailabilityMessages[restoreAvailability]}
+      >
+        {restoring ? <LoaderCircle className="is-spinning" size={17} aria-hidden="true" /> : <RotateCcw size={17} aria-hidden="true" />}
+        恢复上次配置
+      </button>
+      <button
+        className="secondary-button environment-command"
+        type="button"
+        onClick={onSwitchMode}
+        disabled={busy || !snapshot || snapshot.mode === "openai_login" || snapshot.loginStatus !== "logged_in"}
+        aria-description={openAiReason}
+      >
+        {switchingMode ? <LoaderCircle className="is-spinning" size={17} aria-hidden="true" /> : <LogIn size={17} aria-hidden="true" />}
+        切换到 OpenAI 登录模式
+      </button>
       <button className="secondary-button upcoming-command" type="button" disabled>选择 WSL2 供应商 <span>即将支持</span></button>
       <button className="secondary-button upcoming-command" type="button" disabled>导出 Linux 脚本 <span>即将支持</span></button>
       {failure && <p className="inline-error environment-tool-error" role="alert">{environmentFailureMessage(failure.messageId)}</p>}
     </section>
   );
-}
-
-function environmentDescription(snapshot: EnvironmentSnapshot): string {
-  if (snapshot.mode === "openai_login") {
-    return snapshot.loginStatus === "logged_in"
-      ? "Codex 已有本地 OpenAI 登录凭据。"
-      : snapshot.loginStatus === "not_logged_in"
-        ? "OpenAI 登录已在外部失效；当前模式保持不变。"
-        : "无法确认 OpenAI 登录状态；当前模式保持不变。";
-  }
-  return snapshot.state === "conflict"
-    ? "配置所有权无法安全确认。"
-    : "尚未建立有效的 GPTEasy 供应商 ID。";
 }
 
 function providerSwitchImpact(snapshot: EnvironmentSnapshot, provider: ProviderSummary): string {
@@ -1453,17 +1424,6 @@ function createValidationSession(source: ProviderValidationSource): ProviderVali
     stageStartedAt: Date.now(),
     failure: null,
   };
-}
-
-function formatVerifiedAt(epochSeconds: number): string {
-  return new Intl.DateTimeFormat("zh-CN", {
-    year: "numeric",
-    month: "numeric",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
-  }).format(new Date(epochSeconds * 1_000));
 }
 
 let requestSequence = 0;

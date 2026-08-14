@@ -9,6 +9,18 @@ export default tseslint.config(
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
+    files: ["playwright.config.ts"],
+    languageOptions: {
+      globals: globals.node,
+    },
+  },
+  {
+    files: ["tests/ui/**/*.{ts,tsx}"],
+    languageOptions: {
+      globals: { ...globals.browser, ...globals.node },
+    },
+  },
+  {
     files: ["src/**/*.{ts,tsx}"],
     languageOptions: {
       globals: globals.browser,
