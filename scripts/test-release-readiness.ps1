@@ -18,42 +18,8 @@ if ([string]::IsNullOrWhiteSpace($RepositoryRoot)) {
     $RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 }
 
-$requiredChecks = @(
-    'release_tree'
-    'install_current_user'
-    'application_launch'
-    'single_instance_precondition'
-    'single_instance_process'
-    'single_instance_activation'
-    'dayway_lifecycle'
-    'real_provider_validation'
-    'base_url_suggestion'
-    'provider_order_and_tray_sync'
-    'provider_save_and_switch'
-    'pending_restart'
-    'cli_new_process_read'
-    'consumer_detection'
-    'consumers_not_controlled'
-    'desktop_new_process_read'
-    'restore_last_config'
-    'external_config_takeover'
-    'managed_conflict'
-    'openai_login_mode'
-    'provider_combination_applied'
-    'provider_combination_match'
-    'tray_residency'
-    'explicit_tray_exit'
-    'explicit_exit_process_cleanup'
-    'overwrite_install'
-    'overwrite_launch'
-    'uninstall'
-    'data_retention'
-    'credential_leak_scan'
-    'usability_200_percent'
-    'usability_reduced_motion'
-    'usability_high_contrast'
-    'usability_keyboard'
-)
+$releaseContract = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot 'windows-release-contract.json')) | ConvertFrom-Json
+$requiredChecks = @($releaseContract.requiredUatChecks | ForEach-Object { [string]$_.id })
 
 $errors = [System.Collections.Generic.List[string]]::new()
 function Add-GateError([string]$Message) {
@@ -91,8 +57,8 @@ $candidateManifest = Get-Content -LiteralPath $candidateManifestFile.FullName -R
 if ($evidence.schemaVersion -ne 1) {
     Add-GateError 'Evidence schemaVersion must be 1.'
 }
-if ($evidence.issue -ne 22) {
-    Add-GateError 'Evidence must belong to Issue #22.'
+if ($evidence.issue -ne $releaseContract.issue) {
+    Add-GateError 'Evidence must belong to Issue #28.'
 }
 if ($evidence.evidenceOrigin -eq 'synthetic-test') {
     Add-GateError 'Synthetic evidence cannot satisfy the Windows UAT gate.'
@@ -109,7 +75,7 @@ $head = (& git -C $root rev-parse HEAD | Out-String).Trim()
 if ($LASTEXITCODE -ne 0 -or $evidence.gitCommit -ne $head) {
     Add-GateError 'Evidence gitCommit does not match the current HEAD.'
 }
-if ($candidateManifest.schemaVersion -ne 1 -or $candidateManifest.issue -ne 22) {
+if ($candidateManifest.schemaVersion -ne 1 -or $candidateManifest.issue -ne $releaseContract.issue) {
     Add-GateError 'The candidate manifest schema or issue is invalid.'
 }
 if ($candidateManifest.gitCommit -ne $head) {
@@ -121,9 +87,11 @@ if ($candidateManifest.platform -ne 'windows-x64-current-user') {
 $candidateVerification = $candidateManifest.verification
 if ($candidateVerification.frontendCheck -ne 'passed' -or
     $candidateVerification.frontendTests -ne 'passed' -or
+    $candidateVerification.layoutTests -ne 'passed' -or
     $candidateVerification.rustTests -ne 'passed' -or
     $candidateVerification.acceptanceGate -ne 'passed' -or
-    $candidateVerification.releaseTree -ne 'passed') {
+    $candidateVerification.releaseTree -ne 'passed' -or
+    $candidateVerification.releaseContract -ne 'passed') {
     Add-GateError 'The candidate manifest does not record all required build gates as passed.'
 }
 $candidateManifestSha256 = Get-Sha256File $candidateManifestFile.FullName
@@ -136,15 +104,9 @@ if ($evidence.platform.os -ne 'windows' -or
     Add-GateError 'Evidence platform must be Windows x64 build 19045 or newer.'
 }
 $cliVersionMatch = [regex]::Match([string]$evidence.codexCliVersion, '^codex-cli (\d+\.\d+\.\d+)')
-$desktopVersionMatch = [regex]::Match([string]$evidence.desktopCodexVersion, '^\d+(\.\d+){3}$')
 if (-not $cliVersionMatch.Success -or
-    -not $desktopVersionMatch.Success -or
-    [version]$cliVersionMatch.Groups[1].Value -lt [version]'0.147.0' -or
-    [version]$desktopVersionMatch.Value -lt [version]'26.803.5235.0') {
-    Add-GateError 'Evidence must record real Codex CLI and desktop Codex versions.'
-}
-if ($evidence.desktopPublisherId -ne '2p2nqsd0c76g0') {
-    Add-GateError 'Evidence must record an official OpenAI desktop publisher.'
+    [version]$cliVersionMatch.Groups[1].Value -lt [version]'0.147.0') {
+    Add-GateError 'Evidence must record a supported Codex CLI version.'
 }
 if ([string]$evidence.providerCombinationFingerprint -notmatch '^[0-9a-f]{64}$' -or
     [string]$evidence.providerCombinationFingerprint -match '^0{64}$') {
@@ -216,10 +178,24 @@ if ($LASTEXITCODE -ne 0) {
     }
 }
 
+$contractOutput = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'test-release-contract.ps1') -RepositoryRoot $root 2>&1 | Out-String)
+if ($LASTEXITCODE -ne 0) {
+    Add-GateError 'Release contract gate failed.'
+} else {
+    try {
+        $contractReport = $contractOutput | ConvertFrom-Json
+        if (-not $contractReport.passed -or @($contractReport.contradictions).Count -ne 0) {
+            Add-GateError 'Release contract report contains contradictions.'
+        }
+    } catch {
+        Add-GateError 'Release contract report was invalid.'
+    }
+}
+
 $report = [ordered]@{
     passed = $errors.Count -eq 0
     mode = $Mode
-    issue = 22
+    issue = [int]$releaseContract.issue
     gitCommit = $head
     artifactSha256 = $actualHash
     authenticodeStatus = $signatureStatus

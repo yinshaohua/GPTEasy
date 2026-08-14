@@ -6,48 +6,28 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
-const REQUIRED_UAT_CHECKS: &[&str] = &[
-    "release_tree",
-    "install_current_user",
-    "application_launch",
-    "single_instance_precondition",
-    "single_instance_process",
-    "single_instance_activation",
-    "dayway_lifecycle",
-    "real_provider_validation",
-    "base_url_suggestion",
-    "provider_order_and_tray_sync",
-    "provider_save_and_switch",
-    "pending_restart",
-    "cli_new_process_read",
-    "consumer_detection",
-    "consumers_not_controlled",
-    "desktop_new_process_read",
-    "restore_last_config",
-    "external_config_takeover",
-    "managed_conflict",
-    "openai_login_mode",
-    "provider_combination_applied",
-    "provider_combination_match",
-    "tray_residency",
-    "explicit_tray_exit",
-    "explicit_exit_process_cleanup",
-    "overwrite_install",
-    "overwrite_launch",
-    "uninstall",
-    "data_retention",
-    "credential_leak_scan",
-    "usability_200_percent",
-    "usability_reduced_motion",
-    "usability_high_contrast",
-    "usability_keyboard",
-];
-
 fn repository_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("repository root")
         .to_path_buf()
+}
+
+fn windows_release_contract() -> Value {
+    serde_json::from_slice(
+        &fs::read(repository_root().join("scripts/windows-release-contract.json"))
+            .expect("read Windows release contract"),
+    )
+    .expect("parse Windows release contract")
+}
+
+fn required_uat_checks(contract: &Value) -> Vec<&str> {
+    contract["requiredUatChecks"]
+        .as_array()
+        .expect("required UAT checks")
+        .iter()
+        .map(|check| check["id"].as_str().expect("check id"))
+        .collect()
 }
 
 fn current_commit(root: &Path) -> String {
@@ -74,21 +54,24 @@ fn unsigned_uat_fixture() -> (TempDir, PathBuf, PathBuf, PathBuf) {
     .expect("copy unsigned PE fixture");
     let bytes = fs::read(&installer).expect("read fixture artifact");
     let sha256 = format!("{:x}", Sha256::digest(&bytes));
-    let checks = REQUIRED_UAT_CHECKS
-        .iter()
+    let contract = windows_release_contract();
+    let checks = required_uat_checks(&contract)
+        .into_iter()
         .map(|id| json!({ "id": id, "passed": true }))
         .collect::<Vec<_>>();
     let candidate_manifest = json!({
         "schemaVersion": 1,
-        "issue": 22,
+        "issue": 28,
         "gitCommit": current_commit(&root),
         "platform": "windows-x64-current-user",
         "verification": {
             "frontendCheck": "passed",
             "frontendTests": "passed",
+            "layoutTests": "passed",
             "rustTests": "passed",
             "acceptanceGate": "passed",
-            "releaseTree": "passed"
+            "releaseTree": "passed",
+            "releaseContract": "passed"
         },
         "artifact": {
             "path": "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/GPTEasy_0.1.0_x64-setup.exe",
@@ -105,15 +88,13 @@ fn unsigned_uat_fixture() -> (TempDir, PathBuf, PathBuf, PathBuf) {
     let candidate_manifest_sha256 = format!("{:x}", Sha256::digest(&candidate_manifest_bytes));
     let evidence = json!({
         "schemaVersion": 1,
-        "issue": 22,
+        "issue": 28,
         "evidenceOrigin": "synthetic-test",
         "completedAtUtc": "2026-08-10T00:00:00Z",
         "gitCommit": current_commit(&root),
         "candidateManifestSha256": candidate_manifest_sha256,
         "platform": { "os": "windows", "architecture": "x64", "build": 19045 },
         "codexCliVersion": "codex-cli 0.147.0",
-        "desktopCodexVersion": "26.803.5235.0",
-        "desktopPublisherId": "2p2nqsd0c76g0",
         "providerCombinationFingerprint": "a".repeat(64),
         "artifact": {
             "fileName": installer.file_name().expect("file name").to_string_lossy(),
@@ -262,35 +243,170 @@ fn windows_uat_operator_prompts_are_in_simplified_chinese() {
         !script.contains("Type PASS only after observing the required behavior"),
         "legacy English confirmation prompt must not remain"
     );
-    assert!(
-        script.contains("Get-AppxPackage -Name 'OpenAI.Codex'"),
-        "desktop Codex detection must query the exact main package name"
-    );
-    assert!(
-        script.contains("Get-AppxPackage -Name 'OpenAI.ChatGPT'"),
-        "desktop detection must support the ChatGPT package identity"
-    );
-    assert!(
-        !script.contains("$desktopPackage.Count -ne 1"),
-        "desktop Codex detection must tolerate multiple registered package results"
-    );
 }
 
 #[test]
-fn windows_uat_requires_the_official_openai_desktop_package_publisher() {
+fn windows_uat_does_not_require_or_control_a_desktop_consumer() {
     let script = fs::read_to_string(repository_root().join("scripts/run-windows-uat.ps1"))
         .expect("read Windows UAT script");
 
     assert!(
-        script.contains("$_.PublisherId -eq '2p2nqsd0c76g0'"),
-        "UAT must only accept the official OpenAI desktop package publisher"
+        !script.contains("Get-AppxPackage"),
+        "desktop package discovery must not be a release prerequisite"
     );
+    assert!(!script.contains("desktopCodexVersion"));
+    assert!(!script.contains("desktopPublisherId"));
+    assert!(!script.contains("desktop_new_process_read"));
+
     let readiness =
         fs::read_to_string(repository_root().join("scripts/test-release-readiness.ps1"))
             .expect("read release readiness script");
+    assert!(!readiness.contains("desktopCodexVersion"));
+    assert!(!readiness.contains("desktopPublisherId"));
+}
+
+#[test]
+fn windows_candidate_runs_layout_and_release_contract_gates() {
+    let script = fs::read_to_string(repository_root().join("scripts/build-windows-candidate.ps1"))
+        .expect("read Windows candidate builder");
+
+    assert!(script.contains("npm run test:layout"));
+    assert!(script.contains("layoutTests = 'passed'"));
+    assert!(script.contains("scripts/test-release-contract.ps1"));
+    assert!(script.contains("releaseContract = 'passed'"));
+}
+
+#[test]
+fn release_contract_gate_confirms_current_domain_and_ui_documents_agree() {
+    let root = repository_root();
+    let output = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            "scripts/test-release-contract.ps1",
+            "-RepositoryRoot",
+        ])
+        .arg(&root)
+        .current_dir(&root)
+        .output()
+        .expect("run release contract gate");
+
     assert!(
-        readiness.contains("$evidence.desktopPublisherId -ne '2p2nqsd0c76g0'"),
-        "release readiness must bind evidence to the official OpenAI desktop publisher"
+        output.status.success(),
+        "release contract gate failed: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).expect("parse contract report");
+    assert_eq!(report["passed"], true);
+    assert_eq!(report["contradictions"], json!([]));
+}
+
+#[test]
+fn windows_release_contract_is_the_unique_issue_28_uat_schema() {
+    let contract = windows_release_contract();
+    assert_eq!(contract["schemaVersion"], 1);
+    assert_eq!(contract["issue"], 28);
+    assert_eq!(contract["desktopConsumerControl"], "prohibited");
+
+    let checks = contract["requiredUatChecks"]
+        .as_array()
+        .expect("required UAT checks");
+    let ids = required_uat_checks(&contract);
+    let unique = ids
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(unique.len(), checks.len(), "UAT check ids must be unique");
+    let criteria = checks
+        .iter()
+        .filter_map(|check| check["criterion"].as_str())
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(
+        criteria,
+        std::collections::HashSet::from([
+            "executablePathIsolation",
+            "singleInstanceWakeAndTray",
+            "sharedSwitchConfirmation",
+            "switchSuccessUpdatesCurrentProvider",
+            "switchFailureRefreshesEnvironment",
+            "passivePendingRestart",
+            "pendingRestartAutoClear",
+            "noActiveDesktopControl",
+            "defaultLayout",
+            "minimumLayout",
+            "explicitExitSamePathCleanup",
+        ])
+    );
+}
+
+#[test]
+fn release_contract_gate_rejects_an_affirmative_desktop_control_statement() {
+    let root = repository_root();
+    let temp = TempDir::new().expect("contract fixture");
+    let contract = windows_release_contract();
+
+    fs::create_dir_all(temp.path().join("scripts")).expect("fixture scripts");
+    fs::copy(
+        root.join("scripts/windows-release-contract.json"),
+        temp.path().join("scripts/windows-release-contract.json"),
+    )
+    .expect("copy release contract");
+    for document in contract["documents"]
+        .as_array()
+        .expect("contract documents")
+    {
+        let relative = document["path"].as_str().expect("document path");
+        let target = temp.path().join(relative);
+        fs::create_dir_all(target.parent().expect("document parent"))
+            .expect("create document parent");
+        fs::copy(root.join(relative), &target).expect("copy contract document");
+    }
+    for decision in contract["supersededDecisions"]
+        .as_array()
+        .expect("superseded decisions")
+    {
+        let relative = decision["path"].as_str().expect("decision path");
+        let target = temp.path().join(relative);
+        fs::create_dir_all(target.parent().expect("decision parent"))
+            .expect("create decision parent");
+        fs::copy(root.join(relative), target).expect("copy superseded decision");
+    }
+    let tauri_target = temp.path().join("src-tauri/tauri.conf.json");
+    fs::create_dir_all(tauri_target.parent().expect("Tauri parent")).expect("create Tauri parent");
+    fs::copy(root.join("src-tauri/tauri.conf.json"), &tauri_target).expect("copy Tauri config");
+
+    let ui_contract = temp.path().join("docs/ui/UI-SPEC.md");
+    let mut contents = fs::read_to_string(&ui_contract).expect("read UI contract fixture");
+    contents.push_str("\nGPTEasy 可以重启 ChatGPT/Codex 桌面版。\n");
+    fs::write(ui_contract, contents).expect("add contradictory statement");
+
+    let output = Command::new("powershell.exe")
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+        .arg(root.join("scripts/test-release-contract.ps1"))
+        .arg("-RepositoryRoot")
+        .arg(temp.path())
+        .output()
+        .expect("run release contract fixture");
+
+    assert!(
+        !output.status.success(),
+        "contradictory contract unexpectedly passed: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).expect("parse failure report");
+    assert_eq!(report["passed"], false);
+    assert!(
+        report["contradictions"]
+            .as_array()
+            .expect("contradictions")
+            .iter()
+            .any(|value| value
+                .as_str()
+                .is_some_and(|message| message.contains("UI-SPEC.md")))
     );
 }
 

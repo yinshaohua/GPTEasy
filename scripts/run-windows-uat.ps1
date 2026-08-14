@@ -90,7 +90,7 @@ function Get-GPTEasyProcesses([string]$ExecutablePath) {
         Where-Object { $_.ExecutablePath -and $_.ExecutablePath.Equals($ExecutablePath, [StringComparison]::OrdinalIgnoreCase) })
 }
 
-function Wait-GPTEasyProcessesExit([string]$ExecutablePath, [int]$TimeoutSeconds = 10) {
+function Wait-GPTEasyProcessesExit([string]$ExecutablePath, [int]$TimeoutSeconds = 2) {
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     do {
         if (@(Get-GPTEasyProcesses $ExecutablePath).Count -eq 0) {
@@ -99,25 +99,6 @@ function Wait-GPTEasyProcessesExit([string]$ExecutablePath, [int]$TimeoutSeconds
         Start-Sleep -Milliseconds 200
     } while ([DateTime]::UtcNow -lt $deadline)
     return $false
-}
-
-function Get-OfficialDesktopPackage {
-    $packages = @(
-        Get-AppxPackage -Name 'OpenAI.Codex' -ErrorAction SilentlyContinue
-        Get-AppxPackage -Name 'OpenAI.ChatGPT' -ErrorAction SilentlyContinue
-    ) | Where-Object {
-        $_.Architecture.ToString() -eq 'X64' -and
-        $_.PublisherId -eq '2p2nqsd0c76g0'
-    } |
-        Sort-Object { [version]$_.Version } -Descending
-    foreach ($package in $packages) {
-        try {
-            return $package
-        } catch {
-            continue
-        }
-    }
-    return $null
 }
 
 function Confirm-UatStep(
@@ -132,6 +113,29 @@ function Confirm-UatStep(
         throw "UAT 步骤未确认：$Id"
     }
     $Checks.Add([ordered]@{ id = $Id; passed = $true })
+}
+
+function Assert-UatCheckContract(
+    [System.Collections.Generic.List[object]]$Checks,
+    [object]$ReleaseContract
+) {
+    $seen = @{}
+    foreach ($check in @($Checks)) {
+        $id = [string]$check.id
+        if ($seen.ContainsKey($id)) {
+            throw "UAT 检查重复：$id。"
+        }
+        $seen[$id] = $true
+    }
+    $requiredChecks = @($ReleaseContract.requiredUatChecks | ForEach-Object { [string]$_.id })
+    foreach ($required in $requiredChecks) {
+        if (-not $seen.ContainsKey([string]$required)) {
+            throw "UAT 缺少发布合同要求的检查：$required。"
+        }
+    }
+    if ($seen.Count -ne $requiredChecks.Count) {
+        throw 'UAT 包含发布合同之外的检查。'
+    }
 }
 
 $isWindowsHost = [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
@@ -150,6 +154,7 @@ if ([int]$os.BuildNumber -lt 19045) {
 }
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$releaseContract = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot 'windows-release-contract.json')) | ConvertFrom-Json
 $installer = Get-Item -LiteralPath (Resolve-Path -LiteralPath $InstallerPath).Path
 if ($installer.Extension -ne '.exe' -or $installer.Name -notlike '*-setup.exe') {
     throw 'InstallerPath 必须指向 Tauri NSIS 安装程序。'
@@ -196,22 +201,6 @@ if ($LASTEXITCODE -ne 0 -or $codexVersion -notmatch '^codex-cli (\d+\.\d+\.\d+)'
 if ([version]$Matches[1] -lt [version]'0.147.0') {
     throw 'Windows UAT 要求 Codex CLI 0.147.0 或更高版本。'
 }
-$desktopPackage = Get-OfficialDesktopPackage
-if (-not $desktopPackage -or [version]$desktopPackage.Version -lt [version]'26.803.5235.0') {
-    $desktopPackages = @(
-        Get-AppxPackage -Name 'OpenAI.Codex' -ErrorAction SilentlyContinue
-        Get-AppxPackage -Name 'OpenAI.ChatGPT' -ErrorAction SilentlyContinue
-    )
-    $detectedPackages = if ($desktopPackages.Count -eq 0) {
-        '未检测到 OpenAI.Codex 主包'
-    } else {
-        ($desktopPackages | ForEach-Object {
-            "$($_.Name) $($_.Version) $($_.Architecture)"
-        }) -join '；'
-    }
-    throw "Windows UAT 要求安装官方 x64 桌面 Codex 26.803.5235.0 或更高版本。实际检测结果：$detectedPackages。"
-}
-
 $dataRoot = Join-Path $env:LOCALAPPDATA 'com.gpteasy.desktop'
 $codexConfig = Join-Path ([Environment]::GetFolderPath('UserProfile')) '.codex\config.toml'
 $startMenuShortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\GPTEasy.lnk'
@@ -248,7 +237,7 @@ if ($RequireAuthenticode -and $signature.Status -ne 'Valid') {
 $candidateManifest = Get-Content -LiteralPath $candidateManifestFile.FullName -Raw | ConvertFrom-Json
 $candidateArtifactName = [System.IO.Path]::GetFileName(([string]$candidateManifest.artifact.path).Replace('/', '\'))
 if ($candidateManifest.schemaVersion -ne 1 -or
-    $candidateManifest.issue -ne 22 -or
+    $candidateManifest.issue -ne $releaseContract.issue -or
     $candidateManifest.gitCommit -ne $commit -or
     $candidateManifest.platform -ne 'windows-x64-current-user' -or
     $candidateArtifactName -ne $installer.Name -or
@@ -260,9 +249,11 @@ if ($candidateManifest.schemaVersion -ne 1 -or
 $candidateVerification = $candidateManifest.verification
 if ($candidateVerification.frontendCheck -ne 'passed' -or
     $candidateVerification.frontendTests -ne 'passed' -or
+    $candidateVerification.layoutTests -ne 'passed' -or
     $candidateVerification.rustTests -ne 'passed' -or
     $candidateVerification.acceptanceGate -ne 'passed' -or
-    $candidateVerification.releaseTree -ne 'passed') {
+    $candidateVerification.releaseTree -ne 'passed' -or
+    $candidateVerification.releaseContract -ne 'passed') {
     throw '候选 manifest 未记录所有必要构建门禁均已通过。'
 }
 $candidateManifestSha256 = Get-Sha256File $candidateManifestFile.FullName
@@ -310,18 +301,21 @@ Confirm-UatStep $checks 'dayway_lifecycle' '打开 DayWay 官网入口，确认 
 Confirm-UatStep $checks 'real_provider_validation' '完成 DayWay 之外的真实供应商模型发现和 Responses 流式工具调用验证。'
 Confirm-UatStep $checks 'base_url_suggestion' '输入路径错误但同源的 BASE_URL，确认只在安全范围内串行探测并在完整验证后展示建议；明确拒绝或采用建议均不会静默保存。'
 Confirm-UatStep $checks 'provider_order_and_tray_sync' '创建至少三个已验证供应商并拖拽排序，确认 DayWay 固定首位、目录顺序持久化且托盘顺序一致。'
-Confirm-UatStep $checks 'provider_save_and_switch' '保持至少一个旧 Codex 消费者正在运行，明确保存已验证供应商并应用到当前用户 Codex 环境。'
-Confirm-UatStep $checks 'pending_restart' '确认 GPTEasy 显示待重启，且没有终止仍在运行的旧 Codex 消费者。'
-Confirm-UatStep $checks 'consumer_detection' '确认设置页显示桌面版和 Codex CLI 的实际检测状态，并能区分运行中、已停止和无法确认。'
-Confirm-UatStep $checks 'cli_new_process_read' '退出旧 Codex CLI，启动新的真实 Codex CLI 进程，并确认真实请求使用目标供应商和凭据载体。'
+Confirm-UatStep $checks 'settings_and_tray_switch_confirmation' '分别从设置页和托盘选择非当前供应商，确认两处复用同一个简短确认；确认只显示目标供应商、旧消费者风险以及“取消 / 切换”，不显示 Codex 工件、字段或重启选项。'
+Confirm-UatStep $checks 'switch_success_updates_current_provider' '保持至少一个旧 Codex 消费者正在运行并完成供应商切换，确认成功后目录立即把目标供应商标为“当前使用”。'
+Confirm-UatStep $checks 'switch_failure_refreshes_environment' '通过外部并发修改制造一次安全失败的供应商切换，确认界面重新读取环境实际状态、不保留请求前的过期当前供应商，且不自动重试或覆盖外部修改；随后按界面流程恢复可继续验收的受管状态。'
+Confirm-UatStep $checks 'pending_restart_passive' '确认运行中的切换前消费者只产生被动待重启状态，且 GPTEasy 没有启动、关闭、终止、激活或重启消费者。'
 Confirm-UatStep $checks 'consumers_not_controlled' '确认 GPTEasy 没有启动、关闭、终止、激活或重启桌面版和 Codex CLI 的入口；运行中的消费者始终由用户在原入口处理。'
-Confirm-UatStep $checks 'desktop_new_process_read' '关闭旧桌面 Codex，启动新的桌面 Codex 进程，并确认真实请求使用目标供应商和凭据载体。'
+Confirm-UatStep $checks 'pending_restart_auto_clear' '从原入口自然退出所有切换前消费者，确认待重启状态自动清除，且没有出现重启弹窗或重启按钮。'
+Confirm-UatStep $checks 'cli_new_process_read' '启动新的真实 Codex CLI 进程，并确认真实请求使用目标供应商和凭据载体。'
 Confirm-UatStep $checks 'restore_last_config' '使用“恢复上次配置”，确认当前用户 Codex 环境恢复到此前的完整状态。'
 Confirm-UatStep $checks 'external_config_takeover' '创建有效的外部供应商配置，重新扫描并检查替换范围，明确接管后确认无关 TOML 字段仍被保留。'
 Confirm-UatStep $checks 'managed_conflict' '从外部修改供应商 ID 或受管字段，确认 GPTEasy 阻止写入，直到用户明确处理管理冲突。'
 Confirm-UatStep $checks 'openai_login_mode' '明确处理管理冲突后切换到 OpenAI 登录模式，确认 GPTEasy 不读取、保存或删除登录令牌。'
 Confirm-UatStep $checks 'provider_combination_applied' '切回 provider.json 对应的供应商，并确认它成为当前供应商。'
 Confirm-UatStep $checks 'tray_residency' '关闭设置窗口，确认 GPTEasy 继续驻留且不会退出；再从托盘重新打开设置。'
+Confirm-UatStep $checks 'layout_default_1120x620' '将窗口设为默认 1120 × 620，确认底部环境操作可到达，长名称、标签、BASE_URL、模型和行级按钮不重叠，行操作未被旧断点强制换行。'
+Confirm-UatStep $checks 'layout_minimum_680x520' '将窗口缩到最小 680 × 520，确认底部操作可通过页面滚动到达，所有文字、标签和按钮不重叠且完整操作仍可完成。'
 Confirm-UatStep $checks 'usability_200_percent' '将 Windows 缩放设为 200%，使用长 BASE_URL 和长模型 ID，确认目录、详情、验证弹窗和确认对话框无重叠且文本完整。'
 Confirm-UatStep $checks 'usability_reduced_motion' '启用减少动态效果，确认验证进度使用静态状态且所有操作仍可完成。'
 Confirm-UatStep $checks 'usability_high_contrast' '启用高对比度主题，确认状态、错误、按钮和焦点仍清晰可辨。'
@@ -329,7 +323,7 @@ Confirm-UatStep $checks 'usability_keyboard' '仅用键盘完成除排序外的�
 Confirm-UatStep $checks 'explicit_tray_exit' '使用托盘中的“退出 GPTEasy”，确认窗口和托盘入口均已关闭。'
 
 if (-not (Wait-GPTEasyProcessesExit $app.FullName)) {
-    throw '明确退出后 10 秒内同路径 GPTEasy 进程未归零。'
+    throw '明确退出后 2 秒内同路径 GPTEasy 进程未归零。'
 }
 $checks.Add([ordered]@{ id = 'explicit_exit_process_cleanup'; passed = $true })
 $appliedConfig = Get-Content -LiteralPath $codexConfig -Raw
@@ -399,9 +393,10 @@ New-Item -ItemType Directory -Path $sessionRoot -Force | Out-Null
 $pendingEvidencePath = Join-Path $sessionRoot 'evidence.pending.json'
 $evidencePath = Join-Path $sessionRoot 'evidence.json'
 $checks.Add([ordered]@{ id = 'credential_leak_scan'; passed = $true })
+Assert-UatCheckContract $checks $releaseContract
 $evidence = [ordered]@{
     schemaVersion = 1
-    issue = 22
+    issue = [int]$releaseContract.issue
     evidenceOrigin = 'interactive-windows-uat'
     completedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
     gitCommit = $commit
@@ -412,8 +407,6 @@ $evidence = [ordered]@{
         build = [int]$os.BuildNumber
     }
     codexCliVersion = $codexVersion
-    desktopCodexVersion = $desktopPackage.Version.ToString()
-    desktopPublisherId = $desktopPackage.PublisherId
     providerCombinationFingerprint = $combinationFingerprint
     artifact = [ordered]@{
         fileName = $installer.Name

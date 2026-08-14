@@ -5,10 +5,10 @@ $ErrorActionPreference = 'Stop'
 
 $isWindowsHost = [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
 if (-not $isWindowsHost) {
-    throw 'The Issue #22 acceptance gate is a Windows x64 gate.'
+    throw 'The Issue #28 acceptance gate is a Windows x64 gate.'
 }
 if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'X64') {
-    throw 'The Issue #22 acceptance gate requires an x64 process.'
+    throw 'The Issue #28 acceptance gate requires an x64 process.'
 }
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path

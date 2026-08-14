@@ -1,5 +1,7 @@
 # GPTEasy
 
+<!-- release-contract: desktop-consumer-control=prohibited -->
+
 GPTEasy 帮助个人用户管理已验证供应商，并切换当前 Windows 用户默认 Codex 环境使用的 API 服务。
 
 ## 用户与环境

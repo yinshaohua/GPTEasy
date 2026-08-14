@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "issue": 28,
+  "desktopConsumerControl": "prohibited",
+  "documentMarker": "<!-- release-contract: desktop-consumer-control=prohibited -->",
+  "documents": [
+    { "path": "CONTEXT.md" },
+    { "path": "docs/adr/0026-no-active-desktop-control.md" },
+    { "path": "docs/ui/UI-SPEC.md" },
+    { "path": "docs/ui/PROVIDER-MANAGEMENT-SPEC.md" }
+  ],
+  "supersededDecisions": [
+    {
+      "path": "docs/adr/0025-user-confirmed-desktop-restart.md",
+      "status": "status: superseded by ADR-0026"
+    }
+  ],
+  "affirmativeDesktopControlPatterns": [
+    "GPTEasy\\s*(可以|将|会|支持|提供|负责).{0,30}(启动|关闭|终止|激活|重启).{0,30}(ChatGPT|Codex)"
+  ],
+  "window": {
+    "defaultWidth": 1120,
+    "defaultHeight": 620,
+    "minimumWidth": 680,
+    "minimumHeight": 520
+  },
+  "requiredUatChecks": [
+    { "id": "release_tree" },
+    { "id": "install_current_user" },
+    { "id": "application_launch" },
+    { "id": "single_instance_precondition" },
+    { "id": "single_instance_process", "criterion": "executablePathIsolation" },
+    { "id": "single_instance_activation", "criterion": "singleInstanceWakeAndTray" },
+    { "id": "dayway_lifecycle" },
+    { "id": "real_provider_validation" },
+    { "id": "base_url_suggestion" },
+    { "id": "provider_order_and_tray_sync" },
+    { "id": "settings_and_tray_switch_confirmation", "criterion": "sharedSwitchConfirmation" },
+    { "id": "switch_success_updates_current_provider", "criterion": "switchSuccessUpdatesCurrentProvider" },
+    { "id": "switch_failure_refreshes_environment", "criterion": "switchFailureRefreshesEnvironment" },
+    { "id": "pending_restart_passive", "criterion": "passivePendingRestart" },
+    { "id": "pending_restart_auto_clear", "criterion": "pendingRestartAutoClear" },
+    { "id": "cli_new_process_read" },
+    { "id": "consumers_not_controlled", "criterion": "noActiveDesktopControl" },
+    { "id": "restore_last_config" },
+    { "id": "external_config_takeover" },
+    { "id": "managed_conflict" },
+    { "id": "openai_login_mode" },
+    { "id": "provider_combination_applied" },
+    { "id": "provider_combination_match" },
+    { "id": "tray_residency" },
+    { "id": "layout_default_1120x620", "criterion": "defaultLayout" },
+    { "id": "layout_minimum_680x520", "criterion": "minimumLayout" },
+    { "id": "explicit_tray_exit" },
+    { "id": "explicit_exit_process_cleanup", "criterion": "explicitExitSamePathCleanup" },
+    { "id": "overwrite_install" },
+    { "id": "overwrite_launch" },
+    { "id": "uninstall" },
+    { "id": "data_retention" },
+    { "id": "credential_leak_scan" },
+    { "id": "usability_200_percent" },
+    { "id": "usability_reduced_motion" },
+    { "id": "usability_high_contrast" },
+    { "id": "usability_keyboard" }
+  ]
+}

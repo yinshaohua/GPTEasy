@@ -1,5 +1,7 @@
 # 移除所有主动桌面控制入口
 
+<!-- release-contract: desktop-consumer-control=prohibited -->
+
 ## 状态
 
 已取代 ADR-0025，并恢复和收紧 ADR-0020 的被动消费者协调原则。

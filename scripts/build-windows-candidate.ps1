@@ -46,6 +46,7 @@ if (-not $isWindowsHost -or
 }
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$releaseContract = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot 'windows-release-contract.json')) | ConvertFrom-Json
 $branch = (& git -C $repoRoot branch --show-current | Out-String).Trim()
 if ($LASTEXITCODE -ne 0 -or $branch -ne 'main') {
     throw 'The Windows release candidate must be built from main.'
@@ -60,10 +61,14 @@ Push-Location $repoRoot
 try {
     Invoke-Checked 'Frontend typecheck and lint' { npm run check }
     Invoke-Checked 'Frontend test suite' { npm test }
+    Invoke-Checked 'Frontend layout test suite' { npm run test:layout }
     Invoke-Checked 'Rust test suite' { cargo test --manifest-path src-tauri/Cargo.toml }
-    Invoke-Checked 'Issue #22 comprehensive acceptance gate' { npm run acceptance }
+    Invoke-Checked "Issue #$($releaseContract.issue) comprehensive acceptance gate" { npm run acceptance }
     Invoke-Checked 'Release tree gate' {
         powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-release-tree.ps1 -RepositoryRoot $repoRoot
+    }
+    Invoke-Checked 'Release contract gate' {
+        powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-release-contract.ps1 -RepositoryRoot $repoRoot
     }
     Invoke-Checked 'Tauri Windows x64 NSIS build' {
         npx --no-install tauri build --target x86_64-pc-windows-msvc
@@ -100,16 +105,18 @@ if (-not $installer.FullName.StartsWith($repoRoot, [StringComparison]::OrdinalIg
 $relativeInstaller = $installer.FullName.Substring($repoRoot.Length).TrimStart('\').Replace('\', '/')
 $manifest = [ordered]@{
     schemaVersion = 1
-    issue = 22
+    issue = [int]$releaseContract.issue
     gitCommit = $commit
     builtAtUtc = (Get-Date).ToUniversalTime().ToString('o')
     platform = 'windows-x64-current-user'
     verification = [ordered]@{
         frontendCheck = 'passed'
         frontendTests = 'passed'
+        layoutTests = 'passed'
         rustTests = 'passed'
         acceptanceGate = 'passed'
         releaseTree = 'passed'
+        releaseContract = 'passed'
     }
     artifact = [ordered]@{
         path = $relativeInstaller

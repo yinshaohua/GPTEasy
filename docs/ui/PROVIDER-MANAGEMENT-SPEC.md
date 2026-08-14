@@ -1,5 +1,7 @@
 # 供应商管理界面合同
 
+<!-- release-contract: desktop-consumer-control=prohibited -->
+
 本合同描述 v0.1 之后已经确认的供应商管理界面目标。
 
 ## 信息架构
