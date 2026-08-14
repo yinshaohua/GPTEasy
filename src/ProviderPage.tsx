@@ -63,6 +63,7 @@ import {
 import {
   providerFailureMessages,
   providerMessages,
+  restoreAvailabilityMessages,
 } from "./messages";
 
 type Operation =
@@ -735,7 +736,7 @@ export default function ProviderPage() {
         <section className="provider-catalog" aria-labelledby="provider-catalog-heading">
           <div className="catalog-heading">
             <h2 id="provider-catalog-heading">{providerMessages.catalogTitle}</h2>
-            <span>{providers.length} 个已验证供应商</span>
+            <span>{providerMessages.catalogCount(providers.length)}</span>
           </div>
           {listState === "loading" && <p className="pane-note">{providerMessages.loadingCatalog}</p>}
           {listState === "error" && <p className="inline-error">{providerMessages.catalogUnavailable}</p>}
@@ -754,7 +755,7 @@ export default function ProviderPage() {
                 </div>
                 <div className="provider-row-actions">
                   <DaywayWebsiteButton onVisit={visitDaywayWebsite} />
-                  <button className="command-button compact" type="button" onClick={configureDayway} disabled={busy} aria-label="配置 DayWay">
+                  <button className="command-button compact" type="button" onClick={configureDayway} disabled={busy} aria-label={providerMessages.configureDayway}>
                     <Pencil size={16} aria-hidden="true" />
                     配置
                   </button>
@@ -812,8 +813,8 @@ export default function ProviderPage() {
                     type="button"
                     onClick={() => void runRevalidation(provider)}
                     disabled={busy}
-                    aria-label={`验证 ${provider.name}`}
-                    title="验证"
+                    aria-label={providerMessages.verifyProviderAccessibleName(provider.name)}
+                    title={providerMessages.verify}
                   >
                     <RefreshCw size={16} aria-hidden="true" />
                   </button>
@@ -822,7 +823,7 @@ export default function ProviderPage() {
                     type="button"
                     onClick={() => editProvider(provider)}
                     disabled={busy}
-                    aria-label={`修改 ${provider.name}`}
+                    aria-label={providerMessages.editProviderAccessibleName(provider.name)}
                     title={providerMessages.editProvider}
                   >
                     <Pencil size={16} aria-hidden="true" />
@@ -832,7 +833,7 @@ export default function ProviderPage() {
                     type="button"
                     onClick={() => void deleteCatalogProvider(provider)}
                     disabled={provider.isCurrent || busy}
-                    aria-label={`删除 ${provider.name}`}
+                    aria-label={providerMessages.deleteProviderAccessibleName(provider.name)}
                     title={providerMessages.deleteProvider}
                   >
                     <Trash2 size={16} aria-hidden="true" />
@@ -842,7 +843,9 @@ export default function ProviderPage() {
                     type="button"
                     onClick={() => void switchCatalogProvider(provider)}
                     disabled={provider.isCurrent || busy || switchingProviderId === provider.id || !environment || !canApplyProvider(environment)}
-                    aria-label={provider.isCurrent ? `${provider.name} 当前使用` : `切换到 ${provider.name}`}
+                    aria-label={provider.isCurrent
+                      ? providerMessages.currentProviderAccessibleName(provider.name)
+                      : providerMessages.switchProviderAccessibleName(provider.name)}
                   >
                     {switchingProviderId === provider.id
                       ? <LoaderCircle className="is-spinning" size={16} aria-hidden="true" />
@@ -1086,22 +1089,16 @@ export default function ProviderPage() {
   );
 }
 
-const restoreAvailabilityMessages = {
-  available: "可恢复到最近一次 GPTEasy 修改前的配置。",
-  no_backup: "尚无可恢复的 GPTEasy 配置修改。",
-  artifacts_changed: "受管工件在最近一次修改后发生变化，恢复已禁用。",
-  invalid_backup: "最近一次配置备份不完整，恢复已禁用。",
-  recovery_pending: "恢复协调完成前不能再次恢复。",
-} as const;
-
 function EnvironmentReadNotice({
   state,
 }: {
   state: "loading" | "ready" | "error";
 }) {
-  if (state === "loading") return <p className="environment-status-note">正在读取当前用户 Codex 环境</p>;
+  if (state === "loading") {
+    return <p className="environment-status-note">{providerMessages.environmentReading}</p>;
+  }
   if (state === "error") {
-    return <p className="environment-status-note is-error" role="alert">无法读取当前用户 Codex 环境。</p>;
+    return <p className="environment-status-note is-error" role="alert">{providerMessages.environmentReadFailed}</p>;
   }
   return null;
 }
@@ -1112,8 +1109,8 @@ function DaywayWebsiteButton({ onVisit }: { onVisit: () => Promise<void> }) {
       className="secondary-button compact row-icon-button"
       type="button"
       onClick={() => void onVisit()}
-      aria-label="访问 DayWay 官网"
-      title="访问官网"
+      aria-label={providerMessages.visitDaywayWebsiteAccessibleName}
+      title={providerMessages.visitDaywayWebsite}
     >
       <ExternalLink size={16} aria-hidden="true" />
     </button>
@@ -1139,29 +1136,29 @@ function EnvironmentActions({
 }) {
   const restoreAvailability = snapshot?.restoreAvailability ?? "no_backup";
   const openAiReason = !snapshot
-    ? "环境状态不可用。"
+    ? providerMessages.environmentUnavailable
     : snapshot.mode === "openai_login"
       ? snapshot.loginStatus === "not_logged_in"
-        ? "OpenAI 登录已在外部失效；当前模式保持不变。"
+        ? providerMessages.openAiLoginExpired
         : snapshot.loginStatus === "unavailable"
-          ? "无法确认 OpenAI 登录状态；当前模式保持不变。"
-          : "当前已是 OpenAI 登录模式。"
+          ? providerMessages.openAiLoginUnconfirmed
+          : providerMessages.alreadyOpenAiLogin
       : snapshot.loginStatus === "not_logged_in"
-        ? "请先在 Codex 中完成 OpenAI 登录。"
+        ? providerMessages.openAiLoginRequired
         : snapshot.loginStatus === "unavailable"
-          ? "无法确认 Codex 登录状态，已阻止切换。"
-          : "使用 Codex 已有的 OpenAI 登录。";
+          ? providerMessages.openAiLoginBlocked
+          : providerMessages.openAiLoginAvailable;
   return (
-    <section className="environment-tools" aria-label="Codex 环境操作">
+    <section className="environment-tools" aria-label={providerMessages.environmentActions}>
       <button
         className="secondary-button environment-command"
         type="button"
         onClick={onRestore}
         disabled={busy || restoring || restoreAvailability !== "available"}
-        aria-description={restoring ? "正在恢复上次配置。" : restoreAvailabilityMessages[restoreAvailability]}
+        aria-description={restoring ? providerMessages.restoringConfiguration : restoreAvailabilityMessages[restoreAvailability]}
       >
         {restoring ? <LoaderCircle className="is-spinning" size={17} aria-hidden="true" /> : <RotateCcw size={17} aria-hidden="true" />}
-        恢复上次配置
+        {providerMessages.restoreConfiguration}
       </button>
       <button
         className="secondary-button environment-command"
@@ -1171,10 +1168,14 @@ function EnvironmentActions({
         aria-description={openAiReason}
       >
         {switchingMode ? <LoaderCircle className="is-spinning" size={17} aria-hidden="true" /> : <LogIn size={17} aria-hidden="true" />}
-        切换到 OpenAI 登录模式
+        {providerMessages.switchToOpenAiLogin}
       </button>
-      <button className="secondary-button upcoming-command" type="button" disabled>选择 WSL2 供应商 <span>即将支持</span></button>
-      <button className="secondary-button upcoming-command" type="button" disabled>导出 Linux 脚本 <span>即将支持</span></button>
+      <button className="secondary-button upcoming-command" type="button" disabled>
+        {providerMessages.chooseWslProvider} <span>{providerMessages.comingSoon}</span>
+      </button>
+      <button className="secondary-button upcoming-command" type="button" disabled>
+        {providerMessages.exportLinuxScript} <span>{providerMessages.comingSoon}</span>
+      </button>
       {failure && <p className="inline-error environment-tool-error" role="alert">{environmentFailureMessage(failure.messageId)}</p>}
     </section>
   );
