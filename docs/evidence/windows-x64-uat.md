@@ -25,7 +25,7 @@ npm run candidate:windows -- --RequireAuthenticode
 ## UAT 前置条件
 
 - 使用 Windows 10 22H2（build 19045）或更高版本的 x64 一次性当前用户账户，不使用日常开发账户。
-- Codex CLI 0.147.0 或更高版本，以及可动态发现 Application Id/AUMID 的 OpenAI.Codex 26.803.5235.0 或更高版本 x64 桌面包均已安装。
+- Codex CLI 0.147.0 或更高版本，以及 OpenAI.Codex 26.803.5235.0 或更高版本 x64 桌面包均已安装。
 - GPTEasy 尚未安装，`%LOCALAPPDATA%\com.gpteasy.desktop` 不存在，当前用户 `~/.codex/config.toml` 不存在。
 - 工作树位于干净的 `main`，安装包由同一提交构建。
 - 真实供应商凭据只保存在被 Git 忽略的 `.codex/skills/spike-findings-gpteasy/.secrets/provider.json`：
@@ -52,7 +52,7 @@ npm run uat:windows -- --InstallerPath <setup.exe> -CandidateManifestPath <manif
 
 - 安装后应用可启动，真实供应商完成模型发现、Responses API 流式 strict 工具调用和 nonce 回传，并经明确保存与切换生效。
 - 首次启动后记录同路径进程 PID；最小化设置窗口并再次启动同一安装，确认原窗口显示、取消最小化并聚焦，原 PID 保持唯一且托盘仍只有一个入口。
-- 旧 Codex 消费者存在时进入待重启且不被终止；关闭旧进程后，新 Codex CLI 和新桌面 Codex分别完成真实请求，证明读取目标配置和凭据载体。
+- 旧 Codex 消费者存在时进入被动待重启且不被 GPTEasy 控制；用户在原入口关闭并重新运行后，新 Codex CLI 和新桌面 Codex 分别完成真实请求，证明读取目标配置和凭据载体。
 - 恢复上次配置、有效外部配置接管、管理冲突阻断、OpenAI 登录模式和关闭窗口后的托盘驻留均由人工确认；退出前重新应用秘密文件中的目标供应商。
 - GPTEasy 从托盘明确退出后，脚本等待最多 10 秒并确认同一可执行路径的进程数归零；随后在内存中核对最终 `config.toml` 包含秘密文件中的同一地址和模型但不含 Key，并核对 `auth.json` 的 `OPENAI_API_KEY` 与同一 Key 精确匹配。脚本不输出或复制任何工件正文。
 - 脚本自动复核当前用户安装路径、开始菜单项、覆盖安装、覆盖后启动、静默卸载，以及卸载前后 `state.sqlite3` 的存在性和 SHA-256 不变。

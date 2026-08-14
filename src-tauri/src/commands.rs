@@ -5,9 +5,6 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
-use crate::consumer::{
-    ConsumerIdentity, DesktopApplication, DesktopFailure, DesktopRestartResult, DesktopSnapshot,
-};
 use crate::environment::{
     EnvironmentApplication, EnvironmentFailure, EnvironmentFailureCategory, EnvironmentSnapshot,
 };
@@ -30,10 +27,6 @@ pub(crate) struct ProviderRuntime {
 
 pub(crate) struct EnvironmentRuntime {
     application: EnvironmentApplication,
-}
-
-pub(crate) struct DesktopRuntime {
-    application: DesktopApplication,
 }
 
 impl ProviderRuntime {
@@ -61,12 +54,6 @@ impl EnvironmentRuntime {
 
     pub(crate) fn has_pending_restart(&self) -> Result<bool, EnvironmentFailure> {
         self.application.has_pending_restart()
-    }
-}
-
-impl DesktopRuntime {
-    pub(crate) fn new(application: DesktopApplication) -> Self {
-        Self { application }
     }
 }
 
@@ -122,60 +109,6 @@ pub(crate) async fn get_environment_snapshot(
     tauri::async_runtime::spawn_blocking(move || application.inspect())
         .await
         .map_err(|_| environment_task_failed())?
-}
-
-#[tauri::command]
-pub(crate) async fn get_desktop_snapshot(
-    state: State<'_, DesktopRuntime>,
-) -> Result<DesktopSnapshot, DesktopFailure> {
-    let application = state.application.clone();
-    tauri::async_runtime::spawn_blocking(move || application.inspect())
-        .await
-        .map_err(|_| DesktopFailure {
-            category: crate::consumer::DesktopFailureCategory::ActionUnavailable,
-            message_id: "desktop.state_unavailable",
-        })
-}
-
-#[tauri::command]
-pub(crate) async fn start_desktop_application(
-    state: State<'_, DesktopRuntime>,
-) -> Result<DesktopSnapshot, DesktopFailure> {
-    let application = state.application.clone();
-    tauri::async_runtime::spawn_blocking(move || application.start())
-        .await
-        .map_err(|_| DesktopFailure {
-            category: crate::consumer::DesktopFailureCategory::ActionUnavailable,
-            message_id: "desktop.state_unavailable",
-        })?
-}
-
-#[tauri::command]
-pub(crate) async fn restart_desktop_application(
-    state: State<'_, DesktopRuntime>,
-    expected_roots: Vec<ConsumerIdentity>,
-) -> Result<DesktopRestartResult, DesktopFailure> {
-    let application = state.application.clone();
-    tauri::async_runtime::spawn_blocking(move || application.restart(&expected_roots))
-        .await
-        .map_err(|_| DesktopFailure {
-            category: crate::consumer::DesktopFailureCategory::ActionUnavailable,
-            message_id: "desktop.state_unavailable",
-        })?
-}
-
-#[tauri::command]
-pub(crate) async fn force_restart_desktop_application(
-    state: State<'_, DesktopRuntime>,
-    force_authorization: String,
-) -> Result<DesktopRestartResult, DesktopFailure> {
-    let application = state.application.clone();
-    tauri::async_runtime::spawn_blocking(move || application.force_restart(&force_authorization))
-        .await
-        .map_err(|_| DesktopFailure {
-            category: crate::consumer::DesktopFailureCategory::ActionUnavailable,
-            message_id: "desktop.state_unavailable",
-        })?
 }
 
 #[tauri::command]

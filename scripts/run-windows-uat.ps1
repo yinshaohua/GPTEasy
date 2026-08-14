@@ -101,7 +101,7 @@ function Wait-GPTEasyProcessesExit([string]$ExecutablePath, [int]$TimeoutSeconds
     return $false
 }
 
-function Get-OfficialDesktopIdentity {
+function Get-OfficialDesktopPackage {
     $packages = @(
         Get-AppxPackage -Name 'OpenAI.Codex' -ErrorAction SilentlyContinue
         Get-AppxPackage -Name 'OpenAI.ChatGPT' -ErrorAction SilentlyContinue
@@ -112,19 +112,7 @@ function Get-OfficialDesktopIdentity {
         Sort-Object { [version]$_.Version } -Descending
     foreach ($package in $packages) {
         try {
-            $manifest = Get-AppxPackageManifest -Package $package -ErrorAction Stop
-            foreach ($application in @($manifest.Package.Applications.Application)) {
-                $id = [string]$application.Id
-                $executable = [string]$application.Executable
-                if ([string]::IsNullOrWhiteSpace($id) -or
-                    $executable -notmatch '(?i)(codex|chatgpt)' -or
-                    $executable -match '(?i)(helper|crashpad|renderer)') { continue }
-                return [pscustomobject]@{
-                    Package = $package
-                    ApplicationId = $id
-                    AppUserModelId = "$($package.PackageFamilyName)!$id"
-                }
-            }
+            return $package
         } catch {
             continue
         }
@@ -208,8 +196,7 @@ if ($LASTEXITCODE -ne 0 -or $codexVersion -notmatch '^codex-cli (\d+\.\d+\.\d+)'
 if ([version]$Matches[1] -lt [version]'0.147.0') {
     throw 'Windows UAT 要求 Codex CLI 0.147.0 或更高版本。'
 }
-$desktopIdentity = Get-OfficialDesktopIdentity
-$desktopPackage = if ($desktopIdentity) { $desktopIdentity.Package } else { $null }
+$desktopPackage = Get-OfficialDesktopPackage
 if (-not $desktopPackage -or [version]$desktopPackage.Version -lt [version]'26.803.5235.0') {
     $desktopPackages = @(
         Get-AppxPackage -Name 'OpenAI.Codex' -ErrorAction SilentlyContinue
@@ -222,7 +209,7 @@ if (-not $desktopPackage -or [version]$desktopPackage.Version -lt [version]'26.8
             "$($_.Name) $($_.Version) $($_.Architecture)"
         }) -join '；'
     }
-    throw "Windows UAT 要求安装可动态发现 AUMID 且版本不低于 26.803.5235.0 的 x64 桌面 Codex。实际检测结果：$detectedPackages。"
+    throw "Windows UAT 要求安装官方 x64 桌面 Codex 26.803.5235.0 或更高版本。实际检测结果：$detectedPackages。"
 }
 
 $dataRoot = Join-Path $env:LOCALAPPDATA 'com.gpteasy.desktop'
@@ -325,12 +312,9 @@ Confirm-UatStep $checks 'base_url_suggestion' '输入路径错误但同源的 BA
 Confirm-UatStep $checks 'provider_order_and_tray_sync' '创建至少三个已验证供应商并拖拽排序，确认 DayWay 固定首位、目录顺序持久化且托盘顺序一致。'
 Confirm-UatStep $checks 'provider_save_and_switch' '保持至少一个旧 Codex 消费者正在运行，明确保存已验证供应商并应用到当前用户 Codex 环境。'
 Confirm-UatStep $checks 'pending_restart' '确认 GPTEasy 显示待重启，且没有终止仍在运行的旧 Codex 消费者。'
+Confirm-UatStep $checks 'consumer_detection' '确认设置页显示桌面版和 Codex CLI 的实际检测状态，并能区分运行中、已停止和无法确认。'
 Confirm-UatStep $checks 'cli_new_process_read' '退出旧 Codex CLI，启动新的真实 Codex CLI 进程，并确认真实请求使用目标供应商和凭据载体。'
-Confirm-UatStep $checks 'cli_not_terminated' '确认立即重启、取消和失败路径均未关闭或重启 Codex CLI，并给出旧 CLI 手动重启提示。'
-Confirm-UatStep $checks 'desktop_restart_graceful' '通过 GPTEasy 选择立即重启桌面版，确认官方桌面根正常关闭并动态重新激活。'
-Confirm-UatStep $checks 'desktop_restart_force_confirmation' '让正常关闭超时，确认 GPTEasy 二次展示强制关闭风险，只有再次确认后才关闭官方桌面进程树。'
-Confirm-UatStep $checks 'desktop_restart_cancel' '在强制关闭二次确认中选择取消，确认任何官方桌面进程均未被终止且状态保留待重启。'
-Confirm-UatStep $checks 'desktop_activation_recheck' '确认重新激活后通过动态包身份和新 PID 复核桌面根，并由新桌面进程读取切换后的供应商配置。'
+Confirm-UatStep $checks 'consumers_not_controlled' '确认 GPTEasy 没有启动、关闭、终止、激活或重启桌面版和 Codex CLI 的入口；运行中的消费者始终由用户在原入口处理。'
 Confirm-UatStep $checks 'desktop_new_process_read' '关闭旧桌面 Codex，启动新的桌面 Codex 进程，并确认真实请求使用目标供应商和凭据载体。'
 Confirm-UatStep $checks 'restore_last_config' '使用“恢复上次配置”，确认当前用户 Codex 环境恢复到此前的完整状态。'
 Confirm-UatStep $checks 'external_config_takeover' '创建有效的外部供应商配置，重新扫描并检查替换范围，明确接管后确认无关 TOML 字段仍被保留。'
@@ -341,7 +325,7 @@ Confirm-UatStep $checks 'tray_residency' '关闭设置窗口，确认 GPTEasy �
 Confirm-UatStep $checks 'usability_200_percent' '将 Windows 缩放设为 200%，使用长 BASE_URL 和长模型 ID，确认目录、详情、验证弹窗和确认对话框无重叠且文本完整。'
 Confirm-UatStep $checks 'usability_reduced_motion' '启用减少动态效果，确认验证进度使用静态状态且所有操作仍可完成。'
 Confirm-UatStep $checks 'usability_high_contrast' '启用高对比度主题，确认状态、错误、按钮和焦点仍清晰可辨。'
-Confirm-UatStep $checks 'usability_keyboard' '仅用键盘完成除排序外的目录、详情、验证、保存、切换、恢复、重启确认和托盘前设置操作。'
+Confirm-UatStep $checks 'usability_keyboard' '仅用键盘完成除排序外的目录、详情、验证、保存、切换、恢复和托盘前设置操作。'
 Confirm-UatStep $checks 'explicit_tray_exit' '使用托盘中的“退出 GPTEasy”，确认窗口和托盘入口均已关闭。'
 
 if (-not (Wait-GPTEasyProcessesExit $app.FullName)) {
@@ -430,8 +414,6 @@ $evidence = [ordered]@{
     codexCliVersion = $codexVersion
     desktopCodexVersion = $desktopPackage.Version.ToString()
     desktopPublisherId = $desktopPackage.PublisherId
-    desktopApplicationId = $desktopIdentity.ApplicationId
-    desktopAppUserModelId = $desktopIdentity.AppUserModelId
     providerCombinationFingerprint = $combinationFingerprint
     artifact = [ordered]@{
         fileName = $installer.Name

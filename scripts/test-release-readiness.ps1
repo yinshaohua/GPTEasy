@@ -32,11 +32,8 @@ $requiredChecks = @(
     'provider_save_and_switch'
     'pending_restart'
     'cli_new_process_read'
-    'cli_not_terminated'
-    'desktop_restart_graceful'
-    'desktop_restart_force_confirmation'
-    'desktop_restart_cancel'
-    'desktop_activation_recheck'
+    'consumer_detection'
+    'consumers_not_controlled'
     'desktop_new_process_read'
     'restore_last_config'
     'external_config_takeover'
@@ -146,10 +143,8 @@ if (-not $cliVersionMatch.Success -or
     [version]$desktopVersionMatch.Value -lt [version]'26.803.5235.0') {
     Add-GateError 'Evidence must record real Codex CLI and desktop Codex versions.'
 }
-if ($evidence.desktopPublisherId -ne '2p2nqsd0c76g0' -or
-    [string]::IsNullOrWhiteSpace([string]$evidence.desktopApplicationId) -or
-    [string]$evidence.desktopAppUserModelId -notmatch '^[^!]+!\S+$') {
-    Add-GateError 'Evidence must record an official OpenAI desktop publisher, Application Id and AUMID.'
+if ($evidence.desktopPublisherId -ne '2p2nqsd0c76g0') {
+    Add-GateError 'Evidence must record an official OpenAI desktop publisher.'
 }
 if ([string]$evidence.providerCombinationFingerprint -notmatch '^[0-9a-f]{64}$' -or
     [string]$evidence.providerCombinationFingerprint -match '^0{64}$') {

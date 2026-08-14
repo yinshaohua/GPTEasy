@@ -10,18 +10,16 @@ mod tray;
 
 use codex::{CodexInspector, LoginStatusCommand};
 use commands::{
-    DesktopRuntime, EnvironmentRuntime, ProviderRuntime, StartupRuntime,
-    apply_environment_provider, cancel_provider_request, confirm_provider_validation_base_url,
-    copy_provider_api_key, delete_provider, discard_provider_validation, discover_provider_models,
-    discover_provider_models_for_update, force_restart_desktop_application, get_desktop_snapshot,
-    get_environment_snapshot, get_startup_snapshot, list_providers, open_dayway_website,
-    refresh_startup_snapshot, rename_provider, reorder_providers, restart_desktop_application,
-    restore_last_environment_config, revalidate_provider, reveal_provider_api_key,
-    save_and_apply_provider_update, save_dayway_provider, save_provider_update,
-    save_verified_provider, start_desktop_application, switch_to_openai_login, validate_provider,
+    EnvironmentRuntime, ProviderRuntime, StartupRuntime, apply_environment_provider,
+    cancel_provider_request, confirm_provider_validation_base_url, copy_provider_api_key,
+    delete_provider, discard_provider_validation, discover_provider_models,
+    discover_provider_models_for_update, get_environment_snapshot, get_startup_snapshot,
+    list_providers, open_dayway_website, refresh_startup_snapshot, rename_provider,
+    reorder_providers, restore_last_environment_config, revalidate_provider,
+    reveal_provider_api_key, save_and_apply_provider_update, save_dayway_provider,
+    save_provider_update, save_verified_provider, switch_to_openai_login, validate_provider,
     validate_provider_update,
 };
-use consumer::DesktopApplication;
 use environment::EnvironmentApplication;
 use provider::{ProviderApplication, ProviderValidator, ValidationTimeouts};
 use single_instance::{InstanceRole, acquire};
@@ -55,7 +53,6 @@ pub fn run() {
             let environment = EnvironmentApplication::new(state_store.clone(), codex_home);
             let _ = environment.recover_pending();
             app.manage(EnvironmentRuntime::new(environment));
-            app.manage(DesktopRuntime::new(DesktopApplication::new()));
             app.manage(ProviderRuntime::new(ProviderApplication::new(
                 state_store,
                 ProviderValidator::new(ValidationTimeouts::default()),
@@ -75,10 +72,6 @@ pub fn run() {
             get_startup_snapshot,
             refresh_startup_snapshot,
             get_environment_snapshot,
-            get_desktop_snapshot,
-            start_desktop_application,
-            restart_desktop_application,
-            force_restart_desktop_application,
             apply_environment_provider,
             switch_to_openai_login,
             restore_last_environment_config,

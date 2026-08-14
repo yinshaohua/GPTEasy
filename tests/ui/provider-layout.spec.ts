@@ -91,14 +91,6 @@ async function openProviderCatalog(page: Page, width: number, height: number) {
             currentProvider: catalog[0],
           };
         }
-        if (command === "get_desktop_snapshot") {
-          return {
-            status: "stopped",
-            action: "start",
-            messageId: "desktop.ready_to_start",
-            roots: [],
-          };
-        }
         if (command === "plugin:event|listen") return callbackId++;
         if (command === "plugin:event|unlisten") return undefined;
         return undefined;

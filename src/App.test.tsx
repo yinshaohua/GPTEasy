@@ -2133,10 +2133,9 @@ describe("启动状态", () => {
   });
 });
 
-describe("ChatGPT/Codex 桌面版命令", () => {
+describe("被动桌面消费者状态", () => {
   afterEach(() => {
     cleanup();
-    vi.restoreAllMocks();
   });
 
   beforeEach(() => {
@@ -2145,204 +2144,19 @@ describe("ChatGPT/Codex 桌面版命令", () => {
     listen.mockResolvedValue(() => undefined);
   });
 
-  it("桌面版停止时从左栏确认启动，并以重新扫描结果显示运行中", async () => {
+  it("设置窗口不提供桌面版启动或重启入口，也不请求桌面控制命令", async () => {
     invoke.mockImplementation((command: string) => {
       if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
       if (command === "list_providers") return Promise.resolve([]);
-      if (command === "get_desktop_snapshot") {
-        return Promise.resolve({
-          status: "stopped",
-          action: "start",
-          messageId: "desktop.ready_to_start",
-          roots: [],
-        });
-      }
-      if (command === "start_desktop_application") {
-        return Promise.resolve({
-          status: "running",
-          action: "restart",
-          messageId: "desktop.running",
-          roots: [{ role: "desktop", pid: 421, startedAtEpochMillis: 9_000 }],
-        });
-      }
-      return Promise.resolve(undefined);
-    });
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
-
-    render(<App />);
-
-    const start = await screen.findByRole("button", { name: "启动 ChatGPT/Codex" });
-    await waitFor(() => expect(start).toBeEnabled());
-    expect(start.closest(".sidebar-command-area")?.nextElementSibling).toHaveTextContent("当前用户");
-    fireEvent.click(start);
-
-    expect(confirm).toHaveBeenCalledWith("将启动 OpenAI 官方 ChatGPT/Codex 桌面版。是否继续？");
-    await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith("start_desktop_application");
-    });
-    expect(await screen.findByRole("button", { name: "重启 ChatGPT/Codex" })).toBeEnabled();
-  });
-
-  it("桌面身份检测不可信时禁用命令并显示稳定原因", async () => {
-    invoke.mockImplementation((command: string) => {
-      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
-      if (command === "list_providers") return Promise.resolve([]);
-      if (command === "get_desktop_snapshot") {
-        return Promise.resolve({
-          status: "unknown",
-          action: "unavailable",
-          messageId: "desktop.identity_untrusted",
-          roots: [],
-        });
-      }
       return Promise.resolve(undefined);
     });
 
     render(<App />);
 
-    expect(await screen.findByRole("button", { name: "启动 ChatGPT/Codex" })).toBeDisabled();
-    expect(await screen.findByText("无法可靠确认桌面版身份，启动已禁用。")).toBeInTheDocument();
-    expect(invoke.mock.calls.some(([command]) => command === "start_desktop_application")).toBe(false);
-  });
-
-  it("运行时先展示风险且取消不会关闭任何进程", async () => {
-    invoke.mockImplementation((command: string) => {
-      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
-      if (command === "list_providers") return Promise.resolve([]);
-      if (command === "get_desktop_snapshot") {
-        return Promise.resolve({
-          status: "running",
-          action: "restart",
-          messageId: "desktop.ready_to_restart",
-          roots: [{ role: "desktop", pid: 420, startedAtEpochMillis: 8_000 }],
-        });
-      }
-      return Promise.resolve(undefined);
-    });
-
-    render(<App />);
-
-    fireEvent.click(await screen.findByRole("button", { name: "重启 ChatGPT/Codex" }));
-    const dialog = screen.getByRole("dialog", { name: "重启 ChatGPT/Codex" });
-    expect(dialog).toHaveTextContent("OpenAI 官方 ChatGPT/Codex 桌面版（PID 420）");
-    expect(dialog).toHaveTextContent("正在运行的任务可能中断");
-    expect(dialog).toHaveTextContent("Codex CLI 不会关闭");
-    expect(screen.getByRole("button", { name: "取消" })).toHaveFocus();
-
-    fireEvent.click(screen.getByRole("button", { name: "取消" }));
-
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    expect(invoke.mock.calls.some(([command]) => command === "restart_desktop_application")).toBe(false);
-  });
-
-  it("确认后正常关闭并重新激活，显示复核后的成功状态", async () => {
-    invoke.mockImplementation((command: string) => {
-      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
-      if (command === "list_providers") return Promise.resolve([]);
-      if (command === "get_desktop_snapshot") {
-        return Promise.resolve({
-          status: "running",
-          action: "restart",
-          messageId: "desktop.ready_to_restart",
-          roots: [{ role: "desktop", pid: 420, startedAtEpochMillis: 8_000 }],
-        });
-      }
-      if (command === "restart_desktop_application") {
-        return Promise.resolve({
-          status: "restarted",
-          messageId: "desktop.restart_succeeded",
-          desktopIdentities: [],
-          forceAuthorization: null,
-        });
-      }
-      return Promise.resolve(undefined);
-    });
-
-    render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "重启 ChatGPT/Codex" }));
-    fireEvent.click(screen.getByRole("button", { name: "确认重启" }));
-
-    await waitFor(() =>
-      expect(invoke).toHaveBeenCalledWith("restart_desktop_application", {
-        expectedRoots: [{ role: "desktop", pid: 420, startedAtEpochMillis: 8_000 }],
-      }),
-    );
-    expect(await screen.findByText("ChatGPT/Codex 已重新启动。"));
-  });
-
-  it("正常关闭超时后再次确认，取消时不强制终止", async () => {
-    const roots = [{ role: "desktop", pid: 420, startedAtEpochMillis: 8_000 }];
-    invoke.mockImplementation((command: string) => {
-      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
-      if (command === "list_providers") return Promise.resolve([]);
-      if (command === "get_desktop_snapshot") {
-        return Promise.resolve({
-          status: "running",
-          action: "restart",
-          messageId: "desktop.ready_to_restart",
-          roots,
-        });
-      }
-      if (command === "restart_desktop_application") {
-        return Promise.resolve({
-          status: "close_timed_out",
-          messageId: "desktop.close_timed_out",
-          desktopIdentities: roots,
-          forceAuthorization: "force-timeout-1",
-        });
-      }
-      return Promise.resolve(undefined);
-    });
-
-    render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "重启 ChatGPT/Codex" }));
-    fireEvent.click(screen.getByRole("button", { name: "确认重启" }));
-
-    const forceDialog = await screen.findByRole("dialog", { name: "桌面版未能正常关闭" });
-    expect(forceDialog).toHaveTextContent("强制关闭会立即中断正在运行的任务");
-    expect(screen.getByRole("button", { name: "取消" })).toHaveFocus();
-    fireEvent.click(screen.getByRole("button", { name: "取消" }));
-
-    expect(invoke.mock.calls.some(([command]) => command === "force_restart_desktop_application")).toBe(false);
-  });
-
-  it("二次同意后把原身份令牌交给后端复核并强制重启", async () => {
-    const roots = [{ role: "desktop", pid: 420, startedAtEpochMillis: 8_000 }];
-    invoke.mockImplementation((command: string) => {
-      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
-      if (command === "list_providers") return Promise.resolve([]);
-      if (command === "get_desktop_snapshot") {
-        return Promise.resolve({ status: "running", action: "restart", messageId: "desktop.ready_to_restart", roots });
-      }
-      if (command === "restart_desktop_application") {
-        return Promise.resolve({
-          status: "close_timed_out",
-          messageId: "desktop.close_timed_out",
-          desktopIdentities: roots,
-          forceAuthorization: "force-timeout-2",
-        });
-      }
-      if (command === "force_restart_desktop_application") {
-        return Promise.resolve({
-          status: "restarted",
-          messageId: "desktop.restart_succeeded",
-          desktopIdentities: [],
-          forceAuthorization: null,
-        });
-      }
-      return Promise.resolve(undefined);
-    });
-
-    render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "重启 ChatGPT/Codex" }));
-    fireEvent.click(screen.getByRole("button", { name: "确认重启" }));
-    fireEvent.click(await screen.findByRole("button", { name: "强制关闭并重启" }));
-
-    await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith("force_restart_desktop_application", {
-        forceAuthorization: "force-timeout-2",
-      });
-    });
-    expect(await screen.findByText("ChatGPT/Codex 已重新启动。"));
+    expect(await screen.findByRole("heading", { name: "供应商管理" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /启动 ChatGPT|重启 ChatGPT/ })).not.toBeInTheDocument();
+    expect(
+      invoke.mock.calls.some(([command]) => String(command).includes("desktop_application")),
+    ).toBe(false);
   });
 });

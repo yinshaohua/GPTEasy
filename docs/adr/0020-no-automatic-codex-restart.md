@@ -1,5 +1,5 @@
 ---
-status: superseded by ADR-0025
+status: superseded by ADR-0026
 ---
 
 # 首个版本不自动重启 Codex 消费者

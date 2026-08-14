@@ -122,3 +122,50 @@ fn config_changes_are_independent_from_desktop_lifecycle_contracts() {
     assert!(!provider_page.contains("force_restart_desktop_application"));
     assert!(!assembly.contains("force_complete_config_restart"));
 }
+
+#[test]
+fn production_has_no_active_desktop_control_capability() {
+    let root = repository_root();
+    let commands =
+        fs::read_to_string(root.join("src-tauri/src/commands.rs")).expect("read Tauri commands");
+    let assembly =
+        fs::read_to_string(root.join("src-tauri/src/lib.rs")).expect("read Tauri assembly");
+    let consumer =
+        fs::read_to_string(root.join("src-tauri/src/consumer.rs")).expect("read consumer module");
+
+    for forbidden_command in [
+        "get_desktop_snapshot",
+        "start_desktop_application",
+        "restart_desktop_application",
+        "force_restart_desktop_application",
+    ] {
+        assert!(
+            !commands.contains(forbidden_command),
+            "Tauri commands still expose {forbidden_command}"
+        );
+        assert!(
+            !assembly.contains(forbidden_command),
+            "Tauri assembly still registers {forbidden_command}"
+        );
+    }
+
+    assert!(
+        !root.join("src/contracts/desktop.ts").exists(),
+        "frontend desktop-control contract still exists"
+    );
+    for forbidden_capability in [
+        "DesktopApplication",
+        "DesktopActivator",
+        "DesktopProcessController",
+        "request_windows_close",
+        "force_terminate_windows_processes",
+        "TerminateProcess",
+        "WM_CLOSE",
+        "shell:AppsFolder",
+    ] {
+        assert!(
+            !consumer.contains(forbidden_capability),
+            "consumer production code still contains {forbidden_capability}"
+        );
+    }
+}
