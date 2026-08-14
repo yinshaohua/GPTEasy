@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 
+import { isBrowserPreview } from "./browser-preview";
 import type { ProviderSummary } from "./provider";
 import type { LoginStatus } from "./startup";
 
@@ -130,10 +131,6 @@ export function asEnvironmentFailure(error: unknown): EnvironmentFailure {
     return error as EnvironmentFailure;
   }
   return previewFailure;
-}
-
-function isBrowserPreview(): boolean {
-  return import.meta.env.MODE === "development" && !("__TAURI_INTERNALS__" in window);
 }
 
 const previewSnapshot: EnvironmentSnapshot = {

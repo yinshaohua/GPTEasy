@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
+import { isBrowserPreview } from "./browser-preview";
+
 export type ApplicationMode = "ready" | "blocked";
 export type DatabaseStatus = "initialized" | "ready" | "recovered" | "blocked";
 export type DatabaseBlockReason =
@@ -79,10 +81,6 @@ export function refreshStartupSnapshot(): Promise<StartupSnapshot> {
     return Promise.resolve(browserPreviewSnapshot);
   }
   return invoke<StartupSnapshot>("refresh_startup_snapshot");
-}
-
-function isBrowserPreview(): boolean {
-  return import.meta.env.MODE === "development" && !("__TAURI_INTERNALS__" in window);
 }
 
 const browserPreviewSnapshot: StartupSnapshot = {

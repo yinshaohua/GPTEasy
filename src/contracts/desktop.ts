@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
+import { isBrowserPreview } from "./browser-preview";
+
 export type DesktopStatus = "running" | "stopped" | "unknown";
 export type DesktopAction = "start" | "restart" | "unavailable";
 
@@ -110,10 +112,6 @@ function isDesktopIdentities(value: unknown): value is DesktopIdentity[] {
         Number.isSafeInteger(identity.startedAtEpochMillis),
     )
   );
-}
-
-function isBrowserPreview(): boolean {
-  return import.meta.env.MODE === "development" && !("__TAURI_INTERNALS__" in window);
 }
 
 const previewSnapshot: DesktopSnapshot = {

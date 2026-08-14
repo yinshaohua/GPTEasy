@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { ConfigChangeResult, RestartDecision } from "./environment";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+
+import { isBrowserPreview } from "./browser-preview";
+import type { ConfigChangeResult, RestartDecision } from "./environment";
 
 export type ProviderFailureCategory =
   | "security_policy"
@@ -258,10 +260,6 @@ export function asProviderFailure(error: unknown): ProviderFailure {
     return error as ProviderFailure;
   }
   return { category: "transport", messageId: "provider.transport_failed" };
-}
-
-function isBrowserPreview(): boolean {
-  return import.meta.env.MODE === "development" && !("__TAURI_INTERNALS__" in window);
 }
 
 const previewFailure: ProviderFailure = {
