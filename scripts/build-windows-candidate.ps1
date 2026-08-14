@@ -62,7 +62,7 @@ try {
     Invoke-Checked 'Frontend typecheck and lint' { npm run check }
     Invoke-Checked 'Frontend test suite' { npm test }
     Invoke-Checked 'Frontend layout test suite' { npm run test:layout }
-    Invoke-Checked 'Rust test suite' { cargo test --manifest-path src-tauri/Cargo.toml }
+    Invoke-Checked 'Rust test suite' { cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1 }
     Invoke-Checked "Issue #$($releaseContract.issue) comprehensive acceptance gate" { npm run acceptance }
     Invoke-Checked 'Release tree gate' {
         powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-release-tree.ps1 -RepositoryRoot $repoRoot

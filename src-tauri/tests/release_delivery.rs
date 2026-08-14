@@ -272,6 +272,7 @@ fn windows_candidate_runs_layout_and_release_contract_gates() {
 
     assert!(script.contains("npm run test:layout"));
     assert!(script.contains("layoutTests = 'passed'"));
+    assert!(script.contains("cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1"));
     assert!(script.contains("scripts/test-release-contract.ps1"));
     assert!(script.contains("releaseContract = 'passed'"));
 }
