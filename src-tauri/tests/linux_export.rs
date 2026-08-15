@@ -51,6 +51,45 @@ fn bash_export_captures_every_verified_provider_in_catalog_order() {
 }
 
 #[test]
+fn zsh_export_captures_every_verified_provider_in_catalog_order() {
+    let fixture = ExportFixture::new();
+    fixture.insert_provider(
+        "11111111-1111-4111-8111-111111111111",
+        "Alpha Provider",
+        "https://alpha.example/v1",
+        "alpha-secret-key",
+        "alpha-model",
+        1,
+    );
+    fixture.insert_provider(
+        "22222222-2222-4222-8222-222222222222",
+        "Beta Provider",
+        "https://beta.example/v1",
+        "beta-secret-key",
+        "beta-model",
+        2,
+    );
+    let destination = fixture.temp.path().join("gpteasy.zsh");
+
+    let exported = fixture
+        .application
+        .export_linux_script(LinuxShell::Zsh, &destination, false)
+        .expect("export verified provider snapshot");
+
+    assert_eq!(exported.provider_count, 2);
+    assert_eq!(exported.suggested_file_name, "gpteasy.zsh");
+    assert_eq!(exported.export_id.len(), 36);
+    let script = fs::read_to_string(destination).expect("read exported Zsh script");
+    assert!(script.starts_with("#!/usr/bin/env zsh\n"));
+    assert!(script.contains("Alpha Provider"));
+    assert!(script.contains("Beta Provider"));
+    assert!(script.contains("alpha-secret-key"));
+    assert!(script.contains("beta-secret-key"));
+    assert!(script.find("Alpha Provider") < script.find("Beta Provider"));
+    assert!(!script.contains("OpenAI 登录模式"));
+}
+
+#[test]
 fn bash_export_requires_a_verified_provider_without_creating_a_file() {
     let fixture = ExportFixture::new();
     let destination = fixture.temp.path().join("gpteasy.sh");
@@ -97,7 +136,7 @@ fn bash_export_does_not_replace_an_existing_file_without_confirmation() {
 }
 
 #[test]
-fn bash_snapshot_sources_without_side_effects_and_rejects_unsafe_permissions() {
+fn shell_snapshots_source_without_side_effects_and_reject_unsafe_permissions() {
     let fixture = ExportFixture::new();
     fixture.insert_provider(
         "11111111-1111-4111-8111-111111111111",
@@ -107,15 +146,20 @@ fn bash_snapshot_sources_without_side_effects_and_rejects_unsafe_permissions() {
         "alpha-model",
         1,
     );
-    let destination = fixture.temp.path().join("gpteasy.sh");
-    fixture
-        .application
-        .export_linux_script(LinuxShell::Bash, &destination, false)
-        .expect("export Bash snapshot");
+    for shell in [LinuxShell::Bash, LinuxShell::Zsh] {
+        let destination = fixture.temp.path().join(match shell {
+            LinuxShell::Bash => "gpteasy.sh",
+            LinuxShell::Zsh => "gpteasy.zsh",
+        });
+        fixture
+            .application
+            .export_linux_script(shell, &destination, false)
+            .expect("export shell snapshot");
 
-    run_bash_black_box(
-        &destination,
-        r#"
+        run_shell_black_box(
+            shell,
+            &destination,
+            r#"
 set -euo pipefail
 workspace=$(mktemp -d "${TMPDIR:-/tmp}/gpteasy-bash-source.XXXXXX")
 trap 'rm -rf -- "$workspace"' EXIT
@@ -144,11 +188,12 @@ if gpteasy current >/dev/null 2>&1; then
 fi
 gpteasy help >/dev/null
 "#,
-    );
+        );
+    }
 }
 
 #[test]
-fn bash_snapshot_checks_codex_before_installing_only_the_selected_provider() {
+fn shell_snapshots_check_codex_before_installing_only_the_selected_provider() {
     let fixture = ExportFixture::new();
     fixture.insert_provider(
         "11111111-1111-4111-8111-111111111111",
@@ -166,15 +211,20 @@ fn bash_snapshot_checks_codex_before_installing_only_the_selected_provider() {
         "beta-model",
         2,
     );
-    let destination = fixture.temp.path().join("gpteasy.sh");
-    fixture
-        .application
-        .export_linux_script(LinuxShell::Bash, &destination, false)
-        .expect("export Bash snapshot");
+    for shell in [LinuxShell::Bash, LinuxShell::Zsh] {
+        let destination = fixture.temp.path().join(match shell {
+            LinuxShell::Bash => "gpteasy.sh",
+            LinuxShell::Zsh => "gpteasy.zsh",
+        });
+        fixture
+            .application
+            .export_linux_script(shell, &destination, false)
+            .expect("export shell snapshot");
 
-    run_bash_black_box(
-        &destination,
-        r#"
+        run_shell_black_box(
+            shell,
+            &destination,
+            r#"
 set -euo pipefail
 workspace=$(mktemp -d "${TMPDIR:-/tmp}/gpteasy-bash-switch.XXXXXX")
 trap 'rm -rf -- "$workspace"' EXIT
@@ -197,7 +247,7 @@ export PATH="$fake_bin:$PATH"
 export CODEX_HOME="$codex_home"
 # shellcheck disable=SC1090
 source "$script"
-if gpteasy <<<"1" >/dev/null 2>&1; then
+if (gpteasy <<<"1" >/dev/null 2>&1); then
     printf '%s\n' 'unsupported Codex version was accepted' >&2
     exit 1
 fi
@@ -219,19 +269,21 @@ grep -Fq 'model_providers.gpteasy.auth.command = "sh"' "$codex_home/config.toml"
 grep -Fq 'custom_setting = true' "$codex_home/config.toml"
 ! grep -Fq 'alpha-secret-key' "$codex_home/config.toml"
 [[ "$auth_before" == "$(sha256sum "$codex_home/auth.json")" ]]
-mapfile -t credentials < <(find "$codex_home/.gpteasy-shell/credentials" -type f -name '*.token')
-[[ ${#credentials[@]} -eq 1 ]]
-[[ $(cat "${credentials[0]}") == 'alpha-secret-key' ]]
-[[ $(stat -c '%a' "${credentials[0]}") == '600' ]]
+credential_count=$(find "$codex_home/.gpteasy-shell/credentials" -type f -name '*.token' | wc -l)
+[[ "$credential_count" -eq 1 ]]
+credential=$(find "$codex_home/.gpteasy-shell/credentials" -type f -name '*.token' -print -quit)
+[[ $(cat "$credential") == 'alpha-secret-key' ]]
+[[ $(stat -c '%a' "$credential") == '600' ]]
 [[ $(find "$codex_home/.gpteasy-shell/shell-restore" -mindepth 1 -maxdepth 1 -type d | wc -l) -eq 1 ]]
 [[ $(gpteasy current) == *'Alpha Provider'* ]]
 [[ $(gpteasy <<<"q") == *'Alpha Provider (alpha-model) [当前]'* ]]
 "#,
-    );
+        );
+    }
 }
 
 #[test]
-fn bash_snapshot_restores_and_consumes_only_the_latest_of_five_restore_points() {
+fn shell_snapshots_restore_and_consume_only_the_latest_of_five_restore_points() {
     let fixture = ExportFixture::new();
     fixture.insert_provider(
         "11111111-1111-4111-8111-111111111111",
@@ -249,15 +301,20 @@ fn bash_snapshot_restores_and_consumes_only_the_latest_of_five_restore_points() 
         "beta-model",
         2,
     );
-    let destination = fixture.temp.path().join("gpteasy.sh");
-    fixture
-        .application
-        .export_linux_script(LinuxShell::Bash, &destination, false)
-        .expect("export Bash snapshot");
+    for shell in [LinuxShell::Bash, LinuxShell::Zsh] {
+        let destination = fixture.temp.path().join(match shell {
+            LinuxShell::Bash => "gpteasy.sh",
+            LinuxShell::Zsh => "gpteasy.zsh",
+        });
+        fixture
+            .application
+            .export_linux_script(shell, &destination, false)
+            .expect("export shell snapshot");
 
-    run_bash_black_box(
-        &destination,
-        r#"
+        run_shell_black_box(
+            shell,
+            &destination,
+            r#"
 set -euo pipefail
 workspace=$(mktemp -d "${TMPDIR:-/tmp}/gpteasy-bash-restore.XXXXXX")
 trap 'rm -rf -- "$workspace"' EXIT
@@ -304,11 +361,12 @@ done
 ! grep -R -Fq 'alpha-secret-key' "$restore_root"
 ! grep -R -Fq 'beta-secret-key' "$restore_root"
 "#,
-    );
+        );
+    }
 }
 
 #[test]
-fn bash_snapshot_distinguishes_current_updated_and_legacy_managed_blocks() {
+fn shell_snapshots_distinguish_current_updated_and_legacy_managed_blocks() {
     let fixture = ExportFixture::new();
     fixture.insert_provider(
         "11111111-1111-4111-8111-111111111111",
@@ -326,15 +384,20 @@ fn bash_snapshot_distinguishes_current_updated_and_legacy_managed_blocks() {
         "beta-model",
         2,
     );
-    let destination = fixture.temp.path().join("gpteasy.sh");
-    fixture
-        .application
-        .export_linux_script(LinuxShell::Bash, &destination, false)
-        .expect("export Bash snapshot");
+    for shell in [LinuxShell::Bash, LinuxShell::Zsh] {
+        let destination = fixture.temp.path().join(match shell {
+            LinuxShell::Bash => "gpteasy.sh",
+            LinuxShell::Zsh => "gpteasy.zsh",
+        });
+        fixture
+            .application
+            .export_linux_script(shell, &destination, false)
+            .expect("export shell snapshot");
 
-    run_bash_black_box(
-        &destination,
-        r##"
+        run_shell_black_box(
+            shell,
+            &destination,
+            r##"
 set -euo pipefail
 workspace=$(mktemp -d "${TMPDIR:-/tmp}/gpteasy-bash-state.XXXXXX")
 trap 'rm -rf -- "$workspace"' EXIT
@@ -345,6 +408,8 @@ cp -- "$1" "$script"
 chmod 600 "$script"
 mkdir -p -- "$codex_home" "$fake_bin"
 printf '%s\n' 'custom_setting = true' >"$codex_home/config.toml"
+printf '%s\n' '{"tokens":{"access_token":"keep-me"}}' >"$codex_home/auth.json"
+auth_before=$(sha256sum "$codex_home/auth.json")
 cat >"$fake_bin/codex" <<'SUPPORTED_CODEX'
 #!/usr/bin/env bash
 printf '%s\n' 'codex-cli 0.147.0'
@@ -361,13 +426,13 @@ menu=$(gpteasy <<<"q")
 
 sed -i '/# GPTEasy source-id:/d' "$codex_home/config.toml"
 before=$(sha256sum "$codex_home/config.toml")
-if gpteasy <<<"2" >/dev/null 2>&1; then exit 1; fi
+if (gpteasy <<<"2" >/dev/null 2>&1); then exit 1; fi
 [[ "$before" == "$(sha256sum "$codex_home/config.toml")" ]]
 
 cp -- "$workspace/current-config" "$codex_home/config.toml"
 sed -i 's|^model_providers.gpteasy.auth.args = .*|model_providers.gpteasy.auth.args = ["-c", "printf unsafe"]|' "$codex_home/config.toml"
 before=$(sha256sum "$codex_home/config.toml")
-if gpteasy <<<"2" >/dev/null 2>&1; then exit 1; fi
+if (gpteasy <<<"2" >/dev/null 2>&1); then exit 1; fi
 [[ "$before" == "$(sha256sum "$codex_home/config.toml")" ]]
 
 cp -- "$workspace/current-config" "$codex_home/config.toml"
@@ -387,28 +452,40 @@ awk '
 ' "$workspace/current-config" >"$codex_home/config.toml"
 menu=$(gpteasy <<<"q")
 [[ "$menu" == *'Alpha Provider (alpha-model) [当前，旧格式]'* ]]
+gpteasy <<<"2" >/dev/null
+grep -Fq '# GPTEasy provider-id: 22222222-2222-4222-8222-222222222222' "$codex_home/config.toml"
+[[ "$auth_before" == "$(sha256sum "$codex_home/auth.json")" ]]
+
+cp -- "$workspace/current-config" "$codex_home/config.toml"
+sed -i 's/11111111-1111-4111-8111-111111111111/33333333-3333-4333-8333-333333333333/g' "$codex_home/config.toml"
+outside=$(gpteasy current)
+[[ "$outside" == *'当前供应商不在此 Linux 供应商快照中：33333333-3333-4333-8333-333333333333'* ]]
+menu=$(gpteasy <<<"q")
+[[ "$menu" != *'[当前]'* ]]
 
 cp -- "$workspace/current-config" "$codex_home/config.toml"
 sed -i 's/# GPTEasy schema-version: 1/# GPTEasy schema-version: 2/' "$codex_home/config.toml"
 before=$(sha256sum "$codex_home/config.toml")
-if gpteasy <<<"2" >/dev/null 2>&1; then exit 1; fi
+if (gpteasy <<<"2" >/dev/null 2>&1); then exit 1; fi
 [[ "$before" == "$(sha256sum "$codex_home/config.toml")" ]]
 
 printf '%s\n' '# >>> GPTEasy managed provider >>>' 'model = "broken"' >"$codex_home/config.toml"
 before=$(sha256sum "$codex_home/config.toml")
-if gpteasy <<<"2" >/dev/null 2>&1; then exit 1; fi
+if (gpteasy <<<"2" >/dev/null 2>&1); then exit 1; fi
 [[ "$before" == "$(sha256sum "$codex_home/config.toml")" ]]
 
 printf '%s\n' 'model = "external"' 'model_provider = "external"' >"$codex_home/config.toml"
 before=$(sha256sum "$codex_home/config.toml")
-if gpteasy <<<"2" >/dev/null 2>&1; then exit 1; fi
+if (gpteasy <<<"2" >/dev/null 2>&1); then exit 1; fi
 [[ "$before" == "$(sha256sum "$codex_home/config.toml")" ]]
+[[ "$auth_before" == "$(sha256sum "$codex_home/auth.json")" ]]
 "##,
-    );
+        );
+    }
 }
 
 #[test]
-fn bash_snapshot_preserves_safe_symlinks_and_rejects_hardlinks_and_concurrency() {
+fn shell_snapshots_preserve_safe_symlinks_and_reject_hardlinks_and_concurrency() {
     let fixture = ExportFixture::new();
     fixture.insert_provider(
         "11111111-1111-4111-8111-111111111111",
@@ -426,15 +503,20 @@ fn bash_snapshot_preserves_safe_symlinks_and_rejects_hardlinks_and_concurrency()
         "beta-model",
         2,
     );
-    let destination = fixture.temp.path().join("gpteasy.sh");
-    fixture
-        .application
-        .export_linux_script(LinuxShell::Bash, &destination, false)
-        .expect("export Bash snapshot");
+    for shell in [LinuxShell::Bash, LinuxShell::Zsh] {
+        let destination = fixture.temp.path().join(match shell {
+            LinuxShell::Bash => "gpteasy.sh",
+            LinuxShell::Zsh => "gpteasy.zsh",
+        });
+        fixture
+            .application
+            .export_linux_script(shell, &destination, false)
+            .expect("export shell snapshot");
 
-    run_bash_black_box(
-        &destination,
-        r#"
+        run_shell_black_box(
+            shell,
+            &destination,
+            r#"
 set -euo pipefail
 workspace=$(mktemp -d "${TMPDIR:-/tmp}/gpteasy-bash-files.XXXXXX")
 trap 'rm -rf -- "$workspace"' EXIT
@@ -479,7 +561,7 @@ touch "$workspace/change-once"
 export GPTEASY_CONCURRENT_TARGET="$real_home/config.toml"
 export GPTEASY_CONCURRENT_ONCE="$workspace/change-once"
 before_restore_count=$(find "$codex_home/.gpteasy-shell/shell-restore" -mindepth 1 -maxdepth 1 -type d | wc -l)
-if gpteasy <<<"2" >/dev/null 2>&1; then
+if (gpteasy <<<"2" >/dev/null 2>&1); then
     printf '%s\n' 'concurrent config change was overwritten' >&2
     exit 1
 fi
@@ -493,7 +575,7 @@ touch "$workspace/replace-once"
 export GPTEASY_REPLACE_TARGET="$real_home/config.toml"
 export GPTEASY_REPLACE_ONCE="$workspace/replace-once"
 before=$(sha256sum "$real_home/config.toml")
-if gpteasy <<<"2" >/dev/null 2>&1; then
+if (gpteasy <<<"2" >/dev/null 2>&1); then
     printf '%s\n' 'replaced symlink target inode was accepted' >&2
     exit 1
 fi
@@ -507,7 +589,7 @@ printf '%s\n' 'unsafe_parent = true' >"$unsafe_home/config.toml"
 chmod 777 "$unsafe_home"
 export CODEX_HOME="$unsafe_home"
 unsafe_before=$(sha256sum "$unsafe_home/config.toml")
-if gpteasy <<<"1" >/dev/null 2>&1; then
+if (gpteasy <<<"1" >/dev/null 2>&1); then
     printf '%s\n' 'group-writable Codex home was accepted' >&2
     exit 1
 fi
@@ -520,17 +602,18 @@ printf '%s\n' 'hardlinked = true' >"$hardlink_home/config.toml"
 ln "$hardlink_home/config.toml" "$workspace/config-alias.toml"
 export CODEX_HOME="$hardlink_home"
 hardlink_before=$(sha256sum "$hardlink_home/config.toml")
-if gpteasy <<<"1" >/dev/null 2>&1; then
+if (gpteasy <<<"1" >/dev/null 2>&1); then
     printf '%s\n' 'hardlinked config was accepted' >&2
     exit 1
 fi
 [[ "$hardlink_before" == "$(sha256sum "$hardlink_home/config.toml")" ]]
 "#,
-    );
+        );
+    }
 }
 
 #[test]
-fn bash_snapshot_reports_information_and_only_unlocks_confirmed_stale_shell_locks() {
+fn shell_snapshots_report_information_and_only_unlock_confirmed_stale_shell_locks() {
     let fixture = ExportFixture::new();
     fixture.insert_provider(
         "11111111-1111-4111-8111-111111111111",
@@ -540,15 +623,20 @@ fn bash_snapshot_reports_information_and_only_unlocks_confirmed_stale_shell_lock
         "alpha-model",
         1,
     );
-    let destination = fixture.temp.path().join("gpteasy.sh");
-    fixture
-        .application
-        .export_linux_script(LinuxShell::Bash, &destination, false)
-        .expect("export Bash snapshot");
+    for shell in [LinuxShell::Bash, LinuxShell::Zsh] {
+        let destination = fixture.temp.path().join(match shell {
+            LinuxShell::Bash => "gpteasy.sh",
+            LinuxShell::Zsh => "gpteasy.zsh",
+        });
+        fixture
+            .application
+            .export_linux_script(shell, &destination, false)
+            .expect("export shell snapshot");
 
-    run_bash_black_box(
-        &destination,
-        r#"
+        run_shell_black_box(
+            shell,
+            &destination,
+            r#"
 set -euo pipefail
 workspace=$(mktemp -d "${TMPDIR:-/tmp}/gpteasy-bash-lock.XXXXXX")
 trap 'rm -rf -- "$workspace"' EXIT
@@ -572,15 +660,23 @@ gpteasy <<<"1" >/dev/null
 
 info=$(gpteasy info)
 [[ "$info" == *"目标环境：$codex_home"* ]]
-[[ "$info" == *'Shell：Bash 4+'* ]]
+[[ "$info" == *"Shell：$3"* ]]
 [[ "$info" == *'供应商数量：1'* ]]
 [[ "$info" == *'Codex CLI 最低版本：0.147.0'* ]]
 [[ "$info" != *'alpha-secret-key'* ]]
-[[ $(bash "$script" current) == *'Alpha Provider'* ]]
+[[ $("$2" "$script" current) == *'Alpha Provider'* ]]
+
+subshell_owner_pid=$(
+    gpteasy__prepare_private_state
+    gpteasy__acquire_lock switch
+    gpteasy__lock_value "$gpteasy__active_lock/owner" pid
+    gpteasy__release_lock
+)
+[[ "$subshell_owner_pid" != "$$" ]]
 
 credential=$(find "$codex_home/.gpteasy-shell/credentials" -type f -name '*.token')
 chmod 644 "$credential"
-if gpteasy current >/dev/null 2>&1; then
+if (gpteasy current >/dev/null 2>&1); then
     printf '%s\n' 'unsafe credential permissions were accepted' >&2
     exit 1
 fi
@@ -589,7 +685,7 @@ chmod 600 "$credential"
 
 active="$codex_home/.gpteasy-shell/lock/active"
 mkdir -m 700 -- "$active"
-active_pid=$BASHPID
+active_pid=$$
 start=$(awk '{print $22}' "/proc/$active_pid/stat")
 cat >"$active/owner" <<ACTIVE_LOCK
 owner=shell
@@ -601,7 +697,7 @@ ACTIVE_LOCK
 chmod 600 "$active/owner"
 blocked=$(gpteasy <<<"1" 2>&1 || true)
 [[ "$blocked" == *'shell'* && "$blocked" == *'switch'* ]]
-if gpteasy unlock <<<"y" >/dev/null 2>&1; then
+if (gpteasy unlock <<<"y" >/dev/null 2>&1); then
     printf '%s\n' 'active shell lock was removed' >&2
     exit 1
 fi
@@ -631,13 +727,90 @@ process_start=1
 operation=switch
 DESKTOP_LOCK
 chmod 600 "$active/owner"
-if gpteasy unlock <<<"y" >/dev/null 2>&1; then
+if (gpteasy unlock <<<"y" >/dev/null 2>&1); then
     printf '%s\n' 'desktop lock was removed by shell' >&2
     exit 1
 fi
 [[ -d "$active" ]]
 "#,
+        );
+    }
+}
+
+#[test]
+fn shell_snapshots_preserve_special_provider_data_without_glob_expansion() {
+    const NAME: &str = "Long Provider $HOME * ? [abc] with \"quotes\" and Unicode 测试供应商名称";
+    const MODEL: &str = "model-$HOME-*-?-[abc]-\"quoted\"-模型";
+    const API_KEY: &str = "token-$HOME-*-?-[abc]-backslash\\-Unicode-密钥";
+    let fixture = ExportFixture::new();
+    fixture.insert_provider(
+        "11111111-1111-4111-8111-111111111111",
+        NAME,
+        "https://special.example/v1/$HOME/*?value=[abc]",
+        API_KEY,
+        MODEL,
+        1,
     );
+
+    let harness = format!(
+        r#"
+set -euo pipefail
+workspace=$(mktemp -d "${{TMPDIR:-/tmp}}/gpteasy-special.XXXXXX")
+trap 'rm -rf -- "$workspace"' EXIT
+script="$workspace/gpteasy-export"
+codex_home="$workspace/codex home"
+fake_bin="$workspace/bin"
+cp -- "$1" "$script"
+chmod 600 "$script"
+mkdir -p -- "$codex_home" "$fake_bin" "$workspace/glob"
+touch "$workspace/glob/model-expanded" "$workspace/glob/provider-expanded"
+printf '%s\n' '{{"tokens":{{"access_token":"keep-me"}}}}' >"$codex_home/auth.json"
+auth_before=$(sha256sum "$codex_home/auth.json")
+cat >"$fake_bin/codex" <<'SUPPORTED_CODEX'
+#!/usr/bin/env bash
+printf '%s\n' 'codex-cli 0.147.0'
+SUPPORTED_CODEX
+chmod 700 "$fake_bin/codex"
+export PATH="$fake_bin:$PATH"
+export CODEX_HOME="$codex_home"
+source "$script"
+expected_name=$(cat <<'EXPECTED_NAME'
+{NAME}
+EXPECTED_NAME
+)
+expected_model=$(cat <<'EXPECTED_MODEL'
+{MODEL}
+EXPECTED_MODEL
+)
+expected_key=$(cat <<'EXPECTED_KEY'
+{API_KEY}
+EXPECTED_KEY
+)
+cd "$workspace/glob"
+menu=$(gpteasy <<<"q")
+[[ "$menu" == *"$expected_name ($expected_model)"* ]]
+gpteasy <<<"1" >/dev/null
+[[ $(gpteasy__provider_name '11111111-1111-4111-8111-111111111111') == "$expected_name" ]]
+[[ $(gpteasy__provider_model '11111111-1111-4111-8111-111111111111') == "$expected_model" ]]
+credential=$(find "$codex_home/.gpteasy-shell/credentials" -type f -name '*.token' -print -quit)
+cmp -s -- "$credential" <(printf '%s' "$expected_key")
+grep -Fq '$HOME-*' "$codex_home/config.toml"
+grep -Fq '[abc]' "$codex_home/config.toml"
+[[ "$auth_before" == "$(sha256sum "$codex_home/auth.json")" ]]
+"#,
+    );
+
+    for shell in [LinuxShell::Bash, LinuxShell::Zsh] {
+        let destination = fixture.temp.path().join(match shell {
+            LinuxShell::Bash => "gpteasy.sh",
+            LinuxShell::Zsh => "gpteasy.zsh",
+        });
+        fixture
+            .application
+            .export_linux_script(shell, &destination, false)
+            .expect("export shell snapshot");
+        run_shell_black_box(shell, &destination, &harness);
+    }
 }
 
 struct ExportFixture {
@@ -646,12 +819,23 @@ struct ExportFixture {
     application: ProviderApplication,
 }
 
-fn run_bash_black_box(script: &Path, harness: &str) {
+fn run_shell_black_box(shell: LinuxShell, script: &Path, harness: &str) {
+    let (environment, default_executable, label, display_name) = match shell {
+        LinuxShell::Bash => ("GPTEASY_TEST_BASH", "bash", "Bash", "Bash 4+"),
+        LinuxShell::Zsh => ("GPTEASY_TEST_ZSH", "zsh", "Zsh", "Zsh 5+"),
+    };
+    let executable = std::env::var(environment).unwrap_or_else(|_| default_executable.to_owned());
     #[cfg(windows)]
     let mut child = Command::new("wsl.exe")
         .args(["-d", "Ubuntu", "--"])
-        .arg(std::env::var("GPTEASY_TEST_BASH").unwrap_or_else(|_| "bash".to_owned()))
-        .args(["-s", "--", &windows_path_for_wsl(script)])
+        .arg(&executable)
+        .args([
+            "-s",
+            "--",
+            &windows_path_for_wsl(script),
+            &executable,
+            display_name,
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -659,27 +843,33 @@ fn run_bash_black_box(script: &Path, harness: &str) {
         .expect("start WSL Bash black-box test");
 
     #[cfg(not(windows))]
-    let mut child =
-        Command::new(std::env::var("GPTEASY_TEST_BASH").unwrap_or_else(|_| "bash".to_owned()))
-            .args(["-s", "--", script.to_str().expect("UTF-8 test path")])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("start Bash black-box test");
+    let mut child = Command::new(&executable)
+        .args([
+            "-s",
+            "--",
+            script.to_str().expect("UTF-8 test path"),
+            &executable,
+            display_name,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|error| panic!("start {label} black-box test: {error}"));
 
     child
         .stdin
         .take()
-        .expect("Bash stdin")
+        .unwrap_or_else(|| panic!("{label} stdin"))
         .write_all(harness.as_bytes())
-        .expect("write Bash harness without credentials");
+        .unwrap_or_else(|error| panic!("write {label} harness without credentials: {error}"));
     let output = child
         .wait_with_output()
         .expect("wait for Bash black-box test");
     assert!(
         output.status.success(),
-        "Bash black-box test failed: {}",
+        "{label} black-box test failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
 }

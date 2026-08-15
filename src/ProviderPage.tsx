@@ -56,6 +56,7 @@ import {
   type ProviderValidationStage,
   type LinuxExportFailure,
   type LinuxExportResult,
+  type LinuxShell,
 } from "./contracts/provider";
 import {
   applyEnvironmentProvider,
@@ -84,6 +85,26 @@ type Operation =
   | "verified"
   | "saving"
   | "deleting";
+
+const linuxShellPresentation: Record<LinuxShell, {
+  displayName: string;
+  titleName: string;
+  startupFile: string;
+  suggestedFileName: string;
+}> = {
+  bash: {
+    displayName: "Bash 4+",
+    titleName: "Bash",
+    startupFile: ".bashrc",
+    suggestedFileName: "gpteasy.sh",
+  },
+  zsh: {
+    displayName: "Zsh 5+",
+    titleName: "Zsh",
+    startupFile: ".zshrc",
+    suggestedFileName: "gpteasy.zsh",
+  },
+};
 
 type PageView = "catalog" | "detail";
 type Confirmation = "discard" | "validation" | null;
@@ -138,6 +159,7 @@ export default function ProviderPage() {
   const [wslBusy, setWslBusy] = useState(false);
   const [wslFailure, setWslFailure] = useState<{ messageId: string } | null>(null);
   const [linuxExportStep, setLinuxExportStep] = useState<LinuxExportStep>(null);
+  const [linuxExportShell, setLinuxExportShell] = useState<LinuxShell>("bash");
   const [linuxExportDestination, setLinuxExportDestination] = useState<string | null>(null);
   const [linuxExportResult, setLinuxExportResult] = useState<LinuxExportResult | null>(null);
   const [linuxExportFailure, setLinuxExportFailure] = useState<LinuxExportFailure | null>(null);
@@ -665,6 +687,7 @@ export default function ProviderPage() {
 
   function openLinuxExport() {
     if (providers.length === 0) return;
+    setLinuxExportShell("bash");
     setLinuxExportDestination(null);
     setLinuxExportResult(null);
     setLinuxExportFailure(null);
@@ -683,7 +706,7 @@ export default function ProviderPage() {
     setLinuxExportBusy(true);
     setLinuxExportFailure(null);
     try {
-      const selected = await chooseLinuxExportDestination("bash");
+      const selected = await chooseLinuxExportDestination(linuxExportShell);
       if (!selected) {
         setLinuxExportStep(null);
         setLinuxExportDestination(null);
@@ -709,7 +732,7 @@ export default function ProviderPage() {
     setLinuxExportBusy(true);
     setLinuxExportFailure(null);
     try {
-      const result = await exportLinuxScript("bash", destination, confirmOverwrite);
+      const result = await exportLinuxScript(linuxExportShell, destination, confirmOverwrite);
       setLinuxExportResult(result);
       setLinuxExportStep("success");
     } catch (error) {
@@ -1281,8 +1304,10 @@ export default function ProviderPage() {
       )}
       {linuxExportStep === "shell" && (
         <LinuxShellDialog
+          shell={linuxExportShell}
           busy={linuxExportBusy}
           failure={linuxExportFailure}
+          onShellChange={setLinuxExportShell}
           onContinue={() => setLinuxExportStep("sensitive")}
           onClose={closeLinuxExport}
         />
@@ -1302,7 +1327,9 @@ export default function ProviderPage() {
         <ConfirmationDialog
           title={providerMessages.linuxExportOverwriteTitle}
           message={`${providerMessages.linuxExportOverwriteMessage(
-            linuxExportDestination ? exportFileName(linuxExportDestination) : "gpteasy.sh",
+            linuxExportDestination
+              ? exportFileName(linuxExportDestination, linuxShellPresentation[linuxExportShell].suggestedFileName)
+              : linuxShellPresentation[linuxExportShell].suggestedFileName,
           )}${linuxExportFailure ? ` ${linuxExportFailureMessage(linuxExportFailure)}` : ""}`}
           primaryLabel={providerMessages.linuxExportConfirmOverwrite}
           secondaryLabel={providerMessages.linuxExportCancel}
@@ -1313,6 +1340,7 @@ export default function ProviderPage() {
       )}
       {linuxExportStep === "success" && linuxExportResult && (
         <LinuxExportSuccessDialog
+          shell={linuxExportShell}
           result={linuxExportResult}
           onClose={closeLinuxExport}
         />
@@ -1423,13 +1451,17 @@ function WslActions({
 }
 
 function LinuxShellDialog({
+  shell,
   busy,
   failure,
+  onShellChange,
   onContinue,
   onClose,
 }: {
+  shell: LinuxShell;
   busy: boolean;
   failure: LinuxExportFailure | null;
+  onShellChange: (shell: LinuxShell) => void;
   onContinue: () => void;
   onClose: () => void;
 }) {
@@ -1447,14 +1479,17 @@ function LinuxShellDialog({
         </div>
         <fieldset className="linux-shell-options">
           <legend>{providerMessages.linuxExportShellLegend}</legend>
-          <label>
-            <input type="radio" name="linux-shell" checked readOnly />
-            <span>Bash 4+</span>
-          </label>
-          <label className="is-disabled">
-            <input type="radio" name="linux-shell" disabled />
-            <span>Zsh 5+ <small>{providerMessages.comingSoon}</small></span>
-          </label>
+          {(["bash", "zsh"] as const).map((option) => (
+            <label key={option}>
+              <input
+                type="radio"
+                name="linux-shell"
+                checked={shell === option}
+                onChange={() => onShellChange(option)}
+              />
+              <span>{linuxShellPresentation[option].displayName}</span>
+            </label>
+          ))}
         </fieldset>
         {failure && <p className="inline-error" role="alert">{linuxExportFailureMessage(failure)}</p>}
         <div className="dialog-actions">
@@ -1467,21 +1502,25 @@ function LinuxShellDialog({
 }
 
 function LinuxExportSuccessDialog({
+  shell,
   result,
   onClose,
 }: {
+  shell: LinuxShell;
   result: LinuxExportResult;
   onClose: () => void;
 }) {
+  const presentation = linuxShellPresentation[shell];
+  const fileName = result.suggestedFileName;
   return (
     <div className="dialog-backdrop">
       <section className="confirmation-dialog linux-export-dialog" role="dialog" aria-modal="true" aria-labelledby="linux-export-success-title">
-        <h2 id="linux-export-success-title">{providerMessages.linuxExportSuccessTitle}</h2>
+        <h2 id="linux-export-success-title">{providerMessages.linuxExportSuccessTitle(presentation.titleName)}</h2>
         <p>{providerMessages.linuxExportSuccessMessage(result.providerCount)}</p>
         <dl className="linux-export-instructions">
-          <div><dt>{providerMessages.linuxExportDirect}</dt><dd><code>bash ./gpteasy.sh</code></dd></div>
-          <div><dt>{providerMessages.linuxExportCurrentSession}</dt><dd><code>source ./gpteasy.sh</code></dd></div>
-          <div><dt>{providerMessages.linuxExportBashrc}</dt><dd><code>source /trusted/path/gpteasy.sh</code></dd></div>
+          <div><dt>{providerMessages.linuxExportDirect}</dt><dd><code>{shell} ./{fileName}</code></dd></div>
+          <div><dt>{providerMessages.linuxExportCurrentSession}</dt><dd><code>source ./{fileName}</code></dd></div>
+          <div><dt>{providerMessages.linuxExportStartupFile(presentation.startupFile)}</dt><dd><code>source /trusted/path/{fileName}</code></dd></div>
         </dl>
         <p><code>gpteasy</code> · <code>gpteasy current</code> · <code>gpteasy restore</code> · <code>gpteasy info</code> · <code>gpteasy unlock</code></p>
         <div className="dialog-actions">
@@ -1492,9 +1531,9 @@ function LinuxExportSuccessDialog({
   );
 }
 
-function exportFileName(path: string): string {
+function exportFileName(path: string, fallback: string): string {
   const segments = path.split(/[\\/]/);
-  return segments[segments.length - 1] || "gpteasy.sh";
+  return segments[segments.length - 1] || fallback;
 }
 
 function linuxExportFailureMessage(failure: LinuxExportFailure): string {

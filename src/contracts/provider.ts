@@ -86,7 +86,7 @@ export interface ProviderApiKey {
   value: string;
 }
 
-export type LinuxShell = "bash";
+export type LinuxShell = "bash" | "zsh";
 
 export interface LinuxExportDestination {
   path: string;

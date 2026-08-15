@@ -2266,7 +2266,7 @@ describe("WSL2 供应商选择", () => {
   });
 });
 
-describe("Linux Bash 脚本导出", () => {
+describe("Linux 脚本导出", () => {
   afterEach(() => {
     cleanup();
   });
@@ -2329,7 +2329,8 @@ describe("Linux Bash 脚本导出", () => {
 
     const shellDialog = screen.getByRole("dialog", { name: "导出 Linux 脚本" });
     expect(within(shellDialog).getByRole("radio", { name: "Bash 4+" })).toBeChecked();
-    expect(within(shellDialog).getByRole("radio", { name: "Zsh 5+ 即将支持" })).toBeDisabled();
+    expect(within(shellDialog).getByRole("radio", { name: "Zsh 5+" })).not.toBeChecked();
+    expect(within(shellDialog).getByRole("radio", { name: "Zsh 5+" })).toBeEnabled();
     fireEvent.click(within(shellDialog).getByRole("button", { name: "继续" }));
 
     const sensitive = screen.getByRole("dialog", { name: "导出文件包含敏感凭据" });
@@ -2391,5 +2392,58 @@ describe("Linux Bash 脚本导出", () => {
     await waitFor(() => {
       expect(screen.queryByRole("dialog", { name: "导出 Linux 脚本" })).not.toBeInTheDocument();
     });
+  });
+
+  it("选择 Zsh 时只导出 gpteasy.zsh 并展示 Zsh 使用方式", async () => {
+    const provider = {
+      id: "22222222-2222-4222-8222-222222222222",
+      name: "Linux Provider",
+      baseUrl: "https://provider.example/v1",
+      defaultModel: "model-a",
+      verifiedAtEpochSeconds: 1_786_140_000,
+      isCurrent: false,
+    };
+    const destination = "C:\\Users\\example\\gpteasy.zsh";
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([provider]);
+      if (command === "list_wsl_environments") return Promise.resolve([]);
+      if (command === "choose_linux_export_destination") {
+        return Promise.resolve({ path: destination, exists: false });
+      }
+      if (command === "export_linux_script") {
+        return Promise.resolve({
+          exportId: "33333333-3333-4333-8333-333333333333",
+          providerCount: 1,
+          suggestedFileName: "gpteasy.zsh",
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+    const open = await screen.findByRole("button", { name: "导出 Linux 脚本" });
+    await waitFor(() => expect(open).toBeEnabled());
+    fireEvent.click(open);
+
+    const shellDialog = screen.getByRole("dialog", { name: "导出 Linux 脚本" });
+    fireEvent.click(within(shellDialog).getByRole("radio", { name: "Zsh 5+" }));
+    fireEvent.click(within(shellDialog).getByRole("button", { name: "继续" }));
+    fireEvent.click(screen.getByRole("button", { name: "选择保存位置" }));
+
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith(
+      "choose_linux_export_destination",
+      { shell: "zsh" },
+    ));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("export_linux_script", {
+      shell: "zsh",
+      destination,
+      confirmOverwrite: false,
+    }));
+    const success = await screen.findByRole("dialog", { name: "Zsh 脚本已导出" });
+    expect(success).toHaveTextContent("zsh ./gpteasy.zsh");
+    expect(success).toHaveTextContent("source ./gpteasy.zsh");
+    expect(success).toHaveTextContent(".zshrc");
+    expect(success).not.toHaveTextContent("gpteasy.sh");
   });
 });

@@ -5,10 +5,7 @@ gpteasy__provider_id_prefix='# GPTEasy provider-id:'
 gpteasy__schema_prefix='# GPTEasy schema-version:'
 gpteasy__source_id_prefix='# GPTEasy source-id:'
 gpteasy__credential_file_prefix='# GPTEasy credential-file:'
-case ${BASH_SOURCE[0]} in
-    /*) gpteasy__script_path=${BASH_SOURCE[0]} ;;
-    *) gpteasy__script_path=$PWD/${BASH_SOURCE[0]} ;;
-esac
+{{GPTEASY_SHELL_SETUP}}
 
 gpteasy__help() {
     cat <<'GPTEASY_HELP'
@@ -42,8 +39,17 @@ gpteasy__config_path() {
     printf '%s\n' "${CODEX_HOME:-"$HOME/.codex"}/config.toml"
 }
 
+gpteasy__matches() {
+    printf '%s\n' "$1" | awk '
+        BEGIN { pattern = ARGV[1]; ARGV[1] = "" }
+        NR > 1 { invalid = 1 }
+        $0 ~ pattern { matched = 1 }
+        END { exit !invalid && matched ? 0 : 1 }
+    ' "$2"
+}
+
 gpteasy__require_codex_version() {
-    local output major minor patch
+    local output version remainder major minor patch
     if ! command -v codex >/dev/null 2>&1; then
         printf '%s\n' '写入前需要可用的 codex-cli 0.147.0 或更高版本。' >&2
         return 1
@@ -52,13 +58,16 @@ gpteasy__require_codex_version() {
         printf '%s\n' '无法确认 Codex CLI 版本，未写入任何内容。' >&2
         return 1
     fi
-    if [[ ! "$output" =~ ^codex-cli[[:space:]]+([0-9]+)\.([0-9]+)\.([0-9]+)([-+][^[:space:]]+)?$ ]]; then
+    if ! gpteasy__matches "$output" '^codex-cli[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+([-+][^[:space:]]+)?$'; then
         printf '%s\n' '无法识别 Codex CLI 版本，未写入任何内容。' >&2
         return 1
     fi
-    major=${BASH_REMATCH[1]}
-    minor=${BASH_REMATCH[2]}
-    patch=${BASH_REMATCH[3]}
+    version=${output#codex-cli }
+    version=${version%%[-+]*}
+    major=${version%%.*}
+    remainder=${version#*.}
+    minor=${remainder%%.*}
+    patch=${remainder#*.}
     if ((major == 0 && (minor < 147 || (minor == 147 && patch < 0)))); then
         printf '%s\n' 'Codex CLI 版本低于 0.147.0，未写入任何内容。' >&2
         return 1
@@ -73,7 +82,7 @@ gpteasy__directory_is_owned() {
     if [[ "$require_private" -eq 1 ]]; then
         [[ "${mode: -2}" == '00' ]]
     else
-        (( (8#$mode & 0022) == 0 ))
+        (( (8#$mode & 8#22) == 0 ))
     fi
 }
 
@@ -110,7 +119,7 @@ gpteasy__prepare_private_state() {
 }
 
 gpteasy__require_existing_private_state_safe() {
-    local codex_home=${CODEX_HOME:-"$HOME/.codex"} root path
+    local codex_home=${CODEX_HOME:-"$HOME/.codex"} root item
     root="$codex_home/.gpteasy-shell"
     if [[ ! -e "$root" && ! -L "$root" ]]; then
         return
@@ -123,14 +132,14 @@ gpteasy__require_existing_private_state_safe() {
         printf '%s\n' 'Linux 私有状态包含不支持的文件类型。' >&2
         return 1
     fi
-    while IFS= read -r -d '' path; do
-        if ! gpteasy__directory_is_owned "$path" 1; then
+    while IFS= read -r -d '' item; do
+        if ! gpteasy__directory_is_owned "$item" 1; then
             printf '%s\n' 'Linux 私有状态目录的权限或所有者不安全。' >&2
             return 1
         fi
     done < <(find "$root" -type d -print0)
-    while IFS= read -r -d '' path; do
-        if ! gpteasy__private_file_is_safe "$path"; then
+    while IFS= read -r -d '' item; do
+        if ! gpteasy__private_file_is_safe "$item"; then
             printf '%s\n' 'Linux 私有状态文件的权限、所有者或链接数不安全。' >&2
             return 1
         fi
@@ -138,24 +147,28 @@ gpteasy__require_existing_private_state_safe() {
 }
 
 gpteasy__acquire_lock() {
-    local operation=$1 active="$gpteasy__lock_root/active" start owner held_operation
+    local operation=$1 active="$gpteasy__lock_root/active" process_id start owner held_operation
     if ! mkdir -m 700 -- "$active" 2>/dev/null; then
         owner=$(gpteasy__lock_value "$active/owner" owner 2>/dev/null || printf '%s' unknown)
         held_operation=$(gpteasy__lock_value "$active/owner" operation 2>/dev/null || printf '%s' unknown)
         case "$owner" in shell | desktop) ;; *) owner=unknown ;; esac
-        [[ "$held_operation" =~ ^[a-z_]+$ ]] || held_operation=unknown
+        gpteasy__matches "$held_operation" '^[a-z_]+$' || held_operation=unknown
         printf '另一个 GPTEasy 配置操作正在进行（owner=%s，operation=%s），请稍后重试。\n' "$owner" "$held_operation" >&2
         return 1
     fi
-    start=$(awk '{print $22}' "/proc/${BASHPID}/stat" 2>/dev/null) || {
+    read -r process_id < <(sh -c 'printf "%s\n" "$PPID"') || {
         rmdir -- "$active" 2>/dev/null || true
         return 1
     }
-    gpteasy__lock_token="$(date -u +%s%N)-${BASHPID}-${RANDOM:-0}"
+    start=$(awk '{print $22}' "/proc/$process_id/stat" 2>/dev/null) || {
+        rmdir -- "$active" 2>/dev/null || true
+        return 1
+    }
+    gpteasy__lock_token="$(date -u +%s%N)-$process_id-${RANDOM:-0}"
     if ! {
         printf 'owner=shell\n'
         printf 'token=%s\n' "$gpteasy__lock_token"
-        printf 'pid=%s\n' "$BASHPID"
+        printf 'pid=%s\n' "$process_id"
         printf 'process_start=%s\n' "$start"
         printf 'operation=%s\n' "$operation"
     } >"$active/owner"; then
@@ -327,8 +340,8 @@ gpteasy__schema_v1_is_valid() {
     provider_id=$(gpteasy__managed_metadata "$config" "$gpteasy__provider_id_prefix" 2>/dev/null) || return 1
     source=$(gpteasy__managed_metadata "$config" "$gpteasy__source_id_prefix" 2>/dev/null) || return 1
     relative=$(gpteasy__managed_metadata "$config" "$gpteasy__credential_file_prefix" 2>/dev/null) || return 1
-    [[ "$provider_id" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]] || return 1
-    [[ "$source" =~ ^[[:alnum:]][[:alnum:].:_-]*$ ]] || return 1
+    gpteasy__matches "$provider_id" '^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$' || return 1
+    gpteasy__matches "$source" '^[[:alnum:]][[:alnum:].:_-]*$' || return 1
     [[ "$relative" == ".gpteasy-shell/credentials/$source/$provider_id.token" ]] || return 1
     [[ "$relative" != *'..'* && "$relative" != *'//'* ]] || return 1
     awk -v start="$gpteasy__start_marker" -v end="$gpteasy__end_marker" \
@@ -581,9 +594,10 @@ gpteasy__prepare_candidate() {
 }
 
 gpteasy__create_restore_point() {
-    local stamp
+    local stamp process_id
+    read -r process_id < <(sh -c 'printf "%s\n" "$PPID"') || return
     stamp=$(date -u +%Y%m%dT%H%M%S%N)
-    gpteasy__restore_point="$gpteasy__restore_root/switch-$stamp-${BASHPID}-${RANDOM:-0}"
+    gpteasy__restore_point="$gpteasy__restore_root/switch-$stamp-$process_id-${RANDOM:-0}"
     mkdir -m 700 -- "$gpteasy__restore_point" || return
     printf '%s\n' "$gpteasy__config_kind" >"$gpteasy__restore_point/config-kind" || return
     if [[ -f "$gpteasy__config_target" ]]; then
@@ -614,9 +628,9 @@ gpteasy__prune_restore_points() {
 }
 
 gpteasy__private_file_is_safe() {
-    local path=$1 owner mode links kind
-    [[ -f "$path" && ! -L "$path" ]] || return 1
-    read -r owner mode links kind < <(stat -c '%u %a %h %F' -- "$path") || return 1
+    local file=$1 owner mode links kind
+    [[ -f "$file" && ! -L "$file" ]] || return 1
+    read -r owner mode links kind < <(stat -c '%u %a %h %F' -- "$file") || return 1
     [[ "$owner" == "$(id -u)" && "${mode: -2}" == '00' && "$links" == 1 && "$kind" == 'regular file' ]]
 }
 
@@ -700,17 +714,17 @@ gpteasy__apply_provider_locked() {
 }
 
 gpteasy__switch_provider() {
-    local provider_id=$1 status
+    local provider_id=$1 result
     gpteasy__require_codex_version || return
     gpteasy__prepare_private_state || return
     gpteasy__acquire_lock switch || return
     gpteasy__apply_provider_locked "$provider_id"
-    status=$?
+    result=$?
     gpteasy__release_lock || {
         printf '%s\n' '配置已处理，但 shell 锁释放失败；请检查 gpteasy unlock。' >&2
         return 1
     }
-    return "$status"
+    return "$result"
 }
 
 gpteasy__select_provider() {
@@ -734,7 +748,7 @@ gpteasy__select_provider() {
         printf '  %s) %s (%s)%s\n' "$index" "$name" "$model" "$marker"
         index=$((index + 1))
     done
-    read -r -p '请选择供应商编号，或输入 q 取消：' choice
+{{GPTEASY_SELECT_READ}}
     case "$choice" in
         '' | q | Q)
             printf '%s\n' '已取消，不修改配置。'
@@ -828,7 +842,7 @@ gpteasy__restore_locked() {
     printf '当前状态：%s\n' "$current_label"
     printf '恢复目标：%s\n' "$target_label"
     printf '%s\n' '警告：恢复可能覆盖桌面 GPTEasy 或其它脚本之后完成的修改。'
-    read -r -p '确认恢复？[y/N] ' choice
+{{GPTEASY_RESTORE_READ}}
     case "$choice" in
         y | Y) ;;
         *)
@@ -875,24 +889,24 @@ gpteasy__restore_locked() {
 }
 
 gpteasy__restore() {
-    local status
+    local result
     gpteasy__require_codex_version || return
     gpteasy__prepare_private_state || return
     gpteasy__acquire_lock restore || return
     gpteasy__restore_locked
-    status=$?
+    result=$?
     gpteasy__release_lock || {
         printf '%s\n' '恢复已处理，但 shell 锁释放失败；请检查 gpteasy unlock。' >&2
         return 1
     }
-    return "$status"
+    return "$result"
 }
 
 gpteasy__info() {
     printf '目标环境：%s\n' "${CODEX_HOME:-"$HOME/.codex"}"
     printf 'Linux 导出 ID：%s\n' "$gpteasy__export_id"
     printf '%s\n' '管理区块 schema：1'
-    printf '%s\n' 'Shell：Bash 4+'
+    printf '%s\n' 'Shell：{{GPTEASY_SHELL_LABEL}}'
     printf '供应商数量：%s\n' "$gpteasy__provider_count"
     printf '%s\n' 'Codex CLI 最低版本：0.147.0'
 }
@@ -921,7 +935,7 @@ gpteasy__unlock() {
         printf '%s\n' '桌面 owner 锁只能由桌面 WSL2 Saga 恢复，shell 不会删除。' >&2
         return 1
     fi
-    if [[ "$owner" != shell || ! "$pid" =~ ^[0-9]+$ || ! "$process_start" =~ ^[0-9]+$ || ! "$operation" =~ ^[a-z_]+$ || -z "$token" ]]; then
+    if [[ "$owner" != shell ]] || ! gpteasy__matches "$pid" '^[0-9]+$' || ! gpteasy__matches "$process_start" '^[0-9]+$' || ! gpteasy__matches "$operation" '^[a-z_]+$' || [[ -z "$token" ]]; then
         printf '%s\n' 'shell owner 锁格式损坏，拒绝自动删除。' >&2
         return 1
     fi
@@ -933,7 +947,7 @@ gpteasy__unlock() {
     owner_hash=$(gpteasy__file_hash "$owner_file") || return
     owner_signature=$(stat -c '%d:%i:%u:%a:%h:%F' -- "$owner_file") || return
     printf '检测到失效的 shell owner 锁（operation=%s）。\n' "$operation"
-    read -r -p '确认删除该失效锁？[y/N] ' choice
+{{GPTEASY_UNLOCK_READ}}
     case "$choice" in
         y | Y) ;;
         *)
@@ -975,6 +989,7 @@ gpteasy__current() {
 }
 
 gpteasy() {
+{{GPTEASY_FUNCTION_OPTIONS}}
     local command=${1:-}
     case "$command" in
         help | --help | -h)
@@ -1008,6 +1023,4 @@ gpteasy() {
     esac
 }
 
-if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-    gpteasy "$@"
-fi
+{{GPTEASY_DIRECT_EXECUTION}}

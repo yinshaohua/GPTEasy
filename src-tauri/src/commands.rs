@@ -130,7 +130,7 @@ pub(crate) fn choose_linux_export_destination(
         .dialog()
         .file()
         .set_file_name(shell.suggested_file_name())
-        .add_filter("Bash 脚本", &["sh"])
+        .add_filter(shell.display_name(), &[shell.extension()])
         .blocking_save_file();
     let Some(selected) = selected else {
         return Ok(None);

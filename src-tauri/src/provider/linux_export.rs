@@ -13,13 +13,31 @@ use super::catalog;
 #[serde(rename_all = "snake_case")]
 pub enum LinuxShell {
     Bash,
+    Zsh,
 }
 
 impl LinuxShell {
-    pub(crate) fn suggested_file_name(self) -> &'static str {
+    fn definition(self) -> &'static ShellDefinition {
         match self {
-            Self::Bash => "gpteasy.sh",
+            Self::Bash => &BASH_DEFINITION,
+            Self::Zsh => &ZSH_DEFINITION,
         }
+    }
+
+    pub(crate) fn suggested_file_name(self) -> &'static str {
+        self.definition().suggested_file_name
+    }
+
+    pub(crate) fn executable(self) -> &'static str {
+        self.definition().executable
+    }
+
+    pub(crate) fn display_name(self) -> &'static str {
+        self.definition().display_name
+    }
+
+    pub(crate) fn extension(self) -> &'static str {
+        self.definition().extension
     }
 }
 
@@ -57,6 +75,53 @@ pub struct LinuxExportResult {
     pub suggested_file_name: &'static str,
 }
 
+struct ShellSyntax {
+    setup: &'static str,
+    function_options: &'static str,
+    select_read: &'static str,
+    restore_read: &'static str,
+    unlock_read: &'static str,
+    direct_execution: &'static str,
+}
+
+struct ShellDefinition {
+    suggested_file_name: &'static str,
+    executable: &'static str,
+    display_name: &'static str,
+    extension: &'static str,
+    syntax: ShellSyntax,
+}
+
+const BASH_DEFINITION: ShellDefinition = ShellDefinition {
+    suggested_file_name: "gpteasy.sh",
+    executable: "bash",
+    display_name: "Bash 4+",
+    extension: "sh",
+    syntax: ShellSyntax {
+        setup: "case ${BASH_SOURCE[0]} in\n    /*) gpteasy__script_path=${BASH_SOURCE[0]} ;;\n    *) gpteasy__script_path=$PWD/${BASH_SOURCE[0]} ;;\nesac",
+        function_options: "",
+        select_read: "    read -r -p '请选择供应商编号，或输入 q 取消：' choice",
+        restore_read: "    read -r -p '确认恢复？[y/N] ' choice",
+        unlock_read: "    read -r -p '确认删除该失效锁？[y/N] ' choice",
+        direct_execution: "if [[ \"${BASH_SOURCE[0]}\" == \"$0\" ]]; then\n    gpteasy \"$@\"\nfi",
+    },
+};
+
+const ZSH_DEFINITION: ShellDefinition = ShellDefinition {
+    suggested_file_name: "gpteasy.zsh",
+    executable: "zsh",
+    display_name: "Zsh 5+",
+    extension: "zsh",
+    syntax: ShellSyntax {
+        setup: "gpteasy__script_path=${(%):-%x}\ncase $gpteasy__script_path in\n    /*) ;;\n    *) gpteasy__script_path=$PWD/$gpteasy__script_path ;;\nesac",
+        function_options: "    emulate -L zsh\n    setopt local_options nonomatch pipefail",
+        select_read: "    read -r 'choice?请选择供应商编号，或输入 q 取消：'",
+        restore_read: "    read -r 'choice?确认恢复？[y/N] '",
+        unlock_read: "    read -r 'choice?确认删除该失效锁？[y/N] '",
+        direct_execution: "if [[ \"$ZSH_EVAL_CONTEXT\" == toplevel ]]; then\n    gpteasy \"$@\"\nfi",
+    },
+};
+
 pub(super) fn export(
     state_store: &StateStore,
     shell: LinuxShell,
@@ -85,7 +150,7 @@ pub(super) fn export(
     }
 
     let export_id = Uuid::new_v4().to_string();
-    let script = render_bash(&export_id, &providers);
+    let script = render(shell, &export_id, &providers);
     atomic_write(destination, script.as_bytes(), original.as_deref())?;
     Ok(LinuxExportResult {
         export_id,
@@ -103,11 +168,11 @@ fn read_destination(destination: &Path) -> Result<Option<Vec<u8>>, LinuxExportFa
     }
 }
 
-fn render_bash(export_id: &str, providers: &[catalog::ProviderRecord]) -> String {
-    let mut script = String::from(
-        "#!/usr/bin/env bash\n\
-# GPTEasy Bash 4+ Linux provider snapshot. This file contains sensitive credentials.\n\
-gpteasy__schema_version='1'\n",
+fn render(shell: LinuxShell, export_id: &str, providers: &[catalog::ProviderRecord]) -> String {
+    let mut script = format!(
+        "#!/usr/bin/env {}\n# GPTEasy {} Linux provider snapshot. This file contains sensitive credentials.\ngpteasy__schema_version='1'\n",
+        shell.executable(),
+        shell.display_name(),
     );
     script.push_str(&format!(
         "gpteasy__export_id={}\ngpteasy__provider_count={}\n\n",
@@ -190,8 +255,21 @@ gpteasy__schema_version='1'\n",
         ));
     }
     script.push_str("        *) return 1 ;;\n    esac\n}\n");
-    script.push_str(include_str!("bash_runtime.sh"));
+    script.push_str(&render_runtime(shell));
     script
+}
+
+fn render_runtime(shell: LinuxShell) -> String {
+    let definition = shell.definition();
+    let syntax = &definition.syntax;
+    include_str!("shell_runtime.sh")
+        .replace("{{GPTEASY_SHELL_SETUP}}", syntax.setup)
+        .replace("{{GPTEASY_FUNCTION_OPTIONS}}", syntax.function_options)
+        .replace("{{GPTEASY_SELECT_READ}}", syntax.select_read)
+        .replace("{{GPTEASY_RESTORE_READ}}", syntax.restore_read)
+        .replace("{{GPTEASY_UNLOCK_READ}}", syntax.unlock_read)
+        .replace("{{GPTEASY_SHELL_LABEL}}", shell.display_name())
+        .replace("{{GPTEASY_DIRECT_EXECUTION}}", syntax.direct_execution)
 }
 
 fn validate_snapshot(providers: &[catalog::ProviderRecord]) -> Result<(), LinuxExportFailure> {
@@ -327,4 +405,39 @@ fn write_failed() -> LinuxExportFailure {
         LinuxExportFailureCategory::WriteFailed,
         "linux_export.write_failed",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_runtime_limits_shell_divergence_to_declared_syntax_slots() {
+        let template = include_str!("shell_runtime.sh");
+        let slots = [
+            "{{GPTEASY_SHELL_SETUP}}",
+            "{{GPTEASY_FUNCTION_OPTIONS}}",
+            "{{GPTEASY_SELECT_READ}}",
+            "{{GPTEASY_RESTORE_READ}}",
+            "{{GPTEASY_UNLOCK_READ}}",
+            "{{GPTEASY_SHELL_LABEL}}",
+            "{{GPTEASY_DIRECT_EXECUTION}}",
+        ];
+
+        assert_eq!(template.matches("{{GPTEASY_").count(), slots.len());
+        for slot in slots {
+            assert_eq!(template.matches(slot).count(), 1, "unexpected slot {slot}");
+        }
+        assert!(!template.to_ascii_lowercase().contains("bash"));
+        assert!(!template.to_ascii_lowercase().contains("zsh"));
+
+        let bash = render_runtime(LinuxShell::Bash);
+        let zsh = render_runtime(LinuxShell::Zsh);
+        assert!(!bash.contains("{{GPTEASY_"));
+        assert!(!zsh.contains("{{GPTEASY_"));
+        assert!(bash.contains("read -r -p '请选择供应商编号"));
+        assert!(zsh.contains("read -r 'choice?请选择供应商编号"));
+        assert!(!bash.contains("emulate -L zsh"));
+        assert!(zsh.contains("emulate -L zsh"));
+    }
 }
