@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "./App";
@@ -831,17 +831,22 @@ describe("供应商目录生命周期", () => {
     render(<App />);
 
     const catalogHeading = await screen.findByRole("heading", { name: "供应商目录" });
-    await screen.findByText(provider.name);
+    const providerList = await screen.findByLabelText("已验证供应商");
+    expect(within(providerList).getByText(provider.name)).toBeInTheDocument();
     expect(catalogHeading.parentElement).toHaveTextContent("1 个已验证供应商");
     expect(screen.queryByText("管理、验证和切换 Codex 使用的供应商")).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "外部配置" })).not.toBeInTheDocument();
     expect(screen.queryByText(/^验证于 /)).not.toBeInTheDocument();
-    expect(screen.getByTitle(provider.baseUrl)).toHaveTextContent(provider.baseUrl);
-    expect(screen.getByTitle(provider.defaultModel)).toHaveTextContent(provider.defaultModel);
+    expect(within(providerList).getByTitle(provider.baseUrl)).toHaveTextContent(provider.baseUrl);
+    expect(within(providerList).getByTitle(provider.defaultModel)).toHaveTextContent(provider.defaultModel);
 
-    const restore = await screen.findByRole("button", { name: "恢复上次配置" });
-    expect(restore).toBeDisabled();
-    expect(restore).toHaveAccessibleDescription("尚无可恢复的 GPTEasy 配置修改。");
+    const wslProvider = await screen.findByLabelText("WSL2 目标供应商");
+    expect(wslProvider).toHaveTextContent(provider.name);
+    expect(wslProvider).toHaveTextContent(provider.baseUrl);
+    expect(wslProvider).toHaveTextContent(provider.defaultModel);
+    expect(screen.queryByRole("button", { name: "恢复上次配置" })).not.toBeInTheDocument();
+    expect(screen.queryByText("其他环境供应商操作")).not.toBeInTheDocument();
+    expect(screen.queryByText("当前 Windows Codex 环境操作")).not.toBeInTheDocument();
     const openAi = screen.getByRole("button", { name: "切换到 OpenAI 登录模式" });
     expect(openAi).toBeEnabled();
     expect(openAi).toHaveAccessibleDescription("使用 Codex 已有的 OpenAI 登录。");
@@ -1474,7 +1479,7 @@ describe("Codex 环境接管", () => {
 
     render(<App />);
 
-    expect(await screen.findByText("Available Provider")).toBeInTheDocument();
+    expect(await screen.findAllByText("Available Provider")).toHaveLength(2);
     expect(screen.getByRole("alert")).toHaveTextContent("无法读取当前用户 Codex 环境");
     expect(screen.queryByText("无法读取供应商目录")).not.toBeInTheDocument();
   });
@@ -1504,13 +1509,13 @@ describe("Codex 环境接管", () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "供应商管理" })).toBeInTheDocument();
-    const restore = await screen.findByRole("button", { name: "恢复上次配置" });
     const openAi = screen.getByRole("button", { name: "切换到 OpenAI 登录模式" });
     await waitFor(() => expect(openAi).toBeEnabled());
     expect(screen.queryByRole("heading", { name: "外部配置" })).not.toBeInTheDocument();
     expect(screen.queryByText("待重启")).not.toBeInTheDocument();
-    expect(restore).toBeDisabled();
-    expect(restore).toHaveAccessibleDescription("尚无可恢复的 GPTEasy 配置修改。");
+    expect(screen.queryByRole("button", { name: "恢复上次配置" })).not.toBeInTheDocument();
+    expect(screen.queryByText("其他环境供应商操作")).not.toBeInTheDocument();
+    expect(screen.queryByText("当前 Windows Codex 环境操作")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /选择 WSL2 供应商/ })).toBeEnabled();
     expect(screen.getByRole("button", { name: /导出 Linux 脚本/ })).toBeDisabled();
     expect(screen.queryByRole("button", { name: "Codex 环境" })).not.toBeInTheDocument();
@@ -1846,107 +1851,6 @@ describe("Codex 环境接管", () => {
     expect(invoke.mock.calls.some(([command]) => command === "apply_environment_provider")).toBe(false);
   });
 
-  it("只在最近配置可安全恢复时允许用户确认恢复", async () => {
-    const provider = {
-      id: "90f00c5a-59a7-4936-a791-583d90b81b73",
-      name: "Applied Provider",
-      baseUrl: "https://applied.example/v1",
-      defaultModel: "model-a",
-      verifiedAtEpochSeconds: 1_786_140_900,
-      isCurrent: true,
-    };
-    const managed = {
-      state: "managed",
-      messageId: "environment.managed",
-      revision: "managed-revision",
-      requiresTakeoverConfirmation: false,
-      restoreAvailability: "available",
-      restorePreview: {
-        artifacts: ["config", "credentials"],
-        targetMode: null,
-        targetProvider: null,
-      },
-      impacts: [
-        {
-          artifact: "config",
-          action: "update",
-          fields: ["model", "model_provider", "model_providers.<provider-id>"],
-        },
-        {
-          artifact: "credentials",
-          action: "update",
-          fields: ["auth_mode", "OPENAI_API_KEY"],
-        },
-      ],
-      currentProvider: provider,
-    };
-    let finishRestore!: (snapshot: unknown) => void;
-    invoke.mockImplementation((command: string) => {
-      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
-      if (command === "list_providers") return Promise.resolve([provider]);
-      if (command === "get_environment_snapshot") return Promise.resolve(managed);
-      if (command === "restore_last_environment_config") {
-        return new Promise((resolve) => {
-          finishRestore = resolve;
-        });
-      }
-      return Promise.resolve(undefined);
-    });
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
-
-    render(<App />);
-    const restore = await screen.findByRole("button", { name: "恢复上次配置" });
-    await waitFor(() => expect(restore).toBeEnabled());
-    fireEvent.click(restore);
-
-    expect(confirm).toHaveBeenCalledWith("将恢复 config.toml、auth.json，恢复后为外部配置。是否继续？");
-    expect(restore).toHaveAccessibleDescription("正在恢复上次配置。");
-
-    finishRestore({
-      ...managed,
-      state: "external",
-      messageId: "environment.external",
-      revision: "restored-revision",
-      currentProvider: null,
-    });
-
-    await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith("restore_last_environment_config", {
-        confirmRestore: true,
-        expectedRevision: "managed-revision",
-      });
-    });
-    await waitFor(() => expect(restore).toBeEnabled());
-    expect(screen.queryByRole("heading", { name: "外部配置" })).not.toBeInTheDocument();
-  });
-
-  it("受管工件外部变化后禁用恢复并说明原因", async () => {
-    invoke.mockImplementation((command: string) => {
-      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
-      if (command === "list_providers") return Promise.resolve([]);
-      if (command === "get_environment_snapshot") {
-        return Promise.resolve({
-          state: "managed",
-          messageId: "environment.managed",
-          revision: "changed-revision",
-          requiresTakeoverConfirmation: false,
-          restoreAvailability: "artifacts_changed",
-          impacts: [],
-          currentProvider: null,
-        });
-      }
-      return Promise.resolve(undefined);
-    });
-
-    render(<App />);
-
-    const restore = await screen.findByRole("button", { name: "恢复上次配置" });
-    await waitFor(() => expect(restore).toHaveAccessibleDescription(
-      "受管工件在最近一次修改后发生变化，恢复已禁用。",
-    ));
-    expect(restore).toBeDisabled();
-  });
-
   it("读取认证与消费者状态，并从供应商管理确认切换到 OpenAI 登录模式", async () => {
     const external = {
       state: "external",
@@ -2224,6 +2128,24 @@ describe("WSL2 供应商选择", () => {
       revision: "wsl-revision",
       messageId: null,
     };
+    const unavailableEnvironments = [
+      {
+        ...wslEnvironment,
+        environmentId: "{33333333-3333-4333-8333-333333333333}",
+        displayName: "docker-desktop",
+        commandName: null,
+        availability: "infrastructure",
+        requiresAttention: true,
+      },
+      {
+        ...wslEnvironment,
+        environmentId: "{44444444-4444-4444-8444-444444444444}",
+        displayName: "已移除 Ubuntu",
+        commandName: null,
+        availability: "removed",
+        requiresAttention: true,
+      },
+    ];
     invoke.mockImplementation((command: string) => {
       if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
       if (command === "list_providers") return Promise.resolve([provider]);
@@ -2245,7 +2167,9 @@ describe("WSL2 供应商选择", () => {
           consumers: { desktop: "stopped", cli: "stopped" },
         });
       }
-      if (command === "list_wsl_environments") return Promise.resolve([wslEnvironment]);
+      if (command === "list_wsl_environments") {
+        return Promise.resolve([wslEnvironment, ...unavailableEnvironments]);
+      }
       if (command === "apply_wsl_provider") {
         return Promise.resolve({
           environment: { ...wslEnvironment, currentProvider: { ...provider, isCurrent: true } },
@@ -2263,6 +2187,11 @@ describe("WSL2 供应商选择", () => {
     const dialog = await screen.findByRole("dialog", { name: "选择 WSL2 供应商" });
     expect(dialog).toHaveTextContent("已停止的发行版会临时启动，完成后恢复停止");
     expect(dialog).toHaveTextContent("只修改该发行版默认用户的 config.toml 和 auth.json");
+    const distribution = screen.getByLabelText("WSL2 发行版") as HTMLSelectElement;
+    expect(Array.from(distribution.options, (option) => option.textContent)).toEqual(["Ubuntu · 可管理"]);
+    expect(screen.queryByText("请选择发行版")).not.toBeInTheDocument();
+    expect(screen.queryByText("docker-desktop")).not.toBeInTheDocument();
+    expect(screen.queryByText("已移除 Ubuntu")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "应用到 WSL2" }));
 
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("apply_wsl_provider", {
@@ -2274,10 +2203,13 @@ describe("WSL2 供应商选择", () => {
     const applyCall = invoke.mock.calls.find(([command]) => command === "apply_wsl_provider");
     expect(JSON.stringify(applyCall?.[1])).not.toContain("API_KEY");
     expect(JSON.stringify(applyCall?.[1])).not.toContain("secret");
-    expect(await screen.findAllByText(/已将“WSL Provider”应用到 WSL2 发行版“Ubuntu”/)).toHaveLength(2);
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "选择 WSL2 供应商" })).not.toBeInTheDocument();
+    });
+    expect(screen.getByRole("status")).toHaveTextContent("已将“WSL Provider”应用到 WSL2 发行版“Ubuntu”");
   });
 
-  it("没有可管理发行版时仍可查看变化原因", async () => {
+  it("没有可管理发行版时不列出不可选择项", async () => {
     const ambiguousEnvironment = {
       environmentId: "{11111111-1111-1111-1111-111111111111}",
       displayName: "Ubuntu",
@@ -2303,8 +2235,11 @@ describe("WSL2 供应商选择", () => {
     await waitFor(() => expect(open).toBeEnabled());
     fireEvent.click(open);
 
-    expect(await screen.findByRole("dialog", { name: "选择 WSL2 供应商" })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "Ubuntu · 无法安全解歧" })).toBeDisabled();
+    expect(await screen.findByRole("dialog", { name: "选择 WSL2 供应商" })).toHaveTextContent(
+      "没有可管理的 WSL2 发行版",
+    );
+    expect(screen.queryByText("Ubuntu · 无法安全解歧")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("WSL2 发行版")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "应用到 WSL2" })).toBeDisabled();
   });
 

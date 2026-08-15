@@ -115,7 +115,7 @@ async function openProviderCatalog(page: Page, width: number, height: number) {
   }, { catalog: providers });
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "供应商目录" })).toBeVisible();
-  await expect(page.getByText("Long Provider Name")).toBeVisible();
+  await expect(page.getByLabel("已验证供应商").getByText("Long Provider Name")).toBeVisible();
 }
 
 test("默认窗口横向展示目录行且底部操作可见", async ({ page }, testInfo) => {
@@ -144,8 +144,8 @@ test("默认窗口横向展示目录行且底部操作可见", async ({ page }, 
     expect(new Set(row.titleTops.map(Math.round)).size).toBe(1);
   }
 
-  const environmentButtons = page.locator(".environment-command");
-  await expect(environmentButtons).toHaveCount(2);
+  const environmentButtons = page.locator(".environment-tools button");
+  await expect(environmentButtons).toHaveCount(3);
   for (const button of await environmentButtons.all()) {
     const box = await button.boundingBox();
     expect(box).not.toBeNull();
@@ -153,6 +153,11 @@ test("默认窗口横向展示目录行且底部操作可见", async ({ page }, 
     expect(box!.height).toBeLessThanOrEqual(31);
     expect(box!.y + box!.height).toBeLessThanOrEqual(620);
   }
+
+  const wslProvider = page.getByLabel("WSL2 目标供应商");
+  await expect(wslProvider).toContainText("Long Provider Name");
+  await expect(wslProvider).toContainText("https://provider.example/very/long/responses/compatible/api/v1");
+  await expect(wslProvider).toContainText("provider-model-with-a-very-long-version-identifier");
 
   await page.screenshot({ path: testInfo.outputPath("provider-layout-1120x620.png"), fullPage: true });
 });
@@ -193,7 +198,9 @@ test("最小窗口无横向溢出且所有操作可滚动到达", async ({ page 
   expect(layout.clippedButtons).toEqual([]);
 
   await page.getByRole("region", { name: "Codex 环境操作" }).scrollIntoViewIfNeeded();
-  await expect(page.getByRole("button", { name: "恢复上次配置" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "恢复上次配置" })).toHaveCount(0);
+  await expect(page.getByText("其他环境供应商操作")).toHaveCount(0);
+  await expect(page.getByText("当前 Windows Codex 环境操作")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "切换到 OpenAI 登录模式" })).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("provider-layout-680x520.png"), fullPage: true });
 });
@@ -207,6 +214,7 @@ test("WSL2 供应商弹窗在最小窗口展示单发行版范围和生命周期
   await expect(dialog.getByText("Ubuntu 24.04", { exact: true })).toBeVisible();
   await expect(dialog.getByText(/临时启动，完成后恢复停止/)).toBeVisible();
   await expect(dialog.getByText(/默认用户的 config.toml 和 auth.json/)).toBeVisible();
+  await expect(dialog.getByText("请选择发行版")).toHaveCount(0);
   await expect(dialog.getByRole("button", { name: "应用到 WSL2" })).toBeEnabled();
 
   const bounds = await dialog.boundingBox();
