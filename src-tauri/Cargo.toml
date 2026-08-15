@@ -6,6 +6,9 @@ authors = ["GPTEasy contributors"]
 edition = "2024"
 rust-version = "1.85"
 
+[features]
+wsl-guest-harness = []
+
 [lib]
 name = "gpteasy_lib"
 crate-type = ["lib", "cdylib", "staticlib"]

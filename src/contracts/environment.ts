@@ -61,6 +61,16 @@ export type WslAvailability =
   | "default_user_changed"
   | "needs_refresh";
 
+export type WslConfigurationState =
+  | "unknown"
+  | "none"
+  | "current"
+  | "updated"
+  | "legacy"
+  | "provider_missing"
+  | "conflict"
+  | "busy";
+
 export interface WslEnvironmentSummary {
   environmentId: string;
   displayName: string;
@@ -69,6 +79,8 @@ export interface WslEnvironmentSummary {
   running: boolean;
   availability: WslAvailability;
   currentProvider: ProviderSummary | null;
+  actualProviderId: string | null;
+  configurationState: WslConfigurationState;
   requiresAttention: boolean;
   pendingRestart: boolean;
   revision: string;

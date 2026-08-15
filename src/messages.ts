@@ -156,10 +156,11 @@ export const wslFailureMessages: Record<string, string> = {
   "wsl.refresh_required": "WSL2 环境需要刷新后才能操作。",
   "wsl.provider_not_found": "所选供应商已不存在，请刷新供应商目录。",
   "wsl.config_invalid": "WSL2 默认用户的 config.toml 无法安全解析。",
-  "wsl.credentials_invalid": "WSL2 默认用户的 auth.json 无法安全保留。",
-  "wsl.file_credentials_required": "WSL2 Codex 必须使用文件凭据载体才能应用供应商。",
+  "wsl.credentials_invalid": "WSL2 命令式凭据工件无效。",
+  "wsl.credential_conflict": "WSL2 命令式凭据工件与已验证配置不一致。",
   "wsl.managed_conflict": "WSL2 配置的 GPTEasy 管理区块存在冲突。",
   "wsl.guest_write_failed": "WSL2 配置写入失败，旧状态已保留。",
+  "wsl.concurrent_modification": "WSL2 配置在操作期间发生变化，原内容已保留。",
   "wsl.lifecycle_restore_failed": "WSL2 生命周期未能恢复到操作前状态。",
   "wsl.recovery_pending": "检测到未完成的 WSL2 配置操作，需要重新确认。",
   "wsl.recovery_conflict": "WSL2 配置既不匹配操作前状态，也不匹配目标状态。",
@@ -170,6 +171,12 @@ export const wslFailureMessages: Record<string, string> = {
   "wsl.stdin_failed": "无法安全传递 WSL2 配置。",
   "wsl.read_failed": "无法读取 WSL2 默认用户配置。",
   "wsl.helper_verification_failed": "WSL2 guest writer 安装校验失败。",
+  "wsl.guest_reread_failed": "写入后无法复核 WSL2 实际配置。",
+  "wsl.lock_busy": "另一个 GPTEasy 配置操作正在进行，请稍后刷新。",
+  "wsl.lock_unsafe": "WSL2 共享锁的权限或格式不安全。",
+  "wsl.lock_recovery_required": "未完成的桌面 WSL2 操作需要先恢复。",
+  "wsl.provider_missing": "当前供应商 ID 不在桌面供应商目录中。",
+  "wsl.codex_version_required": "WSL2 默认用户需要可用的 codex-cli 0.147.0 或更高版本。",
 };
 
 export const wslAvailabilityMessages = {
@@ -181,6 +188,17 @@ export const wslAvailabilityMessages = {
   unavailable: "暂时无法探测",
   default_user_changed: "默认用户已变化",
   needs_refresh: "需要刷新",
+} as const;
+
+export const wslConfigurationStateMessages = {
+  unknown: "实际状态待核验",
+  none: "未由 GPTEasy 管理",
+  current: "当前",
+  updated: "当前，有更新",
+  legacy: "当前，旧格式",
+  provider_missing: "当前供应商不在目录中",
+  conflict: "管理冲突",
+  busy: "正在被其他操作占用",
 } as const;
 
 export const providerMessages = {
@@ -260,7 +278,7 @@ export const providerMessages = {
   wslStopped: "已停止",
   wslStoppedWarning: "已停止的发行版会临时启动，完成后恢复停止。",
   wslRunningWarning: "运行中的发行版不会被终止，其中 Codex 可能需要手动重启。",
-  wslDefaultUserScope: "只修改该发行版默认用户的 config.toml 和 auth.json。",
+  wslDefaultUserScope: "只修改该发行版默认用户的 config.toml 和命令式凭据工件；auth.json 保持不变。",
   wslApplying: "正在应用 WSL2 供应商",
   wslApplied: (provider: string, distro: string) => `已将“${provider}”应用到 WSL2 发行版“${distro}”。`,
   wslPendingRestart: "WSL2 配置已更新，请在发行版内重新启动 Codex。",

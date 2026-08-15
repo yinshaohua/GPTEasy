@@ -74,6 +74,7 @@ import {
   providerFailureMessages,
   providerMessages,
   wslAvailabilityMessages,
+  wslConfigurationStateMessages,
   wslFailureMessages,
 } from "./messages";
 
@@ -120,6 +121,12 @@ const DAYWAY_BASE_URL = "https://dayway.site/v1";
 function isManageableWslEnvironment(environment: WslEnvironmentSummary): boolean {
   return environment.availability === "manageable"
     || environment.availability === "default_user_changed";
+}
+
+function canApplyWslProvider(environment: WslEnvironmentSummary): boolean {
+  return isManageableWslEnvironment(environment)
+    && environment.configurationState !== "conflict"
+    && environment.configurationState !== "busy";
 }
 
 export default function ProviderPage() {
@@ -661,7 +668,7 @@ export default function ProviderPage() {
     if (
       !target ||
       !wslProviderId ||
-      !isManageableWslEnvironment(target)
+      !canApplyWslProvider(target)
     ) return;
     const provider = providers.find((item) => item.id === wslProviderId);
     if (!provider) return;
@@ -1578,8 +1585,11 @@ function WslProviderDialog({
 }) {
   const manageableEnvironments = environments.filter(isManageableWslEnvironment);
   const selectedEnvironment = manageableEnvironments.find((item) => item.environmentId === selectedEnvironmentId) ?? null;
-  const manageable = selectedEnvironment !== null;
-  const canApply = state === "ready" && manageable && Boolean(selectedProviderId) && !busy;
+  const canApply = state === "ready"
+    && selectedEnvironment !== null
+    && canApplyWslProvider(selectedEnvironment)
+    && Boolean(selectedProviderId)
+    && !busy;
   const failureMessage = failure ? wslFailureMessages[failure.messageId] ?? wslFailureMessages["wsl.state_unavailable"] : "";
   return (
     <div className="dialog-backdrop">
@@ -1636,8 +1646,14 @@ function WslProviderDialog({
                     {selectedEnvironment.running ? providerMessages.wslRunning : providerMessages.wslStopped}
                   </span>
                   <span className="pending-badge">{wslAvailabilityMessages[selectedEnvironment.availability]}</span>
+                  <span className="pending-badge">
+                    {wslConfigurationStateMessages[selectedEnvironment.configurationState ?? "unknown"]}
+                  </span>
                 </div>
                 {selectedEnvironment.currentProvider && <p>当前供应商：{selectedEnvironment.currentProvider.name}</p>}
+                {selectedEnvironment.configurationState === "provider_missing" && selectedEnvironment.actualProviderId && (
+                  <p>当前供应商 ID：<code>{selectedEnvironment.actualProviderId}</code></p>
+                )}
                 {selectedEnvironment.defaultUid !== null && <p>默认用户 UID：{selectedEnvironment.defaultUid}</p>}
                 {selectedEnvironment.running
                   ? <p>{providerMessages.wslRunningWarning}</p>

@@ -9,7 +9,7 @@ use rusqlite::backup::Backup;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction};
 use serde::Serialize;
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 5;
+pub const CURRENT_SCHEMA_VERSION: i64 = 7;
 const APPLICATION_ID: i64 = 0x4750_5445;
 const BACKUP_LIMIT: usize = 3;
 const INSTALLATION_MARKER_CONTENT: &[u8] = b"gpteasy-state-v1\n";
@@ -119,12 +119,25 @@ CREATE TABLE wsl_pending_operation (
 ) STRICT;
 "#;
 
+const SCHEMA_V6: &str = r#"
+ALTER TABLE wsl_environments ADD COLUMN actual_provider_id TEXT;
+ALTER TABLE wsl_environments ADD COLUMN configuration_state TEXT NOT NULL DEFAULT 'unknown'
+    CHECK (configuration_state IN ('unknown', 'none', 'current', 'updated', 'legacy', 'provider_missing', 'conflict', 'busy'));
+ALTER TABLE wsl_pending_operation ADD COLUMN lock_token TEXT;
+"#;
+
+const SCHEMA_V7: &str = r#"
+ALTER TABLE wsl_environments ADD COLUMN refresh_lock_token TEXT;
+"#;
+
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, SCHEMA_V1),
     (2, SCHEMA_V2),
     (3, SCHEMA_V3),
     (4, SCHEMA_V4),
     (5, SCHEMA_V5),
+    (6, SCHEMA_V6),
+    (7, SCHEMA_V7),
 ];
 
 #[derive(Debug, Clone)]

@@ -2123,6 +2123,8 @@ describe("WSL2 供应商选择", () => {
       running: false,
       availability: "manageable",
       currentProvider: null,
+      actualProviderId: null,
+      configurationState: "unknown",
       requiresAttention: false,
       pendingRestart: false,
       revision: "wsl-revision",
@@ -2186,7 +2188,7 @@ describe("WSL2 供应商选择", () => {
 
     const dialog = await screen.findByRole("dialog", { name: "选择 WSL2 供应商" });
     expect(dialog).toHaveTextContent("已停止的发行版会临时启动，完成后恢复停止");
-    expect(dialog).toHaveTextContent("只修改该发行版默认用户的 config.toml 和 auth.json");
+    expect(dialog).toHaveTextContent("命令式凭据工件；auth.json 保持不变");
     const distribution = screen.getByLabelText("WSL2 发行版") as HTMLSelectElement;
     expect(Array.from(distribution.options, (option) => option.textContent)).toEqual(["Ubuntu · 可管理"]);
     expect(screen.queryByText("请选择发行版")).not.toBeInTheDocument();
@@ -2218,6 +2220,8 @@ describe("WSL2 供应商选择", () => {
       running: false,
       availability: "ambiguous",
       currentProvider: null,
+      actualProviderId: null,
+      configurationState: "unknown",
       requiresAttention: true,
       pendingRestart: false,
       revision: "ambiguous-revision",
@@ -2240,6 +2244,106 @@ describe("WSL2 供应商选择", () => {
     );
     expect(screen.queryByText("Ubuntu · 无法安全解歧")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("WSL2 发行版")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "应用到 WSL2" })).toBeDisabled();
+  });
+
+  it("展示 Running WSL2 的实际共同管理状态且不接收凭据", async () => {
+    const provider = {
+      id: "22222222-2222-4222-8222-222222222222",
+      name: "WSL Provider",
+      baseUrl: "https://provider.example/v1",
+      defaultModel: "model-a",
+      verifiedAtEpochSeconds: 1_786_140_000,
+      isCurrent: false,
+    };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([provider]);
+      if (command === "get_environment_snapshot") {
+        return Promise.resolve({
+          state: "managed",
+          mode: "provider",
+          messageId: "environment.managed",
+          revision: "revision",
+          requiresTakeoverConfirmation: false,
+          takeoverAvailable: true,
+          impacts: [],
+          currentProvider: provider,
+          restoreAvailability: "no_backup",
+          restorePreview: null,
+          loginStatus: "logged_in",
+          pendingRestart: false,
+          requiresConsumerConfirmation: false,
+          consumers: { desktop: "stopped", cli: "stopped" },
+        });
+      }
+      if (command === "list_wsl_environments") {
+        const current = {
+          environmentId: "{11111111-1111-1111-1111-111111111111}",
+          displayName: "Ubuntu",
+          commandName: "Ubuntu",
+          defaultUid: 1000,
+          running: true,
+          availability: "manageable",
+          currentProvider: provider,
+          actualProviderId: provider.id,
+          configurationState: "updated",
+          requiresAttention: false,
+          pendingRestart: true,
+          revision: "wsl-revision",
+          messageId: null,
+        };
+        return Promise.resolve([
+          current,
+          {
+            ...current,
+            environmentId: "{33333333-3333-4333-8333-333333333333}",
+            displayName: "Debian conflict",
+            currentProvider: null,
+            actualProviderId: null,
+            configurationState: "conflict",
+            requiresAttention: true,
+            messageId: "wsl.managed_conflict",
+          },
+          {
+            ...current,
+            environmentId: "{44444444-4444-4444-8444-444444444444}",
+            displayName: "Debian busy",
+            configurationState: "busy",
+            messageId: "wsl.lock_busy",
+          },
+        ]);
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+    const open = await screen.findByRole("button", { name: "选择 WSL2 供应商" });
+    await waitFor(() => expect(open).toBeEnabled());
+    fireEvent.click(open);
+
+    const dialog = await screen.findByRole("dialog", { name: "选择 WSL2 供应商" });
+    expect(dialog).toHaveTextContent("当前，有更新");
+    expect(dialog).toHaveTextContent("当前供应商：WSL Provider");
+    expect(dialog).toHaveTextContent("命令式凭据工件");
+    expect(dialog).toHaveTextContent("auth.json 保持不变");
+    expect(dialog.textContent).not.toContain("API Key");
+
+    const distribution = screen.getByLabelText("WSL2 发行版");
+    expect(Array.from((distribution as HTMLSelectElement).options, (option) => option.textContent)).toEqual([
+      "Ubuntu · 可管理",
+      "Debian conflict · 可管理",
+      "Debian busy · 可管理",
+    ]);
+    fireEvent.change(distribution, {
+      target: { value: "{33333333-3333-4333-8333-333333333333}" },
+    });
+    expect(dialog).toHaveTextContent("管理冲突");
+    expect(screen.getByRole("button", { name: "应用到 WSL2" })).toBeDisabled();
+    fireEvent.change(distribution, {
+      target: { value: "{44444444-4444-4444-8444-444444444444}" },
+    });
+    expect(dialog).toHaveTextContent("正在被其他操作占用");
     expect(screen.getByRole("button", { name: "应用到 WSL2" })).toBeDisabled();
   });
 

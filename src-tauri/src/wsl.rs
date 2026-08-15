@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, Mutex};
@@ -14,111 +15,14 @@ use crate::state::StateStore;
 
 #[cfg(windows)]
 const WSL_REGISTRY_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Lxss";
-const HELPER_VERSION: &str = "gpteasy-wsl-guest-writer-v1";
-const HELPER_PATH: &str = "$HOME/.local/lib/gpteasy/guest-writer-v1";
-const BUNDLE_MAGIC: &str = "GPTEASY_WSL_BUNDLE_V1";
+const HELPER_VERSION: &str = "gpteasy-wsl-guest-writer-v2";
+const HELPER_PATH: &str = "$HOME/.local/lib/gpteasy/guest-writer-v2";
+const BUNDLE_MAGIC: &str = "GPTEASY_WSL_BUNDLE_V2";
 
-const GUEST_WRITER: &[u8] = br#"#!/bin/sh
-set -eu
-
-EXPECTED_CONFIG=${1-}
-EXPECTED_CREDENTIALS=${2-}
-BUNDLE_MAGIC='GPTEASY_WSL_BUNDLE_V1'
-TARGET_DIR="$HOME/.codex"
-CONFIG="$TARGET_DIR/config.toml"
-CREDENTIALS="$TARGET_DIR/auth.json"
-BACKUP_DIR="$TARGET_DIR/backups"
-umask 077
-
-read -r magic
-[ "$magic" = "$BUNDLE_MAGIC" ] || { printf '%s\n' '{"status":"candidate_rejected","reason":"bundle_magic"}'; exit 40; }
-read -r config_length
-read -r credentials_length
-case "$config_length:$credentials_length" in
-  *[!0-9:]*|:*) printf '%s\n' '{"status":"candidate_rejected","reason":"bundle_length"}'; exit 40;;
-esac
-
-mkdir -p "$TARGET_DIR" "$BACKUP_DIR"
-config_tmp=$(mktemp "$TARGET_DIR/.config.gpteasy.XXXXXX")
-credentials_tmp=$(mktemp "$TARGET_DIR/.auth.gpteasy.XXXXXX")
-config_old=$(mktemp "$TARGET_DIR/.config-old.gpteasy.XXXXXX")
-credentials_old=$(mktemp "$TARGET_DIR/.auth-old.gpteasy.XXXXXX")
-cleanup() { rm -f "$config_tmp" "$credentials_tmp" "$config_old" "$credentials_old"; }
-rollback() {
-  if [ "$config_existed" = true ]; then mv "$config_old" "$CONFIG"; else rm -f "$CONFIG"; fi
-  if [ "$credentials_existed" = true ]; then mv "$credentials_old" "$CREDENTIALS"; else rm -f "$CREDENTIALS"; fi
-}
-trap cleanup EXIT HUP INT TERM
-
-dd bs=1 count="$config_length" of="$config_tmp" 2>/dev/null
-dd bs=1 count="$credentials_length" of="$credentials_tmp" 2>/dev/null
-start_count=$(sed 's/\r$//' "$config_tmp" | grep -c '^# >>> GPTEasy managed provider >>>$' || true)
-end_count=$(sed 's/\r$//' "$config_tmp" | grep -c '^# <<< GPTEasy managed provider <<<$' || true)
-if [ "$start_count" -ne 1 ] || [ "$end_count" -ne 1 ]; then
-  printf '%s\n' '{"status":"candidate_rejected","reason":"managed_marker_count"}'
-  exit 40
-fi
-
-hash_file() { sha256sum "$1" | awk '{print $1}'; }
-hash_missing() { printf '' | sha256sum | awk '{print $1}'; }
-current_config=$(if [ -f "$CONFIG" ]; then hash_file "$CONFIG"; else hash_missing; fi)
-current_credentials=$(if [ -f "$CREDENTIALS" ]; then hash_file "$CREDENTIALS"; else hash_missing; fi)
-[ "$current_config" = "$EXPECTED_CONFIG" ] || { printf '%s\n' '{"status":"concurrent_change","phase":"initial_hash"}'; exit 41; }
-[ "$current_credentials" = "$EXPECTED_CREDENTIALS" ] || { printf '%s\n' '{"status":"concurrent_change","phase":"initial_hash"}'; exit 41; }
-
-backup_stamp=$(date -u +%Y%m%dT%H%M%S%N)
-backup_config=''
-backup_credentials=''
-config_existed=false
-credentials_existed=false
-if [ -f "$CONFIG" ]; then
-  config_existed=true
-  backup_config="$BACKUP_DIR/config-$backup_stamp-$$.toml"
-  cp -p "$CONFIG" "$backup_config"
-  chmod 600 "$backup_config"
-  cp -p "$CONFIG" "$config_old"
-  chmod --reference="$CONFIG" "$config_tmp"
-else
-  chmod 600 "$config_tmp"
-fi
-if [ -f "$CREDENTIALS" ]; then
-  credentials_existed=true
-  backup_credentials="$BACKUP_DIR/auth-$backup_stamp-$$.json"
-  cp -p "$CREDENTIALS" "$backup_credentials"
-  chmod 600 "$backup_credentials"
-  cp -p "$CREDENTIALS" "$credentials_old"
-  chmod --reference="$CREDENTIALS" "$credentials_tmp"
-else
-  chmod 600 "$credentials_tmp"
-fi
-sync -f "$config_tmp"
-sync -f "$credentials_tmp"
-
-current_config=$(if [ -f "$CONFIG" ]; then hash_file "$CONFIG"; else hash_missing; fi)
-current_credentials=$(if [ -f "$CREDENTIALS" ]; then hash_file "$CREDENTIALS"; else hash_missing; fi)
-if [ "$current_config" != "$EXPECTED_CONFIG" ] || [ "$current_credentials" != "$EXPECTED_CREDENTIALS" ]; then
-  printf '%s\n' '{"status":"concurrent_change","phase":"pre_replace"}'
-  exit 43
-fi
-
-if ! mv "$config_tmp" "$CONFIG"; then
-  printf '%s\n' '{"status":"write_failed","phase":"config_replace"}'
-  exit 44
-fi
-if ! mv "$credentials_tmp" "$CREDENTIALS"; then
-  rollback
-  printf '%s\n' '{"status":"rollback","phase":"credentials_replace"}'
-  exit 45
-fi
-sync -f "$TARGET_DIR"
-
-for pattern in 'config-*.toml' 'auth-*.json'; do
-  find "$BACKUP_DIR" -maxdepth 1 -type f -name "$pattern" -printf '%f\n' |
-    sort -r | awk 'NR > 5 { print }' | while IFS= read -r stale; do rm -f "$BACKUP_DIR/$stale"; done
-done
-backup_count=$(find "$BACKUP_DIR" -maxdepth 1 -type f \( -name 'config-*.toml' -o -name 'auth-*.json' \) | wc -l | awk '{print $1}')
-printf '{"status":"written","backup_count":%s,"helper":"%s"}\n' "$backup_count" 'gpteasy-wsl-guest-writer-v1'
-"#;
+const GUEST_LOCK: &str = include_str!("wsl_guest_lock.sh");
+#[cfg(windows)]
+const GUEST_PRIVATE_READER: &str = include_str!("wsl_guest_private_reader.sh");
+const GUEST_WRITER: &[u8] = include_bytes!("wsl_guest_writer.sh");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -133,6 +37,19 @@ pub enum WslAvailability {
     NeedsRefresh,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WslConfigurationState {
+    Unknown,
+    None,
+    Current,
+    Updated,
+    Legacy,
+    ProviderMissing,
+    Conflict,
+    Busy,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WslEnvironmentSummary {
@@ -143,6 +60,8 @@ pub struct WslEnvironmentSummary {
     pub running: bool,
     pub availability: WslAvailability,
     pub current_provider: Option<ProviderSummary>,
+    pub actual_provider_id: Option<String>,
+    pub configuration_state: WslConfigurationState,
     pub requires_attention: bool,
     pub pending_restart: bool,
     pub revision: String,
@@ -172,6 +91,8 @@ pub enum WslFailureCategory {
     ConcurrentModification,
     RecoveryPending,
     NeedsAttention,
+    Busy,
+    Interrupted,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -179,6 +100,29 @@ pub enum WslFailureCategory {
 pub struct WslFailure {
     pub category: WslFailureCategory,
     pub message_id: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WslFailurePoint {
+    AfterRefreshLockAcquired,
+    AfterPendingRegistered,
+    AfterLockAcquired,
+    AfterPrepared,
+    AfterArtifactsReplaced,
+    AfterStateCommitted,
+}
+
+pub trait WslFaultInjector: Send + Sync {
+    fn check(&self, point: WslFailurePoint) -> Result<(), WslFailure>;
+}
+
+#[derive(Debug)]
+struct NoWslFaults;
+
+impl WslFaultInjector for NoWslFaults {
+    fn check(&self, _point: WslFailurePoint) -> Result<(), WslFailure> {
+        Ok(())
+    }
 }
 
 impl WslFailure {
@@ -212,13 +156,27 @@ pub(crate) trait WslRuntime: Send + Sync {
     fn probe(&self) -> Result<Vec<WslProbe>, WslFailure>;
     fn start(&self, environment: &WslProbe) -> Result<(), WslFailure>;
     fn terminate(&self, environment: &WslProbe) -> Result<(), WslFailure>;
+    fn acquire_lock(
+        &self,
+        _environment: &WslProbe,
+        _token: &str,
+        _operation: &str,
+    ) -> Result<(), WslFailure> {
+        Ok(())
+    }
+    fn release_lock(&self, _environment: &WslProbe, _token: &str) -> Result<(), WslFailure> {
+        Ok(())
+    }
+    fn check_codex_version(&self, _environment: &WslProbe) -> Result<(), WslFailure> {
+        Ok(())
+    }
     fn read_artifacts(&self, environment: &WslProbe) -> Result<WslArtifacts, WslFailure>;
     fn ensure_helper(&self, environment: &WslProbe) -> Result<(), WslFailure>;
     fn write_bundle(
         &self,
         environment: &WslProbe,
+        lock_token: &str,
         old_config_hash: &str,
-        old_credentials_hash: &str,
         bundle: &[u8],
     ) -> Result<String, WslFailure>;
 }
@@ -228,6 +186,7 @@ pub struct WslApplication {
     state_store: StateStore,
     operation_lock: Arc<Mutex<()>>,
     runtime: Arc<dyn WslRuntime>,
+    faults: Arc<dyn WslFaultInjector>,
 }
 
 impl std::fmt::Debug for WslApplication {
@@ -240,15 +199,31 @@ impl std::fmt::Debug for WslApplication {
 
 impl WslApplication {
     pub fn new(state_store: StateStore) -> Self {
-        Self::with_runtime(state_store, Arc::new(SystemWslRuntime))
+        Self::with_runtime(state_store, Arc::new(SystemWslRuntime::default()))
+    }
+
+    #[cfg(all(windows, feature = "wsl-guest-harness"))]
+    #[doc(hidden)]
+    pub fn with_wsl_program_for_harness(state_store: StateStore, program: OsString) -> Self {
+        Self::with_runtime(state_store, Arc::new(SystemWslRuntime { program }))
     }
 
     #[doc(hidden)]
     pub(crate) fn with_runtime(state_store: StateStore, runtime: Arc<dyn WslRuntime>) -> Self {
+        Self::with_dependencies(state_store, runtime, Arc::new(NoWslFaults))
+    }
+
+    #[doc(hidden)]
+    pub(crate) fn with_dependencies(
+        state_store: StateStore,
+        runtime: Arc<dyn WslRuntime>,
+        faults: Arc<dyn WslFaultInjector>,
+    ) -> Self {
         Self {
             state_store,
             operation_lock: Arc::new(Mutex::new(())),
             runtime,
+            faults,
         }
     }
 
@@ -260,7 +235,56 @@ impl WslApplication {
         let probes = self.runtime.probe()?;
         let mut connection = self.open_state()?;
         reconcile_probes(&mut connection, &probes)?;
+        for probe in probes
+            .iter()
+            .filter(|probe| probe.running && probe.availability == WslAvailability::Manageable)
+        {
+            if let Err(failure) = self.refresh_running_probe(&connection, probe) {
+                if failure.category == WslFailureCategory::Busy {
+                    mark_wsl_busy(&connection, &probe.environment_id)?;
+                } else if failure.message_id == "wsl.credentials_invalid" {
+                    mark_wsl_conflict(&connection, &probe.environment_id, failure.message_id)?;
+                } else {
+                    mark_wsl_attention(&connection, &probe.environment_id, failure.message_id)?;
+                }
+            }
+        }
         load_summaries(&connection, &probes)
+    }
+
+    fn refresh_running_probe(
+        &self,
+        connection: &Connection,
+        probe: &WslProbe,
+    ) -> Result<(), WslFailure> {
+        self.recover_refresh_lock(connection, probe)?;
+        let token = Uuid::new_v4().to_string();
+        set_refresh_lock_token(connection, &probe.environment_id, Some(&token))?;
+        if let Err(failure) = self.runtime.acquire_lock(probe, &token, "refresh") {
+            set_refresh_lock_token(connection, &probe.environment_id, None)?;
+            return Err(failure);
+        }
+        self.faults
+            .check(WslFailurePoint::AfterRefreshLockAcquired)?;
+        let result = self
+            .runtime
+            .read_artifacts(probe)
+            .and_then(|artifacts| reconcile_actual_state(connection, probe, &artifacts));
+        self.runtime.release_lock(probe, &token)?;
+        set_refresh_lock_token(connection, &probe.environment_id, None)?;
+        result
+    }
+
+    fn recover_refresh_lock(
+        &self,
+        connection: &Connection,
+        probe: &WslProbe,
+    ) -> Result<(), WslFailure> {
+        let Some(token) = load_refresh_lock_token(connection, &probe.environment_id)? else {
+            return Ok(());
+        };
+        self.runtime.release_lock(probe, &token)?;
+        set_refresh_lock_token(connection, &probe.environment_id, None)
     }
 
     pub fn recover_pending(&self) -> Result<(), WslFailure> {
@@ -272,6 +296,12 @@ impl WslApplication {
         let mut connection = self.open_state()?;
         reconcile_probes(&mut connection, &probes)?;
         let pending = load_pending_operations(&connection)?;
+        for probe in probes
+            .iter()
+            .filter(|probe| probe.running && probe.availability == WslAvailability::Manageable)
+        {
+            self.recover_refresh_lock(&connection, probe)?;
+        }
         for operation in pending {
             let Some(probe) = probes
                 .iter()
@@ -468,6 +498,93 @@ impl WslApplication {
         provider: &WslProvider,
         originally_running: bool,
     ) -> Result<WslApplyResult, WslFailure> {
+        self.runtime.check_codex_version(probe)?;
+        if let Some(pending) = load_pending_operation(connection, &probe.environment_id)? {
+            self.reconcile_pending_for_probe(connection, &pending, probe, false)?;
+        }
+        self.runtime.ensure_helper(probe)?;
+        let token = Uuid::new_v4().to_string();
+        let operation_id = Uuid::new_v4().to_string();
+        let old_provider_id = connection
+            .query_row(
+                "SELECT actual_provider_id FROM wsl_environments WHERE environment_id = ?1",
+                [probe.environment_id.as_str()],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .map_err(|_| state_unavailable())?;
+        connection
+            .execute(
+                "INSERT OR REPLACE INTO wsl_pending_operation(
+                    environment_id, operation_id, stage, old_provider_id, target_provider_id,
+                    originally_running, expected_default_uid, expected_revision, started_at,
+                    lock_token
+                 ) VALUES (?1, ?2, 'registered', ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    probe.environment_id,
+                    operation_id,
+                    old_provider_id,
+                    provider.id,
+                    originally_running,
+                    probe.default_uid,
+                    revision_for_probe(probe),
+                    epoch_seconds().to_string(),
+                    token,
+                ],
+            )
+            .map_err(|_| state_unavailable())?;
+        self.faults.check(WslFailurePoint::AfterPendingRegistered)?;
+        if let Err(failure) = self.runtime.acquire_lock(probe, &token, "switch") {
+            connection
+                .execute(
+                    "DELETE FROM wsl_pending_operation WHERE environment_id = ?1",
+                    [probe.environment_id.as_str()],
+                )
+                .map_err(|_| state_unavailable())?;
+            return Err(failure);
+        }
+        connection
+            .execute(
+                "UPDATE wsl_pending_operation SET stage = 'locked' WHERE environment_id = ?1",
+                [probe.environment_id.as_str()],
+            )
+            .map_err(|_| state_unavailable())?;
+        self.faults.check(WslFailurePoint::AfterLockAcquired)?;
+        let result = self.apply_started_locked(
+            connection,
+            probe,
+            provider,
+            originally_running,
+            &operation_id,
+            &token,
+        );
+        if matches!(&result, Err(failure) if failure.category == WslFailureCategory::Interrupted) {
+            return Err(result.expect_err("matched interrupted failure"));
+        }
+        if let Err(failure) = result {
+            if let Some(pending) = load_pending_operation(connection, &probe.environment_id)? {
+                self.reconcile_pending_for_probe(connection, &pending, probe, false)?;
+            }
+            return Err(failure);
+        }
+        self.runtime.release_lock(probe, &token)?;
+        connection
+            .execute(
+                "DELETE FROM wsl_pending_operation WHERE environment_id = ?1",
+                [probe.environment_id.as_str()],
+            )
+            .map_err(|_| state_unavailable())?;
+        self.load_apply_result(connection, probe, originally_running)
+    }
+
+    fn apply_started_locked(
+        &self,
+        connection: &mut Connection,
+        probe: &WslProbe,
+        provider: &WslProvider,
+        originally_running: bool,
+        operation_id: &str,
+        lock_token: &str,
+    ) -> Result<(), WslFailure> {
         let current_probe = self
             .runtime
             .probe()?
@@ -488,73 +605,64 @@ impl WslApplication {
                 "wsl.environment_changed",
             ));
         }
-        if let Some(pending) = load_pending_operation(connection, &current_probe.environment_id)? {
-            self.reconcile_pending_for_probe(connection, &pending, &current_probe, false)?;
-        }
         let original = self.runtime.read_artifacts(&current_probe)?;
-        let config = render_config(original.config.as_deref(), provider)?;
-        let credentials = render_credentials(original.credentials.as_deref(), &provider.api_key)?;
+        if matches!(
+            inspect_actual_managed_state(
+                original.config.as_deref(),
+                original.credentials.as_deref()
+            ),
+            ActualManagedState::Conflict
+        ) {
+            return Err(WslFailure::new(
+                WslFailureCategory::NeedsAttention,
+                "wsl.managed_conflict",
+            ));
+        }
+        let source_id = format!("desktop-{operation_id}");
+        let config = render_config(original.config.as_deref(), provider, &source_id)?;
+        let credentials = render_credentials(&provider.api_key)?;
         let old_config_hash = hash_optional(original.config.as_deref());
         let old_credentials_hash = hash_optional(original.credentials.as_deref());
         let new_config_hash = hash_bytes(&config);
         let new_credentials_hash = hash_bytes(&credentials);
-        let expected_revision = revision_for_probe(&current_probe);
-        self.runtime.ensure_helper(&current_probe)?;
-
-        let operation_id = Uuid::new_v4().to_string();
-        let old_provider_id = connection
-            .query_row(
-                "SELECT current_provider_id FROM wsl_environments WHERE environment_id = ?1",
-                [current_probe.environment_id.as_str()],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .map_err(|_| state_unavailable())?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| state_unavailable())?;
         transaction
             .execute(
-                "INSERT OR REPLACE INTO wsl_pending_operation(
-                    environment_id, operation_id, stage, old_provider_id, target_provider_id, old_config_fingerprint,
-                    new_config_fingerprint, old_credentials_fingerprint,
-                    new_credentials_fingerprint, originally_running, expected_default_uid,
-                    expected_revision, started_at
-                 ) VALUES (?1, ?2, 'prepared', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                "UPDATE wsl_pending_operation SET stage = 'prepared',
+                    old_config_fingerprint = ?3, new_config_fingerprint = ?4,
+                    old_credentials_fingerprint = ?5, new_credentials_fingerprint = ?6
+                 WHERE environment_id = ?1 AND operation_id = ?2",
                 params![
                     current_probe.environment_id,
                     operation_id,
-                    old_provider_id,
-                    provider.id,
                     old_config_hash,
                     new_config_hash,
                     old_credentials_hash,
                     new_credentials_hash,
-                    originally_running,
-                    current_probe.default_uid,
-                    expected_revision,
-                    epoch_seconds().to_string(),
                 ],
             )
             .map_err(|_| state_unavailable())?;
         transaction.commit().map_err(|_| state_unavailable())?;
+        self.faults.check(WslFailurePoint::AfterPrepared)?;
 
         let bundle = bundle_bytes(&config, &credentials);
-        let writer_output = match self.runtime.write_bundle(
-            &current_probe,
-            &old_config_hash,
-            &old_credentials_hash,
-            &bundle,
-        ) {
-            Ok(output) => output,
-            Err(failure) => {
-                mark_pending_attention(
-                    connection,
-                    &current_probe.environment_id,
-                    failure.message_id,
-                )?;
-                return Err(failure);
-            }
-        };
+        let writer_output =
+            match self
+                .runtime
+                .write_bundle(&current_probe, lock_token, &old_config_hash, &bundle)
+            {
+                Ok(output) => output,
+                Err(failure) => {
+                    mark_pending_attention(
+                        connection,
+                        &current_probe.environment_id,
+                        failure.message_id,
+                    )?;
+                    return Err(failure);
+                }
+            };
         if !writer_output.contains("\"status\":\"written\"")
             || !writer_output.contains(HELPER_VERSION)
         {
@@ -568,6 +676,13 @@ impl WslApplication {
                 "wsl.guest_write_failed",
             ));
         }
+        connection
+            .execute(
+                "UPDATE wsl_pending_operation SET stage = 'artifacts_replaced' WHERE environment_id = ?1",
+                [current_probe.environment_id.as_str()],
+            )
+            .map_err(|_| state_unavailable())?;
+        self.faults.check(WslFailurePoint::AfterArtifactsReplaced)?;
         let latest = self
             .runtime
             .probe()?
@@ -593,19 +708,31 @@ impl WslApplication {
                 "wsl.environment_changed",
             ));
         }
-        connection
-            .execute(
-                "UPDATE wsl_pending_operation SET stage = 'artifacts_replaced' WHERE environment_id = ?1",
-                [current_probe.environment_id.as_str()],
-            )
+        let written = self.runtime.read_artifacts(&latest)?;
+        if hash_optional(written.config.as_deref()) != new_config_hash
+            || hash_optional(written.credentials.as_deref()) != new_credentials_hash
+        {
+            mark_pending_attention(
+                connection,
+                &current_probe.environment_id,
+                "wsl.guest_reread_failed",
+            )?;
+            return Err(WslFailure::new(
+                WslFailureCategory::GuestWriteFailed,
+                "wsl.guest_reread_failed",
+            ));
+        }
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| state_unavailable())?;
-        connection
+        transaction
             .execute(
                 "UPDATE wsl_environments
                  SET current_provider_id = ?2, config_fingerprint = ?3,
                      credentials_fingerprint = ?4, pending_restart = ?5,
                      requires_attention = 0, last_error = NULL,
-                     availability = 'manageable', updated_at = ?6
+                     availability = 'manageable', actual_provider_id = ?2,
+                     configuration_state = 'current', updated_at = ?6
                  WHERE environment_id = ?1",
                 params![
                     current_probe.environment_id,
@@ -617,21 +744,25 @@ impl WslApplication {
                 ],
             )
             .map_err(|_| state_unavailable())?;
-        connection
+        transaction
             .execute(
                 "UPDATE wsl_pending_operation SET stage = 'state_committed' WHERE environment_id = ?1",
                 [current_probe.environment_id.as_str()],
             )
             .map_err(|_| state_unavailable())?;
-        connection
-            .execute(
-                "DELETE FROM wsl_pending_operation WHERE environment_id = ?1",
-                [current_probe.environment_id.as_str()],
-            )
-            .map_err(|_| state_unavailable())?;
-        let summary = load_summary(connection, &current_probe)?;
+        transaction.commit().map_err(|_| state_unavailable())?;
+        self.faults.check(WslFailurePoint::AfterStateCommitted)?;
+        Ok(())
+    }
+
+    fn load_apply_result(
+        &self,
+        connection: &Connection,
+        probe: &WslProbe,
+        originally_running: bool,
+    ) -> Result<WslApplyResult, WslFailure> {
         Ok(WslApplyResult {
-            environment: summary,
+            environment: load_summary(connection, probe)?,
             pending_restart: originally_running,
         })
     }
@@ -643,84 +774,93 @@ impl WslApplication {
         probe: &WslProbe,
         restore_lifecycle: bool,
     ) -> Result<(), WslFailure> {
-        let result = (|| {
-            if pending.expected_default_uid != probe.default_uid {
-                mark_pending_attention(
-                    connection,
-                    &probe.environment_id,
-                    "wsl.default_user_changed",
-                )?;
-                return Err(WslFailure::new(
-                    WslFailureCategory::DefaultUserChanged,
-                    "wsl.default_user_changed",
-                ));
-            }
-            let artifacts = self.runtime.read_artifacts(probe)?;
-            let config_hash = hash_optional(artifacts.config.as_deref());
-            let credentials_hash = hash_optional(artifacts.credentials.as_deref());
-            let matches_old = config_hash == pending.old_config_hash
-                && credentials_hash == pending.old_credentials_hash;
-            let matches_new = config_hash == pending.new_config_hash
-                && credentials_hash == pending.new_credentials_hash;
-            if !matches_old && !matches_new {
-                mark_pending_attention(connection, &probe.environment_id, "wsl.recovery_conflict")?;
-                return Err(WslFailure::new(
-                    WslFailureCategory::NeedsAttention,
-                    "wsl.recovery_conflict",
-                ));
-            }
-            let (provider_id, config_fingerprint, credentials_fingerprint, pending_restart) =
-                if matches_new {
-                    (
-                        Some(pending.target_provider_id.as_str()),
-                        pending.new_config_hash.as_str(),
-                        pending.new_credentials_hash.as_str(),
-                        pending.originally_running,
-                    )
-                } else {
-                    (
-                        pending.old_provider_id.as_deref(),
-                        pending.old_config_hash.as_str(),
-                        pending.old_credentials_hash.as_str(),
-                        false,
-                    )
+        if pending.expected_default_uid != probe.default_uid {
+            mark_pending_attention(
+                connection,
+                &probe.environment_id,
+                "wsl.default_user_changed",
+            )?;
+            return Err(WslFailure::new(
+                WslFailureCategory::DefaultUserChanged,
+                "wsl.default_user_changed",
+            ));
+        }
+        let token = pending.lock_token.as_deref().ok_or_else(|| {
+            WslFailure::new(
+                WslFailureCategory::NeedsAttention,
+                "wsl.lock_recovery_required",
+            )
+        })?;
+        let hashes = (
+            pending.old_config_hash.as_deref(),
+            pending.new_config_hash.as_deref(),
+            pending.old_credentials_hash.as_deref(),
+            pending.new_credentials_hash.as_deref(),
+        );
+        if pending.stage != "registered" && pending.stage != "locked" {
+            if pending.stage != "state_committed" {
+                let (
+                    Some(old_config),
+                    Some(new_config),
+                    Some(old_credentials),
+                    Some(new_credentials),
+                ) = hashes
+                else {
+                    mark_pending_attention(
+                        connection,
+                        &probe.environment_id,
+                        "wsl.recovery_conflict",
+                    )?;
+                    return Err(WslFailure::new(
+                        WslFailureCategory::NeedsAttention,
+                        "wsl.recovery_conflict",
+                    ));
                 };
-            let transaction = connection
-                .unchecked_transaction()
-                .map_err(|_| state_unavailable())?;
-            transaction
+                let artifacts = self.runtime.read_artifacts(probe)?;
+                let config_hash = hash_optional(artifacts.config.as_deref());
+                let credentials_hash = hash_optional(artifacts.credentials.as_deref());
+                let matches_old = config_hash == old_config && credentials_hash == old_credentials;
+                let matches_new = config_hash == new_config && credentials_hash == new_credentials;
+                if !matches_old && !matches_new {
+                    mark_pending_attention(
+                        connection,
+                        &probe.environment_id,
+                        "wsl.recovery_conflict",
+                    )?;
+                    return Err(WslFailure::new(
+                        WslFailureCategory::NeedsAttention,
+                        "wsl.recovery_conflict",
+                    ));
+                }
+                reconcile_actual_state(connection, probe, &artifacts)?;
+                connection
+                    .execute(
+                        "UPDATE wsl_environments SET pending_restart = ?2 WHERE environment_id = ?1",
+                        params![
+                            probe.environment_id,
+                            matches_new && pending.originally_running
+                        ],
+                    )
+                    .map_err(|_| state_unavailable())?;
+            }
+            connection
                 .execute(
-                    "UPDATE wsl_environments SET current_provider_id = ?2,
-                        config_fingerprint = ?3, credentials_fingerprint = ?4,
-                        pending_restart = ?5, requires_attention = 0,
-                        availability = 'manageable', last_error = NULL, updated_at = ?6
-                     WHERE environment_id = ?1",
-                    params![
-                        probe.environment_id,
-                        provider_id,
-                        config_fingerprint,
-                        credentials_fingerprint,
-                        pending_restart,
-                        epoch_seconds().to_string(),
-                    ],
-                )
-                .map_err(|_| state_unavailable())?;
-            transaction
-                .execute(
-                    "DELETE FROM wsl_pending_operation WHERE environment_id = ?1",
+                    "UPDATE wsl_pending_operation SET stage = 'state_committed' WHERE environment_id = ?1",
                     [probe.environment_id.as_str()],
                 )
                 .map_err(|_| state_unavailable())?;
-            transaction.commit().map_err(|_| state_unavailable())
-        })();
-
-        let lifecycle = if restore_lifecycle && !pending.originally_running && probe.running {
-            self.runtime.terminate(probe)
-        } else {
-            Ok(())
-        };
-        result?;
-        lifecycle
+        }
+        self.runtime.release_lock(probe, token)?;
+        connection
+            .execute(
+                "DELETE FROM wsl_pending_operation WHERE environment_id = ?1",
+                [probe.environment_id.as_str()],
+            )
+            .map_err(|_| state_unavailable())?;
+        if restore_lifecycle && !pending.originally_running && probe.running {
+            self.runtime.terminate(probe)?;
+        }
+        Ok(())
     }
 
     fn open_state(&self) -> Result<Connection, WslFailure> {
@@ -743,14 +883,14 @@ impl WslApplication {
 #[derive(Debug, Clone)]
 struct PendingWslOperation {
     environment_id: String,
-    old_provider_id: Option<String>,
-    target_provider_id: String,
-    old_config_hash: String,
-    new_config_hash: String,
-    old_credentials_hash: String,
-    new_credentials_hash: String,
+    stage: String,
+    old_config_hash: Option<String>,
+    new_config_hash: Option<String>,
+    old_credentials_hash: Option<String>,
+    new_credentials_hash: Option<String>,
     originally_running: bool,
     expected_default_uid: Option<u32>,
+    lock_token: Option<String>,
 }
 
 fn load_pending_operations(
@@ -758,10 +898,9 @@ fn load_pending_operations(
 ) -> Result<Vec<PendingWslOperation>, WslFailure> {
     let mut statement = connection
         .prepare(
-            "SELECT environment_id, old_provider_id, target_provider_id,
-                    old_config_fingerprint, new_config_fingerprint,
+            "SELECT environment_id, stage, old_config_fingerprint, new_config_fingerprint,
                     old_credentials_fingerprint, new_credentials_fingerprint,
-                    originally_running, expected_default_uid
+                    originally_running, expected_default_uid, lock_token
              FROM wsl_pending_operation",
         )
         .map_err(|_| state_unavailable())?;
@@ -778,10 +917,9 @@ fn load_pending_operation(
 ) -> Result<Option<PendingWslOperation>, WslFailure> {
     connection
         .query_row(
-            "SELECT environment_id, old_provider_id, target_provider_id,
-                    old_config_fingerprint, new_config_fingerprint,
+            "SELECT environment_id, stage, old_config_fingerprint, new_config_fingerprint,
                     old_credentials_fingerprint, new_credentials_fingerprint,
-                    originally_running, expected_default_uid
+                    originally_running, expected_default_uid, lock_token
              FROM wsl_pending_operation WHERE environment_id = ?1",
             [environment_id],
             pending_from_row,
@@ -790,17 +928,44 @@ fn load_pending_operation(
         .map_err(|_| state_unavailable())
 }
 
+fn load_refresh_lock_token(
+    connection: &Connection,
+    environment_id: &str,
+) -> Result<Option<String>, WslFailure> {
+    connection
+        .query_row(
+            "SELECT refresh_lock_token FROM wsl_environments WHERE environment_id = ?1",
+            [environment_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| state_unavailable())
+}
+
+fn set_refresh_lock_token(
+    connection: &Connection,
+    environment_id: &str,
+    token: Option<&str>,
+) -> Result<(), WslFailure> {
+    connection
+        .execute(
+            "UPDATE wsl_environments SET refresh_lock_token = ?2 WHERE environment_id = ?1",
+            params![environment_id, token],
+        )
+        .map(|_| ())
+        .map_err(|_| state_unavailable())
+}
+
 fn pending_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PendingWslOperation> {
     Ok(PendingWslOperation {
         environment_id: row.get(0)?,
-        old_provider_id: row.get(1)?,
-        target_provider_id: row.get(2)?,
-        old_config_hash: row.get(3)?,
-        new_config_hash: row.get(4)?,
-        old_credentials_hash: row.get(5)?,
-        new_credentials_hash: row.get(6)?,
-        originally_running: row.get(7)?,
-        expected_default_uid: row.get(8)?,
+        stage: row.get(1)?,
+        old_config_hash: row.get(2)?,
+        new_config_hash: row.get(3)?,
+        old_credentials_hash: row.get(4)?,
+        new_credentials_hash: row.get(5)?,
+        originally_running: row.get(6)?,
+        expected_default_uid: row.get(7)?,
+        lock_token: row.get(8)?,
     })
 }
 
@@ -907,7 +1072,8 @@ fn load_summary(
 ) -> Result<WslEnvironmentSummary, WslFailure> {
     let row = connection
         .query_row(
-            "SELECT current_provider_id, requires_attention, pending_restart, last_error, availability
+            "SELECT current_provider_id, requires_attention, pending_restart, last_error, availability,
+                    actual_provider_id, configuration_state
              FROM wsl_environments WHERE environment_id = ?1",
             [probe.environment_id.as_str()],
             |row| {
@@ -917,12 +1083,22 @@ fn load_summary(
                     row.get::<_, bool>(2)?,
                     row.get::<_, Option<String>>(3)?,
                     row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, String>(6)?,
                 ))
             },
         )
         .optional()
         .map_err(|_| state_unavailable())?
-        .unwrap_or((None, false, false, None, availability_name(probe.availability).to_owned()));
+        .unwrap_or((
+            None,
+            false,
+            false,
+            None,
+            availability_name(probe.availability).to_owned(),
+            None,
+            "unknown".to_owned(),
+        ));
     let current_provider = row
         .0
         .as_deref()
@@ -948,11 +1124,369 @@ fn load_summary(
         running: probe.running,
         availability: parse_availability(&row.4),
         current_provider,
+        actual_provider_id: row.5,
+        configuration_state: parse_configuration_state(&row.6),
         requires_attention: row.1 || parse_availability(&row.4) != WslAvailability::Manageable,
         pending_restart: row.2,
         revision: revision_for_probe(probe),
         message_id: probe.message_id.or(row.3.as_deref()).map(str::to_owned),
     })
+}
+
+fn parse_configuration_state(value: &str) -> WslConfigurationState {
+    match value {
+        "none" => WslConfigurationState::None,
+        "current" => WslConfigurationState::Current,
+        "updated" => WslConfigurationState::Updated,
+        "legacy" => WslConfigurationState::Legacy,
+        "provider_missing" => WslConfigurationState::ProviderMissing,
+        "conflict" => WslConfigurationState::Conflict,
+        "busy" => WslConfigurationState::Busy,
+        _ => WslConfigurationState::Unknown,
+    }
+}
+
+#[derive(Debug)]
+enum ActualManagedState {
+    None,
+    Current {
+        provider_id: String,
+        name: String,
+        base_url: String,
+        model: String,
+    },
+    Legacy {
+        provider_id: String,
+    },
+    Conflict,
+}
+
+fn reconcile_actual_state(
+    connection: &Connection,
+    probe: &WslProbe,
+    artifacts: &WslArtifacts,
+) -> Result<(), WslFailure> {
+    let config_hash = hash_optional(artifacts.config.as_deref());
+    let credential_hash = hash_optional(artifacts.credentials.as_deref());
+    let previous_config_hash = connection
+        .query_row(
+            "SELECT config_fingerprint FROM wsl_environments WHERE environment_id = ?1",
+            [probe.environment_id.as_str()],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(|_| state_unavailable())?
+        .flatten();
+    let observed = inspect_actual_managed_state(
+        artifacts.config.as_deref(),
+        artifacts.credentials.as_deref(),
+    );
+    let (actual_provider_id, current_provider_id, state, requires_attention, message_id) =
+        match observed {
+            ActualManagedState::None => (None, None, "none", false, None),
+            ActualManagedState::Conflict => {
+                (None, None, "conflict", true, Some("wsl.managed_conflict"))
+            }
+            ActualManagedState::Legacy { provider_id } => {
+                let known = provider_exists(connection, &provider_id)?;
+                (
+                    Some(provider_id.clone()),
+                    known.then_some(provider_id),
+                    if known { "legacy" } else { "provider_missing" },
+                    !known,
+                    (!known).then_some("wsl.provider_missing"),
+                )
+            }
+            ActualManagedState::Current {
+                provider_id,
+                name,
+                base_url,
+                model,
+            } => {
+                let provider = load_provider_optional(connection, &provider_id)?;
+                match provider {
+                    Some(provider) => {
+                        let matches = provider.name == name
+                            && provider.base_url == base_url
+                            && provider.default_model == model
+                            && artifacts.credentials.as_deref()
+                                == Some(provider.api_key.as_bytes());
+                        (
+                            Some(provider_id.clone()),
+                            Some(provider_id),
+                            if matches { "current" } else { "updated" },
+                            false,
+                            None,
+                        )
+                    }
+                    None => (
+                        Some(provider_id),
+                        None,
+                        "provider_missing",
+                        true,
+                        Some("wsl.provider_missing"),
+                    ),
+                }
+            }
+        };
+    let externally_changed = previous_config_hash
+        .as_deref()
+        .is_some_and(|previous| previous != config_hash);
+    connection
+        .execute(
+            "UPDATE wsl_environments SET actual_provider_id = ?2, current_provider_id = ?3,
+                configuration_state = ?4, config_fingerprint = ?5,
+                credentials_fingerprint = ?6,
+                pending_restart = CASE WHEN ?7 THEN 1 ELSE pending_restart END,
+                requires_attention = ?8, last_error = ?9, updated_at = ?10
+             WHERE environment_id = ?1",
+            params![
+                probe.environment_id,
+                actual_provider_id,
+                current_provider_id,
+                state,
+                config_hash,
+                credential_hash,
+                externally_changed,
+                requires_attention,
+                message_id,
+                epoch_seconds().to_string(),
+            ],
+        )
+        .map_err(|_| state_unavailable())?;
+    Ok(())
+}
+
+fn provider_exists(connection: &Connection, provider_id: &str) -> Result<bool, WslFailure> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM providers WHERE id = ?1)",
+            [provider_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| state_unavailable())
+}
+
+fn load_provider_optional(
+    connection: &Connection,
+    provider_id: &str,
+) -> Result<Option<WslProvider>, WslFailure> {
+    match load_provider(connection, provider_id) {
+        Ok(provider) => Ok(Some(provider)),
+        Err(failure) if failure.category == WslFailureCategory::ProviderNotFound => Ok(None),
+        Err(failure) => Err(failure),
+    }
+}
+
+fn inspect_actual_managed_state(
+    config: Option<&[u8]>,
+    credential: Option<&[u8]>,
+) -> ActualManagedState {
+    let Some(config) = config else {
+        return ActualManagedState::None;
+    };
+    let Ok(text) = std::str::from_utf8(config) else {
+        return ActualManagedState::Conflict;
+    };
+    let start = "# >>> GPTEasy managed provider >>>";
+    let end = "# <<< GPTEasy managed provider <<<";
+    let lines = text
+        .lines()
+        .map(|line| line.trim_end_matches('\r'))
+        .collect::<Vec<_>>();
+    let starts = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| **line == start)
+        .collect::<Vec<_>>();
+    let ends = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| **line == end)
+        .collect::<Vec<_>>();
+    if starts.is_empty() && ends.is_empty() {
+        return ActualManagedState::None;
+    }
+    if starts.len() != 1 || ends.len() != 1 || starts[0].0 >= ends[0].0 {
+        return ActualManagedState::Conflict;
+    }
+    let block = &lines[starts[0].0..=ends[0].0];
+    let metadata = |prefix: &str| {
+        block
+            .iter()
+            .filter_map(|line| line.strip_prefix(prefix).map(str::trim))
+            .collect::<Vec<_>>()
+    };
+    let provider_ids = metadata("# GPTEasy provider-id:");
+    if provider_ids.len() != 1 || Uuid::parse_str(provider_ids[0]).is_err() {
+        return ActualManagedState::Conflict;
+    }
+    let provider_id = provider_ids[0].to_owned();
+    let schemas = metadata("# GPTEasy schema-version:");
+    if schemas.is_empty() {
+        return inspect_legacy_managed_state(text, provider_id);
+    }
+    if !schema_v1_block_has_expected_shape(block) {
+        return ActualManagedState::Conflict;
+    }
+    let sources = metadata("# GPTEasy source-id:");
+    let credential_files = metadata("# GPTEasy credential-file:");
+    if schemas != ["1"] || sources.len() != 1 || credential_files.len() != 1 || credential.is_none()
+    {
+        return ActualManagedState::Conflict;
+    }
+    let expected_credential = format!(
+        ".gpteasy-shell/credentials/{}/{}.token",
+        sources[0], provider_id
+    );
+    if credential_files[0] != expected_credential
+        || credential_relative_from_config(config) != Some(expected_credential.as_str())
+    {
+        return ActualManagedState::Conflict;
+    }
+    let Ok(document) = text.parse::<toml_edit::DocumentMut>() else {
+        return ActualManagedState::Conflict;
+    };
+    let Some(model) = document.get("model").and_then(|value| value.as_str()) else {
+        return ActualManagedState::Conflict;
+    };
+    if document
+        .get("model_provider")
+        .and_then(|value| value.as_str())
+        != Some("gpteasy")
+    {
+        return ActualManagedState::Conflict;
+    }
+    let Some(provider) = document
+        .get("model_providers")
+        .and_then(|value| value.get("gpteasy"))
+    else {
+        return ActualManagedState::Conflict;
+    };
+    let (Some(name), Some(base_url)) = (
+        provider.get("name").and_then(|value| value.as_str()),
+        provider.get("base_url").and_then(|value| value.as_str()),
+    ) else {
+        return ActualManagedState::Conflict;
+    };
+    let expected_auth_script =
+        format!("cat -- \"${{CODEX_HOME:-$HOME/.codex}}/{expected_credential}\"");
+    let auth_args = provider
+        .get("auth")
+        .and_then(|value| value.get("args"))
+        .and_then(|value| value.as_array());
+    if provider.get("wire_api").and_then(|value| value.as_str()) != Some("responses")
+        || provider
+            .get("auth")
+            .and_then(|value| value.get("command"))
+            .and_then(|value| value.as_str())
+            != Some("sh")
+        || provider
+            .get("supports_websockets")
+            .and_then(|value| value.as_bool())
+            != Some(false)
+        || provider
+            .get("requires_openai_auth")
+            .and_then(|value| value.as_bool())
+            != Some(false)
+        || auth_args.is_none_or(|args| {
+            args.len() != 2
+                || args.get(0).and_then(|value| value.as_str()) != Some("-c")
+                || args.get(1).and_then(|value| value.as_str())
+                    != Some(expected_auth_script.as_str())
+        })
+    {
+        return ActualManagedState::Conflict;
+    }
+    ActualManagedState::Current {
+        provider_id,
+        name: name.to_owned(),
+        base_url: base_url.to_owned(),
+        model: model.to_owned(),
+    }
+}
+
+fn schema_v1_block_has_expected_shape(block: &[&str]) -> bool {
+    const EXACT_LINES: [&str; 5] = [
+        "model_provider = \"gpteasy\"",
+        "model_providers.gpteasy.wire_api = \"responses\"",
+        "model_providers.gpteasy.supports_websockets = false",
+        "model_providers.gpteasy.requires_openai_auth = false",
+        "model_providers.gpteasy.auth.command = \"sh\"",
+    ];
+    const PREFIXES: [&str; 8] = [
+        "# GPTEasy schema-version:",
+        "# GPTEasy provider-id:",
+        "# GPTEasy source-id:",
+        "# GPTEasy credential-file:",
+        "model = ",
+        "model_providers.gpteasy.name = ",
+        "model_providers.gpteasy.base_url = ",
+        "model_providers.gpteasy.auth.args = ",
+    ];
+
+    block.len() == 15
+        && block[1..block.len() - 1].iter().all(|line| {
+            EXACT_LINES.contains(line) || PREFIXES.iter().any(|prefix| line.starts_with(prefix))
+        })
+}
+
+fn credential_relative_from_config(config: &[u8]) -> Option<&str> {
+    let text = std::str::from_utf8(config).ok()?;
+    let values = text
+        .lines()
+        .filter_map(|line| {
+            line.trim_end_matches('\r')
+                .strip_prefix("# GPTEasy credential-file:")
+                .map(str::trim)
+        })
+        .collect::<Vec<_>>();
+    let [relative] = values.as_slice() else {
+        return None;
+    };
+    if relative.contains("..") || relative.contains("//") || relative.contains(['\0', '\r', '\n']) {
+        return None;
+    }
+    let parts = relative.split('/').collect::<Vec<_>>();
+    if parts.len() != 4
+        || parts[0] != ".gpteasy-shell"
+        || parts[1] != "credentials"
+        || parts[2].is_empty()
+        || !parts[2]
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        || !parts[3].ends_with(".token")
+        || Uuid::parse_str(parts[3].trim_end_matches(".token")).is_err()
+    {
+        return None;
+    }
+    Some(relative)
+}
+
+fn inspect_legacy_managed_state(text: &str, provider_id: String) -> ActualManagedState {
+    let Ok(document) = text.parse::<toml_edit::DocumentMut>() else {
+        return ActualManagedState::Conflict;
+    };
+    let provider_table = document
+        .get("model_providers")
+        .and_then(|value| value.get(&provider_id));
+    if document
+        .get("model")
+        .and_then(|value| value.as_str())
+        .is_some()
+        && document
+            .get("model_provider")
+            .and_then(|value| value.as_str())
+            == Some(&provider_id)
+        && provider_table
+            .and_then(|value| value.get("wire_api"))
+            .and_then(|value| value.as_str())
+            == Some("responses")
+    {
+        ActualManagedState::Legacy { provider_id }
+    } else {
+        ActualManagedState::Conflict
+    }
 }
 
 fn reconcile_probes(connection: &mut Connection, probes: &[WslProbe]) -> Result<(), WslFailure> {
@@ -1049,6 +1583,33 @@ fn mark_wsl_attention(
             "UPDATE wsl_environments SET requires_attention = 1, last_error = ?2,
              availability = 'needs_refresh', updated_at = ?3 WHERE environment_id = ?1",
             params![environment_id, message_id, epoch_seconds().to_string()],
+        )
+        .map_err(|_| state_unavailable())?;
+    Ok(())
+}
+
+fn mark_wsl_conflict(
+    connection: &Connection,
+    environment_id: &str,
+    message_id: &str,
+) -> Result<(), WslFailure> {
+    connection
+        .execute(
+            "UPDATE wsl_environments SET actual_provider_id = NULL, current_provider_id = NULL,
+                configuration_state = 'conflict', requires_attention = 1, last_error = ?2,
+                updated_at = ?3 WHERE environment_id = ?1",
+            params![environment_id, message_id, epoch_seconds().to_string()],
+        )
+        .map_err(|_| state_unavailable())?;
+    Ok(())
+}
+
+fn mark_wsl_busy(connection: &Connection, environment_id: &str) -> Result<(), WslFailure> {
+    connection
+        .execute(
+            "UPDATE wsl_environments SET configuration_state = 'busy',
+                last_error = 'wsl.lock_busy', updated_at = ?2 WHERE environment_id = ?1",
+            params![environment_id, epoch_seconds().to_string()],
         )
         .map_err(|_| state_unavailable())?;
     Ok(())
@@ -1156,7 +1717,9 @@ fn bundle_bytes(config: &[u8], credentials: &[u8]) -> Vec<u8> {
 }
 
 fn hash_optional(bytes: Option<&[u8]>) -> String {
-    bytes.map(hash_bytes).unwrap_or_else(|| hash_bytes(b""))
+    bytes
+        .map(hash_bytes)
+        .unwrap_or_else(|| "missing".to_owned())
 }
 
 fn hash_bytes(bytes: &[u8]) -> String {
@@ -1165,7 +1728,11 @@ fn hash_bytes(bytes: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-fn render_config(original: Option<&[u8]>, provider: &WslProvider) -> Result<Vec<u8>, WslFailure> {
+fn render_config(
+    original: Option<&[u8]>,
+    provider: &WslProvider,
+    source_id: &str,
+) -> Result<Vec<u8>, WslFailure> {
     let text = original
         .map(std::str::from_utf8)
         .transpose()
@@ -1180,39 +1747,37 @@ fn render_config(original: Option<&[u8]>, provider: &WslProvider) -> Result<Vec<
         })?
     };
     let mut document = parsed;
-    if let Some(store) = document.get("cli_auth_credentials_store") {
-        if store.as_str() != Some("file") {
-            return Err(WslFailure::new(
-                WslFailureCategory::InvalidEnvironment,
-                "wsl.file_credentials_required",
-            ));
-        }
-    }
+    let credential_relative = format!(
+        ".gpteasy-shell/credentials/{source_id}/{}.token",
+        provider.id
+    );
+    let auth_script = format!("cat -- \"${{CODEX_HOME:-$HOME/.codex}}/{credential_relative}\"");
     let block = [
         "# >>> GPTEasy managed provider >>>".to_owned(),
+        "# GPTEasy schema-version: 1".to_owned(),
         format!("# GPTEasy provider-id: {}", provider.id),
+        format!("# GPTEasy source-id: {source_id}"),
+        format!("# GPTEasy credential-file: {credential_relative}"),
         format!(
             "model = {}",
             toml_edit::Value::from(provider.default_model.as_str())
         ),
+        "model_provider = \"gpteasy\"".to_owned(),
         format!(
-            "model_provider = {}",
-            toml_edit::Value::from(provider.id.as_str())
-        ),
-        format!(
-            "model_providers.{}.name = {}",
-            provider.id,
+            "model_providers.gpteasy.name = {}",
             toml_edit::Value::from(provider.name.as_str())
         ),
         format!(
-            "model_providers.{}.base_url = {}",
-            provider.id,
+            "model_providers.gpteasy.base_url = {}",
             toml_edit::Value::from(provider.base_url.as_str())
         ),
-        format!("model_providers.{}.wire_api = \"responses\"", provider.id),
+        "model_providers.gpteasy.wire_api = \"responses\"".to_owned(),
+        "model_providers.gpteasy.supports_websockets = false".to_owned(),
+        "model_providers.gpteasy.requires_openai_auth = false".to_owned(),
+        "model_providers.gpteasy.auth.command = \"sh\"".to_owned(),
         format!(
-            "model_providers.{}.requires_openai_auth = true",
-            provider.id
+            "model_providers.gpteasy.auth.args = [\"-c\", {}]",
+            toml_edit::Value::from(auth_script)
         ),
         "# <<< GPTEasy managed provider <<<".to_owned(),
         String::new(),
@@ -1257,42 +1822,14 @@ fn render_config(original: Option<&[u8]>, provider: &WslProvider) -> Result<Vec<
     Ok(rendered.into_bytes())
 }
 
-fn render_credentials(original: Option<&[u8]>, api_key: &str) -> Result<Vec<u8>, WslFailure> {
-    let mut object = match original {
-        Some(bytes) => serde_json::from_slice::<serde_json::Value>(bytes)
-            .map_err(|_| {
-                WslFailure::new(
-                    WslFailureCategory::InvalidEnvironment,
-                    "wsl.credentials_invalid",
-                )
-            })?
-            .as_object()
-            .cloned()
-            .ok_or_else(|| {
-                WslFailure::new(
-                    WslFailureCategory::InvalidEnvironment,
-                    "wsl.credentials_invalid",
-                )
-            })?,
-        None => serde_json::Map::new(),
-    };
-    object.insert(
-        "auth_mode".to_owned(),
-        serde_json::Value::String("apikey".to_owned()),
-    );
-    object.insert(
-        "OPENAI_API_KEY".to_owned(),
-        serde_json::Value::String(api_key.to_owned()),
-    );
-    let mut result =
-        serde_json::to_vec_pretty(&serde_json::Value::Object(object)).map_err(|_| {
-            WslFailure::new(
-                WslFailureCategory::InvalidEnvironment,
-                "wsl.credentials_invalid",
-            )
-        })?;
-    result.push(b'\n');
-    Ok(result)
+fn render_credentials(api_key: &str) -> Result<Vec<u8>, WslFailure> {
+    if api_key.is_empty() || api_key.contains(['\0', '\r', '\n']) {
+        return Err(WslFailure::new(
+            WslFailureCategory::InvalidEnvironment,
+            "wsl.credentials_invalid",
+        ));
+    }
+    Ok(api_key.as_bytes().to_vec())
 }
 
 fn epoch_seconds() -> u64 {
@@ -1310,7 +1847,17 @@ fn state_unavailable() -> WslFailure {
 }
 
 #[derive(Debug)]
-struct SystemWslRuntime;
+struct SystemWslRuntime {
+    program: OsString,
+}
+
+impl Default for SystemWslRuntime {
+    fn default() -> Self {
+        Self {
+            program: OsString::from("wsl.exe"),
+        }
+    }
+}
 
 impl WslRuntime for SystemWslRuntime {
     fn probe(&self) -> Result<Vec<WslProbe>, WslFailure> {
@@ -1323,9 +1870,14 @@ impl WslRuntime for SystemWslRuntime {
         }
         #[cfg(windows)]
         {
-            let _ = run_wsl(&["--version"], None)?;
-            let all = decode_wsl_output(&run_wsl(&["--list", "--quiet"], None)?)?;
-            let running = decode_wsl_output(&run_wsl(&["--list", "--running", "--quiet"], None)?)?;
+            let _ = run_wsl_with(&self.program, &["--version"], None)?;
+            let all =
+                decode_wsl_output(&run_wsl_with(&self.program, &["--list", "--quiet"], None)?)?;
+            let running = decode_wsl_output(&run_wsl_with(
+                &self.program,
+                &["--list", "--running", "--quiet"],
+                None,
+            )?)?;
             let running_names: HashSet<String> = running
                 .lines()
                 .map(|line| line.trim().to_ascii_lowercase())
@@ -1368,7 +1920,12 @@ impl WslRuntime for SystemWslRuntime {
             .command_name
             .as_deref()
             .ok_or_else(|| wsl_availability_failure(environment.availability))?;
-        run_wsl(&["--distribution", name, "--exec", "/bin/true"], None).map(|_| ())
+        run_wsl_with(
+            &self.program,
+            &["--distribution", name, "--exec", "/bin/true"],
+            None,
+        )
+        .map(|_| ())
     }
 
     fn terminate(&self, environment: &WslProbe) -> Result<(), WslFailure> {
@@ -1376,7 +1933,104 @@ impl WslRuntime for SystemWslRuntime {
             .command_name
             .as_deref()
             .ok_or_else(|| wsl_availability_failure(environment.availability))?;
-        run_wsl(&["--terminate", name], None).map(|_| ())
+        run_wsl_with(&self.program, &["--terminate", name], None).map(|_| ())
+    }
+
+    fn acquire_lock(
+        &self,
+        environment: &WslProbe,
+        token: &str,
+        operation: &str,
+    ) -> Result<(), WslFailure> {
+        let name = environment
+            .command_name
+            .as_deref()
+            .ok_or_else(|| wsl_availability_failure(environment.availability))?;
+        let output = run_wsl_raw_with(
+            &self.program,
+            &[
+                "--distribution",
+                name,
+                "--exec",
+                "/bin/sh",
+                "-c",
+                GUEST_LOCK,
+                "gpteasy",
+                "acquire",
+                token,
+                operation,
+            ],
+            None,
+        )?;
+        if output.status.success() {
+            Ok(())
+        } else if output.status.code() == Some(42) {
+            Err(WslFailure::new(WslFailureCategory::Busy, "wsl.lock_busy"))
+        } else {
+            Err(WslFailure::new(
+                WslFailureCategory::NeedsAttention,
+                "wsl.lock_unsafe",
+            ))
+        }
+    }
+
+    fn release_lock(&self, environment: &WslProbe, token: &str) -> Result<(), WslFailure> {
+        let name = environment
+            .command_name
+            .as_deref()
+            .ok_or_else(|| wsl_availability_failure(environment.availability))?;
+        let output = run_wsl_raw_with(
+            &self.program,
+            &[
+                "--distribution",
+                name,
+                "--exec",
+                "/bin/sh",
+                "-c",
+                GUEST_LOCK,
+                "gpteasy",
+                "release",
+                token,
+            ],
+            None,
+        )?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(WslFailure::new(
+                WslFailureCategory::RecoveryPending,
+                "wsl.lock_recovery_required",
+            ))
+        }
+    }
+
+    fn check_codex_version(&self, environment: &WslProbe) -> Result<(), WslFailure> {
+        let name = environment
+            .command_name
+            .as_deref()
+            .ok_or_else(|| wsl_availability_failure(environment.availability))?;
+        let output = run_wsl_raw_with(
+            &self.program,
+            &[
+                "--distribution",
+                name,
+                "--exec",
+                "/bin/sh",
+                "-c",
+                "command -v codex >/dev/null 2>&1 && exec codex --version",
+            ],
+            None,
+        )?;
+        if output.status.success()
+            && decode_wsl_output(&output).is_ok_and(|value| codex_version_is_supported(&value))
+        {
+            Ok(())
+        } else {
+            Err(WslFailure::new(
+                WslFailureCategory::GuestUnavailable,
+                "wsl.codex_version_required",
+            ))
+        }
     }
 
     fn read_artifacts(&self, environment: &WslProbe) -> Result<WslArtifacts, WslFailure> {
@@ -1384,9 +2038,16 @@ impl WslRuntime for SystemWslRuntime {
             .command_name
             .as_deref()
             .ok_or_else(|| wsl_availability_failure(environment.availability))?;
+        let config = read_guest_file(&self.program, name, ".codex/config.toml")?;
+        let credentials = config
+            .as_deref()
+            .and_then(credential_relative_from_config)
+            .map(|relative| read_guest_private_file(&self.program, name, relative))
+            .transpose()?
+            .flatten();
         Ok(WslArtifacts {
-            config: read_guest_file(name, ".codex/config.toml")?,
-            credentials: read_guest_file(name, ".codex/auth.json")?,
+            config,
+            credentials,
         })
     }
 
@@ -1402,7 +2063,8 @@ impl WslRuntime for SystemWslRuntime {
              mv \"$tmp\" \"{HELPER_PATH}\"; trap - EXIT HUP INT TERM; \
              sha256sum \"{HELPER_PATH}\" | awk '{{print $1}}'"
         );
-        let output = run_wsl(
+        let output = run_wsl_with(
+            &self.program,
             &["--distribution", name, "--exec", "/bin/sh", "-c", &command],
             Some(GUEST_WRITER),
         )?;
@@ -1420,8 +2082,8 @@ impl WslRuntime for SystemWslRuntime {
     fn write_bundle(
         &self,
         environment: &WslProbe,
+        lock_token: &str,
         old_config_hash: &str,
-        old_credentials_hash: &str,
         bundle: &[u8],
     ) -> Result<String, WslFailure> {
         let name = environment
@@ -1437,19 +2099,68 @@ impl WslRuntime for SystemWslRuntime {
             "-c",
             command.as_str(),
             "gpteasy",
+            lock_token,
             old_config_hash,
-            old_credentials_hash,
         ];
-        let output = run_wsl(&args, Some(bundle))?;
-        decode_wsl_output(&output)
+        let output = run_wsl_raw_with(&self.program, &args, Some(bundle))?;
+        if output.status.success() {
+            decode_wsl_output(&output)
+        } else {
+            let (category, message_id) = match output.status.code() {
+                Some(40) => (WslFailureCategory::InvalidEnvironment, "wsl.config_invalid"),
+                Some(41) => (
+                    WslFailureCategory::ConcurrentModification,
+                    "wsl.concurrent_modification",
+                ),
+                Some(43) => (
+                    WslFailureCategory::RecoveryPending,
+                    "wsl.lock_recovery_required",
+                ),
+                Some(46) => (
+                    WslFailureCategory::InvalidEnvironment,
+                    "wsl.credential_conflict",
+                ),
+                _ => (
+                    WslFailureCategory::GuestWriteFailed,
+                    "wsl.guest_write_failed",
+                ),
+            };
+            Err(WslFailure::new(category, message_id))
+        }
+    }
+}
+
+#[cfg(all(windows, test))]
+fn run_wsl(args: &[&str], stdin: Option<&[u8]>) -> Result<Output, WslFailure> {
+    run_wsl_with(OsStr::new("wsl.exe"), args, stdin)
+}
+
+#[cfg(windows)]
+fn run_wsl_with(
+    program: &OsStr,
+    args: &[&str],
+    stdin: Option<&[u8]>,
+) -> Result<Output, WslFailure> {
+    let output = run_wsl_raw_with(program, args, stdin)?;
+    if output.status.success() {
+        Ok(output)
+    } else {
+        Err(WslFailure::new(
+            WslFailureCategory::ProbeFailed,
+            "wsl.command_failed",
+        ))
     }
 }
 
 #[cfg(windows)]
-fn run_wsl(args: &[&str], stdin: Option<&[u8]>) -> Result<Output, WslFailure> {
+fn run_wsl_raw_with(
+    program: &OsStr,
+    args: &[&str],
+    stdin: Option<&[u8]>,
+) -> Result<Output, WslFailure> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x08000000;
-    let mut command = Command::new("wsl.exe");
+    let mut command = Command::new(program);
     command
         .args(args)
         .stdin(Stdio::piped())
@@ -1463,7 +2174,7 @@ fn run_wsl(args: &[&str], stdin: Option<&[u8]>) -> Result<Output, WslFailure> {
         child
             .stdin
             .take()
-            .ok_or_else(|| state_unavailable())?
+            .ok_or_else(state_unavailable)?
             .write_all(bytes)
             .map_err(|_| {
                 WslFailure::new(WslFailureCategory::GuestWriteFailed, "wsl.stdin_failed")
@@ -1472,18 +2183,27 @@ fn run_wsl(args: &[&str], stdin: Option<&[u8]>) -> Result<Output, WslFailure> {
     let output = child
         .wait_with_output()
         .map_err(|_| WslFailure::new(WslFailureCategory::ProbeFailed, "wsl.process_failed"))?;
-    if output.status.success() {
-        Ok(output)
-    } else {
-        Err(WslFailure::new(
-            WslFailureCategory::ProbeFailed,
-            "wsl.command_failed",
-        ))
-    }
+    Ok(output)
 }
 
 #[cfg(not(windows))]
-fn run_wsl(_args: &[&str], _stdin: Option<&[u8]>) -> Result<Output, WslFailure> {
+fn run_wsl_with(
+    _program: &OsStr,
+    _args: &[&str],
+    _stdin: Option<&[u8]>,
+) -> Result<Output, WslFailure> {
+    Err(WslFailure::new(
+        WslFailureCategory::UnsupportedPlatform,
+        "wsl.unsupported_platform",
+    ))
+}
+
+#[cfg(not(windows))]
+fn run_wsl_raw_with(
+    _program: &OsStr,
+    _args: &[&str],
+    _stdin: Option<&[u8]>,
+) -> Result<Output, WslFailure> {
     Err(WslFailure::new(
         WslFailureCategory::UnsupportedPlatform,
         "wsl.unsupported_platform",
@@ -1491,10 +2211,14 @@ fn run_wsl(_args: &[&str], _stdin: Option<&[u8]>) -> Result<Output, WslFailure> 
 }
 
 #[cfg(windows)]
-fn read_guest_file(name: &str, relative: &str) -> Result<Option<Vec<u8>>, WslFailure> {
+fn read_guest_file(
+    program: &OsStr,
+    name: &str,
+    relative: &str,
+) -> Result<Option<Vec<u8>>, WslFailure> {
     let command =
         format!("if [ -f \"$HOME/{relative}\" ]; then cat \"$HOME/{relative}\"; else exit 44; fi");
-    let mut command_process = Command::new("wsl.exe");
+    let mut command_process = Command::new(program);
     use std::os::windows::process::CommandExt;
     command_process
         .creation_flags(0x08000000)
@@ -1516,8 +2240,72 @@ fn read_guest_file(name: &str, relative: &str) -> Result<Option<Vec<u8>>, WslFai
     }
 }
 
+#[cfg(windows)]
+fn read_guest_private_file(
+    program: &OsStr,
+    name: &str,
+    relative: &str,
+) -> Result<Option<Vec<u8>>, WslFailure> {
+    let output = run_wsl_raw_with(
+        program,
+        &[
+            "--distribution",
+            name,
+            "--exec",
+            "/bin/sh",
+            "-c",
+            GUEST_PRIVATE_READER,
+            "gpteasy",
+            relative,
+        ],
+        None,
+    )?;
+    if output.status.success() {
+        Ok(Some(output.stdout))
+    } else if output.status.code() == Some(44) {
+        Ok(None)
+    } else if output.status.code() == Some(43) {
+        Err(WslFailure::new(
+            WslFailureCategory::NeedsAttention,
+            "wsl.credentials_invalid",
+        ))
+    } else {
+        Err(WslFailure::new(
+            WslFailureCategory::GuestUnavailable,
+            "wsl.read_failed",
+        ))
+    }
+}
+
+fn codex_version_is_supported(output: &str) -> bool {
+    output.split_whitespace().any(|token| {
+        let token = token.strip_prefix('v').unwrap_or(token);
+        let parts = token
+            .split('.')
+            .map(str::parse::<u64>)
+            .collect::<Result<Vec<_>, _>>();
+        matches!(parts.as_deref(), Ok([major, minor, patch]) if (*major, *minor, *patch) >= (0, 147, 0))
+    })
+}
+
 #[cfg(not(windows))]
-fn read_guest_file(_name: &str, _relative: &str) -> Result<Option<Vec<u8>>, WslFailure> {
+fn read_guest_file(
+    _program: &OsStr,
+    _name: &str,
+    _relative: &str,
+) -> Result<Option<Vec<u8>>, WslFailure> {
+    Err(WslFailure::new(
+        WslFailureCategory::UnsupportedPlatform,
+        "wsl.unsupported_platform",
+    ))
+}
+
+#[cfg(not(windows))]
+fn read_guest_private_file(
+    _program: &OsStr,
+    _name: &str,
+    _relative: &str,
+) -> Result<Option<Vec<u8>>, WslFailure> {
     Err(WslFailure::new(
         WslFailureCategory::UnsupportedPlatform,
         "wsl.unsupported_platform",
@@ -1672,6 +2460,7 @@ fn decode_wsl_output(_output: &Output) -> Result<String, WslFailure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use tempfile::TempDir;
@@ -1679,10 +2468,19 @@ mod tests {
     struct FakeRuntime {
         probes: Mutex<Vec<WslProbe>>,
         artifacts: Mutex<WslArtifacts>,
+        read_failure: Mutex<Option<WslFailure>>,
         starts: AtomicUsize,
         terminations: AtomicUsize,
         writes: AtomicUsize,
+        reads: AtomicUsize,
+        lock_acquisitions: AtomicUsize,
+        lock_releases: AtomicUsize,
+        lock_busy: AtomicBool,
+        active_lock: Mutex<Option<(String, String)>>,
+        state_database: Mutex<Option<PathBuf>>,
+        released_after_state_commit: AtomicBool,
         fail_probe_after_start: AtomicBool,
+        fail_codex_version: AtomicBool,
         probe_calls: AtomicUsize,
         stop_on_probe_call: AtomicUsize,
     }
@@ -1692,10 +2490,19 @@ mod tests {
             Self {
                 probes: Mutex::new(vec![probe]),
                 artifacts: Mutex::new(artifacts),
+                read_failure: Mutex::new(None),
                 starts: AtomicUsize::new(0),
                 terminations: AtomicUsize::new(0),
                 writes: AtomicUsize::new(0),
+                reads: AtomicUsize::new(0),
+                lock_acquisitions: AtomicUsize::new(0),
+                lock_releases: AtomicUsize::new(0),
+                lock_busy: AtomicBool::new(false),
+                active_lock: Mutex::new(None),
+                state_database: Mutex::new(None),
+                released_after_state_commit: AtomicBool::new(false),
                 fail_probe_after_start: AtomicBool::new(false),
+                fail_codex_version: AtomicBool::new(false),
                 probe_calls: AtomicUsize::new(0),
                 stop_on_probe_call: AtomicUsize::new(usize::MAX),
             }
@@ -1748,8 +2555,70 @@ mod tests {
             Ok(())
         }
 
+        fn acquire_lock(
+            &self,
+            _environment: &WslProbe,
+            _token: &str,
+            _operation: &str,
+        ) -> Result<(), WslFailure> {
+            self.lock_acquisitions.fetch_add(1, Ordering::SeqCst);
+            if self.lock_busy.load(Ordering::SeqCst) {
+                return Err(WslFailure::new(WslFailureCategory::Busy, "wsl.lock_busy"));
+            }
+            let mut active = self.active_lock.lock().expect("active lock");
+            if active.is_some() {
+                return Err(WslFailure::new(WslFailureCategory::Busy, "wsl.lock_busy"));
+            }
+            *active = Some(("desktop".to_owned(), _token.to_owned()));
+            Ok(())
+        }
+
+        fn release_lock(&self, environment: &WslProbe, _token: &str) -> Result<(), WslFailure> {
+            self.lock_releases.fetch_add(1, Ordering::SeqCst);
+            let mut active = self.active_lock.lock().expect("active lock");
+            match active.as_ref() {
+                None => {}
+                Some((owner, token)) if owner == "desktop" && token == _token => *active = None,
+                Some(_) => {
+                    return Err(WslFailure::new(
+                        WslFailureCategory::RecoveryPending,
+                        "wsl.lock_recovery_required",
+                    ));
+                }
+            }
+            if let Some(path) = self.state_database.lock().expect("state database").as_ref() {
+                let committed = Connection::open(path)
+                    .and_then(|connection| {
+                        connection.query_row(
+                            "SELECT configuration_state FROM wsl_environments WHERE environment_id = ?1",
+                            [environment.environment_id.as_str()],
+                            |row| row.get::<_, String>(0),
+                        )
+                    })
+                    .is_ok_and(|state| state == "current");
+                self.released_after_state_commit
+                    .store(committed, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+
         fn read_artifacts(&self, _environment: &WslProbe) -> Result<WslArtifacts, WslFailure> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            if let Some(failure) = self.read_failure.lock().expect("read failure").clone() {
+                return Err(failure);
+            }
             Ok(self.artifacts.lock().expect("artifacts").clone())
+        }
+
+        fn check_codex_version(&self, _environment: &WslProbe) -> Result<(), WslFailure> {
+            if self.fail_codex_version.load(Ordering::SeqCst) {
+                Err(WslFailure::new(
+                    WslFailureCategory::GuestUnavailable,
+                    "wsl.codex_version_required",
+                ))
+            } else {
+                Ok(())
+            }
         }
 
         fn ensure_helper(&self, _environment: &WslProbe) -> Result<(), WslFailure> {
@@ -1759,8 +2628,8 @@ mod tests {
         fn write_bundle(
             &self,
             _environment: &WslProbe,
+            _lock_token: &str,
             _old_config_hash: &str,
-            _old_credentials_hash: &str,
             bundle: &[u8],
         ) -> Result<String, WslFailure> {
             self.writes.fetch_add(1, Ordering::SeqCst);
@@ -1844,6 +2713,591 @@ mod tests {
         }
     }
 
+    fn schema_v1_config(provider_id: &str, source_id: &str) -> Vec<u8> {
+        format!(
+            "# >>> GPTEasy managed provider >>>\n\
+# GPTEasy schema-version: 1\n\
+# GPTEasy provider-id: {provider_id}\n\
+# GPTEasy source-id: {source_id}\n\
+# GPTEasy credential-file: .gpteasy-shell/credentials/{source_id}/{provider_id}.token\n\
+model = \"model-a\"\n\
+model_provider = \"gpteasy\"\n\
+model_providers.gpteasy.name = \"Example\"\n\
+model_providers.gpteasy.base_url = \"https://provider.example/v1\"\n\
+model_providers.gpteasy.wire_api = \"responses\"\n\
+model_providers.gpteasy.supports_websockets = false\n\
+model_providers.gpteasy.requires_openai_auth = false\n\
+model_providers.gpteasy.auth.command = \"sh\"\n\
+ model_providers.gpteasy.auth.args = [\"-c\", 'cat -- \"${{CODEX_HOME:-$HOME/.codex}}/.gpteasy-shell/credentials/{source_id}/{provider_id}.token\"']\n\
+# <<< GPTEasy managed provider <<<\n"
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn running_refresh_uses_the_actual_schema_v1_provider_instead_of_sqlite_history() {
+        let provider_id = "22222222-2222-4222-8222-222222222222";
+        let mut running_probe = probe();
+        running_probe.running = true;
+        let runtime = Arc::new(FakeRuntime::new(
+            running_probe,
+            WslArtifacts {
+                config: Some(schema_v1_config(provider_id, "shell-export")),
+                credentials: Some(b"secret".to_vec()),
+            },
+        ));
+        let (_temp, _store, application) = application(runtime);
+
+        let refreshed = application.list().expect("refresh running WSL").remove(0);
+
+        assert_eq!(
+            refreshed
+                .current_provider
+                .as_ref()
+                .map(|provider| provider.id.as_str()),
+            Some(provider_id)
+        );
+    }
+
+    #[test]
+    fn desktop_apply_writes_the_schema_v1_command_credential_protocol() {
+        let provider_id = "22222222-2222-4222-8222-222222222222";
+        let mut running_probe = probe();
+        running_probe.running = true;
+        let runtime = Arc::new(FakeRuntime::new(
+            running_probe,
+            WslArtifacts {
+                config: Some(b"custom = true\n".to_vec()),
+                credentials: None,
+            },
+        ));
+        let (_temp, _store, application) = application(runtime.clone());
+        let environment = application.list().expect("list").remove(0);
+
+        application
+            .apply_provider(
+                &environment.environment_id,
+                provider_id,
+                &environment.revision,
+                true,
+            )
+            .expect("apply provider");
+
+        let artifacts = runtime.artifacts.lock().expect("artifacts").clone();
+        assert_eq!(artifacts.credentials.as_deref(), Some(b"secret".as_slice()));
+        assert!(matches!(
+            inspect_actual_managed_state(
+                artifacts.config.as_deref(),
+                artifacts.credentials.as_deref()
+            ),
+            ActualManagedState::Current { provider_id: actual, .. } if actual == provider_id
+        ));
+    }
+
+    #[test]
+    fn running_refresh_holds_the_desktop_lock_through_sqlite_commit() {
+        let provider_id = "22222222-2222-4222-8222-222222222222";
+        let mut running_probe = probe();
+        running_probe.running = true;
+        let runtime = Arc::new(FakeRuntime::new(
+            running_probe,
+            WslArtifacts {
+                config: Some(schema_v1_config(provider_id, "shell-export")),
+                credentials: Some(b"secret".to_vec()),
+            },
+        ));
+        let (_temp, store, application) = application(runtime.clone());
+        *runtime.state_database.lock().expect("state database") =
+            Some(store.paths().database().to_path_buf());
+
+        application.list().expect("refresh running WSL");
+
+        assert_eq!(runtime.lock_acquisitions.load(Ordering::SeqCst), 1);
+        assert_eq!(runtime.lock_releases.load(Ordering::SeqCst), 1);
+        assert!(runtime.released_after_state_commit.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn running_refresh_reports_lock_competition_as_a_redacted_busy_state() {
+        let mut running_probe = probe();
+        running_probe.running = true;
+        let runtime = Arc::new(FakeRuntime::new(
+            running_probe,
+            WslArtifacts {
+                config: None,
+                credentials: None,
+            },
+        ));
+        runtime.lock_busy.store(true, Ordering::SeqCst);
+        let (_temp, _store, application) = application(runtime.clone());
+
+        let refreshed = application
+            .list()
+            .expect("busy is an environment state")
+            .remove(0);
+
+        assert_eq!(refreshed.configuration_state, WslConfigurationState::Busy);
+        assert_eq!(refreshed.message_id.as_deref(), Some("wsl.lock_busy"));
+        assert_eq!(runtime.lock_releases.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn running_refresh_recovers_its_persisted_desktop_lock_after_interruption() {
+        let provider_id = "22222222-2222-4222-8222-222222222222";
+        let mut running_probe = probe();
+        running_probe.running = true;
+        let runtime = Arc::new(FakeRuntime::new(
+            running_probe,
+            WslArtifacts {
+                config: Some(schema_v1_config(provider_id, "shell-export")),
+                credentials: Some(b"secret".to_vec()),
+            },
+        ));
+        let (_temp, store, _) = application(runtime.clone());
+        let interrupted = WslApplication::with_dependencies(
+            store.clone(),
+            runtime.clone(),
+            Arc::new(InterruptAt(WslFailurePoint::AfterRefreshLockAcquired)),
+        );
+
+        interrupted
+            .list()
+            .expect("surface interrupted refresh state");
+
+        assert!(matches!(
+            runtime.active_lock.lock().expect("active lock").as_ref(),
+            Some((owner, token)) if owner == "desktop" && !token.is_empty()
+        ));
+        let connection = Connection::open(store.paths().database()).expect("state database");
+        let persisted_token = connection
+            .query_row(
+                "SELECT refresh_lock_token FROM wsl_environments WHERE environment_id = ?1",
+                [probe().environment_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .expect("refresh lock token");
+        assert!(persisted_token.is_some());
+        drop(connection);
+
+        let recovered = WslApplication::with_runtime(store.clone(), runtime.clone());
+        let environment = recovered.list().expect("recover refresh lock").remove(0);
+
+        assert_eq!(
+            environment.configuration_state,
+            WslConfigurationState::Current
+        );
+        assert!(runtime.active_lock.lock().expect("active lock").is_none());
+        let connection = Connection::open(store.paths().database()).expect("state database");
+        let persisted_token = connection
+            .query_row(
+                "SELECT refresh_lock_token FROM wsl_environments WHERE environment_id = ?1",
+                [environment.environment_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .expect("refresh lock token");
+        assert!(persisted_token.is_none());
+    }
+
+    #[test]
+    fn desktop_apply_holds_the_guest_lock_through_reread_and_sqlite_commit() {
+        let provider_id = "22222222-2222-4222-8222-222222222222";
+        let mut running_probe = probe();
+        running_probe.running = true;
+        let runtime = Arc::new(FakeRuntime::new(
+            running_probe,
+            WslArtifacts {
+                config: Some(b"custom = true\n".to_vec()),
+                credentials: None,
+            },
+        ));
+        let (_temp, store, application) = application(runtime.clone());
+        *runtime.state_database.lock().expect("state database") =
+            Some(store.paths().database().to_path_buf());
+        let environment = application.list().expect("list").remove(0);
+
+        application
+            .apply_provider(
+                &environment.environment_id,
+                provider_id,
+                &environment.revision,
+                true,
+            )
+            .expect("apply provider");
+
+        assert_eq!(runtime.lock_acquisitions.load(Ordering::SeqCst), 2);
+        assert_eq!(runtime.lock_releases.load(Ordering::SeqCst), 2);
+        assert_eq!(runtime.reads.load(Ordering::SeqCst), 3);
+        assert!(runtime.released_after_state_commit.load(Ordering::SeqCst));
+    }
+
+    struct InterruptAt(WslFailurePoint);
+
+    impl WslFaultInjector for InterruptAt {
+        fn check(&self, point: WslFailurePoint) -> Result<(), WslFailure> {
+            if point == self.0 {
+                Err(WslFailure::new(
+                    WslFailureCategory::Interrupted,
+                    "wsl.test_interruption",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn every_desktop_saga_stage_recovers_state_and_its_own_guest_lock() {
+        let points = [
+            WslFailurePoint::AfterPendingRegistered,
+            WslFailurePoint::AfterLockAcquired,
+            WslFailurePoint::AfterPrepared,
+            WslFailurePoint::AfterArtifactsReplaced,
+            WslFailurePoint::AfterStateCommitted,
+        ];
+        for point in points {
+            let provider_id = "22222222-2222-4222-8222-222222222222";
+            let mut running_probe = probe();
+            running_probe.running = true;
+            let runtime = Arc::new(FakeRuntime::new(
+                running_probe,
+                WslArtifacts {
+                    config: Some(schema_v1_config(provider_id, "shell-export")),
+                    credentials: Some(b"secret".to_vec()),
+                },
+            ));
+            let (temp, store, _) = application(runtime.clone());
+            let application = WslApplication::with_dependencies(
+                store.clone(),
+                runtime.clone(),
+                Arc::new(InterruptAt(point)),
+            );
+            let environment = application.list().expect("list").remove(0);
+
+            application
+                .apply_provider(
+                    &environment.environment_id,
+                    provider_id,
+                    &environment.revision,
+                    true,
+                )
+                .expect_err("simulate process interruption");
+
+            let recovery = WslApplication::with_runtime(store.clone(), runtime.clone());
+            recovery
+                .recover_pending()
+                .expect("recover pending WSL saga");
+            assert!(runtime.active_lock.lock().expect("active lock").is_none());
+            let connection = Connection::open(store.paths().database()).expect("state database");
+            assert_eq!(
+                connection
+                    .query_row("SELECT count(*) FROM wsl_pending_operation", [], |row| row
+                        .get::<_, i64>(
+                        0
+                    ))
+                    .expect("pending count"),
+                0,
+                "failure point: {point:?}"
+            );
+            drop(connection);
+            drop(temp);
+        }
+    }
+
+    #[test]
+    fn desktop_recovery_never_releases_an_active_shell_owner_lock() {
+        let provider_id = "22222222-2222-4222-8222-222222222222";
+        let mut running_probe = probe();
+        running_probe.running = true;
+        let runtime = Arc::new(FakeRuntime::new(
+            running_probe,
+            WslArtifacts {
+                config: Some(schema_v1_config(provider_id, "shell-export")),
+                credentials: Some(b"secret".to_vec()),
+            },
+        ));
+        let (_temp, store, application) = application(runtime.clone());
+        let environment = application.list().expect("list").remove(0);
+        let connection = Connection::open(store.paths().database()).expect("state database");
+        connection
+            .execute(
+                "INSERT INTO wsl_pending_operation(
+                    environment_id, operation_id, stage, target_provider_id,
+                    originally_running, expected_default_uid, expected_revision,
+                    started_at, lock_token
+                 ) VALUES (?1, 'operation', 'locked', ?2, 1, 1000, ?3, '1', 'desktop-token')",
+                params![
+                    environment.environment_id,
+                    provider_id,
+                    environment.revision
+                ],
+            )
+            .expect("pending operation");
+        drop(connection);
+        *runtime.active_lock.lock().expect("active lock") =
+            Some(("shell".to_owned(), "shell-token".to_owned()));
+
+        let failure = application
+            .recover_pending()
+            .expect_err("shell owner lock must remain authoritative");
+
+        assert_eq!(failure.message_id, "wsl.lock_recovery_required");
+        assert_eq!(
+            runtime.active_lock.lock().expect("active lock").as_ref(),
+            Some(&("shell".to_owned(), "shell-token".to_owned()))
+        );
+        let connection = Connection::open(store.paths().database()).expect("state database");
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM wsl_pending_operation", [], |row| row
+                    .get::<_, i64>(
+                    0
+                ))
+                .expect("pending count"),
+            1
+        );
+    }
+
+    #[test]
+    fn shell_changes_refresh_updated_legacy_missing_and_conflict_states() {
+        let provider_id = "22222222-2222-4222-8222-222222222222";
+        let mut running_probe = probe();
+        running_probe.running = true;
+        let runtime = Arc::new(FakeRuntime::new(
+            running_probe,
+            WslArtifacts {
+                config: Some(schema_v1_config(provider_id, "shell-export")),
+                credentials: Some(b"secret".to_vec()),
+            },
+        ));
+        let (_temp, _store, application) = application(runtime.clone());
+        let current = application.list().expect("current").remove(0);
+        assert_eq!(current.configuration_state, WslConfigurationState::Current);
+        assert!(!current.pending_restart);
+
+        let updated_config = String::from_utf8(schema_v1_config(provider_id, "shell-export"))
+            .expect("utf8")
+            .replace("model-a", "model-from-old-snapshot")
+            .into_bytes();
+        *runtime.artifacts.lock().expect("artifacts") = WslArtifacts {
+            config: Some(updated_config),
+            credentials: Some(b"old-secret".to_vec()),
+        };
+        let updated = application.list().expect("updated").remove(0);
+        assert_eq!(updated.configuration_state, WslConfigurationState::Updated);
+        assert!(updated.pending_restart);
+
+        *runtime.artifacts.lock().expect("artifacts") = WslArtifacts {
+            config: Some(
+                format!(
+                    "# >>> GPTEasy managed provider >>>\n\
+# GPTEasy provider-id: {provider_id}\n\
+model = \"model-a\"\n\
+model_provider = \"{provider_id}\"\n\
+model_providers.{provider_id}.name = \"Example\"\n\
+model_providers.{provider_id}.base_url = \"https://provider.example/v1\"\n\
+model_providers.{provider_id}.wire_api = \"responses\"\n\
+model_providers.{provider_id}.requires_openai_auth = true\n\
+# <<< GPTEasy managed provider <<<\n"
+                )
+                .into_bytes(),
+            ),
+            credentials: None,
+        };
+        let legacy = application.list().expect("legacy").remove(0);
+        assert_eq!(legacy.configuration_state, WslConfigurationState::Legacy);
+
+        let missing_id = "33333333-3333-4333-8333-333333333333";
+        *runtime.artifacts.lock().expect("artifacts") = WslArtifacts {
+            config: Some(schema_v1_config(missing_id, "old-export")),
+            credentials: Some(b"retired-secret".to_vec()),
+        };
+        let missing = application.list().expect("missing provider").remove(0);
+        assert_eq!(
+            missing.configuration_state,
+            WslConfigurationState::ProviderMissing
+        );
+        assert_eq!(missing.actual_provider_id.as_deref(), Some(missing_id));
+        assert!(missing.current_provider.is_none());
+
+        let conflict_config = String::from_utf8(schema_v1_config(provider_id, "shell-export"))
+            .expect("utf8")
+            .replace("# GPTEasy schema-version: 1", "# GPTEasy schema-version: 9")
+            .into_bytes();
+        *runtime.artifacts.lock().expect("artifacts") = WslArtifacts {
+            config: Some(conflict_config),
+            credentials: Some(b"secret".to_vec()),
+        };
+        let conflict = application.list().expect("conflict").remove(0);
+        assert_eq!(
+            conflict.configuration_state,
+            WslConfigurationState::Conflict
+        );
+        assert!(conflict.requires_attention);
+    }
+
+    #[test]
+    fn invalid_schema_v1_credential_reference_is_a_management_conflict() {
+        let provider_id = "22222222-2222-4222-8222-222222222222";
+        let other_id = "33333333-3333-4333-8333-333333333333";
+        let config = String::from_utf8(schema_v1_config(provider_id, "shell-export"))
+            .expect("utf8")
+            .replace(
+                &format!(
+                    "# GPTEasy credential-file: .gpteasy-shell/credentials/shell-export/{provider_id}.token"
+                ),
+                &format!(
+                    "# GPTEasy credential-file: .gpteasy-shell/credentials/shell-export/{other_id}.token"
+                ),
+            )
+            .into_bytes();
+
+        assert!(matches!(
+            inspect_actual_managed_state(Some(&config), Some(b"secret")),
+            ActualManagedState::Conflict
+        ));
+    }
+
+    #[test]
+    fn schema_v1_with_an_unknown_managed_line_is_a_management_conflict() {
+        let provider_id = "22222222-2222-4222-8222-222222222222";
+        for unknown_line in [
+            "# GPTEasy unexpected-metadata: value",
+            "model_providers.gpteasy.unexpected = true",
+        ] {
+            let config = String::from_utf8(schema_v1_config(provider_id, "shell-export"))
+                .expect("utf8")
+                .replace(
+                    "# <<< GPTEasy managed provider <<<",
+                    &format!("{unknown_line}\n# <<< GPTEasy managed provider <<<"),
+                )
+                .into_bytes();
+
+            assert!(
+                matches!(
+                    inspect_actual_managed_state(Some(&config), Some(b"secret")),
+                    ActualManagedState::Conflict
+                ),
+                "unknown schema v1 line must conflict: {unknown_line}",
+            );
+        }
+    }
+
+    #[test]
+    fn unsafe_private_credential_refresh_is_a_management_conflict() {
+        let provider_id = "22222222-2222-4222-8222-222222222222";
+        let mut running_probe = probe();
+        running_probe.running = true;
+        let runtime = Arc::new(FakeRuntime::new(
+            running_probe,
+            WslArtifacts {
+                config: Some(schema_v1_config(provider_id, "shell-export")),
+                credentials: Some(b"secret".to_vec()),
+            },
+        ));
+        *runtime.read_failure.lock().expect("read failure") = Some(WslFailure::new(
+            WslFailureCategory::NeedsAttention,
+            "wsl.credentials_invalid",
+        ));
+        let (_temp, _store, application) = application(runtime);
+
+        let environment = application.list().expect("list conflict").remove(0);
+
+        assert_eq!(
+            environment.configuration_state,
+            WslConfigurationState::Conflict
+        );
+        assert!(environment.requires_attention);
+        assert_eq!(
+            environment.message_id.as_deref(),
+            Some("wsl.credentials_invalid")
+        );
+    }
+
+    #[test]
+    fn desktop_apply_checks_the_guest_codex_version_before_locking_or_writing() {
+        let provider_id = "22222222-2222-4222-8222-222222222222";
+        let mut running_probe = probe();
+        running_probe.running = true;
+        let runtime = Arc::new(FakeRuntime::new(
+            running_probe,
+            WslArtifacts {
+                config: Some(schema_v1_config(provider_id, "shell-export")),
+                credentials: Some(b"secret".to_vec()),
+            },
+        ));
+        let (_temp, store, application) = application(runtime.clone());
+        let environment = application.list().expect("list").remove(0);
+        let lock_count_before = runtime.lock_acquisitions.load(Ordering::SeqCst);
+        runtime.fail_codex_version.store(true, Ordering::SeqCst);
+
+        let failure = application
+            .apply_provider(
+                &environment.environment_id,
+                provider_id,
+                &environment.revision,
+                true,
+            )
+            .expect_err("unsupported Codex version must stop the write");
+
+        assert_eq!(failure.message_id, "wsl.codex_version_required");
+        assert_eq!(
+            runtime.lock_acquisitions.load(Ordering::SeqCst),
+            lock_count_before
+        );
+        assert_eq!(runtime.writes.load(Ordering::SeqCst), 0);
+        let connection = Connection::open(store.paths().database()).expect("state database");
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM wsl_pending_operation", [], |row| row
+                    .get::<_, i64>(
+                    0
+                ))
+                .expect("pending count"),
+            0
+        );
+    }
+
+    #[test]
+    fn desktop_apply_never_overwrites_an_unknown_managed_schema() {
+        let provider_id = "22222222-2222-4222-8222-222222222222";
+        let mut running_probe = probe();
+        running_probe.running = true;
+        let unknown_schema = String::from_utf8(schema_v1_config(provider_id, "shell-export"))
+            .expect("utf8")
+            .replace("# GPTEasy schema-version: 1", "# GPTEasy schema-version: 9")
+            .into_bytes();
+        let runtime = Arc::new(FakeRuntime::new(
+            running_probe,
+            WslArtifacts {
+                config: Some(unknown_schema.clone()),
+                credentials: Some(b"secret".to_vec()),
+            },
+        ));
+        let (_temp, _store, application) = application(runtime.clone());
+        let environment = application.list().expect("list conflict").remove(0);
+
+        let failure = application
+            .apply_provider(
+                &environment.environment_id,
+                provider_id,
+                &environment.revision,
+                true,
+            )
+            .expect_err("unknown schema must not be overwritten");
+
+        assert_eq!(failure.message_id, "wsl.managed_conflict");
+        assert_eq!(runtime.writes.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            runtime
+                .artifacts
+                .lock()
+                .expect("artifacts")
+                .config
+                .as_deref(),
+            Some(unknown_schema.as_slice())
+        );
+    }
+
     #[test]
     fn bundle_has_unambiguous_lengths_and_no_secret_in_header() {
         let bundle = bundle_bytes(b"config\n", br#"{"OPENAI_API_KEY":"secret"}"#);
@@ -1861,17 +3315,33 @@ mod tests {
             + header_end
             + 1;
         assert!(!String::from_utf8_lossy(&bundle[..header_end]).contains("secret"));
-        assert!(String::from_utf8_lossy(&bundle).contains("GPTEASY_WSL_BUNDLE_V1"));
+        assert!(String::from_utf8_lossy(&bundle).contains("GPTEASY_WSL_BUNDLE_V2"));
     }
 
     #[test]
-    fn guest_writer_keeps_five_backups_per_artifact_and_accepts_crlf_markers() {
+    fn guest_writer_keeps_five_desktop_backups_and_accepts_crlf_markers() {
         let script = std::str::from_utf8(GUEST_WRITER).expect("guest writer is UTF-8");
 
-        assert!(script.contains("for pattern in 'config-*.toml' 'auth-*.json'"));
+        assert!(script.contains("desktop-backups"));
         assert!(script.contains("awk 'NR > 5 { print }'"));
         assert!(!script.contains("NR > 10"));
-        assert_eq!(script.matches("sed 's/\\r$//' \"$config_tmp\"").count(), 2);
+        assert!(
+            script
+                .matches("sed 's/\\r$//' \"$incoming_config\"")
+                .count()
+                >= 2
+        );
+    }
+
+    #[test]
+    fn guest_writer_uses_command_credentials_without_touching_auth_json() {
+        let script = std::str::from_utf8(GUEST_WRITER).expect("guest writer is UTF-8");
+
+        assert!(!script.contains("auth.json"));
+        assert!(script.contains(".gpteasy-shell/credentials"));
+        assert!(script.contains("desktop-backups"));
+        assert!(script.contains("lock_value \"$OWNER_FILE\" owner"));
+        assert!(script.contains("= desktop"));
     }
 
     #[test]
@@ -1948,13 +3418,14 @@ model_provider = "legacy"
 name = "Legacy"
 base_url = "https://legacy.example/v1"
 "#;
-        let rendered = render_config(Some(original), &provider("provider-id")).expect("render");
+        let rendered = render_config(Some(original), &provider("provider-id"), "desktop-test")
+            .expect("render");
         let text = String::from_utf8(rendered).expect("utf8");
         let document = text.parse::<toml_edit::DocumentMut>().expect("valid toml");
 
         assert_eq!(document["custom_flag"].as_bool(), Some(true));
         assert_eq!(document["model"].as_str(), Some("model-a"));
-        assert_eq!(document["model_provider"].as_str(), Some("provider-id"));
+        assert_eq!(document["model_provider"].as_str(), Some("gpteasy"));
         assert_eq!(
             document["model_providers"]["legacy"]["name"].as_str(),
             Some("Legacy")
@@ -1968,7 +3439,7 @@ base_url = "https://legacy.example/v1"
     #[test]
     fn damaged_marker_pair_is_rejected_before_credentials_are_rendered() {
         let original = b"# >>> GPTEasy managed provider >>>\nmodel = \"legacy\"\n";
-        let failure = render_config(Some(original), &provider("provider-id"))
+        let failure = render_config(Some(original), &provider("provider-id"), "desktop-test")
             .expect_err("marker damage must stop");
         assert_eq!(failure.message_id, "wsl.managed_conflict");
     }
@@ -2124,8 +3595,9 @@ base_url = "https://legacy.example/v1"
 
     #[test]
     fn recovery_commits_new_hashes_and_restores_a_temporarily_started_distribution() {
-        let target_config = b"new config".to_vec();
-        let target_credentials = b"new credentials".to_vec();
+        let provider_id = "22222222-2222-4222-8222-222222222222";
+        let target_config = schema_v1_config(provider_id, "desktop-recovery");
+        let target_credentials = b"secret".to_vec();
         let mut running_probe = probe();
         running_probe.running = true;
         let runtime = Arc::new(FakeRuntime::new(
@@ -2144,12 +3616,13 @@ base_url = "https://legacy.example/v1"
                     environment_id, operation_id, stage, target_provider_id,
                     old_config_fingerprint, new_config_fingerprint,
                     old_credentials_fingerprint, new_credentials_fingerprint,
-                    originally_running, expected_default_uid, expected_revision, started_at
-                 ) VALUES (?1, 'operation', 'artifacts_replaced', ?2, ?3, ?4, ?3, ?5, 0, 1000, ?6, '1')",
+                    originally_running, expected_default_uid, expected_revision, started_at,
+                    lock_token
+                 ) VALUES (?1, 'operation', 'artifacts_replaced', ?2, ?3, ?4, ?3, ?5, 0, 1000, ?6, '1', 'recovery-token')",
                 params![
                     environment.environment_id,
-                    "22222222-2222-4222-8222-222222222222",
-                    hash_bytes(b""),
+                    provider_id,
+                    "missing",
                     hash_bytes(&target_config),
                     hash_bytes(&target_credentials),
                     environment.revision,
@@ -2157,6 +3630,8 @@ base_url = "https://legacy.example/v1"
             )
             .expect("pending operation");
         drop(connection);
+        *runtime.active_lock.lock().expect("active lock") =
+            Some(("desktop".to_owned(), "recovery-token".to_owned()));
 
         application.recover_pending().expect("recover");
 
@@ -2192,7 +3667,7 @@ base_url = "https://legacy.example/v1"
             &run_wsl(&["--list", "--running", "--quiet"], None).expect("running before"),
         )
         .expect("decode before");
-        let probes = SystemWslRuntime.probe().expect("probe");
+        let probes = SystemWslRuntime::default().probe().expect("probe");
         let after = decode_wsl_output(
             &run_wsl(&["--list", "--running", "--quiet"], None).expect("running after"),
         )
