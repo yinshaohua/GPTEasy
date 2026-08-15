@@ -1181,6 +1181,70 @@ async fn catalog_keeps_provider_identity_across_rename_and_protects_the_current_
 }
 
 #[tokio::test]
+async fn catalog_protects_providers_used_by_wsl_environments_and_pending_operations() {
+    let temp = TempDir::new().expect("temp state directory");
+    let store = StateStore::new(StatePaths::from_root(temp.path()));
+    assert!(store.bootstrap().is_ready());
+    let application = ProviderApplication::new(store.clone(), validator());
+
+    let current_server = ValidationServer::start(ValidationScenario::Success);
+    let current = create_provider(
+        &application,
+        "create-wsl-current",
+        current_server.base_url,
+        "WSL Current Provider",
+        "wsl-current-key",
+    )
+    .await;
+    let pending_server = ValidationServer::start(ValidationScenario::Success);
+    let pending = create_provider(
+        &application,
+        "create-wsl-pending",
+        pending_server.base_url,
+        "WSL Pending Provider",
+        "wsl-pending-key",
+    )
+    .await;
+
+    let connection = Connection::open(store.paths().database()).expect("open provider database");
+    connection
+        .execute(
+            "INSERT INTO wsl_environments (
+                environment_id, display_name, availability, current_provider_id, updated_at
+             ) VALUES ('wsl-guid', 'Ubuntu', 'available', ?1, '1')",
+            [&current.id],
+        )
+        .expect("mark WSL current provider");
+    connection
+        .execute(
+            "INSERT INTO wsl_pending_operation (
+                environment_id, operation_id, stage, target_provider_id,
+                originally_running, expected_revision, started_at
+             ) VALUES ('wsl-guid', 'operation-id', 'prepared', ?1, 0, 'revision', '1')",
+            [&pending.id],
+        )
+        .expect("mark WSL pending provider");
+    drop(connection);
+
+    for provider in [&current, &pending] {
+        let protected = application
+            .delete_provider(&provider.id)
+            .expect_err("WSL provider cannot be deleted");
+        assert_eq!(
+            protected.category,
+            ProviderFailureCategory::CurrentProviderProtected
+        );
+        assert_eq!(
+            protected.message_id,
+            "provider.wsl_current_delete_forbidden"
+        );
+    }
+
+    let remaining = application.list_providers().expect("list providers");
+    assert_eq!(remaining.len(), 2);
+}
+
+#[tokio::test]
 async fn catalog_order_is_persistent_and_invalid_reorders_are_atomic() {
     let temp = TempDir::new().expect("temp state directory");
     let store = StateStore::new(StatePaths::from_root(temp.path()));

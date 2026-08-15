@@ -9,7 +9,7 @@ use rusqlite::backup::Backup;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction};
 use serde::Serialize;
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 4;
+pub const CURRENT_SCHEMA_VERSION: i64 = 5;
 const APPLICATION_ID: i64 = 0x4750_5445;
 const BACKUP_LIMIT: usize = 3;
 const INSTALLATION_MARKER_CONTENT: &[u8] = b"gpteasy-state-v1\n";
@@ -84,11 +84,47 @@ CREATE UNIQUE INDEX providers_recommendation_id_unique
     ON providers(recommendation_id) WHERE recommendation_id IS NOT NULL;
 "#;
 
+const SCHEMA_V5: &str = r#"
+CREATE TABLE wsl_environments (
+    environment_id TEXT PRIMARY KEY NOT NULL,
+    display_name TEXT NOT NULL,
+    command_name TEXT,
+    default_uid INTEGER,
+    wsl_version INTEGER,
+    availability TEXT NOT NULL,
+    current_provider_id TEXT REFERENCES providers(id) ON DELETE SET NULL,
+    config_fingerprint TEXT,
+    credentials_fingerprint TEXT,
+    pending_restart INTEGER NOT NULL DEFAULT 0 CHECK (pending_restart IN (0, 1)),
+    requires_attention INTEGER NOT NULL DEFAULT 0 CHECK (requires_attention IN (0, 1)),
+    last_error TEXT,
+    updated_at TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE wsl_pending_operation (
+    environment_id TEXT PRIMARY KEY REFERENCES wsl_environments(environment_id),
+    operation_id TEXT NOT NULL UNIQUE,
+    stage TEXT NOT NULL,
+    old_provider_id TEXT,
+    target_provider_id TEXT NOT NULL,
+    old_config_fingerprint TEXT,
+    new_config_fingerprint TEXT,
+    old_credentials_fingerprint TEXT,
+    new_credentials_fingerprint TEXT,
+    backup_reference TEXT,
+    originally_running INTEGER NOT NULL CHECK (originally_running IN (0, 1)),
+    expected_default_uid INTEGER,
+    expected_revision TEXT NOT NULL,
+    started_at TEXT NOT NULL
+) STRICT;
+"#;
+
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, SCHEMA_V1),
     (2, SCHEMA_V2),
     (3, SCHEMA_V3),
     (4, SCHEMA_V4),
+    (5, SCHEMA_V5),
 ];
 
 #[derive(Debug, Clone)]

@@ -73,6 +73,21 @@ async function openProviderCatalog(page: Page, width: number, height: number) {
           };
         }
         if (command === "list_providers") return catalog;
+        if (command === "list_wsl_environments") {
+          return [{
+            environmentId: "{11111111-1111-1111-1111-111111111111}",
+            displayName: "Ubuntu 24.04",
+            commandName: "Ubuntu-24.04",
+            defaultUid: 1000,
+            running: false,
+            availability: "manageable",
+            currentProvider: null,
+            requiresAttention: false,
+            pendingRestart: false,
+            revision: "layout-wsl-revision",
+            messageId: null,
+          }];
+        }
         if (command === "get_environment_snapshot") {
           return {
             state: "managed",
@@ -181,4 +196,22 @@ test("最小窗口无横向溢出且所有操作可滚动到达", async ({ page 
   await expect(page.getByRole("button", { name: "恢复上次配置" })).toBeVisible();
   await expect(page.getByRole("button", { name: "切换到 OpenAI 登录模式" })).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("provider-layout-680x520.png"), fullPage: true });
+});
+
+test("WSL2 供应商弹窗在最小窗口展示单发行版范围和生命周期提示", async ({ page }, testInfo) => {
+  await openProviderCatalog(page, 680, 520);
+  await page.getByRole("button", { name: "选择 WSL2 供应商" }).click();
+
+  const dialog = page.getByRole("dialog", { name: "选择 WSL2 供应商" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText("Ubuntu 24.04", { exact: true })).toBeVisible();
+  await expect(dialog.getByText(/临时启动，完成后恢复停止/)).toBeVisible();
+  await expect(dialog.getByText(/默认用户的 config.toml 和 auth.json/)).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "应用到 WSL2" })).toBeEnabled();
+
+  const bounds = await dialog.boundingBox();
+  expect(bounds).not.toBeNull();
+  expect(bounds!.x).toBeGreaterThanOrEqual(0);
+  expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(680);
+  await page.screenshot({ path: testInfo.outputPath("wsl-dialog-680x520.png"), fullPage: true });
 });

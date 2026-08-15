@@ -1482,7 +1482,7 @@ describe("Codex 环境接管", () => {
     expect(screen.queryByText("待重启")).not.toBeInTheDocument();
     expect(restore).toBeDisabled();
     expect(restore).toHaveAccessibleDescription("尚无可恢复的 GPTEasy 配置修改。");
-    expect(screen.getByRole("button", { name: /选择 WSL2 供应商/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /选择 WSL2 供应商/ })).toBeEnabled();
     expect(screen.getByRole("button", { name: /导出 Linux 脚本/ })).toBeDisabled();
     expect(screen.queryByRole("button", { name: "Codex 环境" })).not.toBeInTheDocument();
   });
@@ -2159,5 +2159,145 @@ describe("被动桌面消费者状态", () => {
     expect(
       invoke.mock.calls.some(([command]) => String(command).includes("desktop_application")),
     ).toBe(false);
+  });
+});
+
+describe("WSL2 供应商选择", () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  beforeEach(() => {
+    invoke.mockReset();
+    listen.mockReset();
+    listen.mockResolvedValue(() => undefined);
+  });
+
+  it("明确选择单个发行版和已验证供应商且不把凭据传给前端命令", async () => {
+    const provider = {
+      id: "22222222-2222-4222-8222-222222222222",
+      name: "WSL Provider",
+      baseUrl: "https://provider.example/v1",
+      defaultModel: "model-a",
+      verifiedAtEpochSeconds: 1_786_140_000,
+      isCurrent: false,
+    };
+    const wslEnvironment = {
+      environmentId: "{11111111-1111-1111-1111-111111111111}",
+      displayName: "Ubuntu",
+      commandName: "Ubuntu",
+      defaultUid: 1000,
+      running: false,
+      availability: "manageable",
+      currentProvider: null,
+      requiresAttention: false,
+      pendingRestart: false,
+      revision: "wsl-revision",
+      messageId: null,
+    };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([provider]);
+      if (command === "get_environment_snapshot") {
+        return Promise.resolve({
+          state: "external",
+          mode: null,
+          messageId: "environment.external",
+          revision: "windows-revision",
+          requiresTakeoverConfirmation: true,
+          takeoverAvailable: true,
+          impacts: [],
+          currentProvider: null,
+          restoreAvailability: "no_backup",
+          restorePreview: null,
+          loginStatus: "logged_in",
+          pendingRestart: false,
+          requiresConsumerConfirmation: false,
+          consumers: { desktop: "stopped", cli: "stopped" },
+        });
+      }
+      if (command === "list_wsl_environments") return Promise.resolve([wslEnvironment]);
+      if (command === "apply_wsl_provider") {
+        return Promise.resolve({
+          environment: { ...wslEnvironment, currentProvider: { ...provider, isCurrent: true } },
+          pendingRestart: false,
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+    const open = await screen.findByRole("button", { name: "选择 WSL2 供应商" });
+    await waitFor(() => expect(open).toBeEnabled());
+    fireEvent.click(open);
+
+    const dialog = await screen.findByRole("dialog", { name: "选择 WSL2 供应商" });
+    expect(dialog).toHaveTextContent("已停止的发行版会临时启动，完成后恢复停止");
+    expect(dialog).toHaveTextContent("只修改该发行版默认用户的 config.toml 和 auth.json");
+    fireEvent.click(screen.getByRole("button", { name: "应用到 WSL2" }));
+
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("apply_wsl_provider", {
+      environmentId: wslEnvironment.environmentId,
+      providerId: provider.id,
+      expectedRevision: wslEnvironment.revision,
+      confirm: true,
+    }));
+    const applyCall = invoke.mock.calls.find(([command]) => command === "apply_wsl_provider");
+    expect(JSON.stringify(applyCall?.[1])).not.toContain("API_KEY");
+    expect(JSON.stringify(applyCall?.[1])).not.toContain("secret");
+    expect(await screen.findAllByText(/已将“WSL Provider”应用到 WSL2 发行版“Ubuntu”/)).toHaveLength(2);
+  });
+
+  it("没有可管理发行版时仍可查看变化原因", async () => {
+    const ambiguousEnvironment = {
+      environmentId: "{11111111-1111-1111-1111-111111111111}",
+      displayName: "Ubuntu",
+      commandName: null,
+      defaultUid: 1000,
+      running: false,
+      availability: "ambiguous",
+      currentProvider: null,
+      requiresAttention: true,
+      pendingRestart: false,
+      revision: "ambiguous-revision",
+      messageId: "wsl.environment_ambiguous",
+    };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([]);
+      if (command === "list_wsl_environments") return Promise.resolve([ambiguousEnvironment]);
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+    const open = await screen.findByRole("button", { name: "选择 WSL2 供应商" });
+    await waitFor(() => expect(open).toBeEnabled());
+    fireEvent.click(open);
+
+    expect(await screen.findByRole("dialog", { name: "选择 WSL2 供应商" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Ubuntu · 无法安全解歧" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "应用到 WSL2" })).toBeDisabled();
+  });
+
+  it("探测失败时仍可打开弹窗重试", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([]);
+      if (command === "list_wsl_environments") {
+        return Promise.reject({ category: "probe_failed", messageId: "wsl.environment_unavailable" });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+    const open = await screen.findByRole("button", { name: "选择 WSL2 供应商" });
+    await waitFor(() => expect(open).toBeEnabled());
+    fireEvent.click(open);
+
+    expect(await screen.findByRole("dialog", { name: "选择 WSL2 供应商" })).toHaveTextContent(
+      "暂时无法探测该 WSL2 发行版",
+    );
+    expect(screen.getByRole("button", { name: "刷新 WSL2" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "应用到 WSL2" })).toBeDisabled();
   });
 });

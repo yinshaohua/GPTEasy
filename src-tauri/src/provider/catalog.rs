@@ -199,6 +199,23 @@ pub(super) fn delete_provider(
             "provider.current_delete_forbidden",
         ));
     }
+    let used_by_wsl = transaction
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM wsl_environments WHERE current_provider_id = ?1
+                UNION ALL
+                SELECT 1 FROM wsl_pending_operation WHERE target_provider_id = ?1
+            )",
+            [provider_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|_| state_unavailable())?;
+    if used_by_wsl {
+        return Err(ProviderFailure::new(
+            ProviderFailureCategory::CurrentProviderProtected,
+            "provider.wsl_current_delete_forbidden",
+        ));
+    }
     transaction
         .execute("DELETE FROM providers WHERE id = ?1", [provider_id])
         .map_err(|_| state_unavailable())?;

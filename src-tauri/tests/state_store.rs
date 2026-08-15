@@ -57,6 +57,8 @@ fn fresh_install_initializes_only_the_minimum_schema() {
             "last_applied_state",
             "pending_config_operation",
             "providers",
+            "wsl_environments",
+            "wsl_pending_operation",
         ]
     );
 }
@@ -137,6 +139,12 @@ fn recommendation_migration_never_claims_or_overwrites_an_existing_dayway_name()
     let store = store_in(&temp);
     assert!(store.bootstrap().is_ready());
     let connection = Connection::open(store.paths().database()).expect("open state database");
+    connection
+        .execute("DROP TABLE wsl_pending_operation", [])
+        .expect("remove v5 pending operation table");
+    connection
+        .execute("DROP TABLE wsl_environments", [])
+        .expect("remove v5 environment table");
     connection
         .execute("DROP INDEX providers_recommendation_id_unique", [])
         .expect("remove v4 index");

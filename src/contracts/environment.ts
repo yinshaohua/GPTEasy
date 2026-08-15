@@ -51,6 +51,40 @@ export interface EnvironmentFailure {
   messageId: string;
 }
 
+export type WslAvailability =
+  | "manageable"
+  | "infrastructure"
+  | "unsupported_version"
+  | "ambiguous"
+  | "removed"
+  | "unavailable"
+  | "default_user_changed"
+  | "needs_refresh";
+
+export interface WslEnvironmentSummary {
+  environmentId: string;
+  displayName: string;
+  commandName: string | null;
+  defaultUid: number | null;
+  running: boolean;
+  availability: WslAvailability;
+  currentProvider: ProviderSummary | null;
+  requiresAttention: boolean;
+  pendingRestart: boolean;
+  revision: string;
+  messageId: string | null;
+}
+
+export interface WslApplyResult {
+  environment: WslEnvironmentSummary;
+  pendingRestart: boolean;
+}
+
+export interface WslFailure {
+  category: string;
+  messageId: string;
+}
+
 export function getEnvironmentSnapshot(): Promise<EnvironmentSnapshot> {
   if (isBrowserPreview()) return Promise.resolve(previewSnapshot);
   return invoke<EnvironmentSnapshot>("get_environment_snapshot");
@@ -85,6 +119,40 @@ export function switchToOpenAiLogin(
   return invoke<EnvironmentSnapshot>("switch_to_openai_login", {
     expectedRevision,
   });
+}
+
+export function listWslEnvironments(): Promise<WslEnvironmentSummary[]> {
+  if (isBrowserPreview()) return Promise.resolve([]);
+  return invoke<WslEnvironmentSummary[] | null>("list_wsl_environments").then((result) => result ?? []);
+}
+
+export function applyWslProvider(
+  environmentId: string,
+  providerId: string,
+  expectedRevision: string,
+  confirm = true,
+): Promise<WslApplyResult> {
+  if (isBrowserPreview()) return Promise.reject(previewFailure);
+  return invoke<WslApplyResult>("apply_wsl_provider", {
+    environmentId,
+    providerId,
+    expectedRevision,
+    confirm,
+  });
+}
+
+export function asWslFailure(error: unknown): WslFailure {
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "category" in error &&
+    "messageId" in error &&
+    typeof error.category === "string" &&
+    typeof error.messageId === "string"
+  ) {
+    return error as WslFailure;
+  }
+  return { category: "state_unavailable", messageId: "wsl.state_unavailable" };
 }
 
 export function asEnvironmentFailure(error: unknown): EnvironmentFailure {

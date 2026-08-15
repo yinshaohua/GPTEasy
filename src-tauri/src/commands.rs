@@ -16,6 +16,7 @@ use crate::provider::{
 };
 use crate::startup::{StartupCoordinator, StartupSnapshot};
 use crate::tray;
+use crate::wsl::{WslApplication, WslApplyResult, WslEnvironmentSummary, WslFailure};
 
 pub(crate) struct StartupRuntime {
     coordinator: Mutex<StartupCoordinator>,
@@ -27,6 +28,10 @@ pub(crate) struct ProviderRuntime {
 
 pub(crate) struct EnvironmentRuntime {
     application: EnvironmentApplication,
+}
+
+pub(crate) struct WslRuntime {
+    application: WslApplication,
 }
 
 impl ProviderRuntime {
@@ -54,6 +59,12 @@ impl EnvironmentRuntime {
 
     pub(crate) fn has_pending_restart(&self) -> Result<bool, EnvironmentFailure> {
         self.application.has_pending_restart()
+    }
+}
+
+impl WslRuntime {
+    pub(crate) fn new(application: WslApplication) -> Self {
+        Self { application }
     }
 }
 
@@ -109,6 +120,42 @@ pub(crate) async fn get_environment_snapshot(
     tauri::async_runtime::spawn_blocking(move || application.inspect())
         .await
         .map_err(|_| environment_task_failed())?
+}
+
+#[tauri::command]
+pub(crate) async fn list_wsl_environments(
+    state: State<'_, WslRuntime>,
+) -> Result<Vec<WslEnvironmentSummary>, WslFailure> {
+    let application = state.application.clone();
+    tauri::async_runtime::spawn_blocking(move || application.list())
+        .await
+        .map_err(|_| {
+            WslFailure::new(
+                crate::wsl::WslFailureCategory::StateUnavailable,
+                "wsl.state_unavailable",
+            )
+        })?
+}
+
+#[tauri::command]
+pub(crate) async fn apply_wsl_provider(
+    state: State<'_, WslRuntime>,
+    environment_id: String,
+    provider_id: String,
+    expected_revision: String,
+    confirm: bool,
+) -> Result<WslApplyResult, WslFailure> {
+    let application = state.application.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        application.apply_provider(&environment_id, &provider_id, &expected_revision, confirm)
+    })
+    .await
+    .map_err(|_| {
+        WslFailure::new(
+            crate::wsl::WslFailureCategory::StateUnavailable,
+            "wsl.state_unavailable",
+        )
+    })?
 }
 
 #[tauri::command]
