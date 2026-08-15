@@ -2265,3 +2265,131 @@ describe("WSL2 供应商选择", () => {
     expect(screen.getByRole("button", { name: "应用到 WSL2" })).toBeDisabled();
   });
 });
+
+describe("Linux Bash 脚本导出", () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  beforeEach(() => {
+    invoke.mockReset();
+    listen.mockReset();
+    listen.mockResolvedValue(() => undefined);
+  });
+
+  it("确认敏感性和覆盖风险后导出 Bash 快照并展示三种使用方式", async () => {
+    const provider = {
+      id: "22222222-2222-4222-8222-222222222222",
+      name: "Linux Provider",
+      baseUrl: "https://provider.example/v1",
+      defaultModel: "model-a",
+      verifiedAtEpochSeconds: 1_786_140_000,
+      isCurrent: false,
+    };
+    const destination = "C:\\Users\\example\\gpteasy.sh";
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([provider]);
+      if (command === "list_wsl_environments") return Promise.resolve([]);
+      if (command === "get_environment_snapshot") {
+        return Promise.resolve({
+          state: "external",
+          mode: null,
+          messageId: "environment.external",
+          revision: "linux-export-revision",
+          requiresTakeoverConfirmation: true,
+          takeoverAvailable: true,
+          impacts: [],
+          currentProvider: null,
+          restoreAvailability: "no_backup",
+          restorePreview: null,
+          loginStatus: "logged_in",
+          pendingRestart: false,
+          requiresConsumerConfirmation: false,
+          consumers: { desktop: "stopped", cli: "stopped" },
+        });
+      }
+      if (command === "choose_linux_export_destination") {
+        return Promise.resolve({ path: destination, exists: true });
+      }
+      if (command === "export_linux_script") {
+        return Promise.resolve({
+          exportId: "33333333-3333-4333-8333-333333333333",
+          providerCount: 1,
+          suggestedFileName: "gpteasy.sh",
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+    const open = await screen.findByRole("button", { name: "导出 Linux 脚本" });
+    await waitFor(() => expect(open).toBeEnabled());
+    fireEvent.click(open);
+
+    const shellDialog = screen.getByRole("dialog", { name: "导出 Linux 脚本" });
+    expect(within(shellDialog).getByRole("radio", { name: "Bash 4+" })).toBeChecked();
+    expect(within(shellDialog).getByRole("radio", { name: "Zsh 5+ 即将支持" })).toBeDisabled();
+    fireEvent.click(within(shellDialog).getByRole("button", { name: "继续" }));
+
+    const sensitive = screen.getByRole("dialog", { name: "导出文件包含敏感凭据" });
+    expect(sensitive).toHaveTextContent("全部已验证供应商");
+    expect(sensitive).toHaveTextContent("仅保存到受信任的当前用户位置");
+    fireEvent.click(within(sensitive).getByRole("button", { name: "选择保存位置" }));
+
+    const overwrite = await screen.findByRole("dialog", { name: "覆盖已有导出文件？" });
+    expect(overwrite).toHaveTextContent("gpteasy.sh");
+    fireEvent.click(within(overwrite).getByRole("button", { name: "确认覆盖" }));
+
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("export_linux_script", {
+      shell: "bash",
+      destination,
+      confirmOverwrite: true,
+    }));
+    const success = await screen.findByRole("dialog", { name: "Bash 脚本已导出" });
+    expect(success).toHaveTextContent("bash ./gpteasy.sh");
+    expect(success).toHaveTextContent("source ./gpteasy.sh");
+    expect(success).toHaveTextContent(".bashrc");
+    expect(success).toHaveTextContent("gpteasy current");
+    expect(success).toHaveTextContent("gpteasy restore");
+    expect(success).toHaveTextContent("gpteasy info");
+    expect(success).toHaveTextContent("gpteasy unlock");
+    const exportCall = invoke.mock.calls.find(([command]) => command === "export_linux_script");
+    expect(JSON.stringify(exportCall)).not.toContain("secret");
+    expect(JSON.stringify(exportCall)).not.toContain("apiKey");
+  });
+
+  it("取消原生保存位置选择时不调用导出命令", async () => {
+    const provider = {
+      id: "22222222-2222-4222-8222-222222222222",
+      name: "Linux Provider",
+      baseUrl: "https://provider.example/v1",
+      defaultModel: "model-a",
+      verifiedAtEpochSeconds: 1_786_140_000,
+      isCurrent: false,
+    };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([provider]);
+      if (command === "list_wsl_environments") return Promise.resolve([]);
+      if (command === "choose_linux_export_destination") return Promise.resolve(null);
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+    const open = await screen.findByRole("button", { name: "导出 Linux 脚本" });
+    await waitFor(() => expect(open).toBeEnabled());
+    fireEvent.click(open);
+    fireEvent.click(screen.getByRole("button", { name: "继续" }));
+    fireEvent.click(screen.getByRole("button", { name: "选择保存位置" }));
+
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith(
+      "choose_linux_export_destination",
+      { shell: "bash" },
+    ));
+    expect(invoke.mock.calls.some(([command]) => command === "export_linux_script")).toBe(false);
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "导出 Linux 脚本" })).not.toBeInTheDocument();
+    });
+  });
+});

@@ -21,6 +21,19 @@ pub(super) fn list_providers(
     list_providers_from_connection(&connection)
 }
 
+pub(super) fn list_provider_records(
+    state_store: &StateStore,
+) -> Result<Vec<ProviderRecord>, ProviderFailure> {
+    let connection = open_catalog(state_store)?;
+    let summaries = list_providers_from_connection(&connection)?;
+    summaries
+        .into_iter()
+        .map(|summary| {
+            find_provider_record(&connection, &summary.id)?.ok_or_else(provider_not_found)
+        })
+        .collect()
+}
+
 pub(super) fn insert_provider(
     state_store: &StateStore,
     name: &str,

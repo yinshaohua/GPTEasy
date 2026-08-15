@@ -4,15 +4,17 @@ use std::sync::Mutex;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_clipboard_manager::ClipboardExt;
+use tauri_plugin_dialog::DialogExt;
 
 use crate::environment::{
     EnvironmentApplication, EnvironmentFailure, EnvironmentFailureCategory, EnvironmentSnapshot,
 };
 use crate::provider::{
-    AppliedProviderUpdate, DAYWAY_WEBSITE, DiscoveryInput, ModelDiscovery, ProviderApiKey,
-    ProviderApplication, ProviderFailure, ProviderFailureCategory, ProviderRevalidationResult,
-    ProviderSummary, ProviderUpdateDiscoveryInput, ProviderUpdateValidationInput,
-    ProviderValidationInput, ProviderValidationReceipt, ProviderValidationStage,
+    AppliedProviderUpdate, DAYWAY_WEBSITE, DiscoveryInput, LinuxExportFailure, LinuxExportResult,
+    LinuxShell, ModelDiscovery, ProviderApiKey, ProviderApplication, ProviderFailure,
+    ProviderFailureCategory, ProviderRevalidationResult, ProviderSummary,
+    ProviderUpdateDiscoveryInput, ProviderUpdateValidationInput, ProviderValidationInput,
+    ProviderValidationReceipt, ProviderValidationStage,
 };
 use crate::startup::{StartupCoordinator, StartupSnapshot};
 use crate::tray;
@@ -110,6 +112,51 @@ pub(crate) fn list_providers(
     state: State<'_, ProviderRuntime>,
 ) -> Result<Vec<ProviderSummary>, ProviderFailure> {
     state.application.list_providers()
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LinuxExportDestination {
+    path: String,
+    exists: bool,
+}
+
+#[tauri::command]
+pub(crate) fn choose_linux_export_destination(
+    app: AppHandle,
+    shell: LinuxShell,
+) -> Result<Option<LinuxExportDestination>, LinuxExportFailure> {
+    let selected = app
+        .dialog()
+        .file()
+        .set_file_name(shell.suggested_file_name())
+        .add_filter("Bash 脚本", &["sh"])
+        .blocking_save_file();
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    let path = selected.into_path().map_err(|_| LinuxExportFailure {
+        category: crate::provider::LinuxExportFailureCategory::UnsafeDestination,
+        message_id: "linux_export.unsafe_destination",
+    })?;
+    Ok(Some(LinuxExportDestination {
+        exists: path.exists(),
+        path: path.to_string_lossy().into_owned(),
+    }))
+}
+
+#[tauri::command]
+pub(crate) fn export_linux_script(
+    state: State<'_, ProviderRuntime>,
+    shell: LinuxShell,
+    destination: String,
+    confirm_overwrite: bool,
+) -> Result<LinuxExportResult, LinuxExportFailure> {
+    state.application.export_linux_script(
+        shell,
+        std::path::Path::new(&destination),
+        confirm_overwrite,
+    )
 }
 
 #[tauri::command]

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   Check,
   Copy,
+  Download,
   Eye,
   EyeOff,
   ExternalLink,
@@ -25,13 +26,16 @@ import ProviderValidationDialog, {
 
 import {
   asProviderFailure,
+  asLinuxExportFailure,
   cancelProviderRequest,
   confirmProviderValidationBaseUrl,
   copyProviderApiKey,
+  chooseLinuxExportDestination,
   deleteProvider,
   discoverProviderModels,
   discoverProviderModelsForUpdate,
   discardProviderValidation,
+  exportLinuxScript,
   listProviders,
   openDaywayWebsite,
   onProviderValidationProgress,
@@ -50,6 +54,8 @@ import {
   type ProviderSummary,
   type ProviderValidationReceipt,
   type ProviderValidationStage,
+  type LinuxExportFailure,
+  type LinuxExportResult,
 } from "./contracts/provider";
 import {
   applyEnvironmentProvider,
@@ -81,6 +87,7 @@ type Operation =
 
 type PageView = "catalog" | "detail";
 type Confirmation = "discard" | "validation" | null;
+type LinuxExportStep = "shell" | "sensitive" | "overwrite" | "success" | null;
 type ConfigChangeRequest =
   | { kind: "provider"; provider: ProviderSummary }
   | { kind: "openai" }
@@ -130,6 +137,11 @@ export default function ProviderPage() {
   const [wslProviderId, setWslProviderId] = useState<string | null>(null);
   const [wslBusy, setWslBusy] = useState(false);
   const [wslFailure, setWslFailure] = useState<{ messageId: string } | null>(null);
+  const [linuxExportStep, setLinuxExportStep] = useState<LinuxExportStep>(null);
+  const [linuxExportDestination, setLinuxExportDestination] = useState<string | null>(null);
+  const [linuxExportResult, setLinuxExportResult] = useState<LinuxExportResult | null>(null);
+  const [linuxExportFailure, setLinuxExportFailure] = useState<LinuxExportFailure | null>(null);
+  const [linuxExportBusy, setLinuxExportBusy] = useState(false);
   const [copyStatus, setCopyStatus] = useState("");
   const apiKeyRef = useRef<HTMLInputElement | null>(null);
   const activeRequest = useRef<string | null>(null);
@@ -651,6 +663,62 @@ export default function ProviderPage() {
     }
   }
 
+  function openLinuxExport() {
+    if (providers.length === 0) return;
+    setLinuxExportDestination(null);
+    setLinuxExportResult(null);
+    setLinuxExportFailure(null);
+    setLinuxExportStep("shell");
+  }
+
+  function closeLinuxExport() {
+    if (linuxExportBusy) return;
+    setLinuxExportStep(null);
+    setLinuxExportDestination(null);
+    setLinuxExportResult(null);
+    setLinuxExportFailure(null);
+  }
+
+  async function chooseLinuxExportPath() {
+    setLinuxExportBusy(true);
+    setLinuxExportFailure(null);
+    try {
+      const selected = await chooseLinuxExportDestination("bash");
+      if (!selected) {
+        setLinuxExportStep(null);
+        setLinuxExportDestination(null);
+        setLinuxExportResult(null);
+        setLinuxExportFailure(null);
+        return;
+      }
+      setLinuxExportDestination(selected.path);
+      if (selected.exists) {
+        setLinuxExportStep("overwrite");
+      } else {
+        await performLinuxExport(selected.path, false);
+      }
+    } catch (error) {
+      setLinuxExportFailure(asLinuxExportFailure(error));
+    } finally {
+      setLinuxExportBusy(false);
+    }
+  }
+
+  async function performLinuxExport(destination: string | null, confirmOverwrite: boolean) {
+    if (!destination) return;
+    setLinuxExportBusy(true);
+    setLinuxExportFailure(null);
+    try {
+      const result = await exportLinuxScript("bash", destination, confirmOverwrite);
+      setLinuxExportResult(result);
+      setLinuxExportStep("success");
+    } catch (error) {
+      setLinuxExportFailure(asLinuxExportFailure(error));
+    } finally {
+      setLinuxExportBusy(false);
+    }
+  }
+
   async function executeConfigChange(request: ConfigChangeRequest) {
     if (!environment) return;
     setConfigChangeRequest(null);
@@ -968,8 +1036,9 @@ export default function ProviderPage() {
             providers={providers}
             selectedProviderId={wslProviderId}
             state={wslState}
-            busy={busy || wslBusy}
+            busy={busy || wslBusy || linuxExportBusy}
             onOpen={() => void openWslDialog()}
+            onExport={openLinuxExport}
           />
           <EnvironmentActions
             snapshot={environment}
@@ -1210,6 +1279,44 @@ export default function ProviderPage() {
           }}
         />
       )}
+      {linuxExportStep === "shell" && (
+        <LinuxShellDialog
+          busy={linuxExportBusy}
+          failure={linuxExportFailure}
+          onContinue={() => setLinuxExportStep("sensitive")}
+          onClose={closeLinuxExport}
+        />
+      )}
+      {linuxExportStep === "sensitive" && (
+        <ConfirmationDialog
+          title={providerMessages.linuxExportSensitiveTitle}
+          message={`${providerMessages.linuxExportSensitiveMessage}${linuxExportFailure ? ` ${linuxExportFailureMessage(linuxExportFailure)}` : ""}`}
+          primaryLabel={providerMessages.linuxExportChooseLocation}
+          secondaryLabel={providerMessages.linuxExportCancel}
+          onPrimary={() => void chooseLinuxExportPath()}
+          onSecondary={closeLinuxExport}
+          primaryDisabled={linuxExportBusy}
+        />
+      )}
+      {linuxExportStep === "overwrite" && (
+        <ConfirmationDialog
+          title={providerMessages.linuxExportOverwriteTitle}
+          message={`${providerMessages.linuxExportOverwriteMessage(
+            linuxExportDestination ? exportFileName(linuxExportDestination) : "gpteasy.sh",
+          )}${linuxExportFailure ? ` ${linuxExportFailureMessage(linuxExportFailure)}` : ""}`}
+          primaryLabel={providerMessages.linuxExportConfirmOverwrite}
+          secondaryLabel={providerMessages.linuxExportCancel}
+          onPrimary={() => void performLinuxExport(linuxExportDestination, true)}
+          onSecondary={closeLinuxExport}
+          primaryDisabled={linuxExportBusy}
+        />
+      )}
+      {linuxExportStep === "success" && linuxExportResult && (
+        <LinuxExportSuccessDialog
+          result={linuxExportResult}
+          onClose={closeLinuxExport}
+        />
+      )}
     </>
   );
 }
@@ -1249,6 +1356,7 @@ function WslActions({
   state,
   busy,
   onOpen,
+  onExport,
 }: {
   environments: WslEnvironmentSummary[];
   providers: ProviderSummary[];
@@ -1256,6 +1364,7 @@ function WslActions({
   state: "loading" | "ready" | "error";
   busy: boolean;
   onOpen: () => void;
+  onExport: () => void;
 }) {
   const manageable = environments.some(isManageableWslEnvironment);
   const selectedProvider = providers.find((provider) => provider.id === selectedProviderId) ?? null;
@@ -1299,12 +1408,106 @@ function WslActions({
         )}
       </div>
       <div className="environment-action-row">
-        <button className="secondary-button upcoming-command" type="button" disabled>
-          {providerMessages.exportLinuxScript} <span>{providerMessages.comingSoon}</span>
+        <button
+          className="secondary-button environment-command"
+          type="button"
+          onClick={onExport}
+          disabled={busy || providers.length === 0}
+        >
+          <Download size={17} aria-hidden="true" />
+          {providerMessages.exportLinuxScript}
         </button>
       </div>
     </>
   );
+}
+
+function LinuxShellDialog({
+  busy,
+  failure,
+  onContinue,
+  onClose,
+}: {
+  busy: boolean;
+  failure: LinuxExportFailure | null;
+  onContinue: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="dialog-backdrop">
+      <section className="confirmation-dialog linux-export-dialog" role="dialog" aria-modal="true" aria-labelledby="linux-export-title">
+        <div className="dialog-heading">
+          <div>
+            <h2 id="linux-export-title">{providerMessages.exportLinuxScript}</h2>
+            <p>{providerMessages.linuxExportShellSubtitle}</p>
+          </div>
+          <button className="field-icon-button" type="button" onClick={onClose} disabled={busy} aria-label={providerMessages.linuxExportCancel}>
+            <X size={18} aria-hidden="true" />
+          </button>
+        </div>
+        <fieldset className="linux-shell-options">
+          <legend>{providerMessages.linuxExportShellLegend}</legend>
+          <label>
+            <input type="radio" name="linux-shell" checked readOnly />
+            <span>Bash 4+</span>
+          </label>
+          <label className="is-disabled">
+            <input type="radio" name="linux-shell" disabled />
+            <span>Zsh 5+ <small>{providerMessages.comingSoon}</small></span>
+          </label>
+        </fieldset>
+        {failure && <p className="inline-error" role="alert">{linuxExportFailureMessage(failure)}</p>}
+        <div className="dialog-actions">
+          <button className="secondary-button" type="button" onClick={onClose} disabled={busy}>{providerMessages.linuxExportCancel}</button>
+          <button className="command-button" type="button" onClick={onContinue} disabled={busy}>{providerMessages.linuxExportContinue}</button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function LinuxExportSuccessDialog({
+  result,
+  onClose,
+}: {
+  result: LinuxExportResult;
+  onClose: () => void;
+}) {
+  return (
+    <div className="dialog-backdrop">
+      <section className="confirmation-dialog linux-export-dialog" role="dialog" aria-modal="true" aria-labelledby="linux-export-success-title">
+        <h2 id="linux-export-success-title">{providerMessages.linuxExportSuccessTitle}</h2>
+        <p>{providerMessages.linuxExportSuccessMessage(result.providerCount)}</p>
+        <dl className="linux-export-instructions">
+          <div><dt>{providerMessages.linuxExportDirect}</dt><dd><code>bash ./gpteasy.sh</code></dd></div>
+          <div><dt>{providerMessages.linuxExportCurrentSession}</dt><dd><code>source ./gpteasy.sh</code></dd></div>
+          <div><dt>{providerMessages.linuxExportBashrc}</dt><dd><code>source /trusted/path/gpteasy.sh</code></dd></div>
+        </dl>
+        <p><code>gpteasy</code> · <code>gpteasy current</code> · <code>gpteasy restore</code> · <code>gpteasy info</code> · <code>gpteasy unlock</code></p>
+        <div className="dialog-actions">
+          <button className="command-button" type="button" onClick={onClose}>{providerMessages.linuxExportDone}</button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function exportFileName(path: string): string {
+  const segments = path.split(/[\\/]/);
+  return segments[segments.length - 1] || "gpteasy.sh";
+}
+
+function linuxExportFailureMessage(failure: LinuxExportFailure): string {
+  const messages: Record<string, string> = {
+    "linux_export.no_verified_providers": providerMessages.linuxExportNoProviders,
+    "linux_export.overwrite_confirmation_required": providerMessages.linuxExportOverwriteRequired,
+    "linux_export.unsafe_destination": providerMessages.linuxExportUnsafeDestination,
+    "linux_export.state_unavailable": providerMessages.catalogUnavailable,
+    "linux_export.snapshot_invalid": providerMessages.linuxExportSnapshotInvalid,
+    "linux_export.concurrent_modification": providerMessages.linuxExportConcurrentModification,
+    "linux_export.write_failed": providerMessages.linuxExportWriteFailed,
+  };
+  return messages[failure.messageId] ?? providerMessages.linuxExportWriteFailed;
 }
 
 function WslProviderDialog({

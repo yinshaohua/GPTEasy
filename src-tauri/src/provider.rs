@@ -1,5 +1,10 @@
 mod catalog;
+mod linux_export;
 mod validation;
+
+pub use linux_export::{
+    LinuxExportFailure, LinuxExportFailureCategory, LinuxExportResult, LinuxShell,
+};
 
 pub(crate) const DAYWAY_NAME: &str = "DayWay";
 pub(crate) const DAYWAY_BASE_URL: &str = "https://dayway.site/v1";
@@ -850,6 +855,15 @@ impl ProviderApplication {
 
     pub fn list_providers(&self) -> Result<Vec<ProviderSummary>, ProviderFailure> {
         catalog::list_providers(&self.state_store)
+    }
+
+    pub fn export_linux_script(
+        &self,
+        shell: LinuxShell,
+        destination: &std::path::Path,
+        confirm_overwrite: bool,
+    ) -> Result<LinuxExportResult, LinuxExportFailure> {
+        linux_export::export(&self.state_store, shell, destination, confirm_overwrite)
     }
 
     pub fn rename_provider(

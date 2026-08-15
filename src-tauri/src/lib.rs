@@ -12,11 +12,12 @@ pub mod wsl;
 use codex::{CodexInspector, LoginStatusCommand};
 use commands::{
     EnvironmentRuntime, ProviderRuntime, StartupRuntime, WslRuntime, apply_environment_provider,
-    apply_wsl_provider, cancel_provider_request, confirm_provider_validation_base_url,
-    copy_provider_api_key, delete_provider, discard_provider_validation, discover_provider_models,
-    discover_provider_models_for_update, get_environment_snapshot, get_startup_snapshot,
-    list_providers, list_wsl_environments, open_dayway_website, refresh_startup_snapshot,
-    rename_provider, reorder_providers, restore_last_environment_config, revalidate_provider,
+    apply_wsl_provider, cancel_provider_request, choose_linux_export_destination,
+    confirm_provider_validation_base_url, copy_provider_api_key, delete_provider,
+    discard_provider_validation, discover_provider_models, discover_provider_models_for_update,
+    export_linux_script, get_environment_snapshot, get_startup_snapshot, list_providers,
+    list_wsl_environments, open_dayway_website, refresh_startup_snapshot, rename_provider,
+    reorder_providers, restore_last_environment_config, revalidate_provider,
     reveal_provider_api_key, save_and_apply_provider_update, save_dayway_provider,
     save_provider_update, save_verified_provider, switch_to_openai_login, validate_provider,
     validate_provider_update,
@@ -40,6 +41,7 @@ pub fn run() {
     };
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .setup(move |app| {
             let state_root = app.path().app_local_data_dir()?;
@@ -83,6 +85,8 @@ pub fn run() {
             switch_to_openai_login,
             restore_last_environment_config,
             list_providers,
+            choose_linux_export_destination,
+            export_linux_script,
             discover_provider_models,
             discover_provider_models_for_update,
             validate_provider,

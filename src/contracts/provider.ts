@@ -86,6 +86,29 @@ export interface ProviderApiKey {
   value: string;
 }
 
+export type LinuxShell = "bash";
+
+export interface LinuxExportDestination {
+  path: string;
+  exists: boolean;
+}
+
+export interface LinuxExportResult {
+  exportId: string;
+  providerCount: number;
+  suggestedFileName: string;
+}
+
+export interface LinuxExportFailure {
+  category:
+    | "no_verified_providers"
+    | "overwrite_confirmation_required"
+    | "unsafe_destination"
+    | "state_unavailable"
+    | "write_failed";
+  messageId: string;
+}
+
 export function listProviders(): Promise<ProviderSummary[]> {
   if (isBrowserPreview()) return Promise.resolve([]);
   return invoke<ProviderSummary[]>("list_providers");
@@ -230,6 +253,40 @@ export function revealProviderApiKey(providerId: string): Promise<ProviderApiKey
 export function copyProviderApiKey(providerId: string): Promise<void> {
   if (isBrowserPreview()) return Promise.reject(previewFailure);
   return invoke<void>("copy_provider_api_key", { providerId });
+}
+
+export function chooseLinuxExportDestination(
+  shell: LinuxShell,
+): Promise<LinuxExportDestination | null> {
+  if (isBrowserPreview()) return Promise.resolve(null);
+  return invoke<LinuxExportDestination | null>("choose_linux_export_destination", { shell });
+}
+
+export function exportLinuxScript(
+  shell: LinuxShell,
+  destination: string,
+  confirmOverwrite: boolean,
+): Promise<LinuxExportResult> {
+  if (isBrowserPreview()) return Promise.reject(previewFailure);
+  return invoke<LinuxExportResult>("export_linux_script", {
+    shell,
+    destination,
+    confirmOverwrite,
+  });
+}
+
+export function asLinuxExportFailure(error: unknown): LinuxExportFailure {
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "category" in error &&
+    "messageId" in error &&
+    typeof error.category === "string" &&
+    typeof error.messageId === "string"
+  ) {
+    return error as LinuxExportFailure;
+  }
+  return { category: "write_failed", messageId: "linux_export.write_failed" };
 }
 
 export function discardProviderValidation(validationId: string): Promise<void> {
