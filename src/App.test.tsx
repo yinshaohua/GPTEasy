@@ -646,6 +646,7 @@ describe("供应商目录生命周期", () => {
     expect(await screen.findByText("DayWay", {}, { timeout: 5_000 })).toBeInTheDocument();
     expect(screen.getByText("推荐")).toBeInTheDocument();
     expect(screen.getByText("待配置")).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "DayWay 固定在首位" })).toBeInTheDocument();
     expect(screen.getByText("https://dayway.site/v1")).toBeInTheDocument();
     expect(screen.getByText("尚未选择")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "访问 DayWay 官网" }));

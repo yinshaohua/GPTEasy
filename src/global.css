@@ -569,25 +569,24 @@ select:focus-visible {
   font-size: 12px;
 }
 
-.provider-drag-handle {
+.provider-drag-handle,
+.provider-fixed-indicator {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   width: 28px;
   height: 32px;
   padding: 0;
-  color: var(--muted-text);
+  color: var(--text-muted);
   background: transparent;
   border: 0;
+}
+
+.provider-drag-handle {
   cursor: grab;
 }
 
 .provider-drag-handle:active { cursor: grabbing; }
-
-.provider-drag-placeholder {
-  width: 28px;
-  height: 32px;
-}
 
 .provider-row-summary {
   display: grid;

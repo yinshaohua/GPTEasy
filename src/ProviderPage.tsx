@@ -9,6 +9,7 @@ import {
   LoaderCircle,
   LogIn,
   Pencil,
+  Pin,
   Plus,
   RefreshCw,
   RotateCcw,
@@ -743,7 +744,14 @@ export default function ProviderPage() {
           <div className="provider-list" aria-label={providerMessages.verifiedProviders}>
             {!savedDayway && (
               <article className="provider-list-row provider-template-row">
-                <span className="provider-drag-placeholder" aria-hidden="true" />
+                <span
+                  className="provider-fixed-indicator"
+                  role="img"
+                  aria-label={providerMessages.fixedProviderAccessibleName(DAYWAY_NAME)}
+                  title={providerMessages.fixedProviderAccessibleName(DAYWAY_NAME)}
+                >
+                  <Pin size={16} aria-hidden="true" />
+                </span>
                 <div className="provider-row-summary">
                   <div className="provider-row-title">
                     <strong className="provider-row-name">{DAYWAY_NAME}</strong>
@@ -783,7 +791,14 @@ export default function ProviderPage() {
                 }}
               >
                 {provider.recommendationId === "dayway" ? (
-                  <span className="provider-drag-placeholder" aria-hidden="true" />
+                  <span
+                    className="provider-fixed-indicator"
+                    role="img"
+                    aria-label={providerMessages.fixedProviderAccessibleName(provider.name)}
+                    title={providerMessages.fixedProviderAccessibleName(provider.name)}
+                  >
+                    <Pin size={16} aria-hidden="true" />
+                  </span>
                 ) : (
                   <span className="provider-drag-handle" draggable role="img" aria-label={`拖拽排序 ${provider.name}`} title={`拖拽排序 ${provider.name}`} onDragStart={() => { draggedProviderId.current = provider.id; }} onDragEnd={() => { draggedProviderId.current = null; }}>
                     <GripVertical size={18} aria-hidden="true" />

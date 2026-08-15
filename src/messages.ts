@@ -159,6 +159,7 @@ export const providerMessages = {
   deleteProviderAccessibleName: (name: string) => `删除 ${name}`,
   currentProviderAccessibleName: (name: string) => `${name} 当前使用`,
   switchProviderAccessibleName: (name: string) => `切换到 ${name}`,
+  fixedProviderAccessibleName: (name: string) => `${name} 固定在首位`,
   switchProvider: "切换",
   configureDayway: "配置 DayWay",
   visitDaywayWebsite: "访问官网",

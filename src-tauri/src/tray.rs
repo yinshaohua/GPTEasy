@@ -200,7 +200,7 @@ fn tray_provider_items(
             id: format!("{PROVIDER_PREFIX}{}", provider.id),
             label: escape_menu_text(&provider.name),
             checked: provider.is_current,
-            enabled: environment_available && !provider.is_current,
+            enabled: environment_available,
         })
         .collect()
 }
@@ -209,9 +209,6 @@ fn status_text(snapshot: Option<&EnvironmentSnapshot>) -> String {
     let Some(snapshot) = snapshot else {
         return "状态：无法读取".to_owned();
     };
-    if snapshot.pending_restart {
-        return "状态：待重启".to_owned();
-    }
     match (snapshot.state, snapshot.mode) {
         (EnvironmentState::Managed, Some(AuthenticationMode::Provider)) => snapshot
             .current_provider
@@ -447,6 +444,43 @@ mod tests {
     }
 
     #[test]
+    fn tray_keeps_the_current_provider_enabled_and_marks_it_checked() {
+        let mut current = provider("current-id", "Current", None);
+        current.is_current = true;
+
+        assert_eq!(
+            tray_provider_items(std::slice::from_ref(&current), true),
+            vec![TrayProviderItem {
+                id: "provider:current-id".to_owned(),
+                label: "Current".to_owned(),
+                checked: true,
+                enabled: true,
+            }]
+        );
+        assert_eq!(
+            tray_provider_items(&[current], false),
+            vec![TrayProviderItem {
+                id: "provider:current-id".to_owned(),
+                label: "Current".to_owned(),
+                checked: true,
+                enabled: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn tray_status_keeps_showing_the_current_environment_while_restart_is_pending() {
+        let mut managed = snapshot(
+            EnvironmentState::Managed,
+            Some(AuthenticationMode::Provider),
+        );
+        managed.current_provider = Some(provider("current-id", "Current", None));
+        managed.pending_restart = true;
+
+        assert_eq!(status_text(Some(&managed)), "当前供应商：Current");
+    }
+
+    #[test]
     fn tray_commands_are_restricted_to_settings_exit_and_provider_selection() {
         assert_eq!(parse_command("settings"), TrayCommand::ShowSettings);
         assert_eq!(parse_command("exit"), TrayCommand::Exit);
@@ -483,9 +517,17 @@ mod tests {
 
     #[test]
     fn tray_provider_selection_uses_confirmation_and_conflicts_open_settings() {
-        let normal = snapshot(
+        let mut normal = snapshot(
             EnvironmentState::Managed,
             Some(AuthenticationMode::Provider),
+        );
+        normal.current_provider = Some(provider("current-id", "Current", None));
+        assert_eq!(
+            plan_tray_effect(
+                TrayCommand::SwitchProvider("current-id".to_owned()),
+                Some(&normal),
+            ),
+            TrayEffect::None
         );
         assert_eq!(
             plan_provider_action(&normal, "provider-id"),
