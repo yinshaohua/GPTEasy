@@ -135,6 +135,7 @@ export default function ProviderPage() {
   const activeRequest = useRef<string | null>(null);
   const draggedProviderId = useRef<string | null>(null);
   const receiptRef = useRef<string | null>(null);
+  const saveAfterValidation = useRef(false);
   const selected = providers.find((provider) => provider.id === selectedId) ?? null;
   const savedDayway = providers.find((provider) => provider.recommendationId === "dayway") ?? null;
   const isDaywayEditor = isRecommendedCandidate || selected?.recommendationId === "dayway";
@@ -353,7 +354,8 @@ export default function ProviderPage() {
     }
   }
 
-  async function runValidation() {
+  async function runValidation(continueSave = false) {
+    saveAfterValidation.current = continueSave;
     discardReceipt();
     const requestId = createRequestId();
     activeRequest.current = requestId;
@@ -385,6 +387,7 @@ export default function ProviderPage() {
         ? { ...current, status: "succeeded", stage: "tool_round_trip" }
         : current);
     } catch (error) {
+      saveAfterValidation.current = false;
       const providerFailure = asProviderFailure(error);
       setFailure(providerFailure);
       setOperation("idle");
@@ -444,6 +447,9 @@ export default function ProviderPage() {
 
   function closeValidationSession() {
     if (!validationSession || validationSession.status === "running") return;
+    const shouldContinueSave = validationSession.source.kind === "detail"
+      && validationSession.status === "succeeded"
+      && saveAfterValidation.current;
     if (validationSession.source.kind === "catalog") {
       setCatalogFeedback(validationSession.status === "succeeded"
         ? `${validationSession.source.providerName} 重新验证成功。`
@@ -451,41 +457,53 @@ export default function ProviderPage() {
       setFailure(null);
     }
     setValidationSession(null);
+    if (shouldContinueSave && !addressSuggestion && receipt) {
+      saveAfterValidation.current = false;
+      void saveProvider(receipt);
+    }
   }
 
   async function acceptAddressSuggestion() {
     if (!addressSuggestion) return;
+    const suggestion = addressSuggestion;
     try {
       await confirmProviderValidationBaseUrl(
-        addressSuggestion.validationId,
-        addressSuggestion.normalizedBaseUrl,
+        suggestion.validationId,
+        suggestion.normalizedBaseUrl,
       );
-      setBaseUrl(addressSuggestion.normalizedBaseUrl);
+      setBaseUrl(suggestion.normalizedBaseUrl);
       setAddressSuggestion(null);
+      if (saveAfterValidation.current) {
+        saveAfterValidation.current = false;
+        await saveProvider(suggestion);
+      }
     } catch (error) {
+      saveAfterValidation.current = false;
       discardReceipt("models_confirmed");
       setFailure(asProviderFailure(error));
     }
   }
 
   function rejectAddressSuggestion() {
+    saveAfterValidation.current = false;
     discardReceipt("models_confirmed");
   }
 
-  async function saveProvider() {
-    if ((!selected || criticalDirty) && !receipt) {
+  async function saveProvider(validatedReceipt = receipt) {
+    if ((!selected || criticalDirty) && !validatedReceipt) {
       setConfirmation("validation");
       return;
     }
+    saveAfterValidation.current = false;
     setOperation("saving");
     setFailure(null);
     try {
       let saved: ProviderSummary;
       if (!selected) {
-        if (!receipt) return;
+        if (!validatedReceipt) return;
         if (isRecommendedCandidate) {
           try {
-            saved = await saveDaywayProvider(receipt.validationId);
+            saved = await saveDaywayProvider(validatedReceipt.validationId);
           } catch (error) {
             const providerFailure = asProviderFailure(error);
             if (providerFailure.messageId !== "provider.recommended_name_conflict") throw error;
@@ -493,10 +511,10 @@ export default function ProviderPage() {
               setOperation("verified");
               return;
             }
-            saved = await saveDaywayProvider(receipt.validationId, true);
+            saved = await saveDaywayProvider(validatedReceipt.validationId, true);
           }
         } else {
-          saved = await saveVerifiedProvider(receipt.validationId, name);
+          saved = await saveVerifiedProvider(validatedReceipt.validationId, name);
         }
         receiptRef.current = null;
         setProviders((current) => isRecommendedCandidate ? [saved, ...current] : [...current, saved]);
@@ -504,11 +522,11 @@ export default function ProviderPage() {
         return;
       }
       if (criticalDirty) {
-        if (!receipt) return;
+        if (!validatedReceipt) return;
         if (selected.isCurrent) {
           const request: ConfigChangeRequest = {
             kind: "provider_update",
-            validationId: receipt.validationId,
+            validationId: validatedReceipt.validationId,
             provider: selected,
             name,
           };
@@ -516,7 +534,7 @@ export default function ProviderPage() {
           setOperation("verified");
           return;
         } else {
-          saved = await saveProviderUpdate(receipt.validationId, selected.id, name);
+          saved = await saveProviderUpdate(validatedReceipt.validationId, selected.id, name);
         }
         receiptRef.current = null;
       } else {
@@ -534,7 +552,7 @@ export default function ProviderPage() {
       setView("catalog");
     } catch (error) {
       setFailure(asProviderFailure(error));
-      setOperation(receipt ? "verified" : "idle");
+      setOperation(validatedReceipt ? "verified" : "idle");
     }
   }
 
@@ -1171,7 +1189,7 @@ export default function ProviderPage() {
           secondaryLabel={providerMessages.continueEditing}
           onPrimary={() => {
             setConfirmation(null);
-            void runValidation();
+            void runValidation(true);
           }}
           onSecondary={() => setConfirmation(null)}
           primaryDisabled={!canValidate}
@@ -1198,6 +1216,7 @@ export default function ProviderPage() {
         <AddressSuggestionDialog
           requestedBaseUrl={addressSuggestion.requestedBaseUrl}
           suggestedBaseUrl={addressSuggestion.normalizedBaseUrl}
+          continueSave={saveAfterValidation.current}
           onAccept={() => void acceptAddressSuggestion()}
           onReject={rejectAddressSuggestion}
         />
@@ -1508,11 +1527,13 @@ function environmentFailureMessage(messageId: string): string {
 function AddressSuggestionDialog({
   requestedBaseUrl,
   suggestedBaseUrl,
+  continueSave,
   onAccept,
   onReject,
 }: {
   requestedBaseUrl: string;
   suggestedBaseUrl: string;
+  continueSave: boolean;
   onAccept: () => void;
   onReject: () => void;
 }) {
@@ -1525,7 +1546,11 @@ function AddressSuggestionDialog({
         aria-labelledby="address-suggestion-title"
       >
         <h2 id="address-suggestion-title">{providerMessages.addressSuggestionTitle}</h2>
-        <p>{providerMessages.addressSuggestionMessage}</p>
+        <p>
+          {continueSave
+            ? providerMessages.addressSuggestionSaveMessage
+            : providerMessages.addressSuggestionMessage}
+        </p>
         <dl className="address-comparison">
           <div>
             <dt>{providerMessages.requestedAddress}</dt>

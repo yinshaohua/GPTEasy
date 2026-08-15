@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, Mutex};
@@ -12,7 +12,8 @@ use uuid::Uuid;
 use crate::provider::ProviderSummary;
 use crate::state::StateStore;
 
-const WSL_REGISTRY_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss";
+#[cfg(windows)]
+const WSL_REGISTRY_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Lxss";
 const HELPER_VERSION: &str = "gpteasy-wsl-guest-writer-v1";
 const HELPER_PATH: &str = "$HOME/.local/lib/gpteasy/guest-writer-v1";
 const BUNDLE_MAGIC: &str = "GPTEASY_WSL_BUNDLE_V1";
@@ -1354,55 +1355,11 @@ impl WslRuntime for SystemWslRuntime {
                     })
                     .collect());
             }
-            let counts =
-                registry
-                    .iter()
-                    .fold(HashMap::<String, usize>::new(), |mut counts, item| {
-                        *counts.entry(item.name.to_ascii_lowercase()).or_default() += 1;
-                        counts
-                    });
-            Ok(registry
-                .into_iter()
-                .map(|item| {
-                    let infrastructure = matches!(
-                        item.name.to_ascii_lowercase().as_str(),
-                        "docker-desktop" | "docker-desktop-data"
-                    );
-                    let normalized_name = item.name.to_ascii_lowercase();
-                    let ambiguous = counts.get(&normalized_name).copied().unwrap_or_default() != 1;
-                    let (availability, message_id, command_name) = if infrastructure {
-                        (
-                            WslAvailability::Infrastructure,
-                            Some("wsl.infrastructure_distribution"),
-                            None,
-                        )
-                    } else if item.version != Some(2) {
-                        (
-                            WslAvailability::UnsupportedVersion,
-                            Some("wsl.wsl2_required"),
-                            None,
-                        )
-                    } else if ambiguous || !listed_names.contains(&normalized_name) {
-                        (
-                            WslAvailability::Ambiguous,
-                            Some("wsl.environment_ambiguous"),
-                            None,
-                        )
-                    } else {
-                        (WslAvailability::Manageable, None, Some(item.name.clone()))
-                    };
-                    WslProbe {
-                        environment_id: item.id,
-                        display_name: item.name.clone(),
-                        command_name,
-                        default_uid: item.default_uid,
-                        wsl_version: item.version,
-                        running: running_names.contains(&normalized_name),
-                        availability,
-                        message_id,
-                    }
-                })
-                .collect())
+            Ok(probes_from_registry(
+                registry,
+                &listed_names,
+                &running_names,
+            ))
         }
     }
 
@@ -1567,73 +1524,113 @@ fn read_guest_file(_name: &str, _relative: &str) -> Result<Option<Vec<u8>>, WslF
     ))
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 #[derive(Debug)]
 struct RegistryDistro {
     id: String,
     name: String,
     default_uid: Option<u32>,
     version: Option<u32>,
+    base_path_available: bool,
+}
+
+#[cfg(any(windows, test))]
+fn probes_from_registry(
+    registry: Vec<RegistryDistro>,
+    listed_names: &HashSet<String>,
+    running_names: &HashSet<String>,
+) -> Vec<WslProbe> {
+    let counts = registry
+        .iter()
+        .filter(|item| item.base_path_available)
+        .fold(
+            std::collections::HashMap::<String, usize>::new(),
+            |mut counts, item| {
+                *counts.entry(item.name.to_ascii_lowercase()).or_default() += 1;
+                counts
+            },
+        );
+    registry
+        .into_iter()
+        .map(|item| {
+            let normalized_name = item.name.to_ascii_lowercase();
+            let infrastructure = matches!(
+                normalized_name.as_str(),
+                "docker-desktop" | "docker-desktop-data"
+            );
+            let ambiguous = counts.get(&normalized_name).copied().unwrap_or_default() != 1;
+            let (availability, message_id, command_name) = if infrastructure {
+                (
+                    WslAvailability::Infrastructure,
+                    Some("wsl.infrastructure_distribution"),
+                    None,
+                )
+            } else if !item.base_path_available {
+                (
+                    WslAvailability::Unavailable,
+                    Some("wsl.environment_unavailable"),
+                    None,
+                )
+            } else if item.version != Some(2) {
+                (
+                    WslAvailability::UnsupportedVersion,
+                    Some("wsl.wsl2_required"),
+                    None,
+                )
+            } else if ambiguous || !listed_names.contains(&normalized_name) {
+                (
+                    WslAvailability::Ambiguous,
+                    Some("wsl.environment_ambiguous"),
+                    None,
+                )
+            } else {
+                (WslAvailability::Manageable, None, Some(item.name.clone()))
+            };
+            WslProbe {
+                environment_id: item.id,
+                display_name: item.name,
+                command_name,
+                default_uid: item.default_uid,
+                wsl_version: item.version,
+                running: item.base_path_available && running_names.contains(&normalized_name),
+                availability,
+                message_id,
+            }
+        })
+        .collect()
 }
 
 #[cfg(windows)]
 fn read_registry_distributions() -> Vec<RegistryDistro> {
-    let output = Command::new("reg")
-        .args(["query", WSL_REGISTRY_KEY])
-        .output();
-    let Ok(output) = output else {
+    use std::path::Path;
+    use winreg::RegKey;
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
+
+    let current_user = RegKey::predef(HKEY_CURRENT_USER);
+    let Ok(lxss) = current_user.open_subkey_with_flags(WSL_REGISTRY_KEY, KEY_READ) else {
         return Vec::new();
     };
-    let text = String::from_utf8_lossy(&output.stdout);
     let mut result = Vec::new();
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if let Some(id) = trimmed
-            .strip_prefix("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss\\")
-        {
-            let name_output = Command::new("reg")
-                .args(["query", &format!("{WSL_REGISTRY_KEY}\\{id}")])
-                .output();
-            let Ok(name_output) = name_output else {
-                continue;
-            };
-            let values = String::from_utf8_lossy(&name_output.stdout);
-            let mut name = None;
-            let mut default_uid = None;
-            let mut version = None;
-            for value_line in values.lines() {
-                let parts = value_line.split_whitespace().collect::<Vec<_>>();
-                if parts.len() < 3 {
-                    continue;
-                }
-                match parts[0] {
-                    "DistributionName" => name = Some(parts[2..].join(" ")),
-                    "DefaultUid" => default_uid = parse_registry_u32(parts[2]),
-                    "Version" => version = parse_registry_u32(parts[2]),
-                    _ => {}
-                }
-            }
-            if let Some(name) = name {
-                result.push(RegistryDistro {
-                    id: id.to_owned(),
-                    name,
-                    default_uid,
-                    version,
-                });
-            }
-        }
+    for id in lxss.enum_keys().filter_map(Result::ok) {
+        let Ok(distribution) = lxss.open_subkey_with_flags(&id, KEY_READ) else {
+            continue;
+        };
+        let Ok(name) = distribution.get_value::<String, _>("DistributionName") else {
+            continue;
+        };
+        let base_path_available = distribution
+            .get_value::<String, _>("BasePath")
+            .ok()
+            .is_some_and(|base_path| Path::new(&base_path).is_dir());
+        result.push(RegistryDistro {
+            id,
+            name,
+            default_uid: distribution.get_value::<u32, _>("DefaultUid").ok(),
+            version: distribution.get_value::<u32, _>("Version").ok(),
+            base_path_available,
+        });
     }
     result
-}
-
-fn parse_registry_u32(value: &str) -> Option<u32> {
-    value
-        .strip_prefix("0x")
-        .or_else(|| value.strip_prefix("0X"))
-        .map_or_else(
-            || value.parse().ok(),
-            |hex| u32::from_str_radix(hex, 16).ok(),
-        )
 }
 
 #[cfg(windows)]
@@ -1895,15 +1892,50 @@ mod tests {
     }
 
     #[test]
-    fn registry_numbers_accept_hex_and_non_wsl2_is_rejected() {
-        assert_eq!(parse_registry_u32("0x2"), Some(2));
-        assert_eq!(parse_registry_u32("0X3e8"), Some(1000));
-        assert_eq!(parse_registry_u32("2"), Some(2));
-        assert_eq!(parse_registry_u32("invalid"), None);
+    fn non_wsl2_registration_is_rejected() {
         assert_eq!(
             wsl_availability_failure(WslAvailability::UnsupportedVersion).message_id,
             "wsl.wsl2_required"
         );
+    }
+
+    #[test]
+    fn stale_duplicate_registration_does_not_block_the_valid_distribution() {
+        let registry = vec![
+            RegistryDistro {
+                id: "{stale}".into(),
+                name: "Ubuntu".into(),
+                default_uid: Some(1000),
+                version: Some(2),
+                base_path_available: false,
+            },
+            RegistryDistro {
+                id: "{valid}".into(),
+                name: "Ubuntu".into(),
+                default_uid: Some(1000),
+                version: Some(2),
+                base_path_available: true,
+            },
+        ];
+        let listed_names = HashSet::from(["ubuntu".to_owned()]);
+        let running_names = HashSet::from(["ubuntu".to_owned()]);
+
+        let probes = probes_from_registry(registry, &listed_names, &running_names);
+        let stale = probes
+            .iter()
+            .find(|probe| probe.environment_id == "{stale}")
+            .unwrap();
+        let valid = probes
+            .iter()
+            .find(|probe| probe.environment_id == "{valid}")
+            .unwrap();
+
+        assert_eq!(stale.availability, WslAvailability::Unavailable);
+        assert!(stale.command_name.is_none());
+        assert!(!stale.running);
+        assert_eq!(valid.availability, WslAvailability::Manageable);
+        assert_eq!(valid.command_name.as_deref(), Some("Ubuntu"));
+        assert!(valid.running);
     }
 
     #[test]

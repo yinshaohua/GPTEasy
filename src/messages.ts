@@ -314,6 +314,7 @@ export const providerMessages = {
   validationFallback: "验证未完成，请检查输入后重试。",
   addressSuggestionTitle: "建议修正服务地址",
   addressSuggestionMessage: "此地址已完成完整供应商验证。采用后仍需明确保存。",
+  addressSuggestionSaveMessage: "此地址已完成完整供应商验证。采用后将继续保存。",
   requestedAddress: "原地址",
   suggestedAddress: "建议地址",
   keepRequestedAddress: "保留原地址",
