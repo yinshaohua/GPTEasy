@@ -1,7 +1,10 @@
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
+#[cfg(windows)]
 use std::io::Write;
-use std::process::{Command, Output, Stdio};
+use std::process::Output;
+#[cfg(windows)]
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -274,7 +277,13 @@ impl WslApplication {
     #[cfg(all(windows, feature = "wsl-guest-harness"))]
     #[doc(hidden)]
     pub fn with_wsl_program_for_harness(state_store: StateStore, program: OsString) -> Self {
-        Self::with_runtime(state_store, Arc::new(SystemWslRuntime { program }))
+        Self::with_runtime(
+            state_store,
+            Arc::new(SystemWslRuntime {
+                program,
+                distribution_filter: None,
+            }),
+        )
     }
 
     #[cfg(all(windows, feature = "wsl-guest-harness"))]
@@ -284,10 +293,51 @@ impl WslApplication {
         program: OsString,
         natural_stop_timeout: Duration,
     ) -> Self {
-        let mut application =
-            Self::with_runtime(state_store, Arc::new(SystemWslRuntime { program }));
+        let mut application = Self::with_runtime(
+            state_store,
+            Arc::new(SystemWslRuntime {
+                program,
+                distribution_filter: None,
+            }),
+        );
         application.natural_stop_timeout = natural_stop_timeout;
         application
+    }
+
+    #[cfg(all(windows, feature = "wsl-guest-harness"))]
+    #[doc(hidden)]
+    pub fn with_isolated_wsl_for_harness(
+        state_store: StateStore,
+        program: OsString,
+        natural_stop_timeout: Duration,
+        distribution: String,
+    ) -> Self {
+        let mut application = Self::with_runtime(
+            state_store,
+            Arc::new(SystemWslRuntime {
+                program,
+                distribution_filter: Some(distribution),
+            }),
+        );
+        application.natural_stop_timeout = natural_stop_timeout;
+        application
+    }
+
+    #[cfg(all(windows, feature = "wsl-guest-harness"))]
+    #[doc(hidden)]
+    pub fn with_wsl_program_and_fault_for_harness(
+        state_store: StateStore,
+        program: OsString,
+        faults: Arc<dyn WslFaultInjector>,
+    ) -> Self {
+        Self::with_dependencies(
+            state_store,
+            Arc::new(SystemWslRuntime {
+                program,
+                distribution_filter: None,
+            }),
+            faults,
+        )
     }
 
     #[doc(hidden)]
@@ -1345,7 +1395,9 @@ impl WslApplication {
                 )
                 .map_err(|_| state_unavailable())?;
         }
-        self.runtime.cleanup_credentials(probe, token)?;
+        if pending.stage != "registered" && pending.stage != "locked" {
+            self.runtime.cleanup_credentials(probe, token)?;
+        }
         self.runtime.release_lock(probe, token)?;
         connection
             .execute(
@@ -2379,12 +2431,16 @@ fn state_unavailable() -> WslFailure {
 #[derive(Debug)]
 struct SystemWslRuntime {
     program: OsString,
+    #[cfg(windows)]
+    distribution_filter: Option<String>,
 }
 
 impl Default for SystemWslRuntime {
     fn default() -> Self {
         Self {
             program: OsString::from("wsl.exe"),
+            #[cfg(windows)]
+            distribution_filter: None,
         }
     }
 }
@@ -2418,10 +2474,19 @@ impl WslRuntime for SystemWslRuntime {
                 .map(|line| line.trim().to_ascii_lowercase())
                 .filter(|line| !line.is_empty())
                 .collect::<HashSet<_>>();
-            let registry = read_registry_distributions();
+            let mut registry = read_registry_distributions();
+            if let Some(filter) = self.distribution_filter.as_deref() {
+                registry.retain(|item| item.name.eq_ignore_ascii_case(filter));
+            }
             if registry.is_empty() {
                 return Ok(all
                     .lines()
+                    .filter(|name| {
+                        self.distribution_filter
+                            .as_deref()
+                            .map(|filter| name.trim().eq_ignore_ascii_case(filter))
+                            .unwrap_or(true)
+                    })
                     .filter_map(|name| {
                         let name = name.trim();
                         (!name.is_empty()).then(|| WslProbe {

@@ -969,12 +969,17 @@ fn run_shell_black_box_with_canaries(
         .spawn()
         .unwrap_or_else(|error| panic!("start {label} black-box test: {error}"));
 
-    child
+    let mut stdin = child
         .stdin
         .take()
-        .unwrap_or_else(|| panic!("{label} stdin"))
+        .unwrap_or_else(|| panic!("{label} stdin"));
+    stdin
+        .write_all(b"umask 077\n")
+        .unwrap_or_else(|error| panic!("set a private {label} fixture umask: {error}"));
+    stdin
         .write_all(harness.as_bytes())
         .unwrap_or_else(|error| panic!("write {label} harness without credentials: {error}"));
+    drop(stdin);
     let output = child
         .wait_with_output()
         .expect("wait for Bash black-box test");

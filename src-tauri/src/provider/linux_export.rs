@@ -78,6 +78,7 @@ pub struct LinuxExportResult {
 struct ShellSyntax {
     setup: &'static str,
     function_options: &'static str,
+    process_id: &'static str,
     select_read: &'static str,
     restore_read: &'static str,
     unlock_read: &'static str,
@@ -100,6 +101,7 @@ const BASH_DEFINITION: ShellDefinition = ShellDefinition {
     syntax: ShellSyntax {
         setup: "case ${BASH_SOURCE[0]} in\n    /*) gpteasy__script_path=${BASH_SOURCE[0]} ;;\n    *) gpteasy__script_path=$PWD/${BASH_SOURCE[0]} ;;\nesac",
         function_options: "",
+        process_id: "    process_id=${BASHPID:-$$}",
         select_read: "    read -r -p '请选择供应商编号，或输入 q 取消：' choice",
         restore_read: "    read -r -p '确认恢复？[y/N] ' choice",
         unlock_read: "    read -r -p '确认删除该失效锁？[y/N] ' choice",
@@ -115,6 +117,7 @@ const ZSH_DEFINITION: ShellDefinition = ShellDefinition {
     syntax: ShellSyntax {
         setup: "gpteasy__script_path=${(%):-%x}\ncase $gpteasy__script_path in\n    /*) ;;\n    *) gpteasy__script_path=$PWD/$gpteasy__script_path ;;\nesac",
         function_options: "    emulate -L zsh\n    setopt local_options nonomatch pipefail",
+        process_id: "    if ! zmodload zsh/system 2>/dev/null; then\n        rmdir -- \"$active\" 2>/dev/null || true\n        return 1\n    fi\n    process_id=${sysparams[pid]}",
         select_read: "    read -r 'choice?请选择供应商编号，或输入 q 取消：'",
         restore_read: "    read -r 'choice?确认恢复？[y/N] '",
         unlock_read: "    read -r 'choice?确认删除该失效锁？[y/N] '",
@@ -265,6 +268,7 @@ fn render_runtime(shell: LinuxShell) -> String {
     include_str!("shell_runtime.sh")
         .replace("{{GPTEASY_SHELL_SETUP}}", syntax.setup)
         .replace("{{GPTEASY_FUNCTION_OPTIONS}}", syntax.function_options)
+        .replace("{{GPTEASY_PROCESS_ID}}", syntax.process_id)
         .replace("{{GPTEASY_SELECT_READ}}", syntax.select_read)
         .replace("{{GPTEASY_RESTORE_READ}}", syntax.restore_read)
         .replace("{{GPTEASY_UNLOCK_READ}}", syntax.unlock_read)
@@ -417,6 +421,7 @@ mod tests {
         let slots = [
             "{{GPTEASY_SHELL_SETUP}}",
             "{{GPTEASY_FUNCTION_OPTIONS}}",
+            "{{GPTEASY_PROCESS_ID}}",
             "{{GPTEASY_SELECT_READ}}",
             "{{GPTEASY_RESTORE_READ}}",
             "{{GPTEASY_UNLOCK_READ}}",

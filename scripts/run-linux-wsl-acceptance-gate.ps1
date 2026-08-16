@@ -6,6 +6,8 @@ param(
     [string]$Bash44Path,
     [string]$BashCurrentPath = 'bash',
     [string]$Zsh59Path,
+    [string]$CodexPath,
+    [string]$SourceCommit,
     [switch]$ConfirmDisposableWsl
 )
 
@@ -30,6 +32,18 @@ $realResults = [ordered]@{
     'wsl2-running-guest' = [ordered]@{ id = 'wsl2-running-guest'; status = 'not_run'; detail = 'Run with -Mode Full and explicit disposable WSL2 confirmation.' }
     'wsl2-stopped-guest' = [ordered]@{ id = 'wsl2-stopped-guest'; status = 'not_run'; detail = 'Run with -Mode Full and explicit disposable WSL2 confirmation.' }
 }
+$realCodexResult = [ordered]@{
+    status = 'not_run'
+    version = $null
+    verificationMethod = [string]$contract.realCodex.verificationMethod
+}
+$gitCommit = if ([string]::IsNullOrWhiteSpace($SourceCommit)) {
+    (& git -C $repoRoot rev-parse HEAD 2>$null | Out-String).Trim()
+} elseif ($SourceCommit -match '^[0-9a-fA-F]{40}$') {
+    $SourceCommit.ToLowerInvariant()
+} else {
+    throw 'SourceCommit must be a 40-character Git commit SHA.'
+}
 $environmentNames = @(
     'GPTEASY_ACCEPTANCE_KEY_A',
     'GPTEASY_ACCEPTANCE_KEY_B',
@@ -40,7 +54,11 @@ $environmentNames = @(
     'GPTEASY_REQUIRE_SHELL_MATRIX',
     'GPTEASY_TEST_WSL_DISTRIBUTION',
     'GPTEASY_RUN_WSL_GUEST_HARNESS',
-    'GPTEASY_WSL_TEST_DISTRIBUTION'
+    'GPTEASY_WSL_TEST_DISTRIBUTION',
+    'GPTEASY_RUN_REAL_CODEX_ACCEPTANCE',
+    'GPTEASY_REAL_CODEX',
+    'NO_PROXY',
+    'no_proxy'
 )
 $previousEnvironment = @{}
 foreach ($name in $environmentNames) {
@@ -160,6 +178,15 @@ function Invoke-Step([string]$Id, [string]$Label, [string]$Program, [string[]]$A
     return Add-StepResult $Id $Label $result
 }
 
+function Invoke-CargoStep([string]$Id, [string]$Label, [string[]]$Arguments) {
+    $cargoArguments = @('test')
+    if (-not $isWindowsHost) {
+        $cargoArguments += @('--features', 'native-linux-acceptance')
+    }
+    $cargoArguments += $Arguments
+    return Invoke-Step $Id $Label $cargo $cargoArguments
+}
+
 function Invoke-ShellVersion([string]$Executable) {
     if ($isWindowsHost) {
         return Invoke-CapturedProcess (Resolve-Program 'wsl.exe') @(
@@ -167,6 +194,91 @@ function Invoke-ShellVersion([string]$Executable) {
         )
     }
     return Invoke-CapturedProcess $Executable @('--version')
+}
+
+function Invoke-CodexVersion([string]$Executable) {
+    if ([string]::IsNullOrWhiteSpace($Executable)) {
+        return [pscustomobject]@{
+            exitCode = 127
+            stdout = ''
+            stderr = 'The real Codex executable path was not provided.'
+        }
+    }
+    if ($isWindowsHost) {
+        return Invoke-CapturedProcess (Resolve-Program 'wsl.exe') @(
+            '--distribution', $WslDistribution, '--exec', $Executable, '--version'
+        )
+    }
+    return Invoke-CapturedProcess $Executable @('--version')
+}
+
+function Test-NativeLinuxKernel {
+    if ($isWindowsHost) {
+        return $true
+    }
+    $kernelPath = '/proc/sys/kernel/osrelease'
+    if (-not (Test-Path -LiteralPath $kernelPath -PathType Leaf)) {
+        return $false
+    }
+    $release = [System.IO.File]::ReadAllText($kernelPath).ToLowerInvariant()
+    foreach ($pattern in @($contract.nativeLinux.rejectedKernelPatterns)) {
+        if ($release.Contains(([string]$pattern).ToLowerInvariant(), [StringComparison]::Ordinal)) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Wait-WslDistributionStopped([int]$TimeoutSeconds = 60) {
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        $result = Invoke-CapturedProcess (Resolve-Program 'wsl.exe') @('--list', '--running', '--quiet')
+        if ($result.exitCode -ne 0) {
+            return $false
+        }
+        $running = ([string]$result.stdout).Replace("`0", '') -split "`r?`n" |
+            ForEach-Object { $_.Trim() } |
+            Where-Object { $_ }
+        if (-not @($running | Where-Object { $_.Equals($WslDistribution, [StringComparison]::OrdinalIgnoreCase) }).Count) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $deadline)
+    return $false
+}
+
+function Invoke-RealCodexTarget {
+    $versionResult = Invoke-CodexVersion $CodexPath
+    if ((Test-ContainsCanary $versionResult.stdout) -or (Test-ContainsCanary $versionResult.stderr)) {
+        $script:leakDetected = $true
+        $script:leakLocation = 'real-codex-version'
+        $script:realCodexResult.status = 'failed'
+        return $false
+    }
+    $version = (($versionResult.stdout + $versionResult.stderr) -split "`r?`n" | Select-Object -First 1).Trim()
+    $minimum = [version]([string]$contract.realCodex.minimumVersion)
+    if ($versionResult.exitCode -ne 0 -or $version -notmatch '^codex-cli (\d+\.\d+\.\d+)') {
+        $script:realCodexResult.status = 'failed'
+        $steps.Add([ordered]@{ id = 'real-codex-config-read'; label = 'Real Codex config/read'; status = 'failed'; exitCode = $versionResult.exitCode })
+        return $false
+    }
+    if ([version]$Matches[1] -lt $minimum) {
+        $script:realCodexResult.status = 'failed'
+        $script:realCodexResult.version = $version
+        $steps.Add([ordered]@{ id = 'real-codex-config-read'; label = 'Real Codex config/read'; status = 'failed'; exitCode = 1 })
+        return $false
+    }
+
+    $env:GPTEASY_RUN_REAL_CODEX_ACCEPTANCE = '1'
+    $env:GPTEASY_REAL_CODEX = $CodexPath
+    $env:GPTEASY_TEST_BASH = $BashCurrentPath
+    $passed = Invoke-CargoStep 'real-codex-config-read' 'Real Codex app-server config/read' @(
+        '--manifest-path', 'src-tauri/Cargo.toml', '--test', 'real_linux_codex',
+        'exported_provider_is_effective_in_real_codex_cli', '--', '--ignored', '--nocapture', '--test-threads=1'
+    )
+    $script:realCodexResult.status = if ($passed) { 'passed' } else { 'failed' }
+    $script:realCodexResult.version = $version
+    return $passed
 }
 
 function Invoke-ShellTarget(
@@ -213,8 +325,8 @@ function Invoke-ShellTarget(
     } else {
         $env:GPTEASY_TEST_ZSH = $Executable
     }
-    $passed = Invoke-Step "shell-matrix-$Id" "$Label public black-box matrix" $cargo @(
-        'test', '--manifest-path', 'src-tauri/Cargo.toml', '--test', 'linux_export',
+    $passed = Invoke-CargoStep "shell-matrix-$Id" "$Label public black-box matrix" @(
+        '--manifest-path', 'src-tauri/Cargo.toml', '--test', 'linux_export',
         'shell_snapshots', '--', '--nocapture', '--test-threads=1'
     )
     $shellResults[$Id] = [ordered]@{
@@ -250,6 +362,11 @@ if ($isWindowsHost) {
     $wsl = Resolve-Program 'wsl.exe'
     $prerequisites.Add([ordered]@{ id = 'wsl2'; available = $null -ne $wsl; value = $WslDistribution })
 }
+$prerequisites.Add([ordered]@{ id = 'real-codex'; available = -not [string]::IsNullOrWhiteSpace($CodexPath); value = $CodexPath })
+
+if ($Mode -eq 'Full' -and -not (Test-NativeLinuxKernel)) {
+    throw 'Independent GNU/Linux acceptance requires a non-WSL Linux kernel.'
+}
 
 $reportJson = $null
 $exitCode = 1
@@ -258,6 +375,8 @@ try {
     $env:GPTEASY_ACCEPTANCE_KEY_B = $canaryB
     $env:VITE_GPTEASY_ACCEPTANCE_KEY_A = $canaryA
     $env:GPTEASY_TEST_WSL_DISTRIBUTION = $WslDistribution
+    $env:NO_PROXY = (@($env:NO_PROXY -split ',' | Where-Object { $_ }) + @('127.0.0.1', 'localhost', '::1')) -join ','
+    $env:no_proxy = (@($env:no_proxy -split ',' | Where-Object { $_ }) + @('127.0.0.1', 'localhost', '::1')) -join ','
 
     $contractArguments = @(
         '-NoProfile', '-File', 'scripts/test-linux-wsl-contract.ps1', '-RepositoryRoot', $repoRoot
@@ -266,8 +385,8 @@ try {
         $contractArguments += '-CheckGitHubPrd'
     }
     [void](Invoke-Step 'domain-and-interface-contract' 'Domain, ADR, UI and PRD contract' $pwsh $contractArguments)
-    [void](Invoke-Step 'linux-export-generator' 'Linux export generator integration tests' $cargo @(
-        'test', '--manifest-path', 'src-tauri/Cargo.toml', '--test', 'linux_export',
+    [void](Invoke-CargoStep 'linux-export-generator' 'Linux export generator integration tests' @(
+        '--manifest-path', 'src-tauri/Cargo.toml', '--test', 'linux_export',
         'export_', '--', '--nocapture', '--test-threads=1'
     ))
 
@@ -276,16 +395,16 @@ try {
     Set-NotRunShellResult 'gnu-bash-4.4' 'Run with -Mode Full and provide -Bash44Path.'
     Set-NotRunShellResult 'zsh-5.9' 'Run with -Mode Full and provide -Zsh59Path.'
 
-    [void](Invoke-Step 'wsl-shared-protocol' 'WSL2 shared protocol and lifecycle tests' $cargo @(
-        'test', '--manifest-path', 'src-tauri/Cargo.toml', '--lib', 'wsl::tests',
+    [void](Invoke-CargoStep 'wsl-shared-protocol' 'WSL2 shared protocol and lifecycle tests' @(
+        '--manifest-path', 'src-tauri/Cargo.toml', '--lib', 'wsl::tests',
         '--', '--nocapture', '--test-threads=1'
     ))
-    [void](Invoke-Step 'sqlite-schema-and-saga' 'SQLite schema and migration tests' $cargo @(
-        'test', '--manifest-path', 'src-tauri/Cargo.toml', '--test', 'state_store',
+    [void](Invoke-CargoStep 'sqlite-schema-and-saga' 'SQLite schema and migration tests' @(
+        '--manifest-path', 'src-tauri/Cargo.toml', '--test', 'state_store',
         '--', '--nocapture', '--test-threads=1'
     ))
-    [void](Invoke-Step 'provider-deletion-and-credential-cleanup' 'Provider deletion and recovery integration tests' $cargo @(
-        'test', '--manifest-path', 'src-tauri/Cargo.toml', '--test', 'provider_workflow',
+    [void](Invoke-CargoStep 'provider-deletion-and-credential-cleanup' 'Provider deletion and recovery integration tests' @(
+        '--manifest-path', 'src-tauri/Cargo.toml', '--test', 'provider_workflow',
         '--', '--nocapture', '--test-threads=1'
     ))
     [void](Invoke-Step 'react-linux-wsl-workflows' 'React Linux and WSL2 user workflows' $npx @(
@@ -297,6 +416,7 @@ try {
         $zshTarget = @($contract.shellMatrix | Where-Object { $_.id -eq 'zsh-5.9' })[0]
         [void](Invoke-ShellTarget 'gnu-bash-4.4' $bash44Target.label 'bash' $Bash44Path $bash44Target.versionPattern)
         [void](Invoke-ShellTarget 'zsh-5.9' $zshTarget.label 'zsh' $Zsh59Path $zshTarget.versionPattern)
+        [void](Invoke-RealCodexTarget)
 
         if ($isWindowsHost) {
             if (-not $ConfirmDisposableWsl) {
@@ -310,9 +430,9 @@ try {
             } else {
                 $env:GPTEASY_RUN_WSL_GUEST_HARNESS = '1'
                 $env:GPTEASY_WSL_TEST_DISTRIBUTION = $WslDistribution
-                $runningPassed = Invoke-Step 'wsl2-running-guest' 'Running WSL2 real guest harness' $cargo @(
-                    'test', '--manifest-path', 'src-tauri/Cargo.toml', '--features', 'wsl-guest-harness',
-                    '--test', 'wsl_guest_harness', 'running_guest_harness_preserves_auth',
+                $runningPassed = Invoke-CargoStep 'wsl2-running-guest' 'Running WSL2 real guest harness' @(
+                    '--manifest-path', 'src-tauri/Cargo.toml', '--features', 'wsl-guest-harness',
+                    '--test', 'wsl_guest_harness', 'running_guest_',
                     '--', '--ignored', '--nocapture', '--test-threads=1'
                 )
                 $realResults['wsl2-running-guest'] = [ordered]@{
@@ -320,11 +440,29 @@ try {
                     status = if ($runningPassed) { 'passed' } else { 'failed' }
                     detail = "WSL2 distribution: $WslDistribution"
                 }
-                $stoppedPassed = Invoke-Step 'wsl2-stopped-guest' 'Stopped WSL2 real guest harness' $cargo @(
-                    'test', '--manifest-path', 'src-tauri/Cargo.toml', '--features', 'wsl-guest-harness',
-                    '--test', 'wsl_guest_harness', 'stopped_guest_harness_authorizes_start',
-                    '--', '--ignored', '--nocapture', '--test-threads=1'
-                )
+                $stoppedReady = Wait-WslDistributionStopped
+                $steps.Add([ordered]@{
+                    id = 'wsl2-actual-stopped-precondition'
+                    label = 'Actual Stopped WSL2 precondition'
+                    status = if ($stoppedReady) { 'passed' } else { 'failed' }
+                    exitCode = if ($stoppedReady) { 0 } else { 1 }
+                })
+                $stoppedPassed = $false
+                if ($stoppedReady) {
+                    $stoppedPassed = Invoke-CargoStep 'wsl2-stopped-guest' 'Stopped WSL2 real guest harness' @(
+                        '--manifest-path', 'src-tauri/Cargo.toml', '--features', 'wsl-guest-harness',
+                        '--test', 'wsl_guest_harness', 'stopped_guest_harness_authorizes_start',
+                        '--', '--ignored', '--nocapture', '--test-threads=1'
+                    )
+                }
+                $stoppedAfter = Wait-WslDistributionStopped
+                $steps.Add([ordered]@{
+                    id = 'wsl2-actual-stopped-final'
+                    label = 'Actual Stopped WSL2 final state'
+                    status = if ($stoppedAfter) { 'passed' } else { 'failed' }
+                    exitCode = if ($stoppedAfter) { 0 } else { 1 }
+                })
+                $stoppedPassed = $stoppedPassed -and $stoppedAfter
                 $realResults['wsl2-stopped-guest'] = [ordered]@{
                     id = 'wsl2-stopped-guest'
                     status = if ($stoppedPassed) { 'passed' } else { 'failed' }
@@ -364,6 +502,7 @@ try {
         $failedAutomated = @($automated | Where-Object { $_.status -ne 'passed' })
         $fullHostFailures = if ($Mode -eq 'Full') {
             @($shellResults.Values | Where-Object { $_.status -ne 'passed' }).Count +
+                $(if ($realCodexResult.status -eq 'passed') { 0 } else { 1 }) +
                 $(if ($isWindowsHost) { @($realResults.Values | Where-Object { $_.id -like 'wsl2-*' -and $_.status -ne 'passed' }).Count } else { @($realResults.Values | Where-Object { $_.id -eq 'independent-gnu-linux' -and $_.status -ne 'passed' }).Count })
         } else {
             0
@@ -402,7 +541,7 @@ try {
             parentIssue = 29
             mode = $Mode.ToLowerInvariant()
             passed = $passed
-            gitCommit = (& git -C $repoRoot rev-parse HEAD | Out-String).Trim()
+            gitCommit = $gitCommit
             platform = [ordered]@{
                 os = if ($isWindowsHost) { 'windows' } else { 'linux' }
                 architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
@@ -410,6 +549,7 @@ try {
             automatedMatrix = @($automated)
             shellMatrix = @($contract.shellMatrix | ForEach-Object { $shellResults[[string]$_.id] })
             realEnvironmentGates = @($contract.realEnvironmentGates | ForEach-Object { $realResults[[string]$_.id] })
+            realCodex = $realCodexResult
             unexecutedRealEnvironmentGates = @($realResults.Values | Where-Object { $_.status -in @('not_run', 'blocked') } | ForEach-Object { $_.id })
             platformPrerequisites = @($prerequisites)
             githubPrdCheck = if ($Mode -eq 'Full') { 'checked' } else { 'not_run' }

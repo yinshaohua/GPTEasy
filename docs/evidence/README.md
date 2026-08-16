@@ -6,3 +6,4 @@
 - [Issue #28 综合自动验收门禁](acceptance-gate.md)
 - [Issue #28 Windows x64 真实 UAT 与安装交付](windows-x64-uat.md)
 - [Issue #35 Linux 与 WSL2 自动验收门禁](linux-wsl-acceptance-gate.md)
+- [Issue #31 GNU/Linux 与 Windows x64 + WSL2 真实 UAT](linux-wsl-real-uat.md)

@@ -1,8 +1,17 @@
 {
   "schemaVersion": 1,
   "issue": 35,
+  "realAcceptanceIssue": 31,
   "parentIssue": 29,
   "repository": "yinshaohua/GPTEasy",
+  "realCodex": {
+    "minimumVersion": "0.147.0",
+    "verificationMethod": "app-server config/read"
+  },
+  "nativeLinux": {
+    "requiredDistribution": "Ubuntu GNU/Linux",
+    "rejectedKernelPatterns": ["microsoft", "wsl"]
+  },
   "githubPrd": [
     {
       "issue": 29,
@@ -93,18 +102,44 @@
   "realEnvironmentGates": [
     {
       "id": "independent-gnu-linux",
+      "completionIssue": 31,
       "platform": "native GNU/Linux",
-      "required": "GNU Bash 4.4, current GNU Bash, Zsh 5.9, GNU core utilities and Codex CLI 0.147.0-compatible fixture"
+      "required": "GNU Bash 4.4, current GNU Bash, Zsh 5.9, GNU core utilities and real Codex CLI 0.147.0 or later",
+      "requiredEvidence": [
+        "non-WSL Ubuntu kernel",
+        "real shell versions and permissions",
+        "real Codex app-server config/read",
+        "auth.json byte identity",
+        "canary leak scan"
+      ]
     },
     {
       "id": "wsl2-running-guest",
+      "completionIssue": 31,
       "platform": "Windows x64 with disposable WSL2 distribution",
-      "required": "explicit disposable-environment confirmation"
+      "required": "explicit disposable-environment confirmation and a real Codex CLI 0.147.0 or later",
+      "requiredEvidence": [
+        "actual Running distribution",
+        "desktop and shell bidirectional state",
+        "shared lock and every persisted Saga recovery stage",
+        "real Codex app-server config/read",
+        "auth.json byte identity",
+        "canary leak scan"
+      ]
     },
     {
       "id": "wsl2-stopped-guest",
+      "completionIssue": 31,
       "platform": "Windows x64 with disposable WSL2 distribution",
-      "required": "explicit disposable-environment confirmation"
+      "required": "explicit disposable-environment confirmation and an actually Stopped distribution",
+      "requiredEvidence": [
+        "side-effect-free probe while actually Stopped",
+        "explicit temporary start",
+        "natural stop without distribution termination",
+        "deletion audit and credential cleanup",
+        "auth.json byte identity",
+        "canary leak scan"
+      ]
     }
   ],
   "documents": [

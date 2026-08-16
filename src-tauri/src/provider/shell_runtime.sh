@@ -156,10 +156,7 @@ gpteasy__acquire_lock() {
         printf '另一个 GPTEasy 配置操作正在进行（owner=%s，operation=%s），请稍后重试。\n' "$owner" "$held_operation" >&2
         return 1
     fi
-    read -r process_id < <(sh -c 'printf "%s\n" "$PPID"') || {
-        rmdir -- "$active" 2>/dev/null || true
-        return 1
-    }
+{{GPTEASY_PROCESS_ID}}
     start=$(awk '{print $22}' "/proc/$process_id/stat" 2>/dev/null) || {
         rmdir -- "$active" 2>/dev/null || true
         return 1
@@ -595,7 +592,7 @@ gpteasy__prepare_candidate() {
 
 gpteasy__create_restore_point() {
     local stamp process_id
-    read -r process_id < <(sh -c 'printf "%s\n" "$PPID"') || return
+    process_id=$$
     stamp=$(date -u +%Y%m%dT%H%M%S%N)
     gpteasy__restore_point="$gpteasy__restore_root/switch-$stamp-$process_id-${RANDOM:-0}"
     mkdir -m 700 -- "$gpteasy__restore_point" || return

@@ -3,6 +3,7 @@ mod commands;
 pub mod consumer;
 pub mod environment;
 pub mod provider;
+#[cfg(windows)]
 pub mod single_instance;
 pub mod startup;
 pub mod state;
@@ -24,6 +25,7 @@ use commands::{
 };
 use environment::EnvironmentApplication;
 use provider::{ProviderApplication, ProviderValidator, ValidationTimeouts};
+#[cfg(windows)]
 use single_instance::{InstanceRole, acquire};
 use startup::StartupCoordinator;
 use state::{StatePaths, StateStore};
@@ -33,7 +35,9 @@ use wsl::WslApplication;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(windows)]
     let executable = std::env::current_exe().expect("GPTEasy executable path is unavailable");
+    #[cfg(windows)]
     let primary_instance = match acquire(&executable).expect("GPTEasy single-instance setup failed")
     {
         InstanceRole::Primary(primary) => primary,
@@ -64,13 +68,16 @@ pub fn run() {
                 state_store,
                 ProviderValidator::new(ValidationTimeouts::default()),
             )));
-            let activation_handle = app.app_handle().clone();
-            app.manage(primary_instance.listen(move || {
-                let main_thread_handle = activation_handle.clone();
-                let _ = activation_handle.run_on_main_thread(move || {
-                    tray::show_settings(&main_thread_handle);
-                });
-            })?);
+            #[cfg(windows)]
+            {
+                let activation_handle = app.app_handle().clone();
+                app.manage(primary_instance.listen(move || {
+                    let main_thread_handle = activation_handle.clone();
+                    let _ = activation_handle.run_on_main_thread(move || {
+                        tray::show_settings(&main_thread_handle);
+                    });
+                })?);
+            }
             tray::setup(app)?;
             Ok(())
         })

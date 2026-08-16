@@ -99,6 +99,56 @@ fn issue_35_contract_covers_every_public_acceptance_surface() {
 }
 
 #[test]
+fn issue_31_real_acceptance_requires_real_codex_and_an_independent_linux_kernel() {
+    let contract = acceptance_contract();
+
+    assert_eq!(contract["realAcceptanceIssue"], 31);
+    assert_eq!(contract["realCodex"]["minimumVersion"], "0.147.0");
+    assert_eq!(
+        contract["realCodex"]["verificationMethod"],
+        "app-server config/read"
+    );
+    assert_eq!(
+        contract["nativeLinux"]["rejectedKernelPatterns"],
+        json!(["microsoft", "wsl"])
+    );
+    assert_eq!(
+        contract["nativeLinux"]["requiredDistribution"],
+        "Ubuntu GNU/Linux"
+    );
+
+    for gate in contract["realEnvironmentGates"]
+        .as_array()
+        .expect("real environment gates")
+    {
+        assert_eq!(gate["completionIssue"], 31);
+        assert!(
+            gate["requiredEvidence"]
+                .as_array()
+                .is_some_and(|items| !items.is_empty()),
+            "real gate must declare completion evidence: {gate}"
+        );
+    }
+}
+
+#[test]
+fn extracted_real_acceptance_source_can_bind_evidence_to_a_commit() {
+    let runner =
+        fs::read_to_string(repository_root().join("scripts/run-linux-wsl-acceptance-gate.ps1"))
+            .expect("read Linux and WSL acceptance runner");
+
+    assert!(runner.contains("[string]$SourceCommit"));
+    assert!(runner.contains("SourceCommit must be a 40-character Git commit SHA."));
+    assert!(runner.contains("gitCommit = $gitCommit"));
+    assert!(runner.contains("--features', 'native-linux-acceptance"));
+    assert!(runner.contains("@('127.0.0.1', 'localhost', '::1')"));
+
+    let manifest = fs::read_to_string(repository_root().join("src-tauri/Cargo.toml"))
+        .expect("read Cargo manifest");
+    assert!(manifest.contains("native-linux-acceptance = []"));
+}
+
+#[test]
 fn package_keeps_issue_28_gate_and_adds_parallel_issue_35_commands() {
     let package: Value = serde_json::from_slice(
         &fs::read(repository_root().join("package.json")).expect("read package.json"),
@@ -121,6 +171,12 @@ fn package_keeps_issue_28_gate_and_adds_parallel_issue_35_commands() {
         package["scripts"]["acceptance:all"],
         "pwsh -NoProfile -File scripts/run-all-acceptance-gates.ps1"
     );
+
+    let combined_runner =
+        fs::read_to_string(repository_root().join("scripts/run-all-acceptance-gates.ps1"))
+            .expect("read combined acceptance runner");
+    assert!(combined_runner.contains("[string]$CodexPath"));
+    assert!(combined_runner.contains("$linuxArguments += @('-CodexPath', $CodexPath)"));
 }
 
 #[cfg(windows)]

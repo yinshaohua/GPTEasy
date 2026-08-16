@@ -8,6 +8,7 @@ npm run acceptance:linux-wsl -- `
   -Bash44Path <GNU Bash 4.4 路径> `
   -BashCurrentPath <当前 GNU Bash 路径> `
   -Zsh59Path <Zsh 5.9 路径> `
+  -CodexPath <Codex CLI 0.147.0 或更高版本路径> `
   -ConfirmDisposableWsl
 ```
 
@@ -21,7 +22,9 @@ npm run acceptance:linux-wsl -- `
 npm run acceptance:linux-wsl:automated
 ```
 
-在原生 GNU/Linux 上以 `-Mode Full` 运行同一脚本时，三个 shell 目标计入独立 GNU/Linux 门禁；Windows 上计入 WSL2 shell 矩阵。报告始终列出平台前置条件、各 shell 版本、Running/Stopped WSL2 结果和未执行的真实环境门禁，不用模拟结果冒充真实宿主证据。
+在原生 GNU/Linux 上以 `-Mode Full` 运行同一脚本时，三个 shell 目标计入独立 GNU/Linux 门禁；Windows 上计入 WSL2 shell 矩阵。Full 模式还会在隔离的 `CODEX_HOME` 中调用所选真实 Codex 的 `app-server config/read`，验证生成配置实际被目标版本接受。原生 Linux 门禁拒绝 WSL 内核，不能用 WSL2 冒充独立 GNU/Linux。报告始终列出平台前置条件、各 shell 版本、真实 Codex 版本、Running/Stopped WSL2 结果和未执行的真实环境门禁。
+
+Issue #31 的真实环境、执行矩阵、脱敏证据路径和 #29 可追溯关系记录在 [真实 UAT 证据](linux-wsl-real-uat.md)。
 
 Issue #28 的原命令和语义保持不变：
 
@@ -37,6 +40,7 @@ npm run acceptance:all -- `
   -Bash44Path <GNU Bash 4.4 路径> `
   -BashCurrentPath <当前 GNU Bash 路径> `
   -Zsh59Path <Zsh 5.9 路径> `
+  -CodexPath <Codex CLI 0.147.0 或更高版本路径> `
   -ConfirmDisposableWsl
 ```
 

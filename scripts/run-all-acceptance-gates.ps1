@@ -6,6 +6,7 @@ param(
     [string]$Bash44Path,
     [string]$BashCurrentPath = 'bash',
     [string]$Zsh59Path,
+    [string]$CodexPath,
     [switch]$ConfirmDisposableWsl
 )
 
@@ -57,6 +58,9 @@ if (-not [string]::IsNullOrWhiteSpace($Bash44Path)) {
 }
 if (-not [string]::IsNullOrWhiteSpace($Zsh59Path)) {
     $linuxArguments += @('-Zsh59Path', $Zsh59Path)
+}
+if (-not [string]::IsNullOrWhiteSpace($CodexPath)) {
+    $linuxArguments += @('-CodexPath', $CodexPath)
 }
 if ($ConfirmDisposableWsl) {
     $linuxArguments += '-ConfirmDisposableWsl'

@@ -6,6 +6,8 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::Arc;
+use std::thread;
 use std::time::Duration;
 
 use gpteasy_lib::provider::{
@@ -13,7 +15,8 @@ use gpteasy_lib::provider::{
 };
 use gpteasy_lib::state::{StatePaths, StateStore};
 use gpteasy_lib::wsl::{
-    WslApplication, WslAvailability, WslConfigurationState, WslLifecycleOutcome,
+    WslApplication, WslAvailability, WslConfigurationState, WslFailure, WslFailureCategory,
+    WslFailurePoint, WslFaultInjector, WslLifecycleOutcome,
 };
 use rusqlite::{Connection, params};
 use tempfile::TempDir;
@@ -44,6 +47,22 @@ struct WslWrapper {
     previous_stop_after: Option<OsString>,
     state: PathBuf,
     log: PathBuf,
+}
+
+struct InterruptAt(WslFailurePoint);
+
+impl WslFaultInjector for InterruptAt {
+    fn check(&self, point: WslFailurePoint) -> Result<(), WslFailure> {
+        if point == self.0 {
+            Err(WslFailure {
+                category: WslFailureCategory::Interrupted,
+                message_id: "wsl.acceptance_interruption",
+                lifecycle_outcome: None,
+            })
+        } else {
+            Ok(())
+        }
+    }
 }
 
 impl WslWrapper {
@@ -296,7 +315,7 @@ fn bundle(config: &[u8], credential: &[u8]) -> Vec<u8> {
     result
 }
 
-fn assert_distribution_is_running(distribution: &str) {
+fn distribution_is_running(distribution: &str) -> bool {
     let output = Command::new("wsl.exe")
         .args(["--list", "--running", "--quiet"])
         .output()
@@ -308,13 +327,28 @@ fn assert_distribution_is_running(distribution: &str) {
         .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
         .collect::<Vec<_>>();
     let names = String::from_utf16_lossy(&units);
+    names
+        .lines()
+        .map(|name| name.trim_matches(['\0', '\u{feff}', '\r']))
+        .any(|name| name.eq_ignore_ascii_case(distribution))
+}
+
+fn assert_distribution_is_running(distribution: &str) {
     assert!(
-        names
-            .lines()
-            .map(|name| name.trim_matches(['\0', '\u{feff}', '\r']))
-            .any(|name| name.eq_ignore_ascii_case(distribution)),
+        distribution_is_running(distribution),
         "the selected WSL2 distribution must already be Running",
     );
+}
+
+fn wait_for_distribution_to_stop(distribution: &str, timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if !distribution_is_running(distribution) {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    !distribution_is_running(distribution)
 }
 
 fn bash_snapshot() -> (TempDir, PathBuf) {
@@ -910,7 +944,10 @@ fn stopped_guest_harness_authorizes_start_and_never_forces_termination() {
     );
     let distribution =
         std::env::var("GPTEASY_WSL_TEST_DISTRIBUTION").expect("select a WSL2 distribution");
-    let _running_guest = RunningGuest::start(&distribution);
+    assert!(
+        !distribution_is_running(&distribution),
+        "the selected disposable WSL2 distribution must actually be Stopped",
+    );
     let home_path = String::from_utf8(checked_output(
         &distribution,
         &["/bin/sh", "-c", "mktemp -d /tmp/gpteasy-wsl-harness.XXXXXX"],
@@ -946,13 +983,18 @@ chmod 700 "$home/bin/codex"
         ],
         &[],
     );
+    assert!(
+        wait_for_distribution_to_stop(&distribution, Duration::from_secs(60)),
+        "the setup session must let the disposable WSL2 distribution stop naturally",
+    );
 
     let (_application_temp, application_store) = wsl_application_state();
     let wrapper = WslWrapper::start_with_lifecycle(&distribution, home, false, Some(3));
-    let application = WslApplication::with_wsl_program_and_timeout_for_harness(
+    let application = WslApplication::with_isolated_wsl_for_harness(
         application_store.clone(),
         wrapper.program(),
         Duration::from_secs(1),
+        distribution.clone(),
     );
     let stopped = application
         .list()
@@ -966,6 +1008,10 @@ chmod 700 "$home/bin/codex"
     assert!(!stopped.running);
     assert_eq!(stopped.availability, WslAvailability::Manageable);
     assert_eq!(stopped.configuration_state, WslConfigurationState::Unknown);
+    assert!(
+        !distribution_is_running(&distribution),
+        "ordinary desktop probing must not start an actually Stopped distribution",
+    );
 
     let denied = application
         .apply_provider(
@@ -977,6 +1023,7 @@ chmod 700 "$home/bin/codex"
         .expect_err("explicit confirmation is required");
     assert_eq!(denied.message_id, "wsl.confirmation_required");
     assert!(!wrapper.reports_running());
+    assert!(!distribution_is_running(&distribution));
 
     let applied = application
         .apply_provider(
@@ -997,12 +1044,19 @@ chmod 700 "$home/bin/codex"
     );
     assert!(!applied.environment.running);
     assert!(!wrapper.reports_running());
+    assert!(
+        wait_for_distribution_to_stop(&distribution, Duration::from_secs(60)),
+        "the explicitly started distribution must stop naturally after the operation",
+    );
 
+    let _user_workload = RunningGuest::start(&distribution);
+    assert_distribution_is_running(&distribution);
     wrapper.set_stopped(None);
-    let running_application = WslApplication::with_wsl_program_and_timeout_for_harness(
+    let running_application = WslApplication::with_isolated_wsl_for_harness(
         application_store,
         wrapper.program(),
         Duration::ZERO,
+        distribution.clone(),
     );
     let stopped_again = running_application
         .list()
@@ -1056,6 +1110,164 @@ chmod 700 "$home/bin/codex"
         ),
         br#"{"login":"unchanged"}"#
     );
+    assert!(!wrapper.invocation_log().contains("--terminate"));
+    for canary in [
+        acceptance_key("GPTEASY_ACCEPTANCE_KEY_A", "wsl-harness-secret"),
+        acceptance_key("GPTEASY_ACCEPTANCE_KEY_B", "shell-harness-secret"),
+    ] {
+        assert!(!wrapper.invocation_log().contains(&canary));
+    }
+}
+
+#[test]
+#[ignore = "requires --features wsl-guest-harness, GPTEASY_RUN_WSL_GUEST_HARNESS=1, and an explicitly selected WSL2 distribution"]
+fn running_guest_every_persisted_saga_stage_recovers_and_releases_its_lock() {
+    assert_acceptance_process_arguments_are_clean();
+    assert_eq!(
+        std::env::var("GPTEASY_RUN_WSL_GUEST_HARNESS").as_deref(),
+        Ok("1"),
+        "set GPTEASY_RUN_WSL_GUEST_HARNESS=1 to confirm the isolated WSL harness",
+    );
+    let distribution =
+        std::env::var("GPTEASY_WSL_TEST_DISTRIBUTION").expect("select a WSL2 distribution");
+    let _running_guest = RunningGuest::start(&distribution);
+    assert_distribution_is_running(&distribution);
+    let home_path = String::from_utf8(checked_output(
+        &distribution,
+        &["/bin/sh", "-c", "mktemp -d /tmp/gpteasy-wsl-harness.XXXXXX"],
+        &[],
+    ))
+    .expect("temporary HOME is UTF-8")
+    .trim()
+    .to_owned();
+    let guest_home = GuestHome {
+        distribution: distribution.clone(),
+        path: home_path,
+    };
+    let home = guest_home.path.as_str();
+    checked_output(
+        &distribution,
+        &[
+            "/bin/sh",
+            "-c",
+            r#"set -eu
+home=$1
+mkdir -p "$home/.codex" "$home/bin"
+printf '%s\n' 'custom = true' >"$home/.codex/config.toml"
+printf '%s' '{"login":"unchanged"}' >"$home/.codex/auth.json"
+chmod 600 "$home/.codex/auth.json"
+cat >"$home/bin/codex" <<'CODEX'
+#!/bin/sh
+printf '%s\n' 'codex-cli 0.147.0'
+CODEX
+chmod 700 "$home/bin/codex"
+"#,
+            "gpteasy",
+            home,
+        ],
+        &[],
+    );
+
+    let (_application_temp, store) = wsl_application_state();
+    let wrapper = WslWrapper::start(&distribution, home);
+    let provider_ids = [
+        "22222222-2222-4222-8222-222222222222",
+        "33333333-3333-4333-8333-333333333333",
+    ];
+    for (index, point) in [
+        WslFailurePoint::AfterPendingRegistered,
+        WslFailurePoint::AfterLockAcquired,
+        WslFailurePoint::AfterPrepared,
+        WslFailurePoint::AfterArtifactsReplaced,
+        WslFailurePoint::AfterStateCommitted,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let normal = WslApplication::with_wsl_program_for_harness(store.clone(), wrapper.program());
+        let environment = normal
+            .list()
+            .expect("read real guest before interrupted Saga")
+            .into_iter()
+            .find(|environment| {
+                environment.running && environment.display_name.eq_ignore_ascii_case(&distribution)
+            })
+            .expect("selected WSL environment");
+        let target = provider_ids[index % provider_ids.len()];
+        let interrupted = WslApplication::with_wsl_program_and_fault_for_harness(
+            store.clone(),
+            wrapper.program(),
+            Arc::new(InterruptAt(point)),
+        );
+        let failure = interrupted
+            .apply_provider(
+                &environment.environment_id,
+                target,
+                &environment.revision,
+                true,
+            )
+            .expect_err("the selected persisted Saga stage must interrupt");
+        assert_eq!(failure.category, WslFailureCategory::Interrupted);
+
+        let recovered =
+            WslApplication::with_wsl_program_for_harness(store.clone(), wrapper.program());
+        recovered
+            .recover_pending()
+            .expect("recover the interrupted real guest Saga");
+        let connection = Connection::open(store.paths().database()).expect("state database");
+        let pending = connection
+            .query_row("SELECT count(*) FROM wsl_pending_operation", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("count pending WSL operations");
+        assert_eq!(pending, 0, "pending Saga remained after {point:?}");
+        drop(connection);
+        let lock_absent = wsl_output(
+            &distribution,
+            &[
+                "/bin/sh",
+                "-c",
+                "test ! -e \"$1/.codex/.gpteasy-shell/lock/active\"",
+                "gpteasy",
+                home,
+            ],
+            &[],
+        );
+        assert!(
+            lock_absent.status.success(),
+            "guest lock remained after {point:?}"
+        );
+
+        let current = recovered
+            .list()
+            .expect("read recovered real guest")
+            .into_iter()
+            .find(|environment| {
+                environment.running && environment.display_name.eq_ignore_ascii_case(&distribution)
+            })
+            .expect("selected WSL environment after recovery");
+        let applied = recovered
+            .apply_provider(&current.environment_id, target, &current.revision, true)
+            .unwrap_or_else(|failure| panic!("apply after {point:?} recovery: {failure:?}"));
+        assert_eq!(
+            applied.environment.actual_provider_id.as_deref(),
+            Some(target)
+        );
+        assert_eq!(
+            checked_output(
+                &distribution,
+                &[
+                    "/bin/sh",
+                    "-c",
+                    "cat -- \"$1/.codex/auth.json\"",
+                    "gpteasy",
+                    home,
+                ],
+                &[],
+            ),
+            br#"{"login":"unchanged"}"#,
+        );
+    }
     assert!(!wrapper.invocation_log().contains("--terminate"));
     for canary in [
         acceptance_key("GPTEASY_ACCEPTANCE_KEY_A", "wsl-harness-secret"),
