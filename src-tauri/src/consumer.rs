@@ -27,6 +27,13 @@ pub struct ConsumerIdentity {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsumerProcessExclusion {
+    pub pid: u32,
+    pub started_at_epoch_millis: u64,
+    pub executable: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsumerScan {
     pub desktop: ConsumerStatus,
     pub cli: ConsumerStatus,
@@ -64,6 +71,10 @@ impl ConsumerScan {
 
 pub trait ConsumerScanner: Send + Sync {
     fn scan(&self) -> ConsumerScan;
+
+    fn scan_excluding(&self, _exclusions: &[ConsumerProcessExclusion]) -> ConsumerScan {
+        self.scan()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -79,10 +90,22 @@ impl ConsumerScanner for WindowsConsumerScanner {
     fn scan(&self) -> ConsumerScan {
         #[cfg(windows)]
         {
-            scan_windows(None).unwrap_or_else(|_| ConsumerScan::unknown())
+            scan_windows(None, &[]).unwrap_or_else(|_| ConsumerScan::unknown())
         }
         #[cfg(not(windows))]
         {
+            ConsumerScan::unknown()
+        }
+    }
+
+    fn scan_excluding(&self, exclusions: &[ConsumerProcessExclusion]) -> ConsumerScan {
+        #[cfg(windows)]
+        {
+            scan_windows(None, exclusions).unwrap_or_else(|_| ConsumerScan::unknown())
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = exclusions;
             ConsumerScan::unknown()
         }
     }
@@ -107,23 +130,54 @@ pub struct FixtureProcess {
 }
 
 pub fn classify_fixture(processes: &[FixtureProcess]) -> ConsumerScan {
-    classify_processes(processes, None)
+    classify_processes(processes, None, &[])
 }
 
 pub fn classify_fixture_for_packages(
     processes: &[FixtureProcess],
     install_locations: &[PathBuf],
 ) -> ConsumerScan {
-    classify_processes(processes, Some(install_locations))
+    classify_processes(processes, Some(install_locations), &[])
+}
+
+pub fn classify_fixture_with_exclusions(
+    processes: &[FixtureProcess],
+    exclusions: &[ConsumerProcessExclusion],
+) -> ConsumerScan {
+    classify_processes(processes, None, exclusions)
 }
 
 fn classify_processes(
     processes: &[FixtureProcess],
     install_locations: Option<&[PathBuf]>,
+    exclusions: &[ConsumerProcessExclusion],
 ) -> ConsumerScan {
-    let available = processes
+    let all_available = processes
         .iter()
         .filter(|process| process.access == ProcessAccess::Available)
+        .collect::<Vec<_>>();
+    let all_by_pid = all_available
+        .iter()
+        .map(|process| (process.pid, *process))
+        .collect::<HashMap<_, _>>();
+    let excluded_roots = all_available
+        .iter()
+        .filter(|process| {
+            exclusions.iter().any(|exclusion| {
+                process.pid == exclusion.pid
+                    && process.started_at_epoch_millis == exclusion.started_at_epoch_millis
+                    && normalized_windows_path(&process.executable)
+                        == normalized_windows_path(&exclusion.executable)
+            })
+        })
+        .map(|process| process.pid)
+        .collect::<HashSet<_>>();
+    let available = all_available
+        .into_iter()
+        .filter(|process| {
+            !excluded_roots.contains(&process.pid)
+                && !has_ancestor(process, &all_by_pid, &excluded_roots)
+        })
         .collect::<Vec<_>>();
     let by_pid = available
         .iter()
@@ -330,8 +384,30 @@ fn has_desktop_ancestor(
     false
 }
 
+fn has_ancestor(
+    process: &&FixtureProcess,
+    by_pid: &HashMap<u32, &FixtureProcess>,
+    roots: &HashSet<u32>,
+) -> bool {
+    let mut parent = process.parent_pid;
+    let mut visited = HashSet::new();
+    while parent != 0 && visited.insert(parent) {
+        if roots.contains(&parent) {
+            return true;
+        }
+        let Some(ancestor) = by_pid.get(&parent) else {
+            return false;
+        };
+        parent = ancestor.parent_pid;
+    }
+    false
+}
+
 #[cfg(windows)]
-fn scan_windows(install_locations: Option<&[PathBuf]>) -> Result<ConsumerScan, ()> {
+fn scan_windows(
+    install_locations: Option<&[PathBuf]>,
+    exclusions: &[ConsumerProcessExclusion],
+) -> Result<ConsumerScan, ()> {
     use std::mem::size_of;
 
     use sysinfo::{Pid, System, get_current_pid};
@@ -410,7 +486,11 @@ fn scan_windows(install_locations: Option<&[PathBuf]>) -> Result<ConsumerScan, (
     unsafe {
         CloseHandle(snapshot);
     }
-    Ok(classify_processes(&processes, install_locations))
+    Ok(classify_processes(
+        &processes,
+        install_locations,
+        exclusions,
+    ))
 }
 
 #[cfg(windows)]

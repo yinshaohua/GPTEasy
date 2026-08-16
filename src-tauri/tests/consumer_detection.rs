@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 
 use gpteasy_lib::consumer::{
-    ConsumerRole, ConsumerScanner, ConsumerStatus, FixtureProcess, ProcessAccess,
-    WindowsConsumerScanner, classify_fixture, classify_fixture_for_packages,
+    ConsumerProcessExclusion, ConsumerRole, ConsumerScanner, ConsumerStatus, FixtureProcess,
+    ProcessAccess, WindowsConsumerScanner, classify_fixture, classify_fixture_for_packages,
+    classify_fixture_with_exclusions,
 };
 
 fn process(
@@ -88,6 +89,66 @@ fn recognizes_standalone_codex_cli_without_mistaking_the_bundled_child_for_cli()
             .map(|identity| identity.pid),
         Some(202)
     );
+}
+
+#[test]
+fn only_the_exact_owned_app_server_process_is_excluded_from_consumer_detection() {
+    let executable =
+        r"C:\Users\example\AppData\Roaming\npm\node_modules\@openai\codex\vendor\codex.exe";
+    let scan = classify_fixture_with_exclusions(
+        &[
+            process(202, 77, 2_000, "codex.exe", executable),
+            process(203, 77, 2_001, "codex.exe", executable),
+        ],
+        &[ConsumerProcessExclusion {
+            pid: 202,
+            started_at_epoch_millis: 2_000,
+            executable: PathBuf::from(executable),
+        }],
+    );
+
+    assert_eq!(scan.cli, ConsumerStatus::Running);
+    assert_eq!(scan.identities.len(), 1);
+    assert_eq!(scan.identities[0].pid, 203);
+}
+
+#[test]
+fn a_stale_owned_process_identity_never_excludes_a_reused_pid() {
+    let executable =
+        r"C:\Users\example\AppData\Roaming\npm\node_modules\@openai\codex\vendor\codex.exe";
+    let scan = classify_fixture_with_exclusions(
+        &[process(202, 77, 2_001, "codex.exe", executable)],
+        &[ConsumerProcessExclusion {
+            pid: 202,
+            started_at_epoch_millis: 2_000,
+            executable: PathBuf::from(executable),
+        }],
+    );
+
+    assert_eq!(scan.cli, ConsumerStatus::Running);
+    assert_eq!(scan.identities[0].pid, 202);
+}
+
+#[test]
+fn descendants_of_an_exact_owned_launcher_are_excluded_but_unrelated_app_servers_remain() {
+    let codex = r"C:\Users\example\AppData\Roaming\npm\node_modules\@openai\codex\vendor\codex.exe";
+    let launcher = r"C:\Windows\System32\cmd.exe";
+    let scan = classify_fixture_with_exclusions(
+        &[
+            process(202, 77, 2_000, "cmd.exe", launcher),
+            process(203, 202, 2_001, "codex.exe", codex),
+            process(204, 77, 2_002, "codex.exe", codex),
+        ],
+        &[ConsumerProcessExclusion {
+            pid: 202,
+            started_at_epoch_millis: 2_000,
+            executable: PathBuf::from(launcher),
+        }],
+    );
+
+    assert_eq!(scan.cli, ConsumerStatus::Running);
+    assert_eq!(scan.identities.len(), 1);
+    assert_eq!(scan.identities[0].pid, 204);
 }
 
 #[test]

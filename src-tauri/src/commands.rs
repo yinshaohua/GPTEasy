@@ -16,6 +16,10 @@ use crate::provider::{
     ProviderUpdateDiscoveryInput, ProviderUpdateValidationInput, ProviderValidationInput,
     ProviderValidationReceipt, ProviderValidationStage,
 };
+use crate::session::{
+    SessionApplication, SessionAvailability, SessionDetail, SessionFailure, SessionListPage,
+    SessionMutationResult, SessionQuery,
+};
 use crate::startup::{StartupCoordinator, StartupSnapshot};
 use crate::tray;
 use crate::wsl::{
@@ -37,6 +41,10 @@ pub(crate) struct EnvironmentRuntime {
 
 pub(crate) struct WslRuntime {
     application: WslApplication,
+}
+
+pub(crate) struct SessionRuntime {
+    application: SessionApplication,
 }
 
 impl ProviderRuntime {
@@ -70,6 +78,24 @@ impl EnvironmentRuntime {
 impl WslRuntime {
     pub(crate) fn new(application: WslApplication) -> Self {
         Self { application }
+    }
+}
+
+impl SessionRuntime {
+    pub(crate) fn new(application: SessionApplication) -> Self {
+        Self { application }
+    }
+
+    pub(crate) fn shutdown(&self) {
+        tauri::async_runtime::block_on(self.application.shutdown_now());
+    }
+
+    pub(crate) fn suspend(&self) {
+        tauri::async_runtime::block_on(self.application.suspend());
+    }
+
+    pub(crate) fn resume(&self) {
+        tauri::async_runtime::block_on(self.application.resume());
     }
 }
 
@@ -115,6 +141,125 @@ pub(crate) fn list_providers(
     state: State<'_, ProviderRuntime>,
 ) -> Result<Vec<ProviderSummary>, ProviderFailure> {
     state.application.list_providers()
+}
+
+#[tauri::command]
+pub(crate) async fn enter_session_management(
+    state: State<'_, SessionRuntime>,
+    lease_id: String,
+) -> Result<SessionAvailability, CommandFailure> {
+    Ok(state.application.enter(&lease_id).await)
+}
+
+#[tauri::command]
+pub(crate) async fn leave_session_management(
+    state: State<'_, SessionRuntime>,
+    lease_id: String,
+) -> Result<(), CommandFailure> {
+    state.application.leave(&lease_id).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) async fn list_sessions(
+    state: State<'_, SessionRuntime>,
+    query: SessionQuery,
+) -> Result<SessionListPage, SessionFailure> {
+    state.application.list(query).await
+}
+
+#[tauri::command]
+pub(crate) async fn cancel_session_request(
+    state: State<'_, SessionRuntime>,
+    request_id: String,
+) -> Result<bool, CommandFailure> {
+    Ok(state.application.cancel_list_request(&request_id).await)
+}
+
+#[tauri::command]
+pub(crate) async fn read_session(
+    state: State<'_, SessionRuntime>,
+    session_id: String,
+) -> Result<SessionDetail, SessionFailure> {
+    state.application.read(&session_id).await
+}
+
+#[tauri::command]
+pub(crate) async fn archive_sessions(
+    state: State<'_, SessionRuntime>,
+    session_ids: Vec<String>,
+) -> Result<Vec<SessionMutationResult>, CommandFailure> {
+    Ok(state.application.archive(session_ids).await)
+}
+
+#[tauri::command]
+pub(crate) async fn unarchive_sessions(
+    state: State<'_, SessionRuntime>,
+    session_ids: Vec<String>,
+) -> Result<Vec<SessionMutationResult>, CommandFailure> {
+    Ok(state.application.unarchive(session_ids).await)
+}
+
+#[tauri::command]
+pub(crate) async fn delete_session(
+    state: State<'_, SessionRuntime>,
+    session_id: String,
+) -> Result<SessionMutationResult, CommandFailure> {
+    Ok(state.application.delete(&session_id).await)
+}
+
+#[tauri::command]
+pub(crate) fn choose_session_export_destination(
+    app: AppHandle,
+    suggested_title: String,
+) -> Result<Option<String>, CommandFailure> {
+    let selected = app
+        .dialog()
+        .file()
+        .set_file_name(format!("{}.md", safe_export_name(&suggested_title)))
+        .add_filter("Markdown", &["md"])
+        .blocking_save_file();
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    selected
+        .into_path()
+        .map(|path| Some(path.to_string_lossy().into_owned()))
+        .map_err(|_| CommandFailure {
+            message_id: "session.export_destination_invalid",
+        })
+}
+
+#[tauri::command]
+pub(crate) async fn export_session_markdown(
+    state: State<'_, SessionRuntime>,
+    detail: SessionDetail,
+    destination: String,
+) -> Result<(), SessionFailure> {
+    state
+        .application
+        .export_markdown(&detail, std::path::Path::new(&destination))
+        .await
+}
+
+fn safe_export_name(title: &str) -> String {
+    let sanitized = title
+        .trim()
+        .chars()
+        .map(|character| {
+            if character.is_control() || "<>:\"/\\|?*".contains(character) {
+                '_'
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    let sanitized = sanitized.trim_matches([' ', '.']);
+    if sanitized.is_empty() {
+        "Codex 会话".to_owned()
+    } else {
+        sanitized.chars().take(80).collect()
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

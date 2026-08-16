@@ -57,6 +57,8 @@ fn fresh_install_initializes_only_the_minimum_schema() {
             "last_applied_state",
             "pending_config_operation",
             "providers",
+            "session_capability",
+            "session_process_ownership",
             "wsl_environments",
             "wsl_pending_operation",
         ]
@@ -145,6 +147,12 @@ fn recommendation_migration_never_claims_or_overwrites_an_existing_dayway_name()
     connection
         .execute("DROP TABLE wsl_environments", [])
         .expect("remove v5 environment table");
+    connection
+        .execute("DROP TABLE session_process_ownership", [])
+        .expect("remove v8 process ownership table");
+    connection
+        .execute("DROP TABLE session_capability", [])
+        .expect("remove v8 capability table");
     connection
         .execute("DROP INDEX providers_recommendation_id_unique", [])
         .expect("remove v4 index");

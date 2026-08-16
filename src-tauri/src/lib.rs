@@ -3,6 +3,7 @@ mod commands;
 pub mod consumer;
 pub mod environment;
 pub mod provider;
+pub mod session;
 #[cfg(windows)]
 pub mod single_instance;
 pub mod startup;
@@ -12,19 +13,23 @@ pub mod wsl;
 
 use codex::{CodexInspector, LoginStatusCommand};
 use commands::{
-    EnvironmentRuntime, ProviderRuntime, StartupRuntime, WslRuntime, apply_environment_provider,
-    apply_wsl_provider, cancel_provider_request, choose_linux_export_destination,
-    confirm_provider_validation_base_url, copy_provider_api_key, delete_provider,
+    EnvironmentRuntime, ProviderRuntime, SessionRuntime, StartupRuntime, WslRuntime,
+    apply_environment_provider, apply_wsl_provider, archive_sessions, cancel_provider_request,
+    cancel_session_request, choose_linux_export_destination, choose_session_export_destination,
+    confirm_provider_validation_base_url, copy_provider_api_key, delete_provider, delete_session,
     discard_provider_validation, discover_provider_models, discover_provider_models_for_update,
-    export_linux_script, get_environment_snapshot, get_startup_snapshot, list_providers,
-    list_wsl_environments, open_dayway_website, refresh_startup_snapshot, refresh_wsl_environment,
-    rename_provider, reorder_providers, restore_last_environment_config, revalidate_provider,
-    reveal_provider_api_key, save_and_apply_provider_update, save_dayway_provider,
-    save_provider_update, save_verified_provider, switch_to_openai_login, validate_provider,
+    enter_session_management, export_linux_script, export_session_markdown,
+    get_environment_snapshot, get_startup_snapshot, leave_session_management, list_providers,
+    list_sessions, list_wsl_environments, open_dayway_website, read_session,
+    refresh_startup_snapshot, refresh_wsl_environment, rename_provider, reorder_providers,
+    restore_last_environment_config, revalidate_provider, reveal_provider_api_key,
+    save_and_apply_provider_update, save_dayway_provider, save_provider_update,
+    save_verified_provider, switch_to_openai_login, unarchive_sessions, validate_provider,
     validate_provider_update,
 };
 use environment::EnvironmentApplication;
 use provider::{ProviderApplication, ProviderValidator, ValidationTimeouts};
+use session::SessionApplication;
 #[cfg(windows)]
 use single_instance::{InstanceRole, acquire};
 use startup::StartupCoordinator;
@@ -64,6 +69,9 @@ pub fn run() {
             let wsl = WslApplication::new(state_store.clone());
             let _ = wsl.recover_pending();
             app.manage(WslRuntime::new(wsl));
+            app.manage(SessionRuntime::new(SessionApplication::new(
+                state_store.clone(),
+            )));
             app.manage(ProviderRuntime::new(ProviderApplication::new(
                 state_store,
                 ProviderValidator::new(ValidationTimeouts::default()),
@@ -86,6 +94,16 @@ pub fn run() {
             get_startup_snapshot,
             refresh_startup_snapshot,
             get_environment_snapshot,
+            enter_session_management,
+            leave_session_management,
+            list_sessions,
+            cancel_session_request,
+            read_session,
+            archive_sessions,
+            unarchive_sessions,
+            delete_session,
+            choose_session_export_destination,
+            export_session_markdown,
             list_wsl_environments,
             refresh_wsl_environment,
             apply_wsl_provider,

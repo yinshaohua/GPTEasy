@@ -9,7 +9,7 @@ use rusqlite::backup::Backup;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction};
 use serde::Serialize;
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 7;
+pub const CURRENT_SCHEMA_VERSION: i64 = 8;
 const APPLICATION_ID: i64 = 0x4750_5445;
 const BACKUP_LIMIT: usize = 3;
 const INSTALLATION_MARKER_CONTENT: &[u8] = b"gpteasy-state-v1\n";
@@ -130,6 +130,26 @@ const SCHEMA_V7: &str = r#"
 ALTER TABLE wsl_environments ADD COLUMN refresh_lock_token TEXT;
 "#;
 
+const SCHEMA_V8: &str = r#"
+CREATE TABLE session_capability (
+    singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
+    executable_path TEXT NOT NULL,
+    codex_version TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('available', 'incompatible', 'unavailable')),
+    checked_at_epoch_seconds INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE session_process_ownership (
+    singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
+    pid INTEGER NOT NULL,
+    process_created_at INTEGER NOT NULL,
+    executable_path TEXT NOT NULL,
+    ownership_generation TEXT NOT NULL UNIQUE,
+    command_identity TEXT NOT NULL CHECK (command_identity = 'app-server'),
+    started_at_epoch_seconds INTEGER NOT NULL
+) STRICT;
+"#;
+
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, SCHEMA_V1),
     (2, SCHEMA_V2),
@@ -138,6 +158,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (5, SCHEMA_V5),
     (6, SCHEMA_V6),
     (7, SCHEMA_V7),
+    (8, SCHEMA_V8),
 ];
 
 #[derive(Debug, Clone)]
@@ -146,6 +167,14 @@ pub struct StatePaths {
     database: PathBuf,
     installation_marker: PathBuf,
     backups: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionProcessOwnership {
+    pub pid: u32,
+    pub process_created_at: i64,
+    pub executable_path: String,
+    pub ownership_generation: String,
 }
 
 impl StatePaths {
@@ -252,6 +281,113 @@ impl StateStore {
                 [],
             )
             .is_ok_and(|changed| changed == 1)
+    }
+
+    pub fn record_session_capability(
+        &self,
+        executable_path: &str,
+        codex_version: &str,
+        status: &str,
+        checked_at_epoch_seconds: i64,
+    ) -> bool {
+        let Some(connection) = self.open_existing_database() else {
+            return false;
+        };
+        connection
+            .execute(
+                "INSERT INTO session_capability (
+                    singleton, executable_path, codex_version, status, checked_at_epoch_seconds
+                 ) VALUES (1, ?1, ?2, ?3, ?4)
+                 ON CONFLICT(singleton) DO UPDATE SET
+                    executable_path = excluded.executable_path,
+                    codex_version = excluded.codex_version,
+                    status = excluded.status,
+                    checked_at_epoch_seconds = excluded.checked_at_epoch_seconds",
+                rusqlite::params![
+                    executable_path,
+                    codex_version,
+                    status,
+                    checked_at_epoch_seconds
+                ],
+            )
+            .is_ok()
+    }
+
+    pub fn record_session_process_ownership(
+        &self,
+        pid: u32,
+        process_created_at: i64,
+        executable_path: &str,
+        ownership_generation: &str,
+        started_at_epoch_seconds: i64,
+    ) -> bool {
+        let Some(connection) = self.open_existing_database() else {
+            return false;
+        };
+        connection
+            .execute(
+                "INSERT INTO session_process_ownership (
+                    singleton, pid, process_created_at, executable_path,
+                    ownership_generation, command_identity, started_at_epoch_seconds
+                 ) VALUES (1, ?1, ?2, ?3, ?4, 'app-server', ?5)
+                 ON CONFLICT(singleton) DO UPDATE SET
+                    pid = excluded.pid,
+                    process_created_at = excluded.process_created_at,
+                    executable_path = excluded.executable_path,
+                    ownership_generation = excluded.ownership_generation,
+                    command_identity = excluded.command_identity,
+                    started_at_epoch_seconds = excluded.started_at_epoch_seconds",
+                rusqlite::params![
+                    i64::from(pid),
+                    process_created_at,
+                    executable_path,
+                    ownership_generation,
+                    started_at_epoch_seconds
+                ],
+            )
+            .is_ok()
+    }
+
+    pub fn clear_session_process_ownership(&self, ownership_generation: &str) -> bool {
+        let Some(connection) = self.open_existing_database() else {
+            return false;
+        };
+        connection
+            .execute(
+                "DELETE FROM session_process_ownership WHERE ownership_generation = ?1",
+                [ownership_generation],
+            )
+            .is_ok()
+    }
+
+    pub fn session_process_ownership(&self) -> Option<SessionProcessOwnership> {
+        let connection = self.open_existing_database()?;
+        connection
+            .query_row(
+                "SELECT pid, process_created_at, executable_path, ownership_generation
+                 FROM session_process_ownership WHERE singleton = 1",
+                [],
+                |row| {
+                    Ok(SessionProcessOwnership {
+                        pid: row.get::<_, i64>(0)?.try_into().map_err(|_| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                0,
+                                rusqlite::types::Type::Integer,
+                                Box::new(std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    "invalid session process pid",
+                                )),
+                            )
+                        })?,
+                        process_created_at: row.get(1)?,
+                        executable_path: row.get(2)?,
+                        ownership_generation: row.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .ok()
+            .flatten()
     }
 
     fn open_existing_database(&self) -> Option<Connection> {

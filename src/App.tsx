@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   LoaderCircle,
-  MessageSquare,
   RefreshCw,
-  Server,
   ShieldAlert,
 } from "lucide-react";
 
+import AppSidebar from "./AppSidebar";
 import ProviderPage from "./ProviderPage";
+import SessionPage from "./SessionPage";
 import {
   getStartupSnapshot,
   refreshStartupSnapshot,
@@ -26,6 +26,7 @@ type ViewState =
 
 export default function App() {
   const [state, setState] = useState<ViewState>({ kind: "loading" });
+  const [page, setPage] = useState<"providers" | "sessions">("providers");
 
   const load = useCallback(async (refresh: boolean) => {
     try {
@@ -54,60 +55,16 @@ export default function App() {
     );
   }
 
-  return (
-    <div className="app-shell">
-      <Sidebar />
-      <main className="main-content">
-        <ProviderPage />
-      </main>
-    </div>
-  );
+  return page === "providers"
+    ? <ProviderPage onOpenSessions={() => setPage("sessions")} />
+    : <SessionPage onOpenProviders={() => setPage("providers")} />;
 }
 
 function Shell({ children }: { children: React.ReactNode }) {
   return (
     <div className="app-shell">
-      <aside className="sidebar" aria-label="应用导航">
-        <Brand />
-        <div className="sidebar-meta">当前用户</div>
-      </aside>
+      <AppSidebar />
       <main className="main-content">{children}</main>
-    </div>
-  );
-}
-
-function Sidebar() {
-  return (
-    <aside className="sidebar" aria-label="应用导航">
-      <Brand />
-      <nav className="sidebar-nav">
-        <button
-          className="nav-item"
-          type="button"
-          aria-current="page"
-        >
-          <Server size={18} aria-hidden="true" />
-          供应商管理
-        </button>
-        <button className="nav-item" type="button" disabled aria-disabled="true">
-          <MessageSquare size={18} aria-hidden="true" />
-          <span>会话管理</span>
-          <span className="nav-item-note">即将支持</span>
-        </button>
-      </nav>
-      <div className="sidebar-meta">当前用户</div>
-    </aside>
-  );
-}
-
-function Brand() {
-  return (
-    <div className="brand">
-      <img src="/icon.png" alt="" width="36" height="36" />
-      <div>
-        <strong>GPTEasy</strong>
-        <span>Windows x64</span>
-      </div>
     </div>
   );
 }

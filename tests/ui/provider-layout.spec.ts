@@ -158,7 +158,7 @@ test("默认窗口横向展示目录行且底部操作可见", async ({ page }, 
   }
 
   const environmentButtons = page.locator(".environment-tools button");
-  await expect(environmentButtons).toHaveCount(3);
+  await expect(environmentButtons).toHaveCount(2);
   for (const button of await environmentButtons.all()) {
     const box = await button.boundingBox();
     expect(box).not.toBeNull();
@@ -214,7 +214,9 @@ test("最小窗口无横向溢出且所有操作可滚动到达", async ({ page 
   await expect(page.getByRole("button", { name: "恢复上次配置" })).toHaveCount(0);
   await expect(page.getByText("其他环境供应商操作")).toHaveCount(0);
   await expect(page.getByText("当前 Windows Codex 环境操作")).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "切换到 OpenAI 登录模式" })).toBeVisible();
+  const navigation = page.getByRole("navigation", { name: "主要菜单" });
+  await expect(navigation.getByRole("button", { name: "OpenAI 登录模式" })).toBeVisible();
+  await expect(page.getByText("当前用户")).toHaveCount(0);
   await page.screenshot({ path: testInfo.outputPath("provider-layout-680x520.png"), fullPage: true });
 });
 

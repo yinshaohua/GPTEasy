@@ -33,7 +33,7 @@ tauri-plugin-clipboard-manager = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"
 thiserror = "2.0"
-tokio = { version = "1.47", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.47", features = ["io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 toml_edit = "0.23"
 url = "2.5"
@@ -44,7 +44,7 @@ tempfile = "3.15"
 
 [target.'cfg(windows)'.dependencies]
 sysinfo = { version = "0.36.1", default-features = false, features = ["system"] }
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Threading"] }
 winreg = "0.55"
 
 [profile.release]

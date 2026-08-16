@@ -8,7 +8,6 @@ import {
   ExternalLink,
   GripVertical,
   LoaderCircle,
-  LogIn,
   Pencil,
   Pin,
   Plus,
@@ -24,6 +23,7 @@ import ProviderValidationDialog, {
   type ProviderValidationSession,
   type ProviderValidationSource,
 } from "./ProviderValidationDialog";
+import AppSidebar from "./AppSidebar";
 
 import {
   asProviderFailure,
@@ -134,7 +134,7 @@ function canApplyWslProvider(environment: WslEnvironmentSummary): boolean {
     && environment.configurationState !== "busy";
 }
 
-export default function ProviderPage() {
+export default function ProviderPage({ onOpenSessions }: { onOpenSessions?: () => void }) {
   const [providers, setProviders] = useState<ProviderSummary[]>([]);
   const [listState, setListState] = useState<"loading" | "ready" | "error">("loading");
   const [environment, setEnvironment] = useState<EnvironmentSnapshot | null>(null);
@@ -961,9 +961,23 @@ export default function ProviderPage() {
     !busy;
   const canSave = name.trim().length > 0 && !busy && (selected ? dirty : true);
   const errorId = failure ? "provider-validation-error" : undefined;
+  const openAiReason = openAiLoginReason(environment);
+  const openAiDisabled = busy
+    || wslBusy
+    || switchingMode
+    || !environment
+    || environment.mode === "openai_login"
+    || environment.loginStatus !== "logged_in";
 
   return (
-    <>
+    <div className="app-shell">
+      <AppSidebar onOpenSessions={onOpenSessions} openAiAction={{
+        busy: switchingMode,
+        description: openAiReason,
+        disabled: openAiDisabled,
+        onSelect: () => void enableOpenAiLogin(),
+      }} />
+      <main className="main-content">
       <header className="page-header">
         <h1>{providerMessages.pageTitle}</h1>
         {view === "catalog" && (
@@ -1136,13 +1150,11 @@ export default function ProviderPage() {
             onOpen={() => void openWslDialog()}
             onExport={openLinuxExport}
           />
-          <EnvironmentActions
-            snapshot={environment}
-            failure={environmentFailure}
-            busy={busy || wslBusy}
-            switchingMode={switchingMode}
-            onSwitchMode={() => void enableOpenAiLogin()}
-          />
+          {environmentFailure && (
+            <p className="inline-error environment-tool-error" role="alert">
+              {environmentFailureMessage(environmentFailure.messageId)}
+            </p>
+          )}
         </section>
         </>
       ) : (
@@ -1403,7 +1415,8 @@ export default function ProviderPage() {
           onClose={closeLinuxExport}
         />
       )}
-    </>
+      </main>
+    </div>
   );
 }
 
@@ -1785,19 +1798,7 @@ function lifecycleResultsMessage(results: WslLifecycleResult[]): string {
   return results.length > 0 ? providerMessages.wslLifecycleUnchangedRunning : "";
 }
 
-function EnvironmentActions({
-  snapshot,
-  failure,
-  busy,
-  switchingMode,
-  onSwitchMode,
-}: {
-  snapshot: EnvironmentSnapshot | null;
-  failure: EnvironmentFailure | null;
-  busy: boolean;
-  switchingMode: boolean;
-  onSwitchMode: () => void;
-}) {
+function openAiLoginReason(snapshot: EnvironmentSnapshot | null): string {
   const openAiReason = !snapshot
     ? providerMessages.environmentUnavailable
     : snapshot.mode === "openai_login"
@@ -1811,23 +1812,7 @@ function EnvironmentActions({
         : snapshot.loginStatus === "unavailable"
           ? providerMessages.openAiLoginBlocked
           : providerMessages.openAiLoginAvailable;
-  return (
-    <>
-      <div className="environment-action-row">
-        <button
-          className="secondary-button environment-command"
-          type="button"
-          onClick={onSwitchMode}
-          disabled={busy || switchingMode || !snapshot || snapshot.mode === "openai_login" || snapshot.loginStatus !== "logged_in"}
-          aria-description={openAiReason}
-        >
-          {switchingMode ? <LoaderCircle className="is-spinning" size={17} aria-hidden="true" /> : <LogIn size={17} aria-hidden="true" />}
-          {providerMessages.switchToOpenAiLogin}
-        </button>
-      </div>
-      {failure && <p className="inline-error environment-tool-error" role="alert">{environmentFailureMessage(failure.messageId)}</p>}
-    </>
-  );
+  return openAiReason;
 }
 
 function configChangeMessage(request: ConfigChangeRequest): string {

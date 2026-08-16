@@ -956,9 +956,11 @@ describe("供应商目录生命周期", () => {
     expect(screen.queryByRole("button", { name: "恢复上次配置" })).not.toBeInTheDocument();
     expect(screen.queryByText("其他环境供应商操作")).not.toBeInTheDocument();
     expect(screen.queryByText("当前 Windows Codex 环境操作")).not.toBeInTheDocument();
-    const openAi = screen.getByRole("button", { name: "切换到 OpenAI 登录模式" });
+    const navigation = screen.getByRole("navigation", { name: "主要菜单" });
+    const openAi = within(navigation).getByRole("button", { name: "OpenAI 登录模式" });
     expect(openAi).toBeEnabled();
     expect(openAi).toHaveAccessibleDescription("使用 Codex 已有的 OpenAI 登录。");
+    expect(screen.queryByText("当前用户")).not.toBeInTheDocument();
   });
 
   it("设置页切换非当前供应商统一确认且契约不包含重启决策", async () => {
@@ -1009,7 +1011,7 @@ describe("供应商目录生命周期", () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "供应商目录" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /会话管理/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "会话管理" })).toBeEnabled();
     expect(await screen.findAllByText("已验证")).toHaveLength(2);
     expect(screen.getByRole("button", { name: "Current Provider 当前使用" })).toBeDisabled();
     expect(screen.queryByRole("button", { name: "Atlas" })).not.toBeInTheDocument();
@@ -1145,7 +1147,7 @@ describe("供应商目录生命周期", () => {
     fireEvent.click(screen.getByRole("button", { name: "切换" }));
 
     const switchingButton = screen.getByRole("button", { name: "切换到 Concurrent Provider" });
-    const openAiButton = screen.getByRole("button", { name: "切换到 OpenAI 登录模式" });
+    const openAiButton = screen.getByRole("button", { name: "OpenAI 登录模式" });
     expect(switchingButton.querySelector(".is-spinning")).toBeInTheDocument();
     expect(openAiButton.querySelector(".is-spinning")).not.toBeInTheDocument();
     await waitFor(() => expect(environmentReads).toBe(2));
@@ -1621,8 +1623,15 @@ describe("Codex 环境接管", () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "供应商管理" })).toBeInTheDocument();
-    const openAi = screen.getByRole("button", { name: "切换到 OpenAI 登录模式" });
+    const navigation = screen.getByRole("navigation", { name: "主要菜单" });
+    const navigationItems = within(navigation).getAllByRole("button");
+    const openAi = within(navigation).getByRole("button", { name: "OpenAI 登录模式" });
     await waitFor(() => expect(openAi).toBeEnabled());
+    expect(navigationItems.map((button) => button.textContent)).toEqual([
+      "供应商管理",
+      "会话管理",
+      "OpenAI 登录模式",
+    ]);
     expect(screen.queryByRole("heading", { name: "外部配置" })).not.toBeInTheDocument();
     expect(screen.queryByText("待重启")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "恢复上次配置" })).not.toBeInTheDocument();
@@ -1630,6 +1639,8 @@ describe("Codex 环境接管", () => {
     expect(screen.queryByText("当前 Windows Codex 环境操作")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /选择 WSL2 供应商/ })).toBeEnabled();
     expect(screen.getByRole("button", { name: /导出 Linux 脚本/ })).toBeDisabled();
+    expect(within(screen.getByRole("region", { name: "Codex 环境操作" })).getAllByRole("button")).toHaveLength(2);
+    expect(screen.queryByText("当前用户")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Codex 环境" })).not.toBeInTheDocument();
   });
 
@@ -1997,7 +2008,7 @@ describe("Codex 环境接管", () => {
     });
     render(<App />);
 
-    const openAiButton = await screen.findByRole("button", { name: "切换到 OpenAI 登录模式" });
+    const openAiButton = await screen.findByRole("button", { name: "OpenAI 登录模式" });
     await waitFor(() => expect(openAiButton).toBeEnabled());
     expect(screen.queryByRole("heading", { name: "外部配置" })).not.toBeInTheDocument();
     fireEvent.click(openAiButton);
@@ -2045,7 +2056,7 @@ describe("Codex 环境接管", () => {
 
       render(<App />);
 
-      const openAiButton = await screen.findByRole("button", { name: "切换到 OpenAI 登录模式" });
+      const openAiButton = await screen.findByRole("button", { name: "OpenAI 登录模式" });
       await waitFor(() => expect(openAiButton).toHaveAccessibleDescription(message));
       expect(openAiButton).toBeDisabled();
       expect(invoke.mock.calls.some(([command]) => command === "switch_to_openai_login")).toBe(
@@ -2094,7 +2105,7 @@ describe("Codex 环境接管", () => {
     });
     render(<App />);
 
-    const openAiButton = await screen.findByRole("button", { name: "切换到 OpenAI 登录模式" });
+    const openAiButton = await screen.findByRole("button", { name: "OpenAI 登录模式" });
     await waitFor(() => expect(openAiButton).toHaveAccessibleDescription(
       "OpenAI 登录已在外部失效；当前模式保持不变。",
     ));
@@ -2148,7 +2159,7 @@ describe("启动状态", () => {
     render(<App />);
     await screen.findByRole("heading", { name: "供应商管理" });
 
-    const openAiButton = screen.getByRole("button", { name: "切换到 OpenAI 登录模式" });
+    const openAiButton = screen.getByRole("button", { name: "OpenAI 登录模式" });
     await waitFor(() => expect(openAiButton).toHaveAccessibleDescription(
       "请先在 Codex 中完成 OpenAI 登录。",
     ));

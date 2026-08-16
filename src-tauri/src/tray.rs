@@ -7,7 +7,7 @@ use tauri::{App, AppHandle, Emitter, Manager, Window, WindowEvent};
 use tauri_plugin_notification::NotificationExt;
 use tokio_util::sync::CancellationToken;
 
-use crate::commands::{EnvironmentRuntime, ProviderRuntime};
+use crate::commands::{EnvironmentRuntime, ProviderRuntime, SessionRuntime};
 use crate::environment::{AuthenticationMode, EnvironmentSnapshot, EnvironmentState};
 use crate::provider::ProviderSummary;
 use crate::state::StateStore;
@@ -151,6 +151,7 @@ pub(crate) fn handle_window_event(window: &Window, event: &WindowEvent) {
     }
     api.prevent_close();
     let _ = window.hide();
+    window.state::<SessionRuntime>().suspend();
     if lifecycle.state_store.should_show_first_close_notice() {
         let shown = window
             .notification()
@@ -259,6 +260,7 @@ fn execute_tray_effect(app: &AppHandle, effect: TrayEffect) {
         TrayEffect::Exit => {
             app.state::<LifecycleRuntime>().request_exit();
             app.state::<ProviderRuntime>().shutdown_requests();
+            app.state::<SessionRuntime>().shutdown();
             app.exit(0);
         }
         TrayEffect::None => {}
@@ -320,6 +322,7 @@ pub(crate) fn show_settings(app: &AppHandle) {
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
+    app.state::<SessionRuntime>().resume();
     let _ = window.show();
     let _ = window.unminimize();
     let _ = window.set_focus();
