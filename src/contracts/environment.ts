@@ -71,6 +71,11 @@ export type WslConfigurationState =
   | "conflict"
   | "busy";
 
+export type WslLifecycleOutcome =
+  | "unchanged_running"
+  | "stopped_naturally"
+  | "still_running";
+
 export interface WslEnvironmentSummary {
   environmentId: string;
   displayName: string;
@@ -90,11 +95,24 @@ export interface WslEnvironmentSummary {
 export interface WslApplyResult {
   environment: WslEnvironmentSummary;
   pendingRestart: boolean;
+  lifecycleOutcome: WslLifecycleOutcome;
+}
+
+export interface WslRefreshResult {
+  environment: WslEnvironmentSummary;
+  lifecycleOutcome: WslLifecycleOutcome;
+}
+
+export interface WslLifecycleResult {
+  environmentId: string;
+  displayName: string;
+  outcome: WslLifecycleOutcome;
 }
 
 export interface WslFailure {
   category: string;
   messageId: string;
+  lifecycleOutcome?: WslLifecycleOutcome;
 }
 
 export function getEnvironmentSnapshot(): Promise<EnvironmentSnapshot> {
@@ -150,6 +168,19 @@ export function applyWslProvider(
     providerId,
     expectedRevision,
     confirm,
+  });
+}
+
+export function refreshWslEnvironment(
+  environmentId: string,
+  expectedRevision: string,
+  authorizeStart: boolean,
+): Promise<WslRefreshResult> {
+  if (isBrowserPreview()) return Promise.reject(previewFailure);
+  return invoke<WslRefreshResult>("refresh_wsl_environment", {
+    environmentId,
+    expectedRevision,
+    authorizeStart,
   });
 }
 

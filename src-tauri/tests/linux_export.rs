@@ -341,6 +341,15 @@ cp -- "$codex_home/config.toml" "$workspace/alpha-config"
 gpteasy <<<"2" >/dev/null
 restore_root="$codex_home/.gpteasy-shell/shell-restore"
 [[ $(find "$restore_root" -mindepth 1 -maxdepth 1 -type d | wc -l) -eq 2 ]]
+credentials_root="$codex_home/.gpteasy-shell/credentials"
+[[ $(find "$credentials_root" -type f -name '*.token' | wc -l) -eq 2 ]]
+desktop_backups="$codex_home/.gpteasy-shell/desktop-backups"
+orphan_relative='.gpteasy-shell/credentials/desktop-old/33333333-3333-4333-8333-333333333333.token'
+mkdir -m 700 -- "$desktop_backups" "$credentials_root/desktop-old"
+printf '%s' 'desktop-backup-secret' >"$codex_home/$orphan_relative"
+chmod 600 "$codex_home/$orphan_relative"
+printf '# GPTEasy credential-file: %s\n' "$orphan_relative" >"$desktop_backups/config-desktop.toml"
+chmod 600 "$desktop_backups/config-desktop.toml"
 beta_before=$(sha256sum "$codex_home/config.toml")
 cancelled=$(gpteasy restore <<<"n")
 [[ "$cancelled" == *'当前状态：Beta Provider'* ]]
@@ -352,9 +361,16 @@ restored=$(gpteasy restore <<<"y")
 [[ "$restored" == *'已恢复最近一次 shell 切换前的配置'* ]]
 cmp -s -- "$workspace/alpha-config" "$codex_home/config.toml"
 [[ $(find "$restore_root" -mindepth 1 -maxdepth 1 -type d | wc -l) -eq 1 ]]
+[[ -f "$desktop_backups/config-desktop.toml" ]]
+[[ -f "$codex_home/$orphan_relative" ]]
+[[ $(find "$credentials_root" -type f -name '*.token' | wc -l) -eq 2 ]]
 [[ "$auth_before" == "$(sha256sum "$codex_home/auth.json")" ]]
 
-for choice in 2 1 2 1 2 1 2; do
+rm -f -- "$desktop_backups/config-desktop.toml"
+gpteasy <<<"2" >/dev/null
+[[ ! -e "$codex_home/$orphan_relative" ]]
+
+for choice in 1 2 1 2 1 2; do
     gpteasy <<<"$choice" >/dev/null
 done
 [[ $(find "$restore_root" -mindepth 1 -maxdepth 1 -type d | wc -l) -eq 5 ]]

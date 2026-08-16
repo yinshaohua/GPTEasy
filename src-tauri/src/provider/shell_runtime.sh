@@ -634,6 +634,13 @@ gpteasy__private_file_is_safe() {
     [[ "$owner" == "$(id -u)" && "${mode: -2}" == '00' && "$links" == 1 && "$kind" == 'regular file' ]]
 }
 
+gpteasy__owned_regular_file_is_safe() {
+    local file=$1 owner links kind
+    [[ -f "$file" && ! -L "$file" ]] || return 1
+    read -r owner links kind < <(stat -c '%u %h %F' -- "$file") || return 1
+    [[ "$owner" == "$(id -u)" && "$links" == 1 && "$kind" == 'regular file' ]]
+}
+
 gpteasy__install_credential() {
     local provider_id=$1 directory temporary destination
     directory="$gpteasy__credentials_root/$gpteasy__export_id"
@@ -662,6 +669,104 @@ gpteasy__install_credential() {
         gpteasy__credential_created=1
     fi
     gpteasy__credential_path=$destination
+}
+
+gpteasy__credential_reference_is_valid() {
+    local reference=$1 tail source file
+    case "$reference" in
+        .gpteasy-shell/credentials/*/*.token) ;;
+        *) return 1 ;;
+    esac
+    case "$reference" in *..* | *//* | *[!A-Za-z0-9._/-]*) return 1 ;; esac
+    tail=${reference#'.gpteasy-shell/credentials/'}
+    source=${tail%%/*}
+    file=${tail#*/}
+    [[ -n "$source" && "$file" != "$tail" && "$file" != */* ]]
+}
+
+gpteasy__collect_config_credential_reference() {
+    local file=$1 references=$2 require_private=${3:-1} reference
+    [[ -e "$file" ]] || return 0
+    if [[ "$require_private" -eq 1 ]]; then
+        gpteasy__private_file_is_safe "$file" || return 1
+    else
+        gpteasy__owned_regular_file_is_safe "$file" || return 1
+    fi
+    reference=$(awk '
+        { sub(/\r$/, "", $0) }
+        index($0, "# GPTEasy credential-file:") == 1 {
+            value = substr($0, length("# GPTEasy credential-file:") + 1)
+            sub(/^[[:space:]]+/, "", value)
+            found += 1
+        }
+        END {
+            if (found > 1) exit 2
+            if (found == 1) print value
+        }
+    ' "$file") || return 1
+    [[ -n "$reference" ]] || return 0
+    gpteasy__credential_reference_is_valid "$reference" || return 1
+    printf '%s\n' "$reference" >>"$references"
+}
+
+gpteasy__cleanup_credentials() {
+    local references root file reference credential relative codex_home
+    codex_home=${CODEX_HOME:-"$HOME/.codex"}
+    references=$(mktemp "$gpteasy__tmp_root/.credential-references.XXXXXX") || return
+    chmod 600 "$references" || {
+        rm -f -- "$references"
+        return 1
+    }
+    gpteasy__collect_config_credential_reference "$gpteasy__config_target" "$references" 0 || {
+        rm -f -- "$references"
+        return 1
+    }
+    for root in "$gpteasy__restore_root" "$gpteasy__state_root/desktop-backups"; do
+        [[ -e "$root" ]] || continue
+        gpteasy__directory_is_owned "$root" 1 || {
+            rm -f -- "$references"
+            return 1
+        }
+        while IFS= read -r file; do
+            [[ -n "$file" ]] || continue
+            gpteasy__collect_config_credential_reference "$file" "$references" 1 || {
+                rm -f -- "$references"
+                return 1
+            }
+        done < <(find "$root" -type f -name '*.toml' -print)
+    done
+    if [[ -e "$gpteasy__lock_root/active/references" ]]; then
+        gpteasy__private_file_is_safe "$gpteasy__lock_root/active/references" || {
+            rm -f -- "$references"
+            return 1
+        }
+        while IFS= read -r reference; do
+            [[ -n "$reference" ]] || continue
+            gpteasy__credential_reference_is_valid "$reference" || {
+                rm -f -- "$references"
+                return 1
+            }
+            printf '%s\n' "$reference" >>"$references"
+        done <"$gpteasy__lock_root/active/references"
+    fi
+    while IFS= read -r credential; do
+        [[ -n "$credential" ]] || continue
+        gpteasy__private_file_is_safe "$credential" || {
+            rm -f -- "$references"
+            return 1
+        }
+        relative=${credential#"$codex_home/"}
+        gpteasy__credential_reference_is_valid "$relative" || {
+            rm -f -- "$references"
+            return 1
+        }
+        grep -Fqx -- "$relative" "$references" || rm -f -- "$credential" || {
+            rm -f -- "$references"
+            return 1
+        }
+    done < <(find "$gpteasy__credentials_root" -mindepth 2 -maxdepth 2 -type f -name '*.token' -print)
+    rm -f -- "$references" || return
+    find "$gpteasy__credentials_root" -mindepth 1 -maxdepth 1 -type d -empty -exec rmdir -- {} \;
 }
 
 gpteasy__cleanup_failed_apply() {
@@ -710,6 +815,7 @@ gpteasy__apply_provider_locked() {
         return 1
     fi
     gpteasy__prune_restore_points || return
+    gpteasy__cleanup_credentials || return
     printf '已切换到：%s\n' "$(gpteasy__provider_name "$provider_id")"
 }
 
@@ -885,6 +991,7 @@ gpteasy__restore_locked() {
     fi
     sync -f "$target_dir" 2>/dev/null || return
     gpteasy__discard_restore_point "$latest" || return
+    gpteasy__cleanup_credentials || return
     printf '%s\n' '已恢复最近一次 shell 切换前的配置。'
 }
 

@@ -3,7 +3,8 @@ use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::Serialize;
@@ -18,8 +19,11 @@ const WSL_REGISTRY_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Lxss"
 const HELPER_VERSION: &str = "gpteasy-wsl-guest-writer-v2";
 const HELPER_PATH: &str = "$HOME/.local/lib/gpteasy/guest-writer-v2";
 const BUNDLE_MAGIC: &str = "GPTEASY_WSL_BUNDLE_V2";
+const NATURAL_STOP_TIMEOUT: Duration = Duration::from_secs(10);
+const NATURAL_STOP_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 const GUEST_LOCK: &str = include_str!("wsl_guest_lock.sh");
+const GUEST_CREDENTIAL_CLEANUP: &str = include_str!("wsl_guest_credential_cleanup.sh");
 #[cfg(windows)]
 const GUEST_PRIVATE_READER: &str = include_str!("wsl_guest_private_reader.sh");
 const GUEST_WRITER: &[u8] = include_bytes!("wsl_guest_writer.sh");
@@ -73,6 +77,45 @@ pub struct WslEnvironmentSummary {
 pub struct WslApplyResult {
     pub environment: WslEnvironmentSummary,
     pub pending_restart: bool,
+    pub lifecycle_outcome: WslLifecycleOutcome,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WslRefreshResult {
+    pub environment: WslEnvironmentSummary,
+    pub lifecycle_outcome: WslLifecycleOutcome,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WslLifecycleResult {
+    pub environment_id: String,
+    pub display_name: String,
+    pub outcome: WslLifecycleOutcome,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WslDeletionAudit {
+    pub lifecycle_results: Vec<WslLifecycleResult>,
+}
+
+#[derive(Debug)]
+pub(crate) enum WslDeletionAuditError<E> {
+    Verification(WslFailure),
+    Deletion {
+        failure: E,
+        lifecycle_results: Vec<WslLifecycleResult>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WslLifecycleOutcome {
+    UnchangedRunning,
+    StoppedNaturally,
+    StillRunning,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -100,6 +143,8 @@ pub enum WslFailureCategory {
 pub struct WslFailure {
     pub category: WslFailureCategory,
     pub message_id: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifecycle_outcome: Option<WslLifecycleOutcome>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,7 +175,13 @@ impl WslFailure {
         Self {
             category,
             message_id,
+            lifecycle_outcome: None,
         }
+    }
+
+    fn with_lifecycle_outcome(mut self, outcome: WslLifecycleOutcome) -> Self {
+        self.lifecycle_outcome = Some(outcome);
+        self
     }
 }
 
@@ -155,7 +206,11 @@ pub(crate) struct WslArtifacts {
 pub(crate) trait WslRuntime: Send + Sync {
     fn probe(&self) -> Result<Vec<WslProbe>, WslFailure>;
     fn start(&self, environment: &WslProbe) -> Result<(), WslFailure>;
-    fn terminate(&self, environment: &WslProbe) -> Result<(), WslFailure>;
+    fn wait_for_natural_stop(
+        &self,
+        environment: &WslProbe,
+        timeout: Duration,
+    ) -> Result<bool, WslFailure>;
     fn acquire_lock(
         &self,
         _environment: &WslProbe,
@@ -168,6 +223,13 @@ pub(crate) trait WslRuntime: Send + Sync {
         Ok(())
     }
     fn check_codex_version(&self, _environment: &WslProbe) -> Result<(), WslFailure> {
+        Ok(())
+    }
+    fn cleanup_credentials(
+        &self,
+        _environment: &WslProbe,
+        _lock_token: &str,
+    ) -> Result<(), WslFailure> {
         Ok(())
     }
     fn read_artifacts(&self, environment: &WslProbe) -> Result<WslArtifacts, WslFailure>;
@@ -187,6 +249,13 @@ pub struct WslApplication {
     operation_lock: Arc<Mutex<()>>,
     runtime: Arc<dyn WslRuntime>,
     faults: Arc<dyn WslFaultInjector>,
+    natural_stop_timeout: Duration,
+}
+
+struct DeletionAuditEnvironment {
+    probe: WslProbe,
+    originally_running: bool,
+    lock_token: Option<String>,
 }
 
 impl std::fmt::Debug for WslApplication {
@@ -208,6 +277,19 @@ impl WslApplication {
         Self::with_runtime(state_store, Arc::new(SystemWslRuntime { program }))
     }
 
+    #[cfg(all(windows, feature = "wsl-guest-harness"))]
+    #[doc(hidden)]
+    pub fn with_wsl_program_and_timeout_for_harness(
+        state_store: StateStore,
+        program: OsString,
+        natural_stop_timeout: Duration,
+    ) -> Self {
+        let mut application =
+            Self::with_runtime(state_store, Arc::new(SystemWslRuntime { program }));
+        application.natural_stop_timeout = natural_stop_timeout;
+        application
+    }
+
     #[doc(hidden)]
     pub(crate) fn with_runtime(state_store: StateStore, runtime: Arc<dyn WslRuntime>) -> Self {
         Self::with_dependencies(state_store, runtime, Arc::new(NoWslFaults))
@@ -224,6 +306,7 @@ impl WslApplication {
             operation_lock: Arc::new(Mutex::new(())),
             runtime,
             faults,
+            natural_stop_timeout: NATURAL_STOP_TIMEOUT,
         }
     }
 
@@ -239,7 +322,7 @@ impl WslApplication {
             .iter()
             .filter(|probe| probe.running && probe.availability == WslAvailability::Manageable)
         {
-            if let Err(failure) = self.refresh_running_probe(&connection, probe) {
+            if let Err(failure) = self.refresh_running_probe(&connection, probe, false) {
                 if failure.category == WslFailureCategory::Busy {
                     mark_wsl_busy(&connection, &probe.environment_id)?;
                 } else if failure.message_id == "wsl.credentials_invalid" {
@@ -256,6 +339,7 @@ impl WslApplication {
         &self,
         connection: &Connection,
         probe: &WslProbe,
+        cleanup_credentials: bool,
     ) -> Result<(), WslFailure> {
         self.recover_refresh_lock(connection, probe)?;
         let token = Uuid::new_v4().to_string();
@@ -269,7 +353,14 @@ impl WslApplication {
         let result = self
             .runtime
             .read_artifacts(probe)
-            .and_then(|artifacts| reconcile_actual_state(connection, probe, &artifacts));
+            .and_then(|artifacts| reconcile_actual_state(connection, probe, &artifacts))
+            .and_then(|()| {
+                if cleanup_credentials {
+                    self.runtime.cleanup_credentials(probe, &token)
+                } else {
+                    Ok(())
+                }
+            });
         self.runtime.release_lock(probe, &token)?;
         set_refresh_lock_token(connection, &probe.environment_id, None)?;
         result
@@ -325,6 +416,409 @@ impl WslApplication {
             self.reconcile_pending_for_probe(&connection, &operation, probe, true)?;
         }
         Ok(())
+    }
+
+    pub fn refresh_environment(
+        &self,
+        environment_id: &str,
+        expected_revision: &str,
+        authorize_start: bool,
+    ) -> Result<WslRefreshResult, WslFailure> {
+        let _guard = self
+            .operation_lock
+            .lock()
+            .map_err(|_| state_unavailable())?;
+        let probes = self.runtime.probe()?;
+        let probe = probes
+            .iter()
+            .find(|item| item.environment_id == environment_id)
+            .cloned()
+            .ok_or_else(|| {
+                WslFailure::new(
+                    WslFailureCategory::EnvironmentNotFound,
+                    "wsl.environment_not_found",
+                )
+            })?;
+        if probe.availability != WslAvailability::Manageable {
+            return Err(wsl_availability_failure(probe.availability));
+        }
+        if revision_for_probe(&probe) != expected_revision {
+            return Err(WslFailure::new(
+                WslFailureCategory::EnvironmentChanged,
+                "wsl.environment_changed",
+            ));
+        }
+        if !probe.running && !authorize_start {
+            return Err(WslFailure::new(
+                WslFailureCategory::InvalidEnvironment,
+                "wsl.start_authorization_required",
+            ));
+        }
+
+        let mut connection = self.open_state()?;
+        reconcile_probes(&mut connection, &probes)?;
+        let originally_running = probe.running;
+        let active_probe = if originally_running {
+            probe
+        } else {
+            self.runtime.start(&probe)?;
+            let refreshed = match self.runtime.probe().and_then(|items| {
+                items
+                    .into_iter()
+                    .find(|item| item.environment_id == environment_id)
+                    .ok_or_else(|| {
+                        WslFailure::new(
+                            WslFailureCategory::EnvironmentNotFound,
+                            "wsl.environment_disappeared",
+                        )
+                    })
+            }) {
+                Ok(refreshed) => refreshed,
+                Err(failure) => {
+                    let outcome = self.observe_natural_stop(&connection, &probe);
+                    return Err(failure.with_lifecycle_outcome(outcome));
+                }
+            };
+            if refreshed.availability != WslAvailability::Manageable
+                || !same_environment_identity(&refreshed, &probe)
+                || !refreshed.running
+            {
+                let outcome = self.observe_natural_stop(&connection, &refreshed);
+                return Err(WslFailure::new(
+                    WslFailureCategory::EnvironmentChanged,
+                    "wsl.environment_changed",
+                )
+                .with_lifecycle_outcome(outcome));
+            }
+            refreshed
+        };
+
+        if let Err(failure) = self.refresh_running_probe(&connection, &active_probe, true) {
+            if failure.category == WslFailureCategory::Interrupted || originally_running {
+                return Err(failure);
+            }
+            let outcome = self.observe_natural_stop(&connection, &active_probe);
+            return Err(failure.with_lifecycle_outcome(outcome));
+        }
+        let lifecycle_outcome = if originally_running {
+            WslLifecycleOutcome::UnchangedRunning
+        } else {
+            self.observe_natural_stop(&connection, &active_probe)
+        };
+        let mut final_probe = active_probe;
+        final_probe.running = match lifecycle_outcome {
+            WslLifecycleOutcome::UnchangedRunning | WslLifecycleOutcome::StillRunning => true,
+            WslLifecycleOutcome::StoppedNaturally => false,
+        };
+        Ok(WslRefreshResult {
+            environment: load_summary(&connection, &final_probe)?,
+            lifecycle_outcome,
+        })
+    }
+
+    pub fn audit_provider_deletion(
+        &self,
+        provider_id: &str,
+        authorize_stopped: bool,
+    ) -> Result<WslDeletionAudit, WslFailure> {
+        match self.audit_provider_deletion_then(provider_id, authorize_stopped, || {
+            Ok::<_, std::convert::Infallible>(())
+        }) {
+            Ok((audit, ())) => Ok(audit),
+            Err(WslDeletionAuditError::Verification(failure)) => Err(failure),
+            Err(WslDeletionAuditError::Deletion { failure: never, .. }) => match never {},
+        }
+    }
+
+    pub(crate) fn audit_provider_deletion_then<T, E>(
+        &self,
+        provider_id: &str,
+        authorize_stopped: bool,
+        delete: impl FnOnce() -> Result<T, E>,
+    ) -> Result<(WslDeletionAudit, T), WslDeletionAuditError<E>> {
+        let _guard = self
+            .operation_lock
+            .lock()
+            .map_err(|_| WslDeletionAuditError::Verification(state_unavailable()))?;
+        let probes = self
+            .runtime
+            .probe()
+            .map_err(WslDeletionAuditError::Verification)?;
+        let managed = probes
+            .iter()
+            .filter(|probe| {
+                if probe.availability == WslAvailability::Infrastructure {
+                    return false;
+                }
+                if probe.availability != WslAvailability::Unavailable {
+                    return true;
+                }
+                !probes.iter().any(|candidate| {
+                    candidate.availability == WslAvailability::Manageable
+                        && candidate
+                            .display_name
+                            .eq_ignore_ascii_case(&probe.display_name)
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if managed
+            .iter()
+            .any(|probe| probe.availability != WslAvailability::Manageable)
+        {
+            return Err(WslDeletionAuditError::Verification(WslFailure::new(
+                WslFailureCategory::NeedsAttention,
+                "wsl.delete_verification_unavailable",
+            )));
+        }
+        if !authorize_stopped && managed.iter().any(|probe| !probe.running) {
+            return Err(WslDeletionAuditError::Verification(WslFailure::new(
+                WslFailureCategory::InvalidEnvironment,
+                "wsl.delete_start_authorization_required",
+            )));
+        }
+
+        let mut connection = self
+            .open_state()
+            .map_err(WslDeletionAuditError::Verification)?;
+        reconcile_probes(&mut connection, &probes).map_err(WslDeletionAuditError::Verification)?;
+        let mut audited = Vec::with_capacity(managed.len());
+        for probe in managed {
+            let originally_running = probe.running;
+            let active_probe = if originally_running {
+                probe.clone()
+            } else {
+                if let Err(failure) = self.runtime.start(&probe) {
+                    return Err(self.deletion_verification_failure(
+                        &connection,
+                        &audited,
+                        failure,
+                        None,
+                    ));
+                }
+                let refreshed = match self.runtime.probe().and_then(|items| {
+                    items
+                        .into_iter()
+                        .find(|item| item.environment_id == probe.environment_id)
+                        .ok_or_else(|| {
+                            WslFailure::new(
+                                WslFailureCategory::EnvironmentNotFound,
+                                "wsl.environment_disappeared",
+                            )
+                        })
+                }) {
+                    Ok(refreshed) => refreshed,
+                    Err(failure) => {
+                        audited.push(DeletionAuditEnvironment {
+                            probe,
+                            originally_running,
+                            lock_token: None,
+                        });
+                        return Err(self.deletion_verification_failure(
+                            &connection,
+                            &audited,
+                            failure,
+                            None,
+                        ));
+                    }
+                };
+                if refreshed.availability != WslAvailability::Manageable
+                    || !same_environment_identity(&refreshed, &probe)
+                    || !refreshed.running
+                {
+                    let environment_id = refreshed.environment_id.clone();
+                    audited.push(DeletionAuditEnvironment {
+                        probe: refreshed,
+                        originally_running,
+                        lock_token: None,
+                    });
+                    return Err(self.deletion_verification_failure(
+                        &connection,
+                        &audited,
+                        WslFailure::new(
+                            WslFailureCategory::EnvironmentChanged,
+                            "wsl.environment_changed",
+                        ),
+                        Some(&environment_id),
+                    ));
+                }
+                refreshed
+            };
+            let environment_id = active_probe.environment_id.clone();
+            audited.push(DeletionAuditEnvironment {
+                probe: active_probe,
+                originally_running,
+                lock_token: None,
+            });
+            let index = audited.len() - 1;
+            let token = Uuid::new_v4().to_string();
+            if let Err(failure) = self.recover_refresh_lock(&connection, &audited[index].probe) {
+                return Err(self.deletion_verification_failure(
+                    &connection,
+                    &audited,
+                    failure,
+                    Some(&environment_id),
+                ));
+            }
+            if let Err(failure) = set_refresh_lock_token(&connection, &environment_id, Some(&token))
+            {
+                return Err(self.deletion_verification_failure(
+                    &connection,
+                    &audited,
+                    failure,
+                    Some(&environment_id),
+                ));
+            }
+            if let Err(failure) =
+                self.runtime
+                    .acquire_lock(&audited[index].probe, &token, "delete-audit")
+            {
+                let _ = set_refresh_lock_token(&connection, &environment_id, None);
+                return Err(self.deletion_verification_failure(
+                    &connection,
+                    &audited,
+                    failure,
+                    Some(&environment_id),
+                ));
+            }
+            audited[index].lock_token = Some(token);
+            let refresh_result =
+                self.runtime
+                    .read_artifacts(&audited[index].probe)
+                    .and_then(|artifacts| {
+                        reconcile_actual_state(&connection, &audited[index].probe, &artifacts)
+                    });
+            if let Err(failure) = refresh_result {
+                return Err(self.deletion_verification_failure(
+                    &connection,
+                    &audited,
+                    failure,
+                    Some(&environment_id),
+                ));
+            }
+            let actual_provider_id = connection
+                .query_row(
+                    "SELECT actual_provider_id FROM wsl_environments WHERE environment_id = ?1",
+                    [environment_id.as_str()],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .map_err(|_| state_unavailable());
+            let actual_provider_id = match actual_provider_id {
+                Ok(value) => value,
+                Err(failure) => {
+                    return Err(self.deletion_verification_failure(
+                        &connection,
+                        &audited,
+                        failure,
+                        Some(&environment_id),
+                    ));
+                }
+            };
+            if actual_provider_id.as_deref() == Some(provider_id) {
+                return Err(self.deletion_verification_failure(
+                    &connection,
+                    &audited,
+                    WslFailure::new(
+                        WslFailureCategory::NeedsAttention,
+                        "provider.wsl_current_delete_forbidden",
+                    ),
+                    Some(&environment_id),
+                ));
+            }
+            let token = audited[index]
+                .lock_token
+                .as_deref()
+                .expect("delete audit lock token");
+            if let Err(failure) = self
+                .runtime
+                .cleanup_credentials(&audited[index].probe, token)
+            {
+                return Err(self.deletion_verification_failure(
+                    &connection,
+                    &audited,
+                    failure,
+                    Some(&environment_id),
+                ));
+            }
+        }
+
+        let deleted = match delete() {
+            Ok(deleted) => deleted,
+            Err(failure) => {
+                let lifecycle_results = self
+                    .finish_deletion_audit(&connection, &audited)
+                    .map_err(WslDeletionAuditError::Verification)?;
+                return Err(WslDeletionAuditError::Deletion {
+                    failure,
+                    lifecycle_results,
+                });
+            }
+        };
+        let lifecycle_results = self
+            .finish_deletion_audit(&connection, &audited)
+            .map_err(WslDeletionAuditError::Verification)?;
+        Ok((WslDeletionAudit { lifecycle_results }, deleted))
+    }
+
+    fn deletion_verification_failure<E>(
+        &self,
+        connection: &Connection,
+        audited: &[DeletionAuditEnvironment],
+        mut failure: WslFailure,
+        failed_environment_id: Option<&str>,
+    ) -> WslDeletionAuditError<E> {
+        match self.finish_deletion_audit(connection, audited) {
+            Ok(results) => {
+                if failure.lifecycle_outcome.is_none()
+                    && let Some(environment_id) = failed_environment_id
+                {
+                    failure.lifecycle_outcome = results
+                        .iter()
+                        .find(|result| result.environment_id == environment_id)
+                        .map(|result| result.outcome);
+                }
+                WslDeletionAuditError::Verification(failure)
+            }
+            Err(unlock_failure) => WslDeletionAuditError::Verification(unlock_failure),
+        }
+    }
+
+    fn finish_deletion_audit(
+        &self,
+        connection: &Connection,
+        audited: &[DeletionAuditEnvironment],
+    ) -> Result<Vec<WslLifecycleResult>, WslFailure> {
+        let mut first_failure = None;
+        for environment in audited.iter().rev() {
+            let Some(token) = environment.lock_token.as_deref() else {
+                continue;
+            };
+            if let Err(failure) = self.runtime.release_lock(&environment.probe, token) {
+                first_failure.get_or_insert(failure);
+                continue;
+            }
+            if let Err(failure) =
+                set_refresh_lock_token(connection, &environment.probe.environment_id, None)
+            {
+                first_failure.get_or_insert(failure);
+            }
+        }
+        if let Some(failure) = first_failure {
+            return Err(failure);
+        }
+        let lifecycle_results = audited
+            .iter()
+            .map(|environment| WslLifecycleResult {
+                environment_id: environment.probe.environment_id.clone(),
+                display_name: environment.probe.display_name.clone(),
+                outcome: if environment.originally_running {
+                    WslLifecycleOutcome::UnchangedRunning
+                } else {
+                    self.observe_natural_stop(connection, &environment.probe)
+                },
+            })
+            .collect();
+        Ok(lifecycle_results)
     }
 
     pub fn apply_provider(
@@ -427,67 +921,65 @@ impl WslApplication {
             let refreshed = match refreshed {
                 Ok(refreshed) => refreshed,
                 Err(failure) => {
-                    return Err(self.restore_after_failed_start(&connection, &probe, failure));
+                    let outcome = self.observe_natural_stop(&connection, &probe);
+                    return Err(failure.with_lifecycle_outcome(outcome));
                 }
             };
             if refreshed.availability != WslAvailability::Manageable {
                 let failure = wsl_availability_failure(refreshed.availability);
-                return Err(self.restore_after_failed_start(&connection, &refreshed, failure));
+                let outcome = self.observe_natural_stop(&connection, &refreshed);
+                return Err(failure.with_lifecycle_outcome(outcome));
             }
             if !same_environment_identity(&refreshed, &pre_start) || !refreshed.running {
-                return Err(self.restore_after_failed_start(
-                    &connection,
-                    &refreshed,
-                    WslFailure::new(
-                        WslFailureCategory::EnvironmentChanged,
-                        "wsl.environment_changed",
-                    ),
-                ));
+                let outcome = self.observe_natural_stop(&connection, &refreshed);
+                return Err(WslFailure::new(
+                    WslFailureCategory::EnvironmentChanged,
+                    "wsl.environment_changed",
+                )
+                .with_lifecycle_outcome(outcome));
             }
             refreshed
         };
 
-        let result = self.apply_started(
+        let mut result = self.apply_started(
             &mut connection,
             &active_probe,
             &provider,
             originally_running,
         );
-        if !originally_running {
-            let terminate_result = self.runtime.terminate(&active_probe);
-            if terminate_result.is_err() {
-                let _ = mark_wsl_attention(
-                    &connection,
-                    &active_probe.environment_id,
-                    "wsl.lifecycle_restore_failed",
-                );
-                return Err(WslFailure::new(
-                    WslFailureCategory::GuestWriteFailed,
-                    "wsl.lifecycle_restore_failed",
-                ));
+        if originally_running
+            || matches!(&result, Err(failure) if failure.category == WslFailureCategory::Interrupted)
+        {
+            return result;
+        }
+        let lifecycle_outcome = self.observe_natural_stop(&connection, &active_probe);
+        match &mut result {
+            Ok(applied) => {
+                let mut final_probe = active_probe.clone();
+                final_probe.running = lifecycle_outcome == WslLifecycleOutcome::StillRunning;
+                applied.environment = load_summary(&connection, &final_probe)?;
+                applied.lifecycle_outcome = lifecycle_outcome;
             }
+            Err(failure) => failure.lifecycle_outcome = Some(lifecycle_outcome),
         }
         result
     }
 
-    fn restore_after_failed_start(
+    fn observe_natural_stop(
         &self,
         connection: &Connection,
         probe: &WslProbe,
-        failure: WslFailure,
-    ) -> WslFailure {
-        if self.runtime.terminate(probe).is_ok() {
-            failure
+    ) -> WslLifecycleOutcome {
+        let stopped = self
+            .runtime
+            .wait_for_natural_stop(probe, self.natural_stop_timeout)
+            .unwrap_or(false);
+        if stopped {
+            let _ = clear_lifecycle_attention(connection, &probe.environment_id);
+            WslLifecycleOutcome::StoppedNaturally
         } else {
-            let _ = mark_wsl_attention(
-                connection,
-                &probe.environment_id,
-                "wsl.lifecycle_restore_failed",
-            );
-            WslFailure::new(
-                WslFailureCategory::GuestWriteFailed,
-                "wsl.lifecycle_restore_failed",
-            )
+            let _ = mark_lifecycle_still_running(connection, &probe.environment_id);
+            WslLifecycleOutcome::StillRunning
         }
     }
 
@@ -752,6 +1244,8 @@ impl WslApplication {
             .map_err(|_| state_unavailable())?;
         transaction.commit().map_err(|_| state_unavailable())?;
         self.faults.check(WslFailurePoint::AfterStateCommitted)?;
+        self.runtime
+            .cleanup_credentials(&current_probe, lock_token)?;
         Ok(())
     }
 
@@ -764,6 +1258,7 @@ impl WslApplication {
         Ok(WslApplyResult {
             environment: load_summary(connection, probe)?,
             pending_restart: originally_running,
+            lifecycle_outcome: WslLifecycleOutcome::UnchangedRunning,
         })
     }
 
@@ -850,6 +1345,7 @@ impl WslApplication {
                 )
                 .map_err(|_| state_unavailable())?;
         }
+        self.runtime.cleanup_credentials(probe, token)?;
         self.runtime.release_lock(probe, token)?;
         connection
             .execute(
@@ -858,7 +1354,7 @@ impl WslApplication {
             )
             .map_err(|_| state_unavailable())?;
         if restore_lifecycle && !pending.originally_running && probe.running {
-            self.runtime.terminate(probe)?;
+            self.observe_natural_stop(connection, probe);
         }
         Ok(())
     }
@@ -1615,6 +2111,40 @@ fn mark_wsl_busy(connection: &Connection, environment_id: &str) -> Result<(), Ws
     Ok(())
 }
 
+fn mark_lifecycle_still_running(
+    connection: &Connection,
+    environment_id: &str,
+) -> Result<(), WslFailure> {
+    connection
+        .execute(
+            "UPDATE wsl_environments SET requires_attention = 1,
+                last_error = 'wsl.lifecycle_still_running', updated_at = ?2
+             WHERE environment_id = ?1",
+            params![environment_id, epoch_seconds().to_string()],
+        )
+        .map_err(|_| state_unavailable())?;
+    Ok(())
+}
+
+fn clear_lifecycle_attention(
+    connection: &Connection,
+    environment_id: &str,
+) -> Result<(), WslFailure> {
+    connection
+        .execute(
+            "UPDATE wsl_environments SET
+                requires_attention = CASE WHEN last_error = 'wsl.lifecycle_still_running'
+                    THEN 0 ELSE requires_attention END,
+                last_error = CASE WHEN last_error = 'wsl.lifecycle_still_running'
+                    THEN NULL ELSE last_error END,
+                pending_restart = 0, updated_at = ?2
+             WHERE environment_id = ?1",
+            params![environment_id, epoch_seconds().to_string()],
+        )
+        .map_err(|_| state_unavailable())?;
+    Ok(())
+}
+
 fn availability_name(value: WslAvailability) -> &'static str {
     match value {
         WslAvailability::Manageable => "manageable",
@@ -1928,12 +2458,35 @@ impl WslRuntime for SystemWslRuntime {
         .map(|_| ())
     }
 
-    fn terminate(&self, environment: &WslProbe) -> Result<(), WslFailure> {
+    fn wait_for_natural_stop(
+        &self,
+        environment: &WslProbe,
+        timeout: Duration,
+    ) -> Result<bool, WslFailure> {
         let name = environment
             .command_name
             .as_deref()
             .ok_or_else(|| wsl_availability_failure(environment.availability))?;
-        run_wsl_with(&self.program, &["--terminate", name], None).map(|_| ())
+        let deadline = Instant::now() + timeout;
+        loop {
+            let running = decode_wsl_output(&run_wsl_with(
+                &self.program,
+                &["--list", "--running", "--quiet"],
+                None,
+            )?)?;
+            let is_running = running
+                .lines()
+                .map(|line| line.trim_matches(['\0', '\u{feff}', '\r']).trim())
+                .any(|running_name| running_name.eq_ignore_ascii_case(name));
+            if !is_running {
+                return Ok(true);
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Ok(false);
+            }
+            thread::sleep(NATURAL_STOP_POLL_INTERVAL.min(deadline.saturating_duration_since(now)));
+        }
     }
 
     fn acquire_lock(
@@ -2049,6 +2602,50 @@ impl WslRuntime for SystemWslRuntime {
             config,
             credentials,
         })
+    }
+
+    fn cleanup_credentials(
+        &self,
+        environment: &WslProbe,
+        lock_token: &str,
+    ) -> Result<(), WslFailure> {
+        let name = environment
+            .command_name
+            .as_deref()
+            .ok_or_else(|| wsl_availability_failure(environment.availability))?;
+        let output = run_wsl_raw_with(
+            &self.program,
+            &[
+                "--distribution",
+                name,
+                "--exec",
+                "/bin/sh",
+                "-c",
+                GUEST_CREDENTIAL_CLEANUP,
+                "gpteasy",
+                lock_token,
+            ],
+            None,
+        )?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            let (category, message_id) = match output.status.code() {
+                Some(43) => (
+                    WslFailureCategory::RecoveryPending,
+                    "wsl.credential_cleanup_unsafe",
+                ),
+                Some(47) => (
+                    WslFailureCategory::NeedsAttention,
+                    "wsl.credential_cleanup_conflict",
+                ),
+                _ => (
+                    WslFailureCategory::GuestWriteFailed,
+                    "wsl.credential_cleanup_failed",
+                ),
+            };
+            Err(WslFailure::new(category, message_id))
+        }
     }
 
     fn ensure_helper(&self, environment: &WslProbe) -> Result<(), WslFailure> {
@@ -2476,13 +3073,18 @@ mod tests {
         lock_acquisitions: AtomicUsize,
         lock_releases: AtomicUsize,
         lock_busy: AtomicBool,
-        active_lock: Mutex<Option<(String, String)>>,
+        fail_lock_release: AtomicBool,
+        active_locks: Mutex<Vec<(String, String, String)>>,
         state_database: Mutex<Option<PathBuf>>,
         released_after_state_commit: AtomicBool,
         fail_probe_after_start: AtomicBool,
         fail_codex_version: AtomicBool,
         probe_calls: AtomicUsize,
         stop_on_probe_call: AtomicUsize,
+        natural_stop_on_wait: AtomicBool,
+        lifecycle_waits: AtomicUsize,
+        waited_after_lock_release: AtomicBool,
+        credential_cleanups: AtomicUsize,
     }
 
     impl FakeRuntime {
@@ -2498,13 +3100,18 @@ mod tests {
                 lock_acquisitions: AtomicUsize::new(0),
                 lock_releases: AtomicUsize::new(0),
                 lock_busy: AtomicBool::new(false),
-                active_lock: Mutex::new(None),
+                fail_lock_release: AtomicBool::new(false),
+                active_locks: Mutex::new(Vec::new()),
                 state_database: Mutex::new(None),
                 released_after_state_commit: AtomicBool::new(false),
                 fail_probe_after_start: AtomicBool::new(false),
                 fail_codex_version: AtomicBool::new(false),
                 probe_calls: AtomicUsize::new(0),
                 stop_on_probe_call: AtomicUsize::new(usize::MAX),
+                natural_stop_on_wait: AtomicBool::new(true),
+                lifecycle_waits: AtomicUsize::new(0),
+                waited_after_lock_release: AtomicBool::new(false),
+                credential_cleanups: AtomicUsize::new(0),
             }
         }
     }
@@ -2541,44 +3148,74 @@ mod tests {
             Ok(())
         }
 
-        fn terminate(&self, environment: &WslProbe) -> Result<(), WslFailure> {
-            self.terminations.fetch_add(1, Ordering::SeqCst);
-            if let Some(probe) = self
-                .probes
-                .lock()
-                .expect("probes")
-                .iter_mut()
-                .find(|probe| probe.environment_id == environment.environment_id)
+        fn wait_for_natural_stop(
+            &self,
+            environment: &WslProbe,
+            _timeout: Duration,
+        ) -> Result<bool, WslFailure> {
+            self.lifecycle_waits.fetch_add(1, Ordering::SeqCst);
+            self.waited_after_lock_release.store(
+                self.active_locks.lock().expect("active locks").is_empty(),
+                Ordering::SeqCst,
+            );
+            let stopped = self.natural_stop_on_wait.load(Ordering::SeqCst);
+            if stopped
+                && let Some(probe) = self
+                    .probes
+                    .lock()
+                    .expect("probes")
+                    .iter_mut()
+                    .find(|probe| probe.environment_id == environment.environment_id)
             {
                 probe.running = false;
             }
-            Ok(())
+            Ok(stopped)
         }
 
         fn acquire_lock(
             &self,
-            _environment: &WslProbe,
-            _token: &str,
+            environment: &WslProbe,
+            token: &str,
             _operation: &str,
         ) -> Result<(), WslFailure> {
             self.lock_acquisitions.fetch_add(1, Ordering::SeqCst);
             if self.lock_busy.load(Ordering::SeqCst) {
                 return Err(WslFailure::new(WslFailureCategory::Busy, "wsl.lock_busy"));
             }
-            let mut active = self.active_lock.lock().expect("active lock");
-            if active.is_some() {
+            let mut active = self.active_locks.lock().expect("active locks");
+            if active
+                .iter()
+                .any(|(environment_id, _, _)| environment_id == &environment.environment_id)
+            {
                 return Err(WslFailure::new(WslFailureCategory::Busy, "wsl.lock_busy"));
             }
-            *active = Some(("desktop".to_owned(), _token.to_owned()));
+            active.push((
+                environment.environment_id.clone(),
+                "desktop".to_owned(),
+                token.to_owned(),
+            ));
             Ok(())
         }
 
-        fn release_lock(&self, environment: &WslProbe, _token: &str) -> Result<(), WslFailure> {
+        fn release_lock(&self, environment: &WslProbe, token: &str) -> Result<(), WslFailure> {
             self.lock_releases.fetch_add(1, Ordering::SeqCst);
-            let mut active = self.active_lock.lock().expect("active lock");
-            match active.as_ref() {
+            if self.fail_lock_release.load(Ordering::SeqCst) {
+                return Err(WslFailure::new(
+                    WslFailureCategory::RecoveryPending,
+                    "wsl.lock_recovery_required",
+                ));
+            }
+            let mut active = self.active_locks.lock().expect("active locks");
+            match active
+                .iter()
+                .position(|(environment_id, _, _)| environment_id == &environment.environment_id)
+            {
                 None => {}
-                Some((owner, token)) if owner == "desktop" && token == _token => *active = None,
+                Some(index)
+                    if active[index].1 == "desktop" && active[index].2.as_str() == token =>
+                {
+                    active.remove(index);
+                }
                 Some(_) => {
                     return Err(WslFailure::new(
                         WslFailureCategory::RecoveryPending,
@@ -2622,6 +3259,15 @@ mod tests {
         }
 
         fn ensure_helper(&self, _environment: &WslProbe) -> Result<(), WslFailure> {
+            Ok(())
+        }
+
+        fn cleanup_credentials(
+            &self,
+            _environment: &WslProbe,
+            _lock_token: &str,
+        ) -> Result<(), WslFailure> {
+            self.credential_cleanups.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
 
@@ -2865,8 +3511,8 @@ model_providers.gpteasy.auth.command = \"sh\"\n\
             .expect("surface interrupted refresh state");
 
         assert!(matches!(
-            runtime.active_lock.lock().expect("active lock").as_ref(),
-            Some((owner, token)) if owner == "desktop" && !token.is_empty()
+            runtime.active_locks.lock().expect("active locks").as_slice(),
+            [(_, owner, token)] if owner == "desktop" && !token.is_empty()
         ));
         let connection = Connection::open(store.paths().database()).expect("state database");
         let persisted_token = connection
@@ -2886,7 +3532,13 @@ model_providers.gpteasy.auth.command = \"sh\"\n\
             environment.configuration_state,
             WslConfigurationState::Current
         );
-        assert!(runtime.active_lock.lock().expect("active lock").is_none());
+        assert!(
+            runtime
+                .active_locks
+                .lock()
+                .expect("active locks")
+                .is_empty()
+        );
         let connection = Connection::open(store.paths().database()).expect("state database");
         let persisted_token = connection
             .query_row(
@@ -2986,7 +3638,13 @@ model_providers.gpteasy.auth.command = \"sh\"\n\
             recovery
                 .recover_pending()
                 .expect("recover pending WSL saga");
-            assert!(runtime.active_lock.lock().expect("active lock").is_none());
+            assert!(
+                runtime
+                    .active_locks
+                    .lock()
+                    .expect("active locks")
+                    .is_empty()
+            );
             let connection = Connection::open(store.paths().database()).expect("state database");
             assert_eq!(
                 connection
@@ -3033,8 +3691,11 @@ model_providers.gpteasy.auth.command = \"sh\"\n\
             )
             .expect("pending operation");
         drop(connection);
-        *runtime.active_lock.lock().expect("active lock") =
-            Some(("shell".to_owned(), "shell-token".to_owned()));
+        runtime.active_locks.lock().expect("active locks").push((
+            environment.environment_id.clone(),
+            "shell".to_owned(),
+            "shell-token".to_owned(),
+        ));
 
         let failure = application
             .recover_pending()
@@ -3042,8 +3703,16 @@ model_providers.gpteasy.auth.command = \"sh\"\n\
 
         assert_eq!(failure.message_id, "wsl.lock_recovery_required");
         assert_eq!(
-            runtime.active_lock.lock().expect("active lock").as_ref(),
-            Some(&("shell".to_owned(), "shell-token".to_owned()))
+            runtime
+                .active_locks
+                .lock()
+                .expect("active locks")
+                .as_slice(),
+            &[(
+                environment.environment_id.clone(),
+                "shell".to_owned(),
+                "shell-token".to_owned(),
+            )]
         );
         let connection = Connection::open(store.paths().database()).expect("state database");
         assert_eq!(
@@ -3345,6 +4014,17 @@ model_providers.{provider_id}.requires_openai_auth = true\n\
     }
 
     #[test]
+    fn guest_writer_removes_a_new_credential_until_config_replacement_succeeds() {
+        let script = std::str::from_utf8(GUEST_WRITER).expect("guest writer is UTF-8");
+
+        assert!(script.contains("config_replaced=false"));
+        assert!(script.contains(
+            "[ \"$credential_created\" = false ] || [ \"$config_replaced\" = true ] || rm -f \"$CREDENTIAL\""
+        ));
+        assert!(script.contains("config_replaced=true"));
+    }
+
+    #[test]
     fn revision_changes_when_default_user_changes() {
         let base = WslProbe {
             environment_id: "id".into(),
@@ -3445,7 +4125,7 @@ base_url = "https://legacy.example/v1"
     }
 
     #[test]
-    fn stopped_distribution_is_started_written_and_restored_to_stopped() {
+    fn stopped_distribution_is_started_written_without_forced_termination() {
         let runtime = Arc::new(FakeRuntime::new(
             probe(),
             WslArtifacts {
@@ -3466,8 +4146,14 @@ base_url = "https://legacy.example/v1"
             .expect("apply");
 
         assert!(!result.pending_restart);
+        assert_eq!(
+            result.lifecycle_outcome,
+            WslLifecycleOutcome::StoppedNaturally
+        );
         assert_eq!(runtime.starts.load(Ordering::SeqCst), 1);
-        assert_eq!(runtime.terminations.load(Ordering::SeqCst), 1);
+        assert_eq!(runtime.terminations.load(Ordering::SeqCst), 0);
+        assert_eq!(runtime.lifecycle_waits.load(Ordering::SeqCst), 1);
+        assert!(runtime.waited_after_lock_release.load(Ordering::SeqCst));
         assert_eq!(runtime.writes.load(Ordering::SeqCst), 1);
         assert!(!runtime.probes.lock().expect("probes")[0].running);
         let connection = Connection::open(store.paths().database()).expect("state database");
@@ -3493,7 +4179,223 @@ base_url = "https://legacy.example/v1"
     }
 
     #[test]
-    fn stopped_distribution_is_restored_when_the_post_start_probe_fails() {
+    fn stopped_distribution_refresh_requires_authorization_and_waits_after_unlocking() {
+        let provider_id = "22222222-2222-4222-8222-222222222222";
+        let runtime = Arc::new(FakeRuntime::new(
+            probe(),
+            WslArtifacts {
+                config: Some(schema_v1_config(provider_id, "shell-export")),
+                credentials: Some(b"secret".to_vec()),
+            },
+        ));
+        let (_temp, _store, application) = application(runtime.clone());
+        let observed = application.list().expect("side-effect free list").remove(0);
+
+        assert!(!observed.running);
+        assert_eq!(observed.configuration_state, WslConfigurationState::Unknown);
+        assert_eq!(runtime.starts.load(Ordering::SeqCst), 0);
+        assert_eq!(runtime.reads.load(Ordering::SeqCst), 0);
+        let denied = application
+            .refresh_environment(&observed.environment_id, &observed.revision, false)
+            .expect_err("stopped refresh needs explicit start authorization");
+        assert_eq!(denied.message_id, "wsl.start_authorization_required");
+        assert_eq!(runtime.starts.load(Ordering::SeqCst), 0);
+
+        let refreshed = application
+            .refresh_environment(&observed.environment_id, &observed.revision, true)
+            .expect("authorized actual-state refresh");
+
+        assert_eq!(
+            refreshed.lifecycle_outcome,
+            WslLifecycleOutcome::StoppedNaturally
+        );
+        assert_eq!(
+            refreshed.environment.configuration_state,
+            WslConfigurationState::Current
+        );
+        assert!(!refreshed.environment.running);
+        assert_eq!(runtime.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(runtime.reads.load(Ordering::SeqCst), 1);
+        assert_eq!(runtime.lock_acquisitions.load(Ordering::SeqCst), 1);
+        assert_eq!(runtime.lock_releases.load(Ordering::SeqCst), 1);
+        assert!(runtime.waited_after_lock_release.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn provider_deletion_audits_every_environment_and_requires_stopped_authorization() {
+        let provider_id = "22222222-2222-4222-8222-222222222222";
+        let runtime = Arc::new(FakeRuntime::new(
+            probe(),
+            WslArtifacts {
+                config: Some(schema_v1_config(provider_id, "shell-export")),
+                credentials: Some(b"secret".to_vec()),
+            },
+        ));
+        let mut running_probe = probe();
+        running_probe.environment_id = "{33333333-3333-3333-3333-333333333333}".to_owned();
+        running_probe.display_name = "Debian".to_owned();
+        running_probe.command_name = Some("Debian".to_owned());
+        running_probe.running = true;
+        let mut stale_duplicate = probe();
+        stale_duplicate.environment_id = "{44444444-4444-4444-8444-444444444444}".to_owned();
+        stale_duplicate.command_name = None;
+        stale_duplicate.availability = WslAvailability::Unavailable;
+        stale_duplicate.message_id = Some("wsl.environment_unavailable");
+        runtime
+            .probes
+            .lock()
+            .expect("probes")
+            .extend([running_probe, stale_duplicate]);
+        let (_temp, _store, application) = application(runtime.clone());
+
+        let denied = application
+            .audit_provider_deletion("not-current-provider", false)
+            .expect_err("stopped environment must be verified before deletion");
+        assert_eq!(denied.message_id, "wsl.delete_start_authorization_required");
+        assert_eq!(runtime.starts.load(Ordering::SeqCst), 0);
+
+        let audit = application
+            .audit_provider_deletion("not-current-provider", true)
+            .expect("all environments verified unused");
+
+        assert_eq!(audit.lifecycle_results.len(), 2);
+        assert_eq!(runtime.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(runtime.credential_cleanups.load(Ordering::SeqCst), 2);
+        assert!(audit.lifecycle_results.iter().any(|result| {
+            result.display_name == "Ubuntu"
+                && result.outcome == WslLifecycleOutcome::StoppedNaturally
+        }));
+        assert!(audit.lifecycle_results.iter().any(|result| {
+            result.display_name == "Debian"
+                && result.outcome == WslLifecycleOutcome::UnchangedRunning
+        }));
+    }
+
+    #[test]
+    fn provider_deletion_action_runs_while_the_guest_lock_is_held() {
+        let runtime = Arc::new(FakeRuntime::new(
+            probe(),
+            WslArtifacts {
+                config: Some(schema_v1_config(
+                    "22222222-2222-4222-8222-222222222222",
+                    "shell-export",
+                )),
+                credentials: Some(b"secret".to_vec()),
+            },
+        ));
+        let (_temp, _store, application) = application(runtime.clone());
+        let action_observed_lock = Arc::new(AtomicBool::new(false));
+        let observed = action_observed_lock.clone();
+        let action_runtime = runtime.clone();
+
+        application
+            .audit_provider_deletion_then("not-current-provider", true, move || {
+                observed.store(
+                    action_runtime
+                        .active_locks
+                        .lock()
+                        .expect("active locks")
+                        .iter()
+                        .any(|(_, owner, _)| owner == "desktop"),
+                    Ordering::SeqCst,
+                );
+                Ok::<_, ()>(())
+            })
+            .expect("delete after audit");
+
+        assert!(action_observed_lock.load(Ordering::SeqCst));
+        assert!(
+            runtime
+                .active_locks
+                .lock()
+                .expect("active locks")
+                .is_empty()
+        );
+        assert!(runtime.waited_after_lock_release.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn provider_deletion_does_not_wait_when_the_guest_lock_release_fails() {
+        let runtime = Arc::new(FakeRuntime::new(
+            probe(),
+            WslArtifacts {
+                config: None,
+                credentials: None,
+            },
+        ));
+        runtime.fail_lock_release.store(true, Ordering::SeqCst);
+        let (_temp, _store, application) = application(runtime.clone());
+
+        let failure = application
+            .audit_provider_deletion("not-current-provider", true)
+            .expect_err("failed guest unlock must fail the audit");
+
+        assert_eq!(failure.message_id, "wsl.lock_recovery_required");
+        assert_eq!(runtime.lifecycle_waits.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn provider_deletion_failure_keeps_completed_lifecycle_results() {
+        let runtime = Arc::new(FakeRuntime::new(
+            probe(),
+            WslArtifacts {
+                config: None,
+                credentials: None,
+            },
+        ));
+        let (_temp, _store, application) = application(runtime);
+
+        let failure = application
+            .audit_provider_deletion_then("not-current-provider", true, || {
+                Err::<(), _>("catalog failure")
+            })
+            .expect_err("catalog deletion fails after WSL audit");
+
+        match failure {
+            WslDeletionAuditError::Deletion {
+                failure,
+                lifecycle_results,
+            } => {
+                assert_eq!(failure, "catalog failure");
+                assert_eq!(lifecycle_results.len(), 1);
+                assert_eq!(
+                    lifecycle_results[0].outcome,
+                    WslLifecycleOutcome::StoppedNaturally
+                );
+            }
+            WslDeletionAuditError::Verification(failure) => {
+                panic!("unexpected verification failure: {}", failure.message_id)
+            }
+        }
+    }
+
+    #[test]
+    fn provider_deletion_is_blocked_by_stopped_environment_actual_state() {
+        let provider_id = "22222222-2222-4222-8222-222222222222";
+        let runtime = Arc::new(FakeRuntime::new(
+            probe(),
+            WslArtifacts {
+                config: Some(schema_v1_config(provider_id, "old-export")),
+                credentials: Some(b"secret".to_vec()),
+            },
+        ));
+        let (_temp, _store, application) = application(runtime.clone());
+
+        let blocked = application
+            .audit_provider_deletion(provider_id, true)
+            .expect_err("actual stopped configuration still references provider");
+
+        assert_eq!(blocked.message_id, "provider.wsl_current_delete_forbidden");
+        assert_eq!(
+            blocked.lifecycle_outcome,
+            Some(WslLifecycleOutcome::StoppedNaturally)
+        );
+        assert_eq!(runtime.starts.load(Ordering::SeqCst), 1);
+        assert_eq!(runtime.credential_cleanups.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn stopped_distribution_is_not_forced_down_when_the_post_start_probe_fails() {
         let runtime = Arc::new(FakeRuntime::new(
             probe(),
             WslArtifacts {
@@ -3516,7 +4418,7 @@ base_url = "https://legacy.example/v1"
 
         assert_eq!(failure.message_id, "wsl.environment_unavailable");
         assert_eq!(runtime.starts.load(Ordering::SeqCst), 1);
-        assert_eq!(runtime.terminations.load(Ordering::SeqCst), 1);
+        assert_eq!(runtime.terminations.load(Ordering::SeqCst), 0);
         assert_eq!(runtime.writes.load(Ordering::SeqCst), 0);
         assert!(!runtime.probes.lock().expect("probes")[0].running);
     }
@@ -3594,7 +4496,7 @@ base_url = "https://legacy.example/v1"
     }
 
     #[test]
-    fn recovery_commits_new_hashes_and_restores_a_temporarily_started_distribution() {
+    fn recovery_commits_new_hashes_without_forcing_down_a_temporarily_started_distribution() {
         let provider_id = "22222222-2222-4222-8222-222222222222";
         let target_config = schema_v1_config(provider_id, "desktop-recovery");
         let target_credentials = b"secret".to_vec();
@@ -3630,13 +4532,17 @@ base_url = "https://legacy.example/v1"
             )
             .expect("pending operation");
         drop(connection);
-        *runtime.active_lock.lock().expect("active lock") =
-            Some(("desktop".to_owned(), "recovery-token".to_owned()));
+        runtime.active_locks.lock().expect("active locks").push((
+            environment.environment_id.clone(),
+            "desktop".to_owned(),
+            "recovery-token".to_owned(),
+        ));
+        runtime.natural_stop_on_wait.store(false, Ordering::SeqCst);
 
         application.recover_pending().expect("recover");
 
-        assert_eq!(runtime.terminations.load(Ordering::SeqCst), 1);
-        assert!(!runtime.probes.lock().expect("probes")[0].running);
+        assert_eq!(runtime.terminations.load(Ordering::SeqCst), 0);
+        assert!(runtime.probes.lock().expect("probes")[0].running);
         let connection = Connection::open(store.paths().database()).expect("state database");
         assert_eq!(
             connection

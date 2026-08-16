@@ -214,7 +214,7 @@ test("WSL2 供应商弹窗在最小窗口展示单发行版范围和生命周期
   const dialog = page.getByRole("dialog", { name: "选择 WSL2 供应商" });
   await expect(dialog).toBeVisible();
   await expect(dialog.getByText("Ubuntu 24.04", { exact: true })).toBeVisible();
-  await expect(dialog.getByText(/临时启动，完成后恢复停止/)).toBeVisible();
+  await expect(dialog.getByText(/最多等待 10 秒自然停止，绝不强制终止/)).toBeVisible();
   await expect(dialog.getByText(/命令式凭据工件；auth.json 保持不变/)).toBeVisible();
   await expect(dialog.getByText("请选择发行版")).toHaveCount(0);
   await expect(dialog.getByRole("button", { name: "应用到 WSL2" })).toBeEnabled();

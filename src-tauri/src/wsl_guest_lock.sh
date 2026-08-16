@@ -8,6 +8,7 @@ STATE_DIR="$HOME/.codex/.gpteasy-shell"
 LOCK_ROOT="$STATE_DIR/lock"
 ACTIVE_LOCK="$LOCK_ROOT/active"
 OWNER_FILE="$ACTIVE_LOCK/owner"
+REFERENCES_FILE="$ACTIVE_LOCK/references"
 umask 077
 
 lock_value() {
@@ -59,6 +60,10 @@ case "$MODE" in
     [ -f "$OWNER_FILE" ] && [ ! -L "$OWNER_FILE" ] || exit 43
     [ "$(lock_value "$OWNER_FILE" owner)" = desktop ] || exit 43
     [ "$(lock_value "$OWNER_FILE" token)" = "$TOKEN" ] || exit 43
+    if [ -e "$REFERENCES_FILE" ] || [ -L "$REFERENCES_FILE" ]; then
+      [ -f "$REFERENCES_FILE" ] && [ ! -L "$REFERENCES_FILE" ] || exit 43
+      rm -f "$REFERENCES_FILE"
+    fi
     rm -f "$OWNER_FILE"
     rmdir "$ACTIVE_LOCK"
     printf 'released\n'

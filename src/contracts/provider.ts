@@ -2,7 +2,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import { isBrowserPreview } from "./browser-preview";
-import type { EnvironmentSnapshot } from "./environment";
+import type {
+  EnvironmentSnapshot,
+  WslLifecycleOutcome,
+  WslLifecycleResult,
+} from "./environment";
 
 export type ProviderFailureCategory =
   | "security_policy"
@@ -32,6 +36,8 @@ export type ProviderFailureCategory =
 export interface ProviderFailure {
   category: ProviderFailureCategory;
   messageId: string;
+  lifecycleOutcome?: WslLifecycleOutcome;
+  lifecycleResults?: WslLifecycleResult[];
 }
 
 export interface ModelDiscovery {
@@ -235,9 +241,17 @@ export function saveAndApplyProviderUpdate(
   });
 }
 
-export function deleteProvider(providerId: string): Promise<void> {
+export interface DeleteProviderResult {
+  lifecycleResults: WslLifecycleResult[];
+}
+
+export function deleteProvider(
+  providerId: string,
+  authorizeStoppedWsl: boolean,
+): Promise<DeleteProviderResult> {
   if (isBrowserPreview()) return Promise.reject(previewFailure);
-  return invoke<void>("delete_provider", { providerId });
+  return invoke<DeleteProviderResult | null>("delete_provider", { providerId, authorizeStoppedWsl })
+    .then((result) => result ?? { lifecycleResults: [] });
 }
 
 export function reorderProviders(providerIds: string[]): Promise<ProviderSummary[]> {

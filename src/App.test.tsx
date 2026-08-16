@@ -700,10 +700,90 @@ describe("供应商目录生命周期", () => {
     expect(screen.queryByRole("button", { name: "拖拽排序 DayWay" })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "删除 DayWay" }));
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith("delete_provider", { providerId: saved.id }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("delete_provider", {
+      providerId: saved.id,
+      authorizeStoppedWsl: false,
+    }));
     expect(screen.getByText("待配置")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "配置 DayWay" })).toBeEnabled();
   }, 10_000);
+
+  it("删除核验发现新的 Stopped 发行版时再次取得显式授权", async () => {
+    const provider = {
+      id: "68bf9ee2-3ba5-4517-b47e-12a11e038de4",
+      name: "Atlas",
+      baseUrl: "https://atlas.example/v1",
+      defaultModel: "model-a",
+      verifiedAtEpochSeconds: 1_786_140_000,
+      isCurrent: false,
+    };
+    invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([provider]);
+      if (command === "list_wsl_environments") return Promise.resolve([]);
+      if (command === "delete_provider") {
+        return args?.authorizeStoppedWsl
+          ? Promise.resolve({
+              lifecycleResults: [{
+                environmentId: "{11111111-1111-1111-1111-111111111111}",
+                displayName: "Ubuntu",
+                outcome: "stopped_naturally",
+              }],
+            })
+          : Promise.reject({
+              category: "wsl_verification",
+              messageId: "wsl.delete_start_authorization_required",
+            });
+      }
+      return Promise.resolve(undefined);
+    });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "删除 Atlas" }));
+
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("delete_provider", {
+      providerId: provider.id,
+      authorizeStoppedWsl: true,
+    }));
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("临时启动已停止的 WSL2"));
+    expect(await screen.findByText(/临时启动的发行版已自然停止/)).toBeInTheDocument();
+  });
+
+  it("目录删除失败时仍展示已完成的 WSL2 生命周期结果", async () => {
+    const provider = {
+      id: "68bf9ee2-3ba5-4517-b47e-12a11e038de4",
+      name: "Atlas",
+      baseUrl: "https://atlas.example/v1",
+      defaultModel: "model-a",
+      verifiedAtEpochSeconds: 1_786_140_000,
+      isCurrent: false,
+    };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([provider]);
+      if (command === "list_wsl_environments") return Promise.resolve([]);
+      if (command === "delete_provider") {
+        return Promise.reject({
+          category: "provider",
+          messageId: "provider.current_delete_forbidden",
+          lifecycleResults: [{
+            environmentId: "{11111111-1111-1111-1111-111111111111}",
+            displayName: "Ubuntu",
+            outcome: "unchanged_running",
+          }],
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "删除 Atlas" }));
+
+    expect(await screen.findByText(/当前供应商不能删除。/)).toBeInTheDocument();
+    expect(screen.getByText(/原本为 Running/)).toBeInTheDocument();
+  });
 
   it("已保存 DayWay 只在用户采用推荐地址后进入重新验证流程", async () => {
     const saved = {
@@ -1183,7 +1263,10 @@ describe("供应商目录生命周期", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "删除 Atlas Renamed" }));
     await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith("delete_provider", { providerId: first.id });
+      expect(invoke).toHaveBeenCalledWith("delete_provider", {
+        providerId: first.id,
+        authorizeStoppedWsl: false,
+      });
     });
     expect(screen.queryByRole("button", { name: "修改 Atlas Renamed" })).not.toBeInTheDocument();
 
@@ -2187,7 +2270,7 @@ describe("WSL2 供应商选择", () => {
     fireEvent.click(open);
 
     const dialog = await screen.findByRole("dialog", { name: "选择 WSL2 供应商" });
-    expect(dialog).toHaveTextContent("已停止的发行版会临时启动，完成后恢复停止");
+    expect(dialog).toHaveTextContent("最多等待 10 秒自然停止，绝不强制终止");
     expect(dialog).toHaveTextContent("命令式凭据工件；auth.json 保持不变");
     const distribution = screen.getByLabelText("WSL2 发行版") as HTMLSelectElement;
     expect(Array.from(distribution.options, (option) => option.textContent)).toEqual(["Ubuntu · 可管理"]);
@@ -2245,6 +2328,71 @@ describe("WSL2 供应商选择", () => {
     expect(screen.queryByText("Ubuntu · 无法安全解歧")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("WSL2 发行版")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "应用到 WSL2" })).toBeDisabled();
+  });
+
+  it("显式授权核验 Stopped 发行版并分别展示配置与生命周期结果", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const provider = {
+      id: "22222222-2222-4222-8222-222222222222",
+      name: "WSL Provider",
+      baseUrl: "https://provider.example/v1",
+      defaultModel: "model-a",
+      verifiedAtEpochSeconds: 1_786_140_000,
+      isCurrent: false,
+    };
+    const stopped = {
+      environmentId: "{11111111-1111-1111-1111-111111111111}",
+      displayName: "Ubuntu",
+      commandName: "Ubuntu",
+      defaultUid: 1000,
+      running: false,
+      availability: "manageable",
+      currentProvider: null,
+      actualProviderId: null,
+      configurationState: "unknown",
+      requiresAttention: false,
+      pendingRestart: false,
+      revision: "stopped-revision",
+      messageId: null,
+    };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([provider]);
+      if (command === "list_wsl_environments") return Promise.resolve([stopped]);
+      if (command === "refresh_wsl_environment") {
+        return Promise.resolve({
+          environment: {
+            ...stopped,
+            running: true,
+            currentProvider: provider,
+            actualProviderId: provider.id,
+            configurationState: "current",
+            requiresAttention: true,
+            messageId: "wsl.lifecycle_still_running",
+          },
+          lifecycleOutcome: "still_running",
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+    const open = await screen.findByRole("button", { name: "选择 WSL2 供应商" });
+    await waitFor(() => expect(open).toBeEnabled());
+    fireEvent.click(open);
+    fireEvent.click(await screen.findByRole("button", { name: "核验实际状态" }));
+
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("自然停止"));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("refresh_wsl_environment", {
+      environmentId: stopped.environmentId,
+      expectedRevision: stopped.revision,
+      authorizeStart: true,
+    }));
+    const dialog = screen.getByRole("dialog", { name: "选择 WSL2 供应商" });
+    await waitFor(() => expect(dialog).toHaveTextContent("已核验 WSL2 发行版“Ubuntu”的实际配置"));
+    expect(dialog).toHaveTextContent("仍为 Running");
+    expect(dialog).toHaveTextContent("未强制终止用户会话或工作负载");
+    expect(screen.queryByRole("button", { name: /强制终止/ })).not.toBeInTheDocument();
   });
 
   it("展示 Running WSL2 的实际共同管理状态且不接收凭据", async () => {

@@ -18,7 +18,10 @@ use crate::provider::{
 };
 use crate::startup::{StartupCoordinator, StartupSnapshot};
 use crate::tray;
-use crate::wsl::{WslApplication, WslApplyResult, WslEnvironmentSummary, WslFailure};
+use crate::wsl::{
+    WslApplication, WslApplyResult, WslDeletionAuditError, WslEnvironmentSummary, WslFailure,
+    WslLifecycleOutcome, WslLifecycleResult, WslRefreshResult,
+};
 
 pub(crate) struct StartupRuntime {
     coordinator: Mutex<StartupCoordinator>,
@@ -195,6 +198,26 @@ pub(crate) async fn apply_wsl_provider(
     let application = state.application.clone();
     tauri::async_runtime::spawn_blocking(move || {
         application.apply_provider(&environment_id, &provider_id, &expected_revision, confirm)
+    })
+    .await
+    .map_err(|_| {
+        WslFailure::new(
+            crate::wsl::WslFailureCategory::StateUnavailable,
+            "wsl.state_unavailable",
+        )
+    })?
+}
+
+#[tauri::command]
+pub(crate) async fn refresh_wsl_environment(
+    state: State<'_, WslRuntime>,
+    environment_id: String,
+    expected_revision: String,
+    authorize_start: bool,
+) -> Result<WslRefreshResult, WslFailure> {
+    let application = state.application.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        application.refresh_environment(&environment_id, &expected_revision, authorize_start)
     })
     .await
     .map_err(|_| {
@@ -470,13 +493,71 @@ pub(crate) async fn save_and_apply_provider_update(
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DeleteProviderResult {
+    lifecycle_results: Vec<WslLifecycleResult>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DeleteProviderFailure {
+    category: &'static str,
+    message_id: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lifecycle_outcome: Option<WslLifecycleOutcome>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    lifecycle_results: Vec<WslLifecycleResult>,
+}
+
 #[tauri::command]
-pub(crate) fn delete_provider(
+pub(crate) async fn delete_provider(
     app: AppHandle,
-    state: State<'_, ProviderRuntime>,
     provider_id: String,
-) -> Result<(), ProviderFailure> {
-    let result = state.application.delete_provider(&provider_id);
+    authorize_stopped_wsl: bool,
+) -> Result<DeleteProviderResult, DeleteProviderFailure> {
+    let task_app = app.clone();
+    let audit_provider_id = provider_id.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let provider_state = task_app.state::<ProviderRuntime>();
+        let wsl_state = task_app.state::<WslRuntime>();
+        wsl_state.application.audit_provider_deletion_then(
+            &audit_provider_id,
+            authorize_stopped_wsl,
+            || {
+                provider_state
+                    .application
+                    .delete_provider(&audit_provider_id)
+            },
+        )
+    })
+    .await
+    .map_err(|_| DeleteProviderFailure {
+        category: "state_unavailable",
+        message_id: "wsl.state_unavailable",
+        lifecycle_outcome: None,
+        lifecycle_results: Vec::new(),
+    })?;
+    let result = match result {
+        Ok((audit, ())) => Ok(DeleteProviderResult {
+            lifecycle_results: audit.lifecycle_results,
+        }),
+        Err(WslDeletionAuditError::Verification(failure)) => Err(DeleteProviderFailure {
+            category: "wsl_verification",
+            message_id: failure.message_id,
+            lifecycle_outcome: failure.lifecycle_outcome,
+            lifecycle_results: Vec::new(),
+        }),
+        Err(WslDeletionAuditError::Deletion {
+            failure,
+            lifecycle_results,
+        }) => Err(DeleteProviderFailure {
+            category: "provider",
+            message_id: failure.message_id,
+            lifecycle_outcome: None,
+            lifecycle_results,
+        }),
+    };
     refresh_tray_after(&app, result)
 }
 

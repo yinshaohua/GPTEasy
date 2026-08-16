@@ -11,6 +11,7 @@ BACKUP_DIR="$STATE_DIR/desktop-backups"
 TMP_DIR="$STATE_DIR/tmp"
 LOCK_DIR="$STATE_DIR/lock/active"
 OWNER_FILE="$LOCK_DIR/owner"
+REFERENCES_FILE="$LOCK_DIR/references"
 umask 077
 
 fail() {
@@ -51,10 +52,13 @@ incoming_credential=$(mktemp "$TMP_DIR/.credential.XXXXXX")
 config_candidate=''
 credential_candidate=''
 credential_created=false
+config_replaced=false
+CREDENTIAL=''
 cleanup() {
   rm -f "$incoming_config" "$incoming_credential"
   [ -z "$config_candidate" ] || rm -f "$config_candidate"
   [ -z "$credential_candidate" ] || rm -f "$credential_candidate"
+  [ "$credential_created" = false ] || [ "$config_replaced" = true ] || rm -f "$CREDENTIAL"
 }
 trap cleanup EXIT HUP INT TERM
 
@@ -107,6 +111,36 @@ validate_config_target() {
   fi
 }
 validate_config_target || fail unsafe_path 43
+
+old_credential_relative=''
+if [ -f "$CONFIG_TARGET" ]; then
+  old_credential_relative=$(awk '
+    { sub(/\r$/, "", $0) }
+    index($0, "# GPTEasy credential-file:") == 1 {
+      value = substr($0, length("# GPTEasy credential-file:") + 1)
+      sub(/^[[:space:]]+/, "", value)
+      found += 1
+    }
+    END {
+      if (found > 1) exit 2
+      if (found == 1) print value
+    }
+  ' "$CONFIG_TARGET") || fail candidate_rejected 40
+fi
+for reference in "$credential_relative" "$old_credential_relative"; do
+  [ -n "$reference" ] || continue
+  case "$reference" in
+    .gpteasy-shell/credentials/*/*.token) ;;
+    *) fail candidate_rejected 40 ;;
+  esac
+  case "$reference" in *..*|*//*|*[!A-Za-z0-9._/-]*) fail candidate_rejected 40 ;; esac
+done
+{
+  printf '%s\n' "$credential_relative"
+  [ -z "$old_credential_relative" ] || printf '%s\n' "$old_credential_relative"
+} >"$REFERENCES_FILE"
+chmod 600 "$REFERENCES_FILE"
+sync -f "$REFERENCES_FILE"
 
 hash_file() {
   if [ -f "$1" ]; then sha256sum "$1" | awk '{print $1}'; else printf 'missing\n'; fi
@@ -161,6 +195,7 @@ if ! mv "$config_candidate" "$CONFIG_TARGET"; then
   fail write_failed 44
 fi
 config_candidate=''
+config_replaced=true
 sync -f "$config_parent"
 
 find "$BACKUP_DIR" -maxdepth 1 -type f \( -name 'config-*.toml' -o -name 'config-*.missing' \) -printf '%f\n' |

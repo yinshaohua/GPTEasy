@@ -50,6 +50,7 @@ import {
   saveVerifiedProvider,
   validateProvider,
   validateProviderUpdate,
+  type DeleteProviderResult,
   type ProviderFailure,
   type ProviderSummary,
   type ProviderValidationReceipt,
@@ -65,10 +66,13 @@ import {
   asWslFailure,
   getEnvironmentSnapshot,
   listWslEnvironments,
+  refreshWslEnvironment,
   switchToOpenAiLogin,
   type EnvironmentFailure,
   type EnvironmentSnapshot,
   type WslEnvironmentSummary,
+  type WslLifecycleOutcome,
+  type WslLifecycleResult,
 } from "./contracts/environment";
 import {
   providerFailureMessages,
@@ -163,8 +167,9 @@ export default function ProviderPage() {
   const [wslDialogOpen, setWslDialogOpen] = useState(false);
   const [wslEnvironmentId, setWslEnvironmentId] = useState<string | null>(null);
   const [wslProviderId, setWslProviderId] = useState<string | null>(null);
-  const [wslBusy, setWslBusy] = useState(false);
+  const [wslAction, setWslAction] = useState<"idle" | "applying" | "refreshing">("idle");
   const [wslFailure, setWslFailure] = useState<{ messageId: string } | null>(null);
+  const [wslFeedback, setWslFeedback] = useState("");
   const [linuxExportStep, setLinuxExportStep] = useState<LinuxExportStep>(null);
   const [linuxExportShell, setLinuxExportShell] = useState<LinuxShell>("bash");
   const [linuxExportDestination, setLinuxExportDestination] = useState<string | null>(null);
@@ -180,6 +185,7 @@ export default function ProviderPage() {
   const selected = providers.find((provider) => provider.id === selectedId) ?? null;
   const savedDayway = providers.find((provider) => provider.recommendationId === "dayway") ?? null;
   const isDaywayEditor = isRecommendedCandidate || selected?.recommendationId === "dayway";
+  const wslBusy = wslAction !== "idle";
 
   useEffect(() => {
     let mounted = true;
@@ -604,15 +610,48 @@ export default function ProviderPage() {
     if (provider.isCurrent || !window.confirm(providerMessages.deleteConfirmation)) {
       return;
     }
+    const hasStoppedWsl = wslEnvironments.some((environment) =>
+      isManageableWslEnvironment(environment) && !environment.running);
+    let authorizeStoppedWsl = false;
+    if (hasStoppedWsl) {
+      authorizeStoppedWsl = window.confirm(providerMessages.deleteWslVerificationConfirmation);
+      if (!authorizeStoppedWsl) return;
+    }
     setOperation("deleting");
     setFailure(null);
     try {
-      await deleteProvider(provider.id);
+      let result: DeleteProviderResult;
+      try {
+        result = await deleteProvider(provider.id, authorizeStoppedWsl);
+      } catch (error) {
+        const failure = asProviderFailure(error);
+        if (
+          authorizeStoppedWsl
+          || failure.messageId !== "wsl.delete_start_authorization_required"
+          || !window.confirm(providerMessages.deleteWslVerificationConfirmation)
+        ) {
+          throw error;
+        }
+        authorizeStoppedWsl = true;
+        result = await deleteProvider(provider.id, true);
+      }
       setProviders((current) => current.filter((item) => item.id !== provider.id));
       if (selectedId === provider.id) resetEditor("catalog");
+      setCatalogFeedback([
+        providerMessages.providerDeleted,
+        lifecycleResultsMessage(result.lifecycleResults),
+      ].filter(Boolean).join(" "));
       setOperation("idle");
     } catch (error) {
-      setFailure(asProviderFailure(error));
+      const failure = asProviderFailure(error);
+      const lifecycleFeedback = failure.lifecycleResults?.length
+        ? lifecycleResultsMessage(failure.lifecycleResults)
+        : lifecycleOutcomeMessage(failure.lifecycleOutcome);
+      setFailure(failure);
+      setCatalogFeedback([
+        providerFailureMessages[failure.messageId] ?? providerMessages.validationFallback,
+        lifecycleFeedback,
+      ].filter(Boolean).join(" "));
       setOperation("idle");
     }
   }
@@ -630,6 +669,7 @@ export default function ProviderPage() {
   async function openWslDialog() {
     setWslDialogOpen(true);
     setWslFailure(null);
+    setWslFeedback("");
     setWslState("loading");
     try {
       const items = await listWslEnvironments();
@@ -648,6 +688,7 @@ export default function ProviderPage() {
 
   async function refreshWslDialog() {
     setWslFailure(null);
+    setWslFeedback("");
     setWslState("loading");
     try {
       const items = await listWslEnvironments();
@@ -672,23 +713,58 @@ export default function ProviderPage() {
     ) return;
     const provider = providers.find((item) => item.id === wslProviderId);
     if (!provider) return;
-    setWslBusy(true);
+    setWslAction("applying");
     setWslFailure(null);
+    setWslFeedback("");
     try {
       const result = await applyWslProvider(target.environmentId, provider.id, target.revision, true);
       setWslEnvironments((current) => current.map((item) => item.environmentId === result.environment.environmentId
         ? result.environment
         : item));
-      setCatalogFeedback(result.pendingRestart
-        ? `${providerMessages.wslPendingRestart} ${providerMessages.wslApplied(provider.name, target.displayName)}`
-        : providerMessages.wslApplied(provider.name, target.displayName));
+      setCatalogFeedback([
+        providerMessages.wslApplied(provider.name, target.displayName),
+        result.pendingRestart ? providerMessages.wslPendingRestart : "",
+        lifecycleOutcomeMessage(result.lifecycleOutcome),
+      ].filter(Boolean).join(" "));
       setWslDialogOpen(false);
     } catch (error) {
       const failure = asWslFailure(error);
       await refreshWslDialog();
       setWslFailure(failure);
     } finally {
-      setWslBusy(false);
+      setWslAction("idle");
+    }
+  }
+
+  async function refreshSelectedWslActualState() {
+    const target = wslEnvironments.find((item) => item.environmentId === wslEnvironmentId);
+    if (!target || !isManageableWslEnvironment(target)) return;
+    const authorizeStart = target.running
+      || window.confirm(providerMessages.wslStoppedWarning);
+    if (!authorizeStart) return;
+    setWslAction("refreshing");
+    setWslFailure(null);
+    setWslFeedback("");
+    try {
+      const result = await refreshWslEnvironment(
+        target.environmentId,
+        target.revision,
+        authorizeStart,
+      );
+      setWslEnvironments((current) => current.map((item) =>
+        item.environmentId === result.environment.environmentId ? result.environment : item));
+      setWslFeedback([
+        providerMessages.wslRefreshed(target.displayName),
+        lifecycleOutcomeMessage(result.lifecycleOutcome),
+      ].filter(Boolean).join(" "));
+    } catch (error) {
+      const failure = asWslFailure(error);
+      setWslFailure(failure);
+      if (failure.lifecycleOutcome) {
+        setWslFeedback(lifecycleOutcomeMessage(failure.lifecycleOutcome));
+      }
+    } finally {
+      setWslAction("idle");
     }
   }
 
@@ -1299,10 +1375,13 @@ export default function ProviderPage() {
           selectedEnvironmentId={wslEnvironmentId}
           selectedProviderId={wslProviderId}
           busy={wslBusy}
+          action={wslAction}
           failure={wslFailure}
+          feedback={wslFeedback}
           onEnvironmentChange={setWslEnvironmentId}
           onProviderChange={setWslProviderId}
           onRefresh={() => void refreshWslDialog()}
+          onActualRefresh={() => void refreshSelectedWslActualState()}
           onApply={() => void applyWslSelection()}
           onClose={() => {
             if (!wslBusy) setWslDialogOpen(false);
@@ -1563,10 +1642,13 @@ function WslProviderDialog({
   selectedEnvironmentId,
   selectedProviderId,
   busy,
+  action,
   failure,
+  feedback,
   onEnvironmentChange,
   onProviderChange,
   onRefresh,
+  onActualRefresh,
   onApply,
   onClose,
 }: {
@@ -1576,10 +1658,13 @@ function WslProviderDialog({
   selectedEnvironmentId: string | null;
   selectedProviderId: string | null;
   busy: boolean;
+  action: "idle" | "applying" | "refreshing";
   failure: { messageId: string } | null;
+  feedback: string;
   onEnvironmentChange: (id: string) => void;
   onProviderChange: (id: string) => void;
   onRefresh: () => void;
+  onActualRefresh: () => void;
   onApply: () => void;
   onClose: () => void;
 }) {
@@ -1662,18 +1747,53 @@ function WslProviderDialog({
               </div>
             )}
             {failure && <p className="inline-error" role="alert">{failureMessage}</p>}
+            {feedback && <p className="catalog-feedback" role="status">{feedback}</p>}
           </>
         )}
         <div className="dialog-actions">
           <button className="secondary-button" type="button" onClick={onClose} disabled={busy}>{providerMessages.wslCancel}</button>
+          <button
+            className="secondary-button"
+            type="button"
+            onClick={onActualRefresh}
+            disabled={state !== "ready" || selectedEnvironment === null || busy}
+          >
+            {action === "refreshing"
+              ? <LoaderCircle className="is-spinning" size={17} aria-hidden="true" />
+              : <RefreshCw size={17} aria-hidden="true" />}
+            {action === "refreshing"
+              ? providerMessages.wslRefreshingActual
+              : providerMessages.wslRefreshActual}
+          </button>
           <button className="command-button" type="button" onClick={onApply} disabled={!canApply}>
-            {busy ? <LoaderCircle className="is-spinning" size={17} aria-hidden="true" /> : <Check size={17} aria-hidden="true" />}
-            {busy ? providerMessages.wslApplying : providerMessages.wslApply}
+            {action === "applying" ? <LoaderCircle className="is-spinning" size={17} aria-hidden="true" /> : <Check size={17} aria-hidden="true" />}
+            {action === "applying" ? providerMessages.wslApplying : providerMessages.wslApply}
           </button>
         </div>
       </section>
     </div>
   );
+}
+
+function lifecycleOutcomeMessage(outcome: WslLifecycleOutcome | undefined): string {
+  switch (outcome) {
+    case "unchanged_running":
+      return providerMessages.wslLifecycleUnchangedRunning;
+    case "stopped_naturally":
+      return providerMessages.wslLifecycleStoppedNaturally;
+    case "still_running":
+      return providerMessages.wslLifecycleStillRunning;
+    default:
+      return "";
+  }
+}
+
+function lifecycleResultsMessage(results: WslLifecycleResult[]): string {
+  const stopped = results.filter((result) => result.outcome === "stopped_naturally").length;
+  const stillRunning = results.filter((result) => result.outcome === "still_running").length;
+  if (stillRunning > 0) return providerMessages.wslLifecycleStillRunning;
+  if (stopped > 0) return providerMessages.wslLifecycleStoppedNaturally;
+  return results.length > 0 ? providerMessages.wslLifecycleUnchangedRunning : "";
 }
 
 function EnvironmentActions({
