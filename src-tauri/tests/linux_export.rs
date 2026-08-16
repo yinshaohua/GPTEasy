@@ -10,6 +10,7 @@ use gpteasy_lib::provider::{
 use gpteasy_lib::state::{StatePaths, StateStore};
 use rusqlite::{Connection, params};
 use tempfile::TempDir;
+use uuid::Uuid;
 
 #[test]
 fn bash_export_captures_every_verified_provider_in_catalog_order() {
@@ -146,7 +147,7 @@ fn shell_snapshots_source_without_side_effects_and_reject_unsafe_permissions() {
         "alpha-model",
         1,
     );
-    for shell in [LinuxShell::Bash, LinuxShell::Zsh] {
+    for shell in shell_matrix_targets() {
         let destination = fixture.temp.path().join(match shell {
             LinuxShell::Bash => "gpteasy.sh",
             LinuxShell::Zsh => "gpteasy.zsh",
@@ -169,7 +170,9 @@ cp -- "$1" "$script"
 chmod 600 "$script"
 mkdir -p -- "$codex_home"
 printf '%s\n' 'custom_setting = true' >"$codex_home/config.toml"
+printf '%s' '{"login":"unchanged"}' >"$codex_home/auth.json"
 before=$(sha256sum "$codex_home/config.toml")
+auth_before=$(sha256sum "$codex_home/auth.json")
 export CODEX_HOME="$codex_home"
 # shellcheck disable=SC1090
 pushd "$workspace" >/dev/null
@@ -177,6 +180,7 @@ source ./gpteasy.sh
 popd >/dev/null
 after=$(sha256sum "$codex_home/config.toml")
 [[ "$before" == "$after" ]]
+[[ "$auth_before" == "$(sha256sum "$codex_home/auth.json")" ]]
 [[ $(gpteasy help) == *'gpteasy current'* ]]
 [[ $(gpteasy --help) == "$(gpteasy -h)" ]]
 current=$(gpteasy current 2>&1 || true)
@@ -186,6 +190,7 @@ if gpteasy current >/dev/null 2>&1; then
     printf '%s\n' 'unsafe snapshot permissions were accepted' >&2
     exit 1
 fi
+[[ "$auth_before" == "$(sha256sum "$codex_home/auth.json")" ]]
 gpteasy help >/dev/null
 "#,
         );
@@ -211,7 +216,7 @@ fn shell_snapshots_check_codex_before_installing_only_the_selected_provider() {
         "beta-model",
         2,
     );
-    for shell in [LinuxShell::Bash, LinuxShell::Zsh] {
+    for shell in shell_matrix_targets() {
         let destination = fixture.temp.path().join(match shell {
             LinuxShell::Bash => "gpteasy.sh",
             LinuxShell::Zsh => "gpteasy.zsh",
@@ -301,7 +306,7 @@ fn shell_snapshots_restore_and_consume_only_the_latest_of_five_restore_points() 
         "beta-model",
         2,
     );
-    for shell in [LinuxShell::Bash, LinuxShell::Zsh] {
+    for shell in shell_matrix_targets() {
         let destination = fixture.temp.path().join(match shell {
             LinuxShell::Bash => "gpteasy.sh",
             LinuxShell::Zsh => "gpteasy.zsh",
@@ -400,7 +405,7 @@ fn shell_snapshots_distinguish_current_updated_and_legacy_managed_blocks() {
         "beta-model",
         2,
     );
-    for shell in [LinuxShell::Bash, LinuxShell::Zsh] {
+    for shell in shell_matrix_targets() {
         let destination = fixture.temp.path().join(match shell {
             LinuxShell::Bash => "gpteasy.sh",
             LinuxShell::Zsh => "gpteasy.zsh",
@@ -519,7 +524,7 @@ fn shell_snapshots_preserve_safe_symlinks_and_reject_hardlinks_and_concurrency()
         "beta-model",
         2,
     );
-    for shell in [LinuxShell::Bash, LinuxShell::Zsh] {
+    for shell in shell_matrix_targets() {
         let destination = fixture.temp.path().join(match shell {
             LinuxShell::Bash => "gpteasy.sh",
             LinuxShell::Zsh => "gpteasy.zsh",
@@ -639,7 +644,7 @@ fn shell_snapshots_report_information_and_only_unlock_confirmed_stale_shell_lock
         "alpha-model",
         1,
     );
-    for shell in [LinuxShell::Bash, LinuxShell::Zsh] {
+    for shell in shell_matrix_targets() {
         let destination = fixture.temp.path().join(match shell {
             LinuxShell::Bash => "gpteasy.sh",
             LinuxShell::Zsh => "gpteasy.zsh",
@@ -816,7 +821,7 @@ grep -Fq '[abc]' "$codex_home/config.toml"
 "#,
     );
 
-    for shell in [LinuxShell::Bash, LinuxShell::Zsh] {
+    for shell in shell_matrix_targets() {
         let destination = fixture.temp.path().join(match shell {
             LinuxShell::Bash => "gpteasy.sh",
             LinuxShell::Zsh => "gpteasy.zsh",
@@ -829,6 +834,66 @@ grep -Fq '[abc]' "$codex_home/config.toml"
     }
 }
 
+#[test]
+fn shell_snapshots_keep_acceptance_canary_out_of_public_surfaces_and_auth_json() {
+    let canary = std::env::var("GPTEASY_ACCEPTANCE_KEY_A")
+        .unwrap_or_else(|_| format!("gpteasy-shell-canary-{}", Uuid::new_v4()));
+    let fixture = ExportFixture::new();
+    fixture.insert_provider(
+        "11111111-1111-4111-8111-111111111111",
+        "Canary Provider",
+        "https://canary.example/v1",
+        &canary,
+        "canary-model",
+        1,
+    );
+
+    for shell in shell_matrix_targets() {
+        let destination = fixture.temp.path().join(match shell {
+            LinuxShell::Bash => "gpteasy.sh",
+            LinuxShell::Zsh => "gpteasy.zsh",
+        });
+        fixture
+            .application
+            .export_linux_script(shell, &destination, false)
+            .expect("export canary shell snapshot");
+
+        run_shell_black_box_with_canaries(
+            shell,
+            &destination,
+            r#"
+set -euo pipefail
+workspace=$(mktemp -d "${TMPDIR:-/tmp}/gpteasy-canary.XXXXXX")
+trap 'rm -rf -- "$workspace"' EXIT
+script="$workspace/gpteasy-export"
+codex_home="$workspace/codex"
+fake_bin="$workspace/bin"
+cp -- "$1" "$script"
+chmod 600 "$script"
+mkdir -p -- "$codex_home" "$fake_bin"
+printf '%s' '{"login":"unchanged"}' >"$codex_home/auth.json"
+auth_before=$(sha256sum "$codex_home/auth.json")
+cat >"$fake_bin/codex" <<'SUPPORTED_CODEX'
+#!/usr/bin/env sh
+printf '%s\n' 'codex-cli 0.147.0'
+SUPPORTED_CODEX
+chmod 700 "$fake_bin/codex"
+export PATH="$fake_bin:$PATH"
+export CODEX_HOME="$codex_home"
+source "$script"
+gpteasy <<<"1"
+gpteasy current
+gpteasy info
+"$2" "$script" current
+credential=$(find "$codex_home/.gpteasy-shell/credentials" -type f -name '*.token' -print -quit)
+[[ -s "$credential" ]]
+[[ "$auth_before" == "$(sha256sum "$codex_home/auth.json")" ]]
+"#,
+            &[&canary],
+        );
+    }
+}
+
 struct ExportFixture {
     temp: TempDir,
     store: StateStore,
@@ -836,37 +901,68 @@ struct ExportFixture {
 }
 
 fn run_shell_black_box(shell: LinuxShell, script: &Path, harness: &str) {
+    run_shell_black_box_with_canaries(shell, script, harness, &[]);
+}
+
+fn run_shell_black_box_with_canaries(
+    shell: LinuxShell,
+    script: &Path,
+    harness: &str,
+    extra_canaries: &[&str],
+) {
     let (environment, default_executable, label, display_name) = match shell {
         LinuxShell::Bash => ("GPTEASY_TEST_BASH", "bash", "Bash", "Bash 4+"),
         LinuxShell::Zsh => ("GPTEASY_TEST_ZSH", "zsh", "Zsh", "Zsh 5+"),
     };
     let executable = std::env::var(environment).unwrap_or_else(|_| default_executable.to_owned());
+    if !shell_is_available(&executable) {
+        if std::env::var("GPTEASY_REQUIRE_SHELL_MATRIX").as_deref() == Ok("1") {
+            panic!("required {label} executable is unavailable: {executable}");
+        }
+        eprintln!("skipping unavailable {label} executable: {executable}");
+        return;
+    }
     #[cfg(windows)]
-    let mut child = Command::new("wsl.exe")
-        .args(["-d", "Ubuntu", "--"])
-        .arg(&executable)
-        .args([
-            "-s",
-            "--",
-            &windows_path_for_wsl(script),
-            &executable,
-            display_name,
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start WSL Bash black-box test");
+    let mut command = {
+        let mut command = Command::new("wsl.exe");
+        command
+            .args(["-d", &wsl_test_distribution(), "--"])
+            .arg(&executable)
+            .args([
+                "-s",
+                "--",
+                &windows_path_for_wsl(script),
+                &executable,
+                display_name,
+            ]);
+        command
+    };
 
     #[cfg(not(windows))]
-    let mut child = Command::new(&executable)
-        .args([
+    let mut command = {
+        let mut command = Command::new(&executable);
+        command.args([
             "-s",
             "--",
             script.to_str().expect("UTF-8 test path"),
             &executable,
             display_name,
-        ])
+        ]);
+        command
+    };
+
+    for canary in extra_canaries {
+        assert_process_arguments_are_clean(label, &command, canary);
+    }
+    for name in ["GPTEASY_ACCEPTANCE_KEY_A", "GPTEASY_ACCEPTANCE_KEY_B"] {
+        if let Ok(value) = std::env::var(name)
+            && !value.is_empty()
+        {
+            assert_process_arguments_are_clean(label, &command, &value);
+        }
+    }
+
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -882,6 +978,16 @@ fn run_shell_black_box(shell: LinuxShell, script: &Path, harness: &str) {
     let output = child
         .wait_with_output()
         .expect("wait for Bash black-box test");
+    for canary in extra_canaries {
+        assert_public_output_is_clean(label, &output, canary);
+    }
+    for name in ["GPTEASY_ACCEPTANCE_KEY_A", "GPTEASY_ACCEPTANCE_KEY_B"] {
+        if let Ok(value) = std::env::var(name)
+            && !value.is_empty()
+        {
+            assert_public_output_is_clean(label, &output, &value);
+        }
+    }
     assert!(
         output.status.success(),
         "{label} black-box test failed\nstdout:\n{}\nstderr:\n{}",
@@ -890,11 +996,79 @@ fn run_shell_black_box(shell: LinuxShell, script: &Path, harness: &str) {
     );
 }
 
+fn assert_public_output_is_clean(label: &str, output: &std::process::Output, canary: &str) {
+    assert!(
+        !contains_bytes(&output.stdout, canary.as_bytes()),
+        "API key canary leaked into {label} standard output"
+    );
+    assert!(
+        !contains_bytes(&output.stderr, canary.as_bytes()),
+        "API key canary leaked into {label} standard error"
+    );
+}
+
+fn assert_process_arguments_are_clean(label: &str, command: &Command, canary: &str) {
+    assert!(
+        !command.get_program().to_string_lossy().contains(canary)
+            && !command
+                .get_args()
+                .any(|argument| argument.to_string_lossy().contains(canary)),
+        "API key canary leaked into {label} child process arguments"
+    );
+}
+
+fn shell_matrix_targets() -> Vec<LinuxShell> {
+    match std::env::var("GPTEASY_TEST_MATRIX_SHELL").as_deref() {
+        Ok("bash") => vec![LinuxShell::Bash],
+        Ok("zsh") => vec![LinuxShell::Zsh],
+        Ok(value) => panic!("unsupported GPTEASY_TEST_MATRIX_SHELL value: {value}"),
+        Err(_) => vec![LinuxShell::Bash, LinuxShell::Zsh],
+    }
+}
+
+fn shell_is_available(executable: &str) -> bool {
+    #[cfg(windows)]
+    let output = Command::new("wsl.exe")
+        .args([
+            "-d",
+            &wsl_test_distribution(),
+            "--",
+            executable,
+            "--version",
+        ])
+        .output();
+
+    #[cfg(not(windows))]
+    let output = Command::new(executable).arg("--version").output();
+
+    output.is_ok_and(|output| output.status.success())
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+}
+
+#[cfg(windows)]
+fn wsl_test_distribution() -> String {
+    std::env::var("GPTEASY_TEST_WSL_DISTRIBUTION").unwrap_or_else(|_| "Ubuntu".to_owned())
+}
+
 #[cfg(windows)]
 fn windows_path_for_wsl(path: &Path) -> String {
     let windows_path = path.to_str().expect("UTF-8 test path").replace('\\', "/");
     let output = Command::new("wsl.exe")
-        .args(["-d", "Ubuntu", "--", "wslpath", "-a", "-u", &windows_path])
+        .args([
+            "-d",
+            &wsl_test_distribution(),
+            "--",
+            "wslpath",
+            "-a",
+            "-u",
+            &windows_path,
+        ])
         .output()
         .expect("translate Windows test path for WSL");
     assert!(

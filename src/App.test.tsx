@@ -603,6 +603,13 @@ describe("验收凭据泄漏门禁", () => {
       if (command === "reveal_provider_api_key") {
         return Promise.resolve({ value: apiKeyCanary });
       }
+      if (command === "revalidate_provider") {
+        return Promise.reject({
+          category: "authentication",
+          messageId: "provider.authentication_failed",
+          details: apiKeyCanary,
+        });
+      }
       return Promise.resolve(undefined);
     });
     const notifications: string[] = [];
@@ -619,6 +626,11 @@ describe("验收凭据泄漏门禁", () => {
 
     const screenshotAssist = `${document.body.textContent}\n${document.documentElement.outerHTML}`;
     fireEvent.click(screen.getByRole("button", { name: "返回" }));
+    fireEvent.click(screen.getByRole("button", { name: "验证 Atlas" }));
+    const validationDialog = await screen.findByRole("dialog", { name: "供应商验证" });
+    const errorDetails = within(validationDialog).getByText("技术详情").parentElement?.textContent ?? "";
+    expect(errorDetails).not.toContain(apiKeyCanary);
+    fireEvent.click(within(validationDialog).getByRole("button", { name: "完成" }));
     fireEvent.click(screen.getByRole("button", { name: "删除 Atlas" }));
     expect(notifications).toHaveLength(1);
     expect(screenshotAssist).not.toContain(apiKeyCanary);

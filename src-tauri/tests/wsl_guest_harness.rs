@@ -332,18 +332,20 @@ fn bash_snapshot() -> (TempDir, PathBuf) {
 }
 
 fn insert_harness_providers(connection: &Connection) {
+    let desktop_key = acceptance_key("GPTEASY_ACCEPTANCE_KEY_A", "wsl-harness-secret");
+    let shell_key = acceptance_key("GPTEASY_ACCEPTANCE_KEY_B", "shell-harness-secret");
     for (id, name, api_key, model, sort_order) in [
         (
             "22222222-2222-4222-8222-222222222222",
             "Harness",
-            "wsl-harness-secret",
+            desktop_key.as_str(),
             "model-a",
             0,
         ),
         (
             "33333333-3333-4333-8333-333333333333",
             "Shell Harness",
-            "shell-harness-secret",
+            shell_key.as_str(),
             "model-b",
             1,
         ),
@@ -357,6 +359,21 @@ fn insert_harness_providers(connection: &Connection) {
                 params![id, name, api_key, model, sort_order],
             )
             .expect("insert harness provider");
+    }
+}
+
+fn acceptance_key(name: &str, fallback: &str) -> String {
+    env::var(name).unwrap_or_else(|_| fallback.to_owned())
+}
+
+fn assert_acceptance_process_arguments_are_clean() {
+    for name in ["GPTEASY_ACCEPTANCE_KEY_A", "GPTEASY_ACCEPTANCE_KEY_B"] {
+        if let Ok(canary) = env::var(name) {
+            assert!(
+                !env::args().any(|argument| argument.contains(&canary)),
+                "API key canary leaked into the WSL harness process arguments"
+            );
+        }
     }
 }
 
@@ -388,6 +405,7 @@ fn windows_path_for_wsl(distribution: &str, path: &Path) -> String {
 #[test]
 #[ignore = "requires --features wsl-guest-harness, GPTEASY_RUN_WSL_GUEST_HARNESS=1, and an explicitly selected WSL2 distribution"]
 fn running_guest_harness_preserves_auth_and_enforces_the_shared_desktop_lock() {
+    assert_acceptance_process_arguments_are_clean();
     assert_eq!(
         std::env::var("GPTEASY_RUN_WSL_GUEST_HARNESS").as_deref(),
         Ok("1"),
@@ -488,7 +506,7 @@ model_providers.gpteasy.auth.command = \"sh\"\n\
  model_providers.gpteasy.auth.args = [\"-c\", '{auth_script}']\n\
 # <<< GPTEasy managed provider <<<\n"
     );
-    let credential = b"wsl-harness-secret";
+    let credential = acceptance_key("GPTEASY_ACCEPTANCE_KEY_A", "wsl-harness-secret").into_bytes();
     let written = wsl_output(
         &distribution,
         &[
@@ -499,7 +517,7 @@ model_providers.gpteasy.auth.command = \"sh\"\n\
             token,
             "missing",
         ],
-        &bundle(config.as_bytes(), credential),
+        &bundle(config.as_bytes(), &credential),
     );
     assert!(
         written.status.success(),
@@ -759,8 +777,13 @@ chmod 700 "$HOME/bin/codex"
         !blocked.status.success(),
         "desktop lock must block shell switch"
     );
-    assert!(!String::from_utf8_lossy(&blocked.stdout).contains("wsl-harness-secret"));
-    assert!(!String::from_utf8_lossy(&blocked.stderr).contains("wsl-harness-secret"));
+    for canary in [
+        acceptance_key("GPTEASY_ACCEPTANCE_KEY_A", "wsl-harness-secret"),
+        acceptance_key("GPTEASY_ACCEPTANCE_KEY_B", "shell-harness-secret"),
+    ] {
+        assert!(!String::from_utf8_lossy(&blocked.stdout).contains(&canary));
+        assert!(!String::from_utf8_lossy(&blocked.stderr).contains(&canary));
+    }
 
     let connection =
         Connection::open(application_store.paths().database()).expect("state database");
@@ -868,11 +891,18 @@ mv "$HOME/.codex/legacy.toml" "$HOME/.codex/config.toml""##,
         migrated_refreshed.actual_provider_id.as_deref(),
         Some(provider_id)
     );
+    for canary in [
+        acceptance_key("GPTEASY_ACCEPTANCE_KEY_A", "wsl-harness-secret"),
+        acceptance_key("GPTEASY_ACCEPTANCE_KEY_B", "shell-harness-secret"),
+    ] {
+        assert!(!_wsl_wrapper.invocation_log().contains(&canary));
+    }
 }
 
 #[test]
 #[ignore = "requires --features wsl-guest-harness, GPTEASY_RUN_WSL_GUEST_HARNESS=1, and an explicitly selected WSL2 distribution"]
 fn stopped_guest_harness_authorizes_start_and_never_forces_termination() {
+    assert_acceptance_process_arguments_are_clean();
     assert_eq!(
         std::env::var("GPTEASY_RUN_WSL_GUEST_HARNESS").as_deref(),
         Ok("1"),
@@ -1027,4 +1057,10 @@ chmod 700 "$home/bin/codex"
         br#"{"login":"unchanged"}"#
     );
     assert!(!wrapper.invocation_log().contains("--terminate"));
+    for canary in [
+        acceptance_key("GPTEASY_ACCEPTANCE_KEY_A", "wsl-harness-secret"),
+        acceptance_key("GPTEASY_ACCEPTANCE_KEY_B", "shell-harness-secret"),
+    ] {
+        assert!(!wrapper.invocation_log().contains(&canary));
+    }
 }
