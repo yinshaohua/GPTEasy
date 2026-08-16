@@ -24,6 +24,15 @@ const HELPER_PATH: &str = "$HOME/.local/lib/gpteasy/guest-writer-v2";
 const BUNDLE_MAGIC: &str = "GPTEASY_WSL_BUNDLE_V2";
 const NATURAL_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const NATURAL_STOP_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const CODEX_VERSION_PROBE_PREFIX: &str = "__GPTEASY_CODEX_VERSION__:";
+const CODEX_NOT_FOUND_PROBE_RESULT: &str = "__GPTEASY_CODEX_NOT_FOUND__";
+const CODEX_VERSION_PROBE_SCRIPT: &str = r#"codex_path=$(type -P codex 2>/dev/null) || {
+    printf '%s\n' '__GPTEASY_CODEX_NOT_FOUND__'
+    exit 42
+}
+codex_output=$("$codex_path" --version 2>/dev/null) || exit 43
+printf '%s%s\n' '__GPTEASY_CODEX_VERSION__:' "$codex_output"
+"#;
 
 const GUEST_LOCK: &str = include_str!("wsl_guest_lock.sh");
 const GUEST_CREDENTIAL_CLEANUP: &str = include_str!("wsl_guest_credential_cleanup.sh");
@@ -2627,28 +2636,20 @@ impl WslRuntime for SystemWslRuntime {
             .command_name
             .as_deref()
             .ok_or_else(|| wsl_availability_failure(environment.availability))?;
-        let output = run_wsl_raw_with(
-            &self.program,
-            &[
-                "--distribution",
-                name,
-                "--exec",
-                "/bin/sh",
-                "-c",
-                "command -v codex >/dev/null 2>&1 && exec codex --version",
-            ],
-            None,
-        )?;
-        if output.status.success()
-            && decode_wsl_output(&output).is_ok_and(|value| codex_version_is_supported(&value))
-        {
-            Ok(())
-        } else {
-            Err(WslFailure::new(
-                WslFailureCategory::GuestUnavailable,
-                "wsl.codex_version_required",
-            ))
-        }
+        let output = run_wsl_raw_with(&self.program, &codex_version_probe_args(name), None)?;
+        let decoded = decode_wsl_output(&output)?;
+        let message_id = match classify_codex_version_probe(&decoded) {
+            CodexVersionProbe::Supported if output.status.success() => return Ok(()),
+            CodexVersionProbe::NotFound => "wsl.codex_not_found",
+            CodexVersionProbe::TooOld => "wsl.codex_version_too_old",
+            CodexVersionProbe::Supported | CodexVersionProbe::Unrecognized => {
+                "wsl.codex_version_required"
+            }
+        };
+        Err(WslFailure::new(
+            WslFailureCategory::GuestUnavailable,
+            message_id,
+        ))
     }
 
     fn read_artifacts(&self, environment: &WslProbe) -> Result<WslArtifacts, WslFailure> {
@@ -2939,14 +2940,59 @@ fn read_guest_private_file(
     }
 }
 
-fn codex_version_is_supported(output: &str) -> bool {
-    output.split_whitespace().any(|token| {
+fn codex_version_probe_args(name: &str) -> [&str; 6] {
+    [
+        "--distribution",
+        name,
+        "--exec",
+        "/bin/bash",
+        "-lic",
+        CODEX_VERSION_PROBE_SCRIPT,
+    ]
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodexVersionProbe {
+    Supported,
+    NotFound,
+    TooOld,
+    Unrecognized,
+}
+
+fn classify_codex_version_probe(output: &str) -> CodexVersionProbe {
+    let version_at = output.rfind(CODEX_VERSION_PROBE_PREFIX);
+    let not_found_at = output.rfind(CODEX_NOT_FOUND_PROBE_RESULT);
+    if not_found_at.is_some_and(|index| version_at.is_none_or(|version| index > version)) {
+        return CodexVersionProbe::NotFound;
+    }
+    let Some(version_at) = version_at else {
+        return CodexVersionProbe::Unrecognized;
+    };
+    let version_output = output[version_at + CODEX_VERSION_PROBE_PREFIX.len()..]
+        .lines()
+        .next()
+        .unwrap_or_default();
+    let Some(version) = parse_codex_version(version_output) else {
+        return CodexVersionProbe::Unrecognized;
+    };
+    if version >= (0, 147, 0) {
+        CodexVersionProbe::Supported
+    } else {
+        CodexVersionProbe::TooOld
+    }
+}
+
+fn parse_codex_version(output: &str) -> Option<(u64, u64, u64)> {
+    output.split_whitespace().find_map(|token| {
         let token = token.strip_prefix('v').unwrap_or(token);
         let parts = token
             .split('.')
             .map(str::parse::<u64>)
             .collect::<Result<Vec<_>, _>>();
-        matches!(parts.as_deref(), Ok([major, minor, patch]) if (*major, *minor, *patch) >= (0, 147, 0))
+        match parts.as_deref() {
+            Ok([major, minor, patch]) => Some((*major, *minor, *patch)),
+            _ => None,
+        }
     })
 }
 
@@ -3126,6 +3172,54 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use tempfile::TempDir;
+
+    #[test]
+    fn codex_version_parser_ignores_login_noise_outside_the_probe_result() {
+        let output = concat!(
+            "shell startup: codex-cli 999.0.0\n",
+            "__GPTEASY_CODEX_VERSION__:codex-cli 0.146.9\n",
+        );
+
+        assert_eq!(
+            classify_codex_version_probe(output),
+            CodexVersionProbe::TooOld,
+        );
+    }
+
+    #[test]
+    fn codex_version_probe_uses_login_bash_and_the_real_executable_path() {
+        let args = codex_version_probe_args("Ubuntu");
+
+        assert_eq!(
+            &args[..5],
+            ["--distribution", "Ubuntu", "--exec", "/bin/bash", "-lic"]
+        );
+        assert!(args[5].contains("type -P codex"));
+        assert!(args[5].contains(CODEX_VERSION_PROBE_PREFIX));
+    }
+
+    #[test]
+    fn codex_version_probe_distinguishes_supported_old_missing_and_unknown_results() {
+        assert_eq!(
+            classify_codex_version_probe(concat!(
+                "shell startup output\n",
+                "__GPTEASY_CODEX_VERSION__:codex-cli 0.147.0\n",
+            )),
+            CodexVersionProbe::Supported,
+        );
+        assert_eq!(
+            classify_codex_version_probe("__GPTEASY_CODEX_VERSION__:codex-cli 0.146.9\n"),
+            CodexVersionProbe::TooOld,
+        );
+        assert_eq!(
+            classify_codex_version_probe("__GPTEASY_CODEX_NOT_FOUND__\n"),
+            CodexVersionProbe::NotFound,
+        );
+        assert_eq!(
+            classify_codex_version_probe("codex-cli version unknown\n"),
+            CodexVersionProbe::Unrecognized,
+        );
+    }
 
     struct FakeRuntime {
         probes: Mutex<Vec<WslProbe>>,

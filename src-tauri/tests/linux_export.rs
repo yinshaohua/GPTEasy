@@ -49,6 +49,11 @@ fn bash_export_captures_every_verified_provider_in_catalog_order() {
     assert!(script.contains("beta-secret-key"));
     assert!(script.find("Alpha Provider") < script.find("Beta Provider"));
     assert!(!script.contains("OpenAI 登录模式"));
+    assert!(
+        script.contains("printf '  %s) %s (%s)%s\\n' \"$index\" \"$name\" \"$model\" \"$marker\"")
+    );
+    assert!(!script.contains("printf '  %s) %s (%s)%\""));
+    assert!(!script.contains("provider_irovider_id"));
 }
 
 #[test]
@@ -137,7 +142,32 @@ fn bash_export_does_not_replace_an_existing_file_without_confirmation() {
 }
 
 #[test]
-fn shell_snapshots_source_without_side_effects_and_reject_unsafe_permissions() {
+fn bash_export_replaces_an_existing_file_after_native_confirmation() {
+    let fixture = ExportFixture::new();
+    fixture.insert_provider(
+        "11111111-1111-4111-8111-111111111111",
+        "Alpha Provider",
+        "https://alpha.example/v1",
+        "alpha-secret-key",
+        "alpha-model",
+        1,
+    );
+    let destination = fixture.temp.path().join("gpteasy.sh");
+    fs::write(&destination, b"user-owned original\n").expect("seed existing file");
+
+    let result = fixture
+        .application
+        .export_linux_script(LinuxShell::Bash, &destination, true)
+        .expect("native confirmation permits overwrite");
+
+    assert_eq!(result.provider_count, 1);
+    let exported = fs::read_to_string(destination).expect("read exported script");
+    assert!(exported.starts_with("#!/usr/bin/env bash\n"));
+    assert!(!exported.contains("user-owned original"));
+}
+
+#[test]
+fn shell_snapshots_source_without_side_effects_and_accept_common_permissions() {
     let fixture = ExportFixture::new();
     fixture.insert_provider(
         "11111111-1111-4111-8111-111111111111",
@@ -185,11 +215,34 @@ after=$(sha256sum "$codex_home/config.toml")
 [[ $(gpteasy --help) == "$(gpteasy -h)" ]]
 current=$(gpteasy current 2>&1 || true)
 [[ "$current" == *'当前配置不包含可识别的 GPTEasy 管理区块'* ]]
-chmod 644 "$script"
-if gpteasy current >/dev/null 2>&1; then
-    printf '%s\n' 'unsafe snapshot permissions were accepted' >&2
-    exit 1
-fi
+chmod 664 "$script"
+common_mode=$(gpteasy current 2>&1 || true)
+[[ "$common_mode" == *'当前配置不包含可识别的 GPTEasy 管理区块'* ]]
+[[ "$common_mode" != *'导出文件必须'* ]]
+chmod 775 "$script"
+executable_mode=$(gpteasy current 2>&1 || true)
+[[ "$executable_mode" == *'当前配置不包含可识别的 GPTEasy 管理区块'* ]]
+[[ "$executable_mode" != *'导出文件必须'* ]]
+
+hardlink="$workspace/gpteasy-hardlink.sh"
+ln -- "$script" "$hardlink"
+# shellcheck disable=SC1090
+source "$hardlink"
+hardlink_result=$(gpteasy current 2>&1 || true)
+[[ "$hardlink_result" == *'单链接普通文件'* ]]
+rm -f -- "$hardlink"
+# shellcheck disable=SC1090
+source "$script"
+
+symlink="$workspace/gpteasy-symlink.sh"
+ln -s -- "$script" "$symlink"
+# shellcheck disable=SC1090
+source "$symlink"
+symlink_result=$(gpteasy current 2>&1 || true)
+[[ "$symlink_result" == *'导出文件不能是符号链接'* ]]
+rm -f -- "$symlink"
+# shellcheck disable=SC1090
+source "$script"
 [[ "$auth_before" == "$(sha256sum "$codex_home/auth.json")" ]]
 gpteasy help >/dev/null
 "#,
@@ -243,19 +296,28 @@ printf '%s\n' 'custom_setting = true' >"$codex_home/config.toml"
 printf '%s\n' '{"tokens":{"access_token":"keep-me"}}' >"$codex_home/auth.json"
 config_before=$(sha256sum "$codex_home/config.toml")
 auth_before=$(sha256sum "$codex_home/auth.json")
+export PATH="$fake_bin:$PATH"
+export CODEX_HOME="$codex_home"
+# shellcheck disable=SC1090
+source "$script"
+missing=$(PATH="$fake_bin:/usr/bin:/bin" gpteasy <<<"1" 2>&1 || true)
+[[ "$missing" == *'未找到 Codex CLI，请先安装 0.147.0 或更高版本'* ]]
+[[ "$missing" != *'版本过低'* ]]
+[[ "$config_before" == "$(sha256sum "$codex_home/config.toml")" ]]
+[[ "$auth_before" == "$(sha256sum "$codex_home/auth.json")" ]]
+[[ ! -e "$codex_home/.gpteasy-shell" ]]
 cat >"$fake_bin/codex" <<'OLD_CODEX'
 #!/usr/bin/env bash
 printf '%s\n' 'codex-cli 0.146.0'
 OLD_CODEX
 chmod 700 "$fake_bin/codex"
-export PATH="$fake_bin:$PATH"
-export CODEX_HOME="$codex_home"
-# shellcheck disable=SC1090
-source "$script"
 if (gpteasy <<<"1" >/dev/null 2>&1); then
     printf '%s\n' 'unsupported Codex version was accepted' >&2
     exit 1
 fi
+too_old=$(gpteasy <<<"1" 2>&1 || true)
+[[ "$too_old" == *'Codex CLI 版本过低，请升级到 0.147.0 或更高版本'* ]]
+[[ "$too_old" != *'未找到 Codex CLI'* ]]
 [[ "$config_before" == "$(sha256sum "$codex_home/config.toml")" ]]
 [[ "$auth_before" == "$(sha256sum "$codex_home/auth.json")" ]]
 [[ ! -e "$codex_home/.gpteasy-shell" ]]

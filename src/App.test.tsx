@@ -917,6 +917,23 @@ describe("供应商目录生命周期", () => {
           currentProvider: null,
         });
       }
+      if (command === "list_wsl_environments") {
+        return Promise.resolve([{
+          environmentId: "{11111111-1111-4111-8111-111111111111}",
+          displayName: "Ubuntu",
+          commandName: "Ubuntu",
+          defaultUid: 1000,
+          running: true,
+          availability: "manageable",
+          currentProvider: provider,
+          actualProviderId: provider.id,
+          configurationState: "current",
+          requiresAttention: false,
+          pendingRestart: false,
+          revision: "compact-wsl-revision",
+          messageId: null,
+        }]);
+      }
       return Promise.resolve(undefined);
     });
 
@@ -924,7 +941,7 @@ describe("供应商目录生命周期", () => {
 
     const catalogHeading = await screen.findByRole("heading", { name: "供应商目录" });
     const providerList = await screen.findByLabelText("已验证供应商");
-    expect(within(providerList).getByText(provider.name)).toBeInTheDocument();
+    expect(await within(providerList).findByText(provider.name)).toBeInTheDocument();
     expect(catalogHeading.parentElement).toHaveTextContent("1 个已验证供应商");
     expect(screen.queryByText("管理、验证和切换 Codex 使用的供应商")).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "外部配置" })).not.toBeInTheDocument();
@@ -932,7 +949,7 @@ describe("供应商目录生命周期", () => {
     expect(within(providerList).getByTitle(provider.baseUrl)).toHaveTextContent(provider.baseUrl);
     expect(within(providerList).getByTitle(provider.defaultModel)).toHaveTextContent(provider.defaultModel);
 
-    const wslProvider = await screen.findByLabelText("WSL2 目标供应商");
+    const wslProvider = await screen.findByLabelText("WSL2 当前供应商");
     expect(wslProvider).toHaveTextContent(provider.name);
     expect(wslProvider).toHaveTextContent(provider.baseUrl);
     expect(wslProvider).toHaveTextContent(provider.defaultModel);
@@ -1574,7 +1591,7 @@ describe("Codex 环境接管", () => {
 
     render(<App />);
 
-    expect(await screen.findAllByText("Available Provider")).toHaveLength(2);
+    expect(await screen.findAllByText("Available Provider")).toHaveLength(1);
     expect(screen.getByRole("alert")).toHaveTextContent("无法读取当前用户 Codex 环境");
     expect(screen.queryByText("无法读取供应商目录")).not.toBeInTheDocument();
   });
@@ -2304,7 +2321,80 @@ describe("WSL2 供应商选择", () => {
       expect(screen.queryByRole("dialog", { name: "选择 WSL2 供应商" })).not.toBeInTheDocument();
     });
     expect(screen.getByRole("status")).toHaveTextContent("已将“WSL Provider”应用到 WSL2 发行版“Ubuntu”");
+    expect(screen.getByLabelText("WSL2 当前供应商")).toHaveTextContent("WSL Provider");
   });
+
+  it("应用失败后以 WSL2 实际状态恢复当前供应商和下次选择", async () => {
+    const dayway = {
+      id: "11111111-1111-4111-8111-111111111111",
+      name: "DayWay",
+      baseUrl: "https://dayway.site/v1",
+      defaultModel: "dayway-model",
+      verifiedAtEpochSeconds: 1_786_140_000,
+      isCurrent: false,
+    };
+    const ylai = {
+      id: "22222222-2222-4222-8222-222222222222",
+      name: "ylai",
+      baseUrl: "https://ylai.example/v1",
+      defaultModel: "ylai-model",
+      verifiedAtEpochSeconds: 1_786_140_000,
+      isCurrent: false,
+    };
+    const environment = {
+      environmentId: "{33333333-3333-4333-8333-333333333333}",
+      displayName: "Ubuntu",
+      commandName: "Ubuntu",
+      defaultUid: 1000,
+      running: true,
+      availability: "manageable",
+      currentProvider: ylai,
+      actualProviderId: ylai.id,
+      configurationState: "current",
+      requiresAttention: false,
+      pendingRestart: false,
+      revision: "ylai-revision",
+      messageId: null,
+    };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([dayway, ylai]);
+      if (command === "list_wsl_environments") return Promise.resolve([environment]);
+      if (command === "apply_wsl_provider") {
+        return Promise.reject({
+          category: "guest_unavailable",
+          messageId: "wsl.codex_version_too_old",
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+    const open = await screen.findByRole("button", { name: "选择 WSL2 供应商" });
+    await waitFor(() => expect(open).toBeEnabled());
+    const currentSummary = await screen.findByLabelText("WSL2 当前供应商");
+    expect(currentSummary).toHaveTextContent("ylai");
+    expect(currentSummary).not.toHaveTextContent("DayWay");
+
+    fireEvent.click(open);
+    const dialog = await screen.findByRole("dialog", { name: "选择 WSL2 供应商" });
+    const providerSelect = within(dialog).getByLabelText("已验证供应商") as HTMLSelectElement;
+    expect(providerSelect).toHaveValue(ylai.id);
+    fireEvent.change(providerSelect, { target: { value: dayway.id } });
+    fireEvent.click(screen.getByRole("button", { name: "应用到 WSL2" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("版本过低");
+    expect(providerSelect).toHaveValue(ylai.id);
+    expect(screen.getByRole("dialog", { name: "选择 WSL2 供应商" })).toHaveTextContent(
+      "当前供应商：ylai",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "返回" }));
+    expect(screen.getByLabelText("WSL2 当前供应商")).toHaveTextContent("ylai");
+
+    fireEvent.click(open);
+    const reopened = await screen.findByRole("dialog", { name: "选择 WSL2 供应商" });
+    expect(within(reopened).getByLabelText("已验证供应商")).toHaveValue(ylai.id);
+  }, 10_000);
 
   it("没有可管理发行版时不列出不可选择项", async () => {
     const ambiguousEnvironment = {
@@ -2340,6 +2430,7 @@ describe("WSL2 供应商选择", () => {
     expect(screen.queryByText("Ubuntu · 无法安全解歧")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("WSL2 发行版")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "应用到 WSL2" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "返回" })).toBeEnabled();
   });
 
   it("显式授权核验 Stopped 发行版并分别展示配置与生命周期结果", async () => {
@@ -2541,7 +2632,7 @@ describe("Linux 脚本导出", () => {
     listen.mockResolvedValue(() => undefined);
   });
 
-  it("确认敏感性和覆盖风险后导出 Bash 快照并展示三种使用方式", async () => {
+  it("原生文件选择器确认覆盖后直接导出 Bash 快照并逐行展示用法", async () => {
     const provider = {
       id: "22222222-2222-4222-8222-222222222222",
       name: "Linux Provider",
@@ -2595,23 +2686,21 @@ describe("Linux 脚本导出", () => {
     expect(within(shellDialog).getByRole("radio", { name: "Bash 4+" })).toBeChecked();
     expect(within(shellDialog).getByRole("radio", { name: "Zsh 5+" })).not.toBeChecked();
     expect(within(shellDialog).getByRole("radio", { name: "Zsh 5+" })).toBeEnabled();
-    fireEvent.click(within(shellDialog).getByRole("button", { name: "继续" }));
-
-    const sensitive = screen.getByRole("dialog", { name: "导出文件包含敏感凭据" });
-    expect(sensitive).toHaveTextContent("全部已验证供应商");
-    expect(sensitive).toHaveTextContent("仅保存到受信任的当前用户位置");
-    fireEvent.click(within(sensitive).getByRole("button", { name: "选择保存位置" }));
-
-    const overwrite = await screen.findByRole("dialog", { name: "覆盖已有导出文件？" });
-    expect(overwrite).toHaveTextContent("gpteasy.sh");
-    fireEvent.click(within(overwrite).getByRole("button", { name: "确认覆盖" }));
+    expect(shellDialog).toHaveTextContent("导出文件包含敏感凭据");
+    expect(shellDialog).toHaveTextContent("全部已验证供应商");
+    expect(shellDialog).toHaveTextContent("仅保存到受信任的当前用户位置");
+    expect(screen.queryByRole("dialog", { name: "导出文件包含敏感凭据" })).not.toBeInTheDocument();
+    fireEvent.click(within(shellDialog).getByRole("button", { name: "选择保存位置" }));
 
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("export_linux_script", {
       shell: "bash",
       destination,
       confirmOverwrite: true,
     }));
+    expect(screen.queryByRole("dialog", { name: "覆盖已有导出文件？" })).not.toBeInTheDocument();
     const success = await screen.findByRole("dialog", { name: "Bash 脚本已导出" });
+    expect(success).toHaveTextContent("建议保护权限");
+    expect(success).toHaveTextContent("chmod 600 ./gpteasy.sh");
     expect(success).toHaveTextContent("bash ./gpteasy.sh");
     expect(success).toHaveTextContent("source ./gpteasy.sh");
     expect(success).toHaveTextContent(".bashrc");
@@ -2619,6 +2708,9 @@ describe("Linux 脚本导出", () => {
     expect(success).toHaveTextContent("gpteasy restore");
     expect(success).toHaveTextContent("gpteasy info");
     expect(success).toHaveTextContent("gpteasy unlock");
+    expect(within(success).getByText("gpteasy", { selector: "dt code" }).closest("div")).toHaveTextContent("交互选择供应商");
+    expect(within(success).getByText("gpteasy current", { selector: "dt code" }).closest("div")).toHaveTextContent("查看当前供应商");
+    expect(within(success).getByText("gpteasy restore", { selector: "dt code" }).closest("div")).toHaveTextContent("恢复最近一个 Linux 恢复点");
     const exportCall = invoke.mock.calls.find(([command]) => command === "export_linux_script");
     expect(JSON.stringify(exportCall)).not.toContain("secret");
     expect(JSON.stringify(exportCall)).not.toContain("apiKey");
@@ -2645,7 +2737,6 @@ describe("Linux 脚本导出", () => {
     const open = await screen.findByRole("button", { name: "导出 Linux 脚本" });
     await waitFor(() => expect(open).toBeEnabled());
     fireEvent.click(open);
-    fireEvent.click(screen.getByRole("button", { name: "继续" }));
     fireEvent.click(screen.getByRole("button", { name: "选择保存位置" }));
 
     await waitFor(() => expect(invoke).toHaveBeenCalledWith(
@@ -2692,8 +2783,7 @@ describe("Linux 脚本导出", () => {
 
     const shellDialog = screen.getByRole("dialog", { name: "导出 Linux 脚本" });
     fireEvent.click(within(shellDialog).getByRole("radio", { name: "Zsh 5+" }));
-    fireEvent.click(within(shellDialog).getByRole("button", { name: "继续" }));
-    fireEvent.click(screen.getByRole("button", { name: "选择保存位置" }));
+    fireEvent.click(within(shellDialog).getByRole("button", { name: "选择保存位置" }));
 
     await waitFor(() => expect(invoke).toHaveBeenCalledWith(
       "choose_linux_export_destination",

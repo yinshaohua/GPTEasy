@@ -81,9 +81,9 @@ async function openProviderCatalog(page: Page, width: number, height: number) {
             defaultUid: 1000,
             running: false,
             availability: "manageable",
-            currentProvider: null,
-            actualProviderId: null,
-            configurationState: "unknown",
+            currentProvider: catalog[1],
+            actualProviderId: catalog[1].id,
+            configurationState: "current",
             requiresAttention: false,
             pendingRestart: false,
             revision: "layout-wsl-revision",
@@ -110,6 +110,17 @@ async function openProviderCatalog(page: Page, width: number, height: number) {
         }
         if (command === "plugin:event|listen") return callbackId++;
         if (command === "plugin:event|unlisten") return undefined;
+        if (command === "apply_wsl_provider") return new Promise(() => undefined);
+        if (command === "choose_linux_export_destination") {
+          return { path: "C:\\Users\\example\\gpteasy.sh", exists: false };
+        }
+        if (command === "export_linux_script") {
+          return {
+            exportId: "33333333-3333-4333-8333-333333333333",
+            providerCount: catalog.length,
+            suggestedFileName: "gpteasy.sh",
+          };
+        }
         return undefined;
       },
     };
@@ -156,7 +167,7 @@ test("默认窗口横向展示目录行且底部操作可见", async ({ page }, 
     expect(box!.y + box!.height).toBeLessThanOrEqual(620);
   }
 
-  const wslProvider = page.getByLabel("WSL2 目标供应商");
+  const wslProvider = page.getByLabel("WSL2 当前供应商");
   await expect(wslProvider).toContainText("Long Provider Name");
   await expect(wslProvider).toContainText("https://provider.example/very/long/responses/compatible/api/v1");
   await expect(wslProvider).toContainText("provider-model-with-a-very-long-version-identifier");
@@ -223,5 +234,70 @@ test("WSL2 供应商弹窗在最小窗口展示单发行版范围和生命周期
   expect(bounds).not.toBeNull();
   expect(bounds!.x).toBeGreaterThanOrEqual(0);
   expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(680);
+  expect(bounds!.width).toBeGreaterThanOrEqual(600);
+  expect(bounds!.height).toBeLessThan(430);
+  const paragraphMargins = await dialog.locator(".wsl-environment-detail p").evaluateAll((paragraphs) =>
+    paragraphs.map((paragraph) => {
+      const style = window.getComputedStyle(paragraph);
+      return { top: style.marginTop, bottom: style.marginBottom };
+    }),
+  );
+  expect(paragraphMargins.every(({ top, bottom }) => top === "0px" && bottom === "0px")).toBe(true);
+
+  const actionButtons = dialog.locator(".dialog-actions button");
+  const before = await actionButtons.evaluateAll((buttons) => buttons.map((button) => {
+    const bounds = button.getBoundingClientRect();
+    return { top: bounds.top, height: bounds.height };
+  }));
+  await dialog.getByRole("button", { name: "应用到 WSL2" }).click();
+  await expect(dialog.getByRole("button", { name: "正在应用 WSL2 供应商" })).toBeVisible();
+  const after = await actionButtons.evaluateAll((buttons) => buttons.map((button) => {
+    const bounds = button.getBoundingClientRect();
+    return { top: bounds.top, height: bounds.height };
+  }));
+  expect(after.map(({ top }) => Math.round(top))).toEqual(before.map(({ top }) => Math.round(top)));
+  expect(after.map(({ height }) => Math.round(height))).toEqual(before.map(({ height }) => Math.round(height)));
   await page.screenshot({ path: testInfo.outputPath("wsl-dialog-680x520.png"), fullPage: true });
+});
+
+test("Linux 导出首屏说明凭据风险且成功用法逐行紧排", async ({ page }, testInfo) => {
+  await openProviderCatalog(page, 680, 520);
+  await page.getByRole("button", { name: "导出 Linux 脚本" }).click();
+
+  const exportDialog = page.getByRole("dialog", { name: "导出 Linux 脚本" });
+  await expect(exportDialog).toContainText("导出文件包含敏感凭据");
+  await expect(exportDialog).toContainText("仅保存到受信任的当前用户位置");
+  await expect(page.getByRole("dialog", { name: "导出文件包含敏感凭据" })).toHaveCount(0);
+  const sensitiveNote = exportDialog.locator(".linux-export-sensitive-note");
+  const sensitiveNoteColors = await sensitiveNote.evaluate((note) => {
+    const style = window.getComputedStyle(note);
+    const dangerProbe = document.createElement("span");
+    dangerProbe.style.color = "var(--danger)";
+    document.body.append(dangerProbe);
+    const danger = window.getComputedStyle(dangerProbe).color;
+    dangerProbe.remove();
+    return {
+      foreground: style.color,
+      border: style.borderLeftColor,
+      danger,
+    };
+  });
+  expect(sensitiveNoteColors.foreground).not.toBe(sensitiveNoteColors.danger);
+  expect(sensitiveNoteColors.border).not.toBe(sensitiveNoteColors.danger);
+  await page.screenshot({ path: testInfo.outputPath("linux-export-first-dialog-680x520.png"), fullPage: true });
+
+  await exportDialog.getByRole("button", { name: "选择保存位置" }).click();
+  const successDialog = page.getByRole("dialog", { name: "Bash 脚本已导出" });
+  await expect(successDialog).toBeVisible();
+  await expect(successDialog).toContainText("建议保护权限");
+  await expect(successDialog).toContainText("chmod 600 ./gpteasy.sh");
+  const rows = successDialog.locator(".linux-command-instructions > div");
+  await expect(rows).toHaveCount(5);
+  const rowBounds = await rows.evaluateAll((items) => items.map((item) => {
+    const bounds = item.getBoundingClientRect();
+    return { top: bounds.top, bottom: bounds.bottom };
+  }));
+  const gaps = rowBounds.slice(1).map((bounds, index) => bounds.top - rowBounds[index].bottom);
+  expect(gaps.every((gap) => Math.abs(gap) < 0.5)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("linux-export-success-680x520.png"), fullPage: true });
 });

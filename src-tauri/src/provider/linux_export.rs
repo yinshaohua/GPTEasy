@@ -328,6 +328,7 @@ fn atomic_write(
         let mut file = options.open(&temporary).map_err(|_| write_failed())?;
         file.write_all(bytes).map_err(|_| write_failed())?;
         file.sync_all().map_err(|_| write_failed())?;
+        drop(file);
         if read_destination(destination)?.as_deref() != original {
             return Err(LinuxExportFailure::new(
                 LinuxExportFailureCategory::WriteFailed,

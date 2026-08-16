@@ -19,18 +19,18 @@ gpteasy__help() {
 GPTEASY_HELP
 }
 
-gpteasy__require_snapshot_private() {
-    local owner mode links kind
+gpteasy__require_snapshot_safe() {
+    local owner links kind
     if [[ -L "$gpteasy__script_path" ]]; then
         printf '%s\n' '导出文件不能是符号链接；除帮助外已拒绝执行。' >&2
         return 1
     fi
-    if ! read -r owner mode links kind < <(stat -c '%u %a %h %F' -- "$gpteasy__script_path" 2>/dev/null); then
-        printf '%s\n' '无法确认导出文件权限；除帮助外已拒绝执行。' >&2
+    if ! read -r owner links kind < <(stat -c '%u %h %F' -- "$gpteasy__script_path" 2>/dev/null); then
+        printf '%s\n' '无法确认导出文件身份；除帮助外已拒绝执行。' >&2
         return 1
     fi
-    if [[ "$owner" != "$(id -u)" || "$links" != 1 || "$kind" != 'regular file' || "${mode: -2}" != '00' ]]; then
-        printf '%s\n' '导出文件必须仅由当前用户持有和读取；除帮助外已拒绝执行。' >&2
+    if [[ "$owner" != "$(id -u)" || "$links" != 1 || "$kind" != 'regular file' ]]; then
+        printf '%s\n' '导出文件必须是当前用户拥有的单链接普通文件；除帮助外已拒绝执行。' >&2
         return 1
     fi
 }
@@ -51,7 +51,7 @@ gpteasy__matches() {
 gpteasy__require_codex_version() {
     local output version remainder major minor patch
     if ! command -v codex >/dev/null 2>&1; then
-        printf '%s\n' '写入前需要可用的 codex-cli 0.147.0 或更高版本。' >&2
+        printf '%s\n' '未找到 Codex CLI，请先安装 0.147.0 或更高版本，或确认 codex 已加入 PATH。' >&2
         return 1
     fi
     if ! output=$(codex --version 2>/dev/null); then
@@ -69,7 +69,7 @@ gpteasy__require_codex_version() {
     minor=${remainder%%.*}
     patch=${remainder#*.}
     if ((major == 0 && (minor < 147 || (minor == 147 && patch < 0)))); then
-        printf '%s\n' 'Codex CLI 版本低于 0.147.0，未写入任何内容。' >&2
+        printf '%s\n' 'Codex CLI 版本过低，请升级到 0.147.0 或更高版本；未写入任何内容。' >&2
         return 1
     fi
 }
@@ -1101,7 +1101,7 @@ gpteasy() {
             return
             ;;
     esac
-    gpteasy__require_snapshot_private || return
+    gpteasy__require_snapshot_safe || return
     gpteasy__require_existing_private_state_safe || return
     case "$command" in
         '')

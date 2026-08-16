@@ -14,6 +14,7 @@ import {
   Plus,
   RefreshCw,
   Server,
+  ShieldAlert,
   ShieldCheck,
   Trash2,
   X,
@@ -113,7 +114,7 @@ const linuxShellPresentation: Record<LinuxShell, {
 
 type PageView = "catalog" | "detail";
 type Confirmation = "discard" | "validation" | null;
-type LinuxExportStep = "shell" | "sensitive" | "overwrite" | "success" | null;
+type LinuxExportStep = "shell" | "success" | null;
 type ConfigChangeRequest =
   | { kind: "provider"; provider: ProviderSummary }
   | { kind: "openai" }
@@ -172,7 +173,6 @@ export default function ProviderPage() {
   const [wslFeedback, setWslFeedback] = useState("");
   const [linuxExportStep, setLinuxExportStep] = useState<LinuxExportStep>(null);
   const [linuxExportShell, setLinuxExportShell] = useState<LinuxShell>("bash");
-  const [linuxExportDestination, setLinuxExportDestination] = useState<string | null>(null);
   const [linuxExportResult, setLinuxExportResult] = useState<LinuxExportResult | null>(null);
   const [linuxExportFailure, setLinuxExportFailure] = useState<LinuxExportFailure | null>(null);
   const [linuxExportBusy, setLinuxExportBusy] = useState(false);
@@ -677,9 +677,7 @@ export default function ProviderPage() {
       setWslState("ready");
       const firstManageable = items.find(isManageableWslEnvironment);
       setWslEnvironmentId(firstManageable?.environmentId ?? null);
-      setWslProviderId((current) => current && providers.some((provider) => provider.id === current)
-        ? current
-        : providers.find((provider) => !provider.isCurrent)?.id ?? providers[0]?.id ?? null);
+      setWslProviderId(wslTargetProviderId(firstManageable, providers));
     } catch (error) {
       setWslState("error");
       setWslFailure(asWslFailure(error));
@@ -694,10 +692,11 @@ export default function ProviderPage() {
       const items = await listWslEnvironments();
       setWslEnvironments(items);
       setWslState("ready");
-      setWslEnvironmentId((current) => current && items.some((item) =>
-        item.environmentId === current && isManageableWslEnvironment(item))
-        ? current
-        : items.find(isManageableWslEnvironment)?.environmentId ?? null);
+      const selectedEnvironment = items.find((item) =>
+        item.environmentId === wslEnvironmentId && isManageableWslEnvironment(item))
+        ?? items.find(isManageableWslEnvironment);
+      setWslEnvironmentId(selectedEnvironment?.environmentId ?? null);
+      setWslProviderId(wslTargetProviderId(selectedEnvironment, providers));
     } catch (error) {
       setWslState("error");
       setWslFailure(asWslFailure(error));
@@ -753,6 +752,7 @@ export default function ProviderPage() {
       );
       setWslEnvironments((current) => current.map((item) =>
         item.environmentId === result.environment.environmentId ? result.environment : item));
+      setWslProviderId(wslTargetProviderId(result.environment, providers));
       setWslFeedback([
         providerMessages.wslRefreshed(target.displayName),
         lifecycleOutcomeMessage(result.lifecycleOutcome),
@@ -771,7 +771,6 @@ export default function ProviderPage() {
   function openLinuxExport() {
     if (providers.length === 0) return;
     setLinuxExportShell("bash");
-    setLinuxExportDestination(null);
     setLinuxExportResult(null);
     setLinuxExportFailure(null);
     setLinuxExportStep("shell");
@@ -780,7 +779,6 @@ export default function ProviderPage() {
   function closeLinuxExport() {
     if (linuxExportBusy) return;
     setLinuxExportStep(null);
-    setLinuxExportDestination(null);
     setLinuxExportResult(null);
     setLinuxExportFailure(null);
   }
@@ -792,17 +790,11 @@ export default function ProviderPage() {
       const selected = await chooseLinuxExportDestination(linuxExportShell);
       if (!selected) {
         setLinuxExportStep(null);
-        setLinuxExportDestination(null);
         setLinuxExportResult(null);
         setLinuxExportFailure(null);
         return;
       }
-      setLinuxExportDestination(selected.path);
-      if (selected.exists) {
-        setLinuxExportStep("overwrite");
-      } else {
-        await performLinuxExport(selected.path, false);
-      }
+      await performLinuxExport(selected.path, selected.exists);
     } catch (error) {
       setLinuxExportFailure(asLinuxExportFailure(error));
     } finally {
@@ -810,8 +802,7 @@ export default function ProviderPage() {
     }
   }
 
-  async function performLinuxExport(destination: string | null, confirmOverwrite: boolean) {
-    if (!destination) return;
+  async function performLinuxExport(destination: string, confirmOverwrite: boolean) {
     setLinuxExportBusy(true);
     setLinuxExportFailure(null);
     try {
@@ -1140,7 +1131,6 @@ export default function ProviderPage() {
           <WslActions
             environments={wslEnvironments}
             providers={providers}
-            selectedProviderId={wslProviderId}
             state={wslState}
             busy={busy || wslBusy || linuxExportBusy}
             onOpen={() => void openWslDialog()}
@@ -1378,7 +1368,15 @@ export default function ProviderPage() {
           action={wslAction}
           failure={wslFailure}
           feedback={wslFeedback}
-          onEnvironmentChange={setWslEnvironmentId}
+          onEnvironmentChange={(id) => {
+            setWslEnvironmentId(id);
+            setWslProviderId(wslTargetProviderId(
+              wslEnvironments.find((item) => item.environmentId === id),
+              providers,
+            ));
+            setWslFailure(null);
+            setWslFeedback("");
+          }}
           onProviderChange={setWslProviderId}
           onRefresh={() => void refreshWslDialog()}
           onActualRefresh={() => void refreshSelectedWslActualState()}
@@ -1394,34 +1392,8 @@ export default function ProviderPage() {
           busy={linuxExportBusy}
           failure={linuxExportFailure}
           onShellChange={setLinuxExportShell}
-          onContinue={() => setLinuxExportStep("sensitive")}
+          onChooseLocation={() => void chooseLinuxExportPath()}
           onClose={closeLinuxExport}
-        />
-      )}
-      {linuxExportStep === "sensitive" && (
-        <ConfirmationDialog
-          title={providerMessages.linuxExportSensitiveTitle}
-          message={`${providerMessages.linuxExportSensitiveMessage}${linuxExportFailure ? ` ${linuxExportFailureMessage(linuxExportFailure)}` : ""}`}
-          primaryLabel={providerMessages.linuxExportChooseLocation}
-          secondaryLabel={providerMessages.linuxExportCancel}
-          onPrimary={() => void chooseLinuxExportPath()}
-          onSecondary={closeLinuxExport}
-          primaryDisabled={linuxExportBusy}
-        />
-      )}
-      {linuxExportStep === "overwrite" && (
-        <ConfirmationDialog
-          title={providerMessages.linuxExportOverwriteTitle}
-          message={`${providerMessages.linuxExportOverwriteMessage(
-            linuxExportDestination
-              ? exportFileName(linuxExportDestination, linuxShellPresentation[linuxExportShell].suggestedFileName)
-              : linuxShellPresentation[linuxExportShell].suggestedFileName,
-          )}${linuxExportFailure ? ` ${linuxExportFailureMessage(linuxExportFailure)}` : ""}`}
-          primaryLabel={providerMessages.linuxExportConfirmOverwrite}
-          secondaryLabel={providerMessages.linuxExportCancel}
-          onPrimary={() => void performLinuxExport(linuxExportDestination, true)}
-          onSecondary={closeLinuxExport}
-          primaryDisabled={linuxExportBusy}
         />
       )}
       {linuxExportStep === "success" && linuxExportResult && (
@@ -1466,7 +1438,6 @@ function DaywayWebsiteButton({ onVisit }: { onVisit: () => Promise<void> }) {
 function WslActions({
   environments,
   providers,
-  selectedProviderId,
   state,
   busy,
   onOpen,
@@ -1474,14 +1445,13 @@ function WslActions({
 }: {
   environments: WslEnvironmentSummary[];
   providers: ProviderSummary[];
-  selectedProviderId: string | null;
   state: "loading" | "ready" | "error";
   busy: boolean;
   onOpen: () => void;
   onExport: () => void;
 }) {
   const manageable = environments.some(isManageableWslEnvironment);
-  const selectedProvider = providers.find((provider) => provider.id === selectedProviderId) ?? null;
+  const currentProvider = environments.find(isManageableWslEnvironment)?.currentProvider ?? null;
   const description = state === "loading"
     ? "正在读取 WSL2 发行版状态。"
     : state === "error"
@@ -1502,19 +1472,19 @@ function WslActions({
         <Server size={17} aria-hidden="true" />
         {providerMessages.chooseWslProvider}
       </button>
-        {selectedProvider ? (
+        {currentProvider ? (
           <dl className="wsl-provider-summary" aria-label={providerMessages.wslSelectedProvider}>
             <div>
               <dt>{providerMessages.providerName}</dt>
-              <dd title={selectedProvider.name}>{selectedProvider.name}</dd>
+              <dd title={currentProvider.name}>{currentProvider.name}</dd>
             </div>
             <div>
               <dt>{providerMessages.baseUrl}</dt>
-              <dd title={selectedProvider.baseUrl}>{selectedProvider.baseUrl}</dd>
+              <dd title={currentProvider.baseUrl}>{currentProvider.baseUrl}</dd>
             </div>
             <div>
               <dt>{providerMessages.defaultModel}</dt>
-              <dd title={selectedProvider.defaultModel}>{selectedProvider.defaultModel}</dd>
+              <dd title={currentProvider.defaultModel}>{currentProvider.defaultModel}</dd>
             </div>
           </dl>
         ) : (
@@ -1536,19 +1506,29 @@ function WslActions({
   );
 }
 
+function wslTargetProviderId(
+  environment: WslEnvironmentSummary | undefined,
+  providers: ProviderSummary[],
+): string | null {
+  const currentProviderId = environment?.currentProvider?.id;
+  return providers.some((provider) => provider.id === currentProviderId)
+    ? currentProviderId ?? null
+    : providers[0]?.id ?? null;
+}
+
 function LinuxShellDialog({
   shell,
   busy,
   failure,
   onShellChange,
-  onContinue,
+  onChooseLocation,
   onClose,
 }: {
   shell: LinuxShell;
   busy: boolean;
   failure: LinuxExportFailure | null;
   onShellChange: (shell: LinuxShell) => void;
-  onContinue: () => void;
+  onChooseLocation: () => void;
   onClose: () => void;
 }) {
   return (
@@ -1577,10 +1557,17 @@ function LinuxShellDialog({
             </label>
           ))}
         </fieldset>
+        <div className="linux-export-sensitive-note">
+          <ShieldAlert size={18} aria-hidden="true" />
+          <div>
+            <strong>{providerMessages.linuxExportSensitiveTitle}</strong>
+            <p>{providerMessages.linuxExportSensitiveMessage}</p>
+          </div>
+        </div>
         {failure && <p className="inline-error" role="alert">{linuxExportFailureMessage(failure)}</p>}
         <div className="dialog-actions">
           <button className="secondary-button" type="button" onClick={onClose} disabled={busy}>{providerMessages.linuxExportCancel}</button>
-          <button className="command-button" type="button" onClick={onContinue} disabled={busy}>{providerMessages.linuxExportContinue}</button>
+          <button className="command-button" type="button" onClick={onChooseLocation} disabled={busy}>{providerMessages.linuxExportChooseLocation}</button>
         </div>
       </section>
     </div>
@@ -1604,22 +1591,24 @@ function LinuxExportSuccessDialog({
         <h2 id="linux-export-success-title">{providerMessages.linuxExportSuccessTitle(presentation.titleName)}</h2>
         <p>{providerMessages.linuxExportSuccessMessage(result.providerCount)}</p>
         <dl className="linux-export-instructions">
+          <div><dt>{providerMessages.linuxExportPermissions}</dt><dd><code>chmod 600 ./{fileName}</code></dd></div>
           <div><dt>{providerMessages.linuxExportDirect}</dt><dd><code>{shell} ./{fileName}</code></dd></div>
           <div><dt>{providerMessages.linuxExportCurrentSession}</dt><dd><code>source ./{fileName}</code></dd></div>
           <div><dt>{providerMessages.linuxExportStartupFile(presentation.startupFile)}</dt><dd><code>source /trusted/path/{fileName}</code></dd></div>
         </dl>
-        <p><code>gpteasy</code> · <code>gpteasy current</code> · <code>gpteasy restore</code> · <code>gpteasy info</code> · <code>gpteasy unlock</code></p>
+        <dl className="linux-command-instructions" aria-label={providerMessages.linuxExportCommands}>
+          <div><dt><code>gpteasy</code></dt><dd>{providerMessages.linuxExportCommandSelect}</dd></div>
+          <div><dt><code>gpteasy current</code></dt><dd>{providerMessages.linuxExportCommandCurrent}</dd></div>
+          <div><dt><code>gpteasy restore</code></dt><dd>{providerMessages.linuxExportCommandRestore}</dd></div>
+          <div><dt><code>gpteasy info</code></dt><dd>{providerMessages.linuxExportCommandInfo}</dd></div>
+          <div><dt><code>gpteasy unlock</code></dt><dd>{providerMessages.linuxExportCommandUnlock}</dd></div>
+        </dl>
         <div className="dialog-actions">
           <button className="command-button" type="button" onClick={onClose}>{providerMessages.linuxExportDone}</button>
         </div>
       </section>
     </div>
   );
-}
-
-function exportFileName(path: string, fallback: string): string {
-  const segments = path.split(/[\\/]/);
-  return segments[segments.length - 1] || fallback;
 }
 
 function linuxExportFailureMessage(failure: LinuxExportFailure): string {
@@ -1684,7 +1673,7 @@ function WslProviderDialog({
             <h2 id="wsl-dialog-title">{providerMessages.wslDialogTitle}</h2>
             <p>{providerMessages.wslDialogSubtitle}</p>
           </div>
-          <button className="field-icon-button" type="button" onClick={onClose} disabled={busy} aria-label={providerMessages.wslCancel}>
+          <button className="field-icon-button" type="button" onClick={onClose} disabled={busy} aria-label={providerMessages.wslClose}>
             <X size={18} aria-hidden="true" />
           </button>
         </div>
@@ -1751,9 +1740,9 @@ function WslProviderDialog({
           </>
         )}
         <div className="dialog-actions">
-          <button className="secondary-button" type="button" onClick={onClose} disabled={busy}>{providerMessages.wslCancel}</button>
+          <button className="secondary-button wsl-back-button" type="button" onClick={onClose} disabled={busy}>{providerMessages.wslBack}</button>
           <button
-            className="secondary-button"
+            className="secondary-button wsl-refresh-button"
             type="button"
             onClick={onActualRefresh}
             disabled={state !== "ready" || selectedEnvironment === null || busy}
@@ -1765,7 +1754,7 @@ function WslProviderDialog({
               ? providerMessages.wslRefreshingActual
               : providerMessages.wslRefreshActual}
           </button>
-          <button className="command-button" type="button" onClick={onApply} disabled={!canApply}>
+          <button className="command-button wsl-apply-button" type="button" onClick={onApply} disabled={!canApply}>
             {action === "applying" ? <LoaderCircle className="is-spinning" size={17} aria-hidden="true" /> : <Check size={17} aria-hidden="true" />}
             {action === "applying" ? providerMessages.wslApplying : providerMessages.wslApply}
           </button>

@@ -12,6 +12,8 @@
   --text-muted: #616973;
   --accent: #147d55;
   --accent-soft: #e5f4ed;
+  --warning: #806018;
+  --warning-soft: #fff8df;
   --danger: #b42318;
   --danger-soft: #fff0ee;
   --focus: #0969da;
@@ -515,7 +517,7 @@ select:focus-visible {
   min-height: 36px;
 }
 
-.wsl-provider-dialog {
+.confirmation-dialog.wsl-provider-dialog {
   width: min(620px, calc(100vw - 32px));
   max-height: calc(100vh - 40px);
   overflow-y: auto;
@@ -529,7 +531,8 @@ select:focus-visible {
 }
 
 .wsl-provider-dialog .dialog-heading p {
-  margin: 4px 0 0;
+  margin: 2px 0 0;
+  line-height: 1.35;
 }
 
 .wsl-provider-dialog .dialog-heading .field-icon-button {
@@ -543,8 +546,8 @@ select:focus-visible {
 .wsl-provider-dialog .dialog-actions {
   position: sticky;
   bottom: -20px;
-  margin: 18px -20px -20px;
-  padding: 12px 20px 20px;
+  margin: 10px -20px -20px;
+  padding: 10px 20px 14px;
   background: var(--surface);
   border-top: 1px solid var(--border);
 }
@@ -552,8 +555,8 @@ select:focus-visible {
 .wsl-dialog-fields {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 14px;
-  margin-top: 18px;
+  gap: 12px;
+  margin-top: 12px;
 }
 
 .wsl-dialog-fields select {
@@ -568,18 +571,35 @@ select:focus-visible {
 
 .wsl-environment-detail {
   display: grid;
-  gap: 5px;
-  margin-top: 16px;
-  padding: 12px;
+  gap: 2px;
+  margin-top: 10px;
+  padding: 9px 10px;
   background: var(--surface-muted);
   border: 1px solid var(--border);
 }
 
-.wsl-environment-detail p {
+.confirmation-dialog .wsl-environment-detail p {
   margin: 0;
   color: var(--text-muted);
   font-size: 12px;
-  line-height: 1.45;
+  line-height: 1.35;
+}
+
+.wsl-provider-dialog .dialog-actions > button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.wsl-back-button {
+  min-width: 64px;
+}
+
+.wsl-refresh-button {
+  min-width: 148px;
+}
+
+.wsl-apply-button {
+  min-width: 152px;
 }
 
 .wsl-dialog-error {
@@ -1138,7 +1158,7 @@ select:focus-visible {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
-  margin: 18px 0 20px;
+  margin: 14px 0 12px;
   padding: 0;
   border: 0;
 }
@@ -1180,8 +1200,8 @@ select:focus-visible {
 
 .linux-export-instructions {
   display: grid;
-  gap: 10px;
-  margin: 16px 0;
+  gap: 0;
+  margin: 12px 0;
 }
 
 .linux-export-instructions div {
@@ -1189,6 +1209,7 @@ select:focus-visible {
   grid-template-columns: 120px minmax(0, 1fr);
   gap: 10px;
   align-items: baseline;
+  min-height: 24px;
 }
 
 .linux-export-instructions dt {
@@ -1202,10 +1223,55 @@ select:focus-visible {
 }
 
 .linux-export-instructions code,
-.linux-export-dialog p code {
+.linux-export-dialog p code,
+.linux-command-instructions code {
   overflow-wrap: anywhere;
   font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
   font-size: 12px;
+}
+
+.linux-export-sensitive-note {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 9px;
+  margin: 0 0 14px;
+  padding: 9px 10px;
+  color: var(--warning);
+  background: var(--warning-soft);
+  border-left: 3px solid var(--warning);
+  font-size: 12px;
+}
+
+.linux-export-sensitive-note p {
+  margin: 2px 0 0;
+  color: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.linux-command-instructions {
+  display: grid;
+  gap: 0;
+  margin: 0 0 14px;
+}
+
+.linux-command-instructions div {
+  display: grid;
+  grid-template-columns: 132px minmax(0, 1fr);
+  align-items: baseline;
+  min-height: 24px;
+}
+
+.linux-command-instructions dt,
+.linux-command-instructions dd {
+  min-width: 0;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.linux-command-instructions dd {
+  color: var(--text-muted);
 }
 
 .address-comparison {
@@ -1275,6 +1341,8 @@ select:focus-visible {
     --text-muted: #aeb6bf;
     --accent: #55d99a;
     --accent-soft: #17382c;
+    --warning: #e5c267;
+    --warning-soft: #332c19;
     --danger: #ff8075;
     --danger-soft: #402321;
     --focus: #58a6ff;
@@ -1370,6 +1438,15 @@ select:focus-visible {
 }
 
 @media (max-width: 440px) {
+  .wsl-provider-dialog .dialog-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .wsl-provider-dialog .dialog-actions > button {
+    width: 100%;
+  }
+
   .linux-shell-options {
     grid-template-columns: minmax(0, 1fr);
   }
