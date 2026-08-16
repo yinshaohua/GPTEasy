@@ -2,6 +2,8 @@
 
 Issue #31 在同一套 Full 门禁上完成两类真实宿主验收：Windows x64 使用一次性 WSL2 发行版覆盖 Running 与 Stopped 生命周期；独立 Ubuntu GNU/Linux 使用 QEMU 虚拟机，其内核不含 `microsoft` 或 `wsl` 标记。两边均使用真实 shell、文件系统权限和 Codex CLI 0.147.0，不以 fixture 版本输出代替 Codex 配置读取。
 
+两类宿主受验实现提交均为 `b6027659c388235d349c958d970808564d61785b`。独立 Ubuntu 使用该提交的无 `.git` 源码包，源码包 SHA-256 为 `ad793367916cef294aa93d2800e9809de9570689fe343edaf77b932347b07d5b`，并通过 `-SourceCommit` 把报告绑定到同一提交。
+
 ## 环境与前置条件
 
 | 项目 | Windows x64 + WSL2 | 独立 GNU/Linux |
@@ -31,6 +33,7 @@ npm run acceptance:linux-wsl -- `
   -BashCurrentPath /bin/bash `
   -Zsh59Path /usr/bin/zsh `
   -CodexPath /usr/local/bin/codex `
+  -SourceCommit <源码包对应的 40 位 Git commit SHA> `
   -ConfirmDisposableWsl
 ```
 
@@ -50,14 +53,14 @@ pwsh -NoProfile -File scripts/run-linux-wsl-acceptance-gate.ps1 \
 
 证据保存在 Git 忽略的 `src-tauri/target/acceptance/linux-wsl/`，便于本机复核而不把环境路径和执行日志提交到 Git：
 
-| 宿主 | `evidence.json` | 结果 |
-| --- | --- | --- |
-| Windows x64 + WSL2 | `e0ac564fca8840c38f62f5fece468466/evidence.json` | Full 通过 |
-| 独立 Ubuntu GNU/Linux | `1af2567ebdc34fc99bb25d4fd7578d5a/evidence.json` | Full 通过 |
+| 宿主 | `evidence.json` | SHA-256 | 结果 |
+| --- | --- | --- | --- |
+| Windows x64 + WSL2 | `1486b9607b0b4d4fb72f6b14f9bce018/evidence.json` | `0dfad2e0b2e9f6ca079d3a304d108b51a591768e1eec2e71f2e9f2ce4a02abb9` | Full 通过 |
+| 独立 Ubuntu GNU/Linux | `ecfa23a3d17c4f8dbeae9b92b4883e6a/evidence.json` | `c03fd39e69ed9b482f755eba401a0a47273ab3f1a61e3da501deec86b72cf9da` | Full 通过 |
 
-每份通过证据均记录七组自动化矩阵、三种 shell 的实际版本、真实 Codex 版本与验证接口、真实环境门禁、平台前置条件、PRD 检查及十个泄漏扫描面。日志只在全部 canary 扫描通过后落盘；报告中的 `leaked` 为 `false`，扫描面为进程参数、标准输出、标准错误、前端 DOM、通知、错误详情、测试日志、应用后端日志、截图辅助和最终报告。
+每份通过证据均记录七组自动化矩阵、三种 shell 的实际版本、真实 Codex 版本与验证接口、真实环境门禁、平台前置条件、PRD 检查及十个泄漏扫描面。日志只在全部 canary 扫描通过后落盘；报告中的 `leaked` 为 `false`，扫描面为进程参数、标准输出、标准错误、前端 DOM、通知、错误详情、测试日志、应用后端日志、截图辅助和最终报告。Windows 报告的应用日志面包含 WSL 协调、删除与凭据清理及 Running/Stopped guest 四个后端步骤；Linux 报告包含前两项后端步骤。
 
-Windows 证据同时记录 `wsl2-running-guest` 与 `wsl2-stopped-guest` 通过。Stopped 门禁在 harness 前后都从 `wsl.exe --list --running --quiet` 确认实际停止；普通探测期间发行版保持 Stopped，显式操作后只等待自然停止，测试和调用记录均不含发行版级终止。
+Windows 证据同时记录 `wsl2-running-guest` 与 `wsl2-stopped-guest` 通过。Running harness 从同一桌面目录导出静态快照，在真实删除审计后删除其中一个供应商，再由 shell 应用旧快照；桌面识别 `ProviderMissing` 且没有重建目录记录。Stopped 门禁在 harness 前后都从 `wsl.exe --list --running --quiet` 确认实际停止；普通探测期间发行版保持 Stopped，显式操作后只等待自然停止，测试和调用记录均不含发行版级终止。
 
 Ubuntu 证据记录 `independent-gnu-linux` 通过，且 runner 在进入矩阵前读取 `/proc/sys/kernel/osrelease` 拒绝 WSL 内核。真实 Codex 黑盒在隔离 `CODEX_HOME` 中应用导出快照，再从 `config/read` 响应核对模型、供应商 ID、名称、服务地址与 Responses wire API；前后两次核对 `auth.json` SHA-256 不变。
 
@@ -69,11 +72,11 @@ Ubuntu 证据记录 `independent-gnu-linux` 通过，且 runner 在进入矩阵�
 | Windows x64 + WSL2 Running/Stopped | Windows `wsl2-running-guest`、`wsl2-stopped-guest` 及实际 Stopped 前后检查 |
 | 桌面与 shell 双向切换、实际状态识别 | `wsl-shared-protocol` 与 Running guest harness |
 | 共享锁及各持久化 Saga 阶段恢复 | Running guest harness 覆盖 registered、locked、prepared、artifacts_replaced、state_committed |
-| 旧格式、未知 schema、旧快照、删除 ID | shell matrix、`wsl-shared-protocol`、`provider-deletion-and-credential-cleanup` |
+| 旧格式、未知 schema、旧快照、删除 ID | shell matrix、`wsl-shared-protocol`、`provider-deletion-and-credential-cleanup` 及 Running guest 的真实目录删除后旧快照应用 |
 | Stopped 无副作用探测及自然停止 | Stopped guest harness 与 runner 实际状态检查 |
 | 删除核验和跨来源凭据引用清理 | `provider-deletion-and-credential-cleanup` 与 Stopped guest harness |
 | `auth.json` 逐字节不变 | 三种真实 shell、真实 Codex、Running/Stopped guest harness |
-| API Key 不进入公开表面 | 两份证据的九个 canary 扫描面，`leaked=false` |
+| API Key 不进入公开表面 | 两份证据的十个 canary 扫描面，`leaked=false` |
 | 环境、版本、矩阵、脱敏和复现步骤 | 本文及两份 `evidence.json` |
 | 未验证范围如实记录 | 本文“未验证范围” |
 | #29 用户可观察项可追溯 | 下表 |
