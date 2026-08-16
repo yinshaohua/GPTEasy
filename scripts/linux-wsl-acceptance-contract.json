@@ -10,6 +10,7 @@
   },
   "nativeLinux": {
     "requiredDistribution": "Ubuntu GNU/Linux",
+    "requiredOsReleaseId": "ubuntu",
     "rejectedKernelPatterns": ["microsoft", "wsl"]
   },
   "githubPrd": [
@@ -77,6 +78,12 @@
       "coverage": "domain language, ADRs, provider management interface and Issue #29/#35 identity"
     }
   ],
+  "applicationLogSteps": [
+    "wsl-shared-protocol",
+    "provider-deletion-and-credential-cleanup",
+    "wsl2-running-guest",
+    "wsl2-stopped-guest"
+  ],
   "canaryScannedSurfaces": [
     "process_arguments",
     "standard_output",
@@ -85,6 +92,7 @@
     "notification",
     "error_details",
     "test_logs",
+    "application_logs",
     "screenshot_assist",
     "acceptance_report"
   ],
@@ -96,6 +104,7 @@
     "notification": ["react-linux-wsl-workflows"],
     "error_details": ["react-linux-wsl-workflows"],
     "test_logs": ["__runner__"],
+    "application_logs": ["__application_logs__"],
     "screenshot_assist": ["react-linux-wsl-workflows"],
     "acceptance_report": ["__runner__"]
   },
@@ -122,9 +131,10 @@
         "actual Running distribution",
         "desktop and shell bidirectional state",
         "shared lock and every persisted Saga recovery stage",
+        "deleted provider old snapshot remains applicable and is reported missing from catalog",
         "real Codex app-server config/read",
         "auth.json byte identity",
-        "canary leak scan"
+        "canary leak scan including application logs"
       ]
     },
     {
@@ -138,7 +148,7 @@
         "natural stop without distribution termination",
         "deletion audit and credential cleanup",
         "auth.json byte identity",
-        "canary leak scan"
+        "canary leak scan including application logs"
       ]
     }
   ],

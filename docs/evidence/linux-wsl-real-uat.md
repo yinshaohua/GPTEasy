@@ -55,7 +55,7 @@ pwsh -NoProfile -File scripts/run-linux-wsl-acceptance-gate.ps1 \
 | Windows x64 + WSL2 | `e0ac564fca8840c38f62f5fece468466/evidence.json` | Full 通过 |
 | 独立 Ubuntu GNU/Linux | `1af2567ebdc34fc99bb25d4fd7578d5a/evidence.json` | Full 通过 |
 
-每份通过证据均记录七组自动化矩阵、三种 shell 的实际版本、真实 Codex 版本与验证接口、真实环境门禁、平台前置条件、PRD 检查及九个泄漏扫描面。日志只在全部 canary 扫描通过后落盘；报告中的 `leaked` 为 `false`，扫描面为进程参数、标准输出、标准错误、前端 DOM、通知、错误详情、测试日志、截图辅助和最终报告。
+每份通过证据均记录七组自动化矩阵、三种 shell 的实际版本、真实 Codex 版本与验证接口、真实环境门禁、平台前置条件、PRD 检查及十个泄漏扫描面。日志只在全部 canary 扫描通过后落盘；报告中的 `leaked` 为 `false`，扫描面为进程参数、标准输出、标准错误、前端 DOM、通知、错误详情、测试日志、应用后端日志、截图辅助和最终报告。
 
 Windows 证据同时记录 `wsl2-running-guest` 与 `wsl2-stopped-guest` 通过。Stopped 门禁在 harness 前后都从 `wsl.exe --list --running --quiet` 确认实际停止；普通探测期间发行版保持 Stopped，显式操作后只等待自然停止，测试和调用记录均不含发行版级终止。
 

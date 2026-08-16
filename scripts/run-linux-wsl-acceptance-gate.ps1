@@ -16,6 +16,15 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $contractPath = Join-Path $repoRoot 'scripts/linux-wsl-acceptance-contract.json'
 $contract = [System.IO.File]::ReadAllText($contractPath) | ConvertFrom-Json
 $isWindowsHost = [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
+$isLinuxHost = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+    [System.Runtime.InteropServices.OSPlatform]::Linux
+)
+if (-not $isWindowsHost -and -not $isLinuxHost) {
+    throw 'Linux/WSL2 acceptance only supports Windows and native GNU/Linux hosts.'
+}
+if ($Mode -eq 'Full' -and $isWindowsHost -and -not $ConfirmDisposableWsl) {
+    throw 'Full WSL2 acceptance requires -ConfirmDisposableWsl before any guest command runs.'
+}
 $sessionName = [Guid]::NewGuid().ToString('N')
 $sessionRoot = Join-Path $repoRoot "src-tauri/target/acceptance/linux-wsl/$sessionName"
 $canaryA = "gpteasy-linux-wsl-a-$([Guid]::NewGuid().ToString('N'))"
@@ -25,6 +34,9 @@ $leakLocation = $null
 $processArgumentsScanned = $false
 $steps = [System.Collections.Generic.List[object]]::new()
 $capturedLogs = [System.Collections.Generic.List[object]]::new()
+$applicationLogStepsScanned = [System.Collections.Generic.HashSet[string]]::new(
+    [StringComparer]::Ordinal
+)
 $prerequisites = [System.Collections.Generic.List[object]]::new()
 $shellResults = [ordered]@{}
 $realResults = [ordered]@{
@@ -170,6 +182,9 @@ function Add-StepResult(
         stdout = [string]$Result.stdout
         stderr = [string]$Result.stderr
     })
+    if (@($contract.applicationLogSteps) -contains $Id) {
+        [void]$script:applicationLogStepsScanned.Add($Id)
+    }
     return $Result.exitCode -eq 0
 }
 
@@ -180,7 +195,7 @@ function Invoke-Step([string]$Id, [string]$Label, [string]$Program, [string[]]$A
 
 function Invoke-CargoStep([string]$Id, [string]$Label, [string[]]$Arguments) {
     $cargoArguments = @('test')
-    if (-not $isWindowsHost) {
+    if ($isLinuxHost) {
         $cargoArguments += @('--features', 'native-linux-acceptance')
     }
     $cargoArguments += $Arguments
@@ -212,12 +227,30 @@ function Invoke-CodexVersion([string]$Executable) {
     return Invoke-CapturedProcess $Executable @('--version')
 }
 
-function Test-NativeLinuxKernel {
+function Test-NativeLinuxHost {
     if ($isWindowsHost) {
         return $true
     }
+    if (-not $isLinuxHost) {
+        return $false
+    }
+    $osReleasePath = '/etc/os-release'
     $kernelPath = '/proc/sys/kernel/osrelease'
-    if (-not (Test-Path -LiteralPath $kernelPath -PathType Leaf)) {
+    if (-not (Test-Path -LiteralPath $osReleasePath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $kernelPath -PathType Leaf)) {
+        return $false
+    }
+    $idLine = [System.IO.File]::ReadAllLines($osReleasePath) |
+        Where-Object { $_.StartsWith('ID=', [StringComparison]::Ordinal) } |
+        Select-Object -First 1
+    if ($null -eq $idLine) {
+        return $false
+    }
+    $distributionId = $idLine.Substring(3).Trim().Trim('"').Trim("'")
+    if (-not $distributionId.Equals(
+        [string]$contract.nativeLinux.requiredOsReleaseId,
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
         return $false
     }
     $release = [System.IO.File]::ReadAllText($kernelPath).ToLowerInvariant()
@@ -364,8 +397,8 @@ if ($isWindowsHost) {
 }
 $prerequisites.Add([ordered]@{ id = 'real-codex'; available = -not [string]::IsNullOrWhiteSpace($CodexPath); value = $CodexPath })
 
-if ($Mode -eq 'Full' -and -not (Test-NativeLinuxKernel)) {
-    throw 'Independent GNU/Linux acceptance requires a non-WSL Linux kernel.'
+if ($Mode -eq 'Full' -and -not (Test-NativeLinuxHost)) {
+    throw 'Independent GNU/Linux acceptance requires Ubuntu on a non-WSL Linux kernel.'
 }
 
 $reportJson = $null
@@ -419,55 +452,45 @@ try {
         [void](Invoke-RealCodexTarget)
 
         if ($isWindowsHost) {
-            if (-not $ConfirmDisposableWsl) {
-                foreach ($id in @('wsl2-running-guest', 'wsl2-stopped-guest')) {
-                    $realResults[$id] = [ordered]@{
-                        id = $id
-                        status = 'blocked'
-                        detail = 'Full WSL2 harness requires -ConfirmDisposableWsl.'
-                    }
-                }
-            } else {
-                $env:GPTEASY_RUN_WSL_GUEST_HARNESS = '1'
-                $env:GPTEASY_WSL_TEST_DISTRIBUTION = $WslDistribution
-                $runningPassed = Invoke-CargoStep 'wsl2-running-guest' 'Running WSL2 real guest harness' @(
+            $env:GPTEASY_RUN_WSL_GUEST_HARNESS = '1'
+            $env:GPTEASY_WSL_TEST_DISTRIBUTION = $WslDistribution
+            $runningPassed = Invoke-CargoStep 'wsl2-running-guest' 'Running WSL2 real guest harness' @(
+                '--manifest-path', 'src-tauri/Cargo.toml', '--features', 'wsl-guest-harness',
+                '--test', 'wsl_guest_harness', 'running_guest_',
+                '--', '--ignored', '--nocapture', '--test-threads=1'
+            )
+            $realResults['wsl2-running-guest'] = [ordered]@{
+                id = 'wsl2-running-guest'
+                status = if ($runningPassed) { 'passed' } else { 'failed' }
+                detail = "WSL2 distribution: $WslDistribution"
+            }
+            $stoppedReady = Wait-WslDistributionStopped
+            $steps.Add([ordered]@{
+                id = 'wsl2-actual-stopped-precondition'
+                label = 'Actual Stopped WSL2 precondition'
+                status = if ($stoppedReady) { 'passed' } else { 'failed' }
+                exitCode = if ($stoppedReady) { 0 } else { 1 }
+            })
+            $stoppedPassed = $false
+            if ($stoppedReady) {
+                $stoppedPassed = Invoke-CargoStep 'wsl2-stopped-guest' 'Stopped WSL2 real guest harness' @(
                     '--manifest-path', 'src-tauri/Cargo.toml', '--features', 'wsl-guest-harness',
-                    '--test', 'wsl_guest_harness', 'running_guest_',
+                    '--test', 'wsl_guest_harness', 'stopped_guest_harness_authorizes_start',
                     '--', '--ignored', '--nocapture', '--test-threads=1'
                 )
-                $realResults['wsl2-running-guest'] = [ordered]@{
-                    id = 'wsl2-running-guest'
-                    status = if ($runningPassed) { 'passed' } else { 'failed' }
-                    detail = "WSL2 distribution: $WslDistribution"
-                }
-                $stoppedReady = Wait-WslDistributionStopped
-                $steps.Add([ordered]@{
-                    id = 'wsl2-actual-stopped-precondition'
-                    label = 'Actual Stopped WSL2 precondition'
-                    status = if ($stoppedReady) { 'passed' } else { 'failed' }
-                    exitCode = if ($stoppedReady) { 0 } else { 1 }
-                })
-                $stoppedPassed = $false
-                if ($stoppedReady) {
-                    $stoppedPassed = Invoke-CargoStep 'wsl2-stopped-guest' 'Stopped WSL2 real guest harness' @(
-                        '--manifest-path', 'src-tauri/Cargo.toml', '--features', 'wsl-guest-harness',
-                        '--test', 'wsl_guest_harness', 'stopped_guest_harness_authorizes_start',
-                        '--', '--ignored', '--nocapture', '--test-threads=1'
-                    )
-                }
-                $stoppedAfter = Wait-WslDistributionStopped
-                $steps.Add([ordered]@{
-                    id = 'wsl2-actual-stopped-final'
-                    label = 'Actual Stopped WSL2 final state'
-                    status = if ($stoppedAfter) { 'passed' } else { 'failed' }
-                    exitCode = if ($stoppedAfter) { 0 } else { 1 }
-                })
-                $stoppedPassed = $stoppedPassed -and $stoppedAfter
-                $realResults['wsl2-stopped-guest'] = [ordered]@{
-                    id = 'wsl2-stopped-guest'
-                    status = if ($stoppedPassed) { 'passed' } else { 'failed' }
-                    detail = "WSL2 distribution: $WslDistribution"
-                }
+            }
+            $stoppedAfter = Wait-WslDistributionStopped
+            $steps.Add([ordered]@{
+                id = 'wsl2-actual-stopped-final'
+                label = 'Actual Stopped WSL2 final state'
+                status = if ($stoppedAfter) { 'passed' } else { 'failed' }
+                exitCode = if ($stoppedAfter) { 0 } else { 1 }
+            })
+            $stoppedPassed = $stoppedPassed -and $stoppedAfter
+            $realResults['wsl2-stopped-guest'] = [ordered]@{
+                id = 'wsl2-stopped-guest'
+                status = if ($stoppedPassed) { 'passed' } else { 'failed' }
+                detail = "WSL2 distribution: $WslDistribution"
             }
         } else {
             $allShellsPassed = @($shellResults.Values | Where-Object { $_.status -ne 'passed' }).Count -eq 0
@@ -522,6 +545,13 @@ try {
                     }
                     continue
                 }
+                if ($verifier -eq '__application_logs__') {
+                    if ($applicationLogStepsScanned.Count -eq 0) {
+                        $verified = $false
+                        break
+                    }
+                    continue
+                }
                 $matrixResult = @($automated | Where-Object { $_.id -eq $verifier }) | Select-Object -Last 1
                 if ($null -eq $matrixResult -or $matrixResult.status -ne 'passed') {
                     $verified = $false
@@ -557,6 +587,7 @@ try {
             leakScan = [ordered]@{
                 leaked = $false
                 scannedSurfaces = @($scannedSurfaces)
+                applicationLogSteps = @($applicationLogStepsScanned | Sort-Object)
             }
             windowsIssue28Gate = [ordered]@{
                 command = 'npm run acceptance'

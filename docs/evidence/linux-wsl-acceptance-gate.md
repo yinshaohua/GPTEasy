@@ -12,7 +12,9 @@ npm run acceptance:linux-wsl -- `
   -ConfirmDisposableWsl
 ```
 
-它生成两个随机 API Key canary，在内存中捕获并扫描进程参数、标准输出/错误、React DOM、通知、错误详情、测试日志、截图辅助和最终报告。只有全部扫描面不含 canary 后，才把日志与 `evidence.json` 写入 `src-tauri/target/acceptance/linux-wsl/<session>/`；检测到泄漏时返回非零状态，且不持久化本轮日志或证据。
+Windows Full 模式在执行任何 guest 命令前检查 `-ConfirmDisposableWsl`；缺少确认时立即失败，不进入或启动默认发行版。
+
+它生成两个随机 API Key canary，在内存中捕获并扫描进程参数、标准输出/错误、React DOM、通知、错误详情、测试日志、应用后端日志、截图辅助和最终报告。应用后端日志来自 WSL 协调、删除与凭据清理以及真实 Running/Stopped guest 步骤的进程输出；每个受验后端进程都由 runner 捕获 stdout/stderr。只有全部扫描面不含 canary 后，才把日志与 `evidence.json` 写入 `src-tauri/target/acceptance/linux-wsl/<session>/`；检测到泄漏时返回非零状态，且不持久化本轮日志或证据。
 
 矩阵运行 Linux 导出生成器、三个 shell 的同一套公开黑盒行为、WSL2 共享协议与生命周期、SQLite schema/迁移、供应商删除与凭据清理、React Linux/WSL2 用户流程，以及领域/ADR/界面/GitHub PRD 合同检查。公开 shell 黑盒覆盖直接执行、source 零写入、全部子命令、切换、恢复、锁、权限、Codex 版本、symlink、hardlink、并发修改和 `auth.json` 逐字节不变。
 

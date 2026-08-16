@@ -351,17 +351,15 @@ fn wait_for_distribution_to_stop(distribution: &str, timeout: Duration) -> bool 
     !distribution_is_running(distribution)
 }
 
-fn bash_snapshot() -> (TempDir, PathBuf) {
+fn bash_snapshot(store: &StateStore) -> (TempDir, PathBuf) {
     let temp = TempDir::new().expect("snapshot temp");
-    let store = StateStore::new(StatePaths::from_root(temp.path().join("state")));
-    assert!(store.bootstrap().is_ready());
-    let connection = Connection::open(store.paths().database()).expect("state database");
-    insert_harness_providers(&connection);
-    drop(connection);
     let destination = temp.path().join("gpteasy.sh");
-    ProviderApplication::new(store, ProviderValidator::new(ValidationTimeouts::default()))
-        .export_linux_script(LinuxShell::Bash, &destination, false)
-        .expect("export Bash snapshot");
+    ProviderApplication::new(
+        store.clone(),
+        ProviderValidator::new(ValidationTimeouts::default()),
+    )
+    .export_linux_script(LinuxShell::Bash, &destination, false)
+    .expect("export Bash snapshot");
     (temp, destination)
 }
 
@@ -449,7 +447,8 @@ fn running_guest_harness_preserves_auth_and_enforces_the_shared_desktop_lock() {
         std::env::var("GPTEASY_WSL_TEST_DISTRIBUTION").expect("select a WSL2 distribution");
     let _running_guest = RunningGuest::start(&distribution);
     assert_distribution_is_running(&distribution);
-    let (_snapshot_temp, snapshot) = bash_snapshot();
+    let (_application_temp, application_store) = wsl_application_state();
+    let (_snapshot_temp, snapshot) = bash_snapshot(&application_store);
     let snapshot = windows_path_for_wsl(&distribution, &snapshot);
     let home_path = String::from_utf8(checked_output(
         &distribution,
@@ -777,11 +776,12 @@ chmod 700 "$HOME/bin/codex"
         )
     };
 
-    let (_application_temp, application_store) = wsl_application_state();
     let _wsl_wrapper = WslWrapper::start(&distribution, home);
-    let application = WslApplication::with_wsl_program_for_harness(
+    let application = WslApplication::with_isolated_wsl_for_harness(
         application_store.clone(),
         _wsl_wrapper.program(),
+        Duration::from_secs(10),
+        distribution.clone(),
     );
     let busy = application
         .list()
@@ -828,8 +828,12 @@ chmod 700 "$HOME/bin/codex"
         )
         .expect("persist interrupted desktop lock token");
     drop(connection);
-    let recovered_application =
-        WslApplication::with_wsl_program_for_harness(application_store, _wsl_wrapper.program());
+    let recovered_application = WslApplication::with_isolated_wsl_for_harness(
+        application_store.clone(),
+        _wsl_wrapper.program(),
+        Duration::from_secs(10),
+        distribution.clone(),
+    );
     let desktop_refreshed = recovered_application
         .list()
         .expect("recover persisted desktop lock and refresh")
@@ -847,6 +851,25 @@ chmod 700 "$HOME/bin/codex"
         Some(provider_id)
     );
 
+    let deleted_provider_id = "33333333-3333-4333-8333-333333333333";
+    recovered_application
+        .audit_provider_deletion(deleted_provider_id, true)
+        .expect("audit the real guest before deleting the snapshot provider");
+    let provider_application = ProviderApplication::new(
+        application_store.clone(),
+        ProviderValidator::new(ValidationTimeouts::default()),
+    );
+    provider_application
+        .delete_provider(deleted_provider_id)
+        .expect("delete provider after the real guest audit");
+    assert!(
+        provider_application
+            .list_providers()
+            .expect("read catalog after deletion")
+            .iter()
+            .all(|provider| provider.id != deleted_provider_id)
+    );
+
     let switched = run_shell("source \"$HOME/gpteasy.sh\"; gpteasy", b"2\n");
     assert!(
         switched.status.success(),
@@ -856,9 +879,7 @@ chmod 700 "$HOME/bin/codex"
     let shell_config = read_file(".codex/config.toml");
     let shell_config_text = String::from_utf8(shell_config).expect("shell config is UTF-8");
     assert!(shell_config_text.contains("# GPTEasy schema-version: 1"));
-    assert!(
-        shell_config_text.contains("# GPTEasy provider-id: 33333333-3333-4333-8333-333333333333")
-    );
+    assert!(shell_config_text.contains(&format!("# GPTEasy provider-id: {deleted_provider_id}")));
     assert!(shell_config_text.contains("# GPTEasy source-id:"));
     assert!(!shell_config_text.contains("shell-harness-secret"));
     assert!(read_file(".codex/auth.json") == br#"{"login":"unchanged"}"#);
@@ -872,13 +893,22 @@ chmod 700 "$HOME/bin/codex"
         .expect("selected WSL environment");
     assert_eq!(
         shell_refreshed.configuration_state,
-        WslConfigurationState::Current
+        WslConfigurationState::ProviderMissing
     );
     assert_eq!(
         shell_refreshed.actual_provider_id.as_deref(),
-        Some("33333333-3333-4333-8333-333333333333")
+        Some(deleted_provider_id)
     );
+    assert!(shell_refreshed.current_provider.is_none());
     assert!(shell_refreshed.pending_restart);
+    assert!(
+        provider_application
+            .list_providers()
+            .expect("read catalog after applying the old snapshot")
+            .iter()
+            .all(|provider| provider.id != deleted_provider_id),
+        "applying an old snapshot must not recreate the deleted catalog entry",
+    );
 
     checked_output(
         &distribution,

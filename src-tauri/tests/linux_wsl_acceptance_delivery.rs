@@ -85,6 +85,7 @@ fn issue_35_contract_covers_every_public_acceptance_surface() {
             "notification".to_owned(),
             "error_details".to_owned(),
             "test_logs".to_owned(),
+            "application_logs".to_owned(),
             "screenshot_assist".to_owned(),
             "acceptance_report".to_owned(),
         ])
@@ -94,6 +95,19 @@ fn issue_35_contract_covers_every_public_acceptance_surface() {
         json!([
             "__runner_process_arguments__",
             "linux-shell-public-behavior"
+        ])
+    );
+    assert_eq!(
+        contract["canarySurfaceVerifiers"]["application_logs"],
+        json!(["__application_logs__"])
+    );
+    assert_eq!(
+        contract["applicationLogSteps"],
+        json!([
+            "wsl-shared-protocol",
+            "provider-deletion-and-credential-cleanup",
+            "wsl2-running-guest",
+            "wsl2-stopped-guest"
         ])
     );
 }
@@ -116,6 +130,7 @@ fn issue_31_real_acceptance_requires_real_codex_and_an_independent_linux_kernel(
         contract["nativeLinux"]["requiredDistribution"],
         "Ubuntu GNU/Linux"
     );
+    assert_eq!(contract["nativeLinux"]["requiredOsReleaseId"], "ubuntu");
 
     for gate in contract["realEnvironmentGates"]
         .as_array()
@@ -142,6 +157,8 @@ fn extracted_real_acceptance_source_can_bind_evidence_to_a_commit() {
     assert!(runner.contains("gitCommit = $gitCommit"));
     assert!(runner.contains("--features', 'native-linux-acceptance"));
     assert!(runner.contains("@('127.0.0.1', 'localhost', '::1')"));
+    assert!(runner.contains("Full WSL2 acceptance requires -ConfirmDisposableWsl"));
+    assert!(runner.contains("__application_logs__"));
 
     let manifest = fs::read_to_string(repository_root().join("src-tauri/Cargo.toml"))
         .expect("read Cargo manifest");
