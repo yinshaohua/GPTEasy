@@ -92,7 +92,7 @@ Ubuntu 证据记录 `independent-gnu-linux` 通过，且 runner 在进入矩阵�
 | 40-45 双向状态、共享锁与崩溃恢复 | `wsl-shared-protocol`、SQLite Saga | Running guest 与五个持久化阶段中断恢复 |
 | 46-51 Stopped 探测、授权启动、自然停止和旧格式 | `wsl-shared-protocol` | 实际 Stopped 前后检查与 Stopped guest harness |
 | 52-55 删除核验、旧快照、删除 ID和引用清理 | `provider-deletion-and-credential-cleanup` | Running/Stopped guest 的实际配置和凭据工件 |
-| 56-58 外部行为门禁、秘密扫描和完整交付 | 单命令 Full gate、九面 canary 扫描 | Windows x64 + WSL2 与独立 Ubuntu 证据并列通过 |
+| 56-58 外部行为门禁、秘密扫描和完整交付 | 单命令 Full gate、十个 canary 扫描面 | Windows x64 + WSL2 与独立 Ubuntu 证据并列通过 |
 
 ## 未验证范围
 
