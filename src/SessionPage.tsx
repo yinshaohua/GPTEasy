@@ -44,16 +44,30 @@ type DetailState =
   | { kind: "loaded"; detail: SessionDetail }
   | { kind: "error"; summary: SessionSummary; failure: SessionFailure };
 
+interface SessionListCache {
+  sessions: SessionSummary[];
+  nextCursor: string | null;
+}
+
 interface MutationOutcome {
   sessionId: string;
   title: string;
   actualState: SessionMutationResult["actualState"];
 }
 
-export default function SessionPage({ onOpenProviders }: { onOpenProviders: () => void }) {
+export default function SessionPage({
+  active = true,
+  onOpenProviders,
+}: {
+  active?: boolean;
+  onOpenProviders: () => void;
+}) {
   const leaseId = useRef(`session-page-${createLeaseId()}`);
   const requestGeneration = useRef(0);
   const activeListRequests = useRef(new Set<string>());
+  const listCache = useRef(new Map<string, SessionListCache>());
+  const leaseActive = useRef(false);
+  const activeRef = useRef(active);
   const detailRequestGeneration = useRef(0);
   const listScrollPosition = useRef(0);
   const tabRef = useRef<SessionTab>("active");
@@ -79,14 +93,33 @@ export default function SessionPage({ onOpenProviders }: { onOpenProviders: () =
   const [deleteTarget, setDeleteTarget] = useState<SessionDetail | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteFailure, setDeleteFailure] = useState<string | null>(null);
+  const [deleteLoadingId, setDeleteLoadingId] = useState<string | null>(null);
+
+  useEffect(() => {
+    activeRef.current = active;
+  }, [active]);
+
+  const cancelInFlight = useCallback(() => {
+    for (const requestId of activeListRequests.current) {
+      activeListRequests.current.delete(requestId);
+      void cancelSessionRequest(requestId);
+    }
+  }, []);
 
   const checkAvailability = useCallback(async () => {
-    requestGeneration.current += 1;
+    const generation = ++requestGeneration.current;
     detailRequestGeneration.current += 1;
     setAvailability(null);
     try {
-      setAvailability(await enterSessionManagement(leaseId.current));
+      const nextAvailability = await enterSessionManagement(leaseId.current);
+      if (requestGeneration.current !== generation || !activeRef.current) {
+        if (!activeRef.current) void leaveSessionManagement(leaseId.current);
+        return;
+      }
+      leaseActive.current = true;
+      setAvailability(nextAvailability);
     } catch (error) {
+      if (requestGeneration.current !== generation || !activeRef.current) return;
       const failure = asSessionFailure(error);
       setAvailability({
         status: failure.category === "recovery_failed" ? "recovery_failed" : "initialization_failed",
@@ -101,14 +134,30 @@ export default function SessionPage({ onOpenProviders }: { onOpenProviders: () =
   }, []);
 
   useEffect(() => {
-    void checkAvailability();
     const activeLease = leaseId.current;
+    if (!active) {
+      requestGeneration.current += 1;
+      detailRequestGeneration.current += 1;
+      cancelInFlight();
+      if (leaseActive.current) {
+        leaseActive.current = false;
+        void leaveSessionManagement(activeLease);
+      }
+      setAvailability(null);
+      return;
+    }
+
+    void checkAvailability();
     return () => {
       requestGeneration.current += 1;
       detailRequestGeneration.current += 1;
-      void leaveSessionManagement(activeLease);
+      cancelInFlight();
+      if (leaseActive.current) {
+        leaseActive.current = false;
+        void leaveSessionManagement(activeLease);
+      }
     };
-  }, [checkAvailability]);
+  }, [active, cancelInFlight, checkAvailability]);
 
   const baseQuery = useMemo<Omit<SessionQuery, "cursor" | "requestId">>(() => ({
     archived: tab === "archived",
@@ -117,20 +166,28 @@ export default function SessionPage({ onOpenProviders }: { onOpenProviders: () =
     modelProvider: modelProvider || null,
     limit: 40,
   }), [modelProvider, project, searchTerm, tab]);
+  const listQueryKey = JSON.stringify(baseQuery);
 
   useEffect(() => {
     tabRef.current = tab;
   }, [tab]);
 
   useEffect(() => {
-    if (availability?.status !== "available") return;
-    const cancelInFlight = () => {
-      for (const requestId of activeListRequests.current) {
-        activeListRequests.current.delete(requestId);
-        void cancelSessionRequest(requestId);
-      }
-    };
+    if (!active || availability?.status !== "available") return;
     cancelInFlight();
+    const cached = listCache.current.get(listQueryKey);
+    if (cached) {
+      setSessions(cached.sessions);
+      setNextCursor(cached.nextCursor);
+      setListFailure(null);
+      setListState("ready");
+      setSelectedIds(new Set());
+      setMutationResults({});
+      setMutationSummary(null);
+      setMutationOutcomes([]);
+      return cancelInFlight;
+    }
+    listCache.current.delete(listQueryKey);
     const generation = ++requestGeneration.current;
     setListState("initial_loading");
     setListFailure(null);
@@ -145,7 +202,9 @@ export default function SessionPage({ onOpenProviders }: { onOpenProviders: () =
     void listSessions({ ...baseQuery, requestId, cursor: null })
       .then((page) => {
         if (requestGeneration.current !== generation) return;
-        setSessions(uniqueSessions(page.sessions));
+        const nextSessions = uniqueSessions(page.sessions);
+        listCache.current.set(listQueryKey, { sessions: nextSessions, nextCursor: page.nextCursor });
+        setSessions(nextSessions);
         rememberFacets(page.sessions, setKnownProjects, setKnownProviders);
         setNextCursor(page.nextCursor);
         setListState("ready");
@@ -157,7 +216,7 @@ export default function SessionPage({ onOpenProviders }: { onOpenProviders: () =
       })
       .finally(() => activeListRequests.current.delete(requestId));
     return cancelInFlight;
-  }, [availability?.status, baseQuery, listRetry]);
+  }, [active, availability?.status, baseQuery, cancelInFlight, listQueryKey, listRetry]);
 
   async function loadMore() {
     if (!nextCursor || listState === "loading_more") return;
@@ -169,7 +228,11 @@ export default function SessionPage({ onOpenProviders }: { onOpenProviders: () =
     try {
       const page = await listSessions({ ...baseQuery, requestId, cursor: nextCursor });
       if (requestGeneration.current !== generation) return;
-      setSessions((current) => uniqueSessions([...current, ...page.sessions]));
+      setSessions((current) => {
+        const nextSessions = uniqueSessions([...current, ...page.sessions]);
+        listCache.current.set(listQueryKey, { sessions: nextSessions, nextCursor: page.nextCursor });
+        return nextSessions;
+      });
       rememberFacets(page.sessions, setKnownProjects, setKnownProviders);
       setNextCursor(page.nextCursor);
       setListState("ready");
@@ -252,10 +315,14 @@ export default function SessionPage({ onOpenProviders }: { onOpenProviders: () =
       title: titles.get(result.sessionId) ?? result.sessionId,
       actualState: result.actualState,
     })));
-    setSessions((current) => current.filter((session) => {
-      const result = byId.get(session.id);
-      return !result || stateBelongsToTab(result.actualState, tabRef.current);
-    }));
+    setSessions((current) => {
+      const nextSessions = current.filter((session) => {
+        const result = byId.get(session.id);
+        return !result || stateBelongsToTab(result.actualState, tabRef.current);
+      });
+      listCache.current.set(listQueryKey, { sessions: nextSessions, nextCursor });
+      return nextSessions;
+    });
     setSelectedIds(new Set(results
       .filter((result) => result.status !== "succeeded" && stateBelongsToTab(result.actualState, tabRef.current))
       .map((result) => result.sessionId)));
@@ -292,6 +359,8 @@ export default function SessionPage({ onOpenProviders }: { onOpenProviders: () =
   }
 
   async function openDeleteConfirmation(summary: SessionSummary) {
+    if (deleteLoadingId) return;
+    setDeleteLoadingId(summary.id);
     setDeleteFailure(null);
     try {
       const detail = detailState.kind === "loaded" && detailState.detail.id === summary.id
@@ -300,6 +369,8 @@ export default function SessionPage({ onOpenProviders }: { onOpenProviders: () =
       setDeleteTarget(detail);
     } catch {
       setMutationSummary(sessionMessages.detailFailed);
+    } finally {
+      setDeleteLoadingId(null);
     }
   }
 
@@ -316,9 +387,13 @@ export default function SessionPage({ onOpenProviders }: { onOpenProviders: () =
         title: deleteTarget.title,
         actualState: result.actualState,
       }]);
-      setSessions((current) => current.filter((session) => (
-        session.id !== result.sessionId || stateBelongsToTab(result.actualState, tabRef.current)
-      )));
+      setSessions((current) => {
+        const nextSessions = current.filter((session) => (
+          session.id !== result.sessionId || stateBelongsToTab(result.actualState, tabRef.current)
+        ));
+        listCache.current.set(listQueryKey, { sessions: nextSessions, nextCursor });
+        return nextSessions;
+      });
       if (result.actualState === "deleted") {
         setDeleteTarget(null);
         setDetailState({ kind: "list" });
@@ -393,7 +468,10 @@ export default function SessionPage({ onOpenProviders }: { onOpenProviders: () =
           hasQuery={Boolean(searchTerm.trim() || project || modelProvider)}
           nextCursor={nextCursor}
           onLoadMore={() => void loadMore()}
-          onRetry={() => setListRetry((current) => current + 1)}
+          onRetry={() => {
+            listCache.current.delete(listQueryKey);
+            setListRetry((current) => current + 1);
+          }}
           onRecover={() => void checkAvailability()}
           onOpen={(summary) => void openDetail(summary)}
           mutation={availability.mutation}
@@ -402,6 +480,7 @@ export default function SessionPage({ onOpenProviders }: { onOpenProviders: () =
           mutationSummary={mutationSummary}
           mutationOutcomes={mutationOutcomes}
           mutationBusy={mutationBusy}
+          deleteLoadingId={deleteLoadingId}
           onToggleSelected={(sessionId) => setSelectedIds((current) => toggleSelection(current, sessionId))}
           onToggleAll={() => setSelectedIds((current) => (
             current.size === sessions.length ? new Set() : new Set(sessions.map((session) => session.id))
@@ -495,6 +574,7 @@ function SessionList({
   mutationSummary,
   mutationOutcomes,
   mutationBusy,
+  deleteLoadingId,
   onToggleSelected,
   onToggleAll,
   onMutate,
@@ -525,6 +605,7 @@ function SessionList({
   mutationSummary: string | null;
   mutationOutcomes: MutationOutcome[];
   mutationBusy: boolean;
+  deleteLoadingId: string | null;
   onToggleSelected: (sessionId: string) => void;
   onToggleAll: () => void;
   onMutate: (sessionIds: string[]) => void;
@@ -532,6 +613,9 @@ function SessionList({
 }) {
   const mutationsAllowed = mutation.status === "allowed";
   const actionLabel = tab === "active" ? sessionMessages.archive : sessionMessages.unarchive;
+  const mutationDisabledReason = mutation.status === "allowed"
+    ? undefined
+    : sessionMessages.mutationBlocked[mutation.status];
   return (
     <>
       <header className="page-header">
@@ -676,7 +760,7 @@ function SessionList({
                         className="secondary-button compact"
                         type="button"
                         aria-label={`${retryLabel}：${session.title}`}
-                        title={`${retryLabel}：${session.title}`}
+                        title={mutationDisabledReason ?? `${retryLabel}：${session.title}`}
                         onClick={() => onMutate([session.id])}
                         disabled={!mutationsAllowed || mutationBusy}
                       >
@@ -687,7 +771,7 @@ function SessionList({
                         className="icon-button"
                         type="button"
                         aria-label={`${actionLabel}会话：${session.title}`}
-                        title={`${actionLabel}会话：${session.title}`}
+                        title={mutationDisabledReason ?? `${actionLabel}会话：${session.title}`}
                         onClick={() => onMutate([session.id])}
                         disabled={!mutationsAllowed || mutationBusy}
                       >
@@ -700,11 +784,13 @@ function SessionList({
                       className="icon-button danger-icon-button"
                       type="button"
                       aria-label={`${sessionMessages.delete}：${session.title}`}
-                      title={`${sessionMessages.delete}：${session.title}`}
+                      title={mutationDisabledReason ?? `${sessionMessages.delete}：${session.title}`}
                       onClick={() => onDelete(session)}
-                      disabled={!mutationsAllowed || mutationBusy}
+                      disabled={!mutationsAllowed || mutationBusy || deleteLoadingId !== null}
                     >
-                      <Trash2 size={16} aria-hidden="true" />
+                      {deleteLoadingId === session.id
+                        ? <LoaderCircle className="is-spinning" size={16} aria-hidden="true" />
+                        : <Trash2 size={16} aria-hidden="true" />}
                     </button>
                     </div>
                   </td>
@@ -772,6 +858,9 @@ function SessionDetailView({
 }) {
   const summary = state.kind === "loaded" ? state.detail : state.summary;
   const mutationsAllowed = mutation.status === "allowed";
+  const mutationDisabledReason = mutation.status === "allowed"
+    ? undefined
+    : sessionMessages.mutationBlocked[mutation.status];
   return (
     <>
       <header className="page-header session-detail-header">
@@ -790,6 +879,7 @@ function SessionDetailView({
             <button
               className="secondary-button compact"
               type="button"
+              title={mutationDisabledReason ?? `${tab === "active" ? sessionMessages.archive : sessionMessages.unarchive}会话`}
               onClick={() => onMutate(state.detail)}
               disabled={!mutationsAllowed || mutationBusy}
             >
@@ -801,6 +891,7 @@ function SessionDetailView({
             <button
               className="danger-button compact"
               type="button"
+              title={mutationDisabledReason ?? sessionMessages.delete}
               onClick={() => onDelete(state.detail)}
               disabled={!mutationsAllowed || mutationBusy}
             >

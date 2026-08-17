@@ -21,6 +21,13 @@ test("会话列表与详情在最小窗口保持可用布局", async ({ page }) 
   await expect(page.getByRole("button", { name: "导出 Markdown" })).toBeVisible();
   await expect(page.getByRole("button", { name: "归档会话" })).toBeVisible();
   await expect(page.getByRole("button", { name: "永久删除会话" })).toBeVisible();
+  const actionBoxes = await Promise.all([
+    page.getByRole("button", { name: "导出 Markdown" }).boundingBox(),
+    page.getByRole("button", { name: "归档会话" }).boundingBox(),
+    page.getByRole("button", { name: "永久删除会话" }).boundingBox(),
+  ]);
+  expect(actionBoxes.every((box) => box !== null)).toBe(true);
+  expect(Math.max(...actionBoxes.map((box) => box!.y)) - Math.min(...actionBoxes.map((box) => box!.y))).toBeLessThan(4);
   const tool = page.locator("details.session-tool-entry").first();
   await expect(tool).toBeVisible();
   await tool.locator("summary").click();

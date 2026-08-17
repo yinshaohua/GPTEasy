@@ -27,6 +27,7 @@ type ViewState =
 export default function App() {
   const [state, setState] = useState<ViewState>({ kind: "loading" });
   const [page, setPage] = useState<"providers" | "sessions">("providers");
+  const [sessionVisited, setSessionVisited] = useState(false);
 
   const load = useCallback(async (refresh: boolean) => {
     try {
@@ -55,9 +56,24 @@ export default function App() {
     );
   }
 
-  return page === "providers"
-    ? <ProviderPage onOpenSessions={() => setPage("sessions")} />
-    : <SessionPage onOpenProviders={() => setPage("providers")} />;
+  return (
+    <>
+      <div className="app-view" hidden={page !== "providers"}>
+        <ProviderPage onOpenSessions={() => {
+          setSessionVisited(true);
+          setPage("sessions");
+        }} />
+      </div>
+      {sessionVisited && (
+        <div className="app-view" hidden={page !== "sessions"}>
+          <SessionPage
+            active={page === "sessions"}
+            onOpenProviders={() => setPage("providers")}
+          />
+        </div>
+      )}
+    </>
+  );
 }
 
 function Shell({ children }: { children: React.ReactNode }) {

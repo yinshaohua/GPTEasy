@@ -111,6 +111,27 @@ describe("会话管理页面", () => {
     });
   });
 
+  it("页面暂时离开或切换页签后复用已读取的列表缓存", async () => {
+    const { rerender } = render(<SessionPage active onOpenProviders={() => undefined} />);
+
+    expect(await screen.findByRole("button", { name: "打开会话：登录修复" })).toBeInTheDocument();
+    expect(sessionContract.listSessions).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("tab", { name: "已归档" }));
+    await waitFor(() => expect(sessionContract.listSessions).toHaveBeenCalledTimes(2));
+    expect(await screen.findByRole("button", { name: "打开会话：登录修复" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("tab", { name: "会话" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "打开会话：登录修复" })).toBeInTheDocument());
+    expect(sessionContract.listSessions).toHaveBeenCalledTimes(2);
+
+    rerender(<SessionPage active={false} onOpenProviders={() => undefined} />);
+    await waitFor(() => expect(sessionContract.leaveSessionManagement).toHaveBeenCalledTimes(1));
+    rerender(<SessionPage active onOpenProviders={() => undefined} />);
+    await waitFor(() => expect(sessionContract.enterSessionManagement).toHaveBeenCalledTimes(2));
+    expect(sessionContract.listSessions).toHaveBeenCalledTimes(2);
+  });
+
   it("筛选变化会取消仍在途的旧列表请求", async () => {
     let resolveFirst: ((value: { sessions: typeof firstSession[]; nextCursor: null }) => void) | undefined;
     sessionContract.listSessions
