@@ -41,6 +41,19 @@ if (-not $isWindowsHost -or
 }
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$signingKeyPath = [string]$env:TAURI_SIGNING_PRIVATE_KEY_PATH
+if ([string]::IsNullOrWhiteSpace($signingKeyPath)) {
+    throw 'Set TAURI_SIGNING_PRIVATE_KEY_PATH to the updater private key outside the repository.'
+}
+$resolvedSigningKey = (Resolve-Path -LiteralPath $signingKeyPath).Path
+if ($resolvedSigningKey.StartsWith($repoRoot, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'The updater private key must be stored outside the repository.'
+}
+$env:TAURI_SIGNING_PRIVATE_KEY = $resolvedSigningKey
+if ([string]::IsNullOrWhiteSpace([string]$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD)) {
+    throw 'TAURI_SIGNING_PRIVATE_KEY_PASSWORD is required for the encrypted updater private key.'
+}
+
 $releaseContract = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot 'windows-release-contract.json')) | ConvertFrom-Json
 $branch = (& git -C $repoRoot branch --show-current | Out-String).Trim()
 if ($LASTEXITCODE -ne 0 -or $branch -ne 'main') {
@@ -65,6 +78,9 @@ try {
     Invoke-Checked 'Release contract gate' {
         powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-release-contract.ps1 -RepositoryRoot $repoRoot
     }
+    Invoke-Checked 'Update trust root gate' {
+        powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-update-trust-root.ps1 -RepositoryRoot $repoRoot
+    }
     Invoke-Checked 'Tauri Windows x64 NSIS build' {
         npx --no-install tauri build --target x86_64-pc-windows-msvc
     }
@@ -83,6 +99,20 @@ if (-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) {
 }
 
 $installer = Get-Item -LiteralPath $installerPath
+$signaturePath = "$installerPath.sig"
+if (-not (Test-Path -LiteralPath $signaturePath -PathType Leaf)) {
+    throw 'Tauri did not produce the updater signature corresponding to the NSIS installer.'
+}
+$updaterSignature = Get-Item -LiteralPath $signaturePath
+$publicKey = [string]$config.plugins.updater.pubkey
+Push-Location $repoRoot
+try {
+    Invoke-Checked 'Tauri updater signature verification' {
+        cargo run --quiet --release --manifest-path src-tauri/Cargo.toml --example verify_updater_signature -- $installer.FullName $updaterSignature.FullName $publicKey
+    }
+} finally {
+    Pop-Location
+}
 $signature = Get-FileSignature $installer.FullName
 if ($signature.Status -ne 'Valid' -and $signature.Status -ne 'NotSigned') {
     throw "Installer Authenticode status is not acceptable: $($signature.Status)."
@@ -94,6 +124,7 @@ if (-not $installer.FullName.StartsWith($repoRoot, [StringComparison]::OrdinalIg
     throw 'The candidate installer must be inside the repository target directory.'
 }
 $relativeInstaller = $installer.FullName.Substring($repoRoot.Length).TrimStart('\').Replace('\', '/')
+$relativeUpdaterSignature = $updaterSignature.FullName.Substring($repoRoot.Length).TrimStart('\').Replace('\', '/')
 $manifest = [ordered]@{
     schemaVersion = 1
     issue = [int]$releaseContract.issue
@@ -108,12 +139,19 @@ $manifest = [ordered]@{
         acceptanceGate = 'passed'
         releaseTree = 'passed'
         releaseContract = 'passed'
+        updateTrustRoot = 'passed'
+        updaterSignature = 'passed'
     }
     artifact = [ordered]@{
         path = $relativeInstaller
         sha256 = Get-Sha256File $installer.FullName
         size = $installer.Length
         authenticodeStatus = $signature.Status.ToString()
+        updaterSignature = [ordered]@{
+            path = $relativeUpdaterSignature
+            sha256 = Get-Sha256File $updaterSignature.FullName
+            size = $updaterSignature.Length
+        }
     }
 }
 $json = $manifest | ConvertTo-Json -Depth 8

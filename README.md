@@ -78,6 +78,8 @@ cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1
 npm run candidate:windows
 ```
 
+应用更新的 GitCode 分发信任根、带密码 updater 密钥、冒烟工作流与版本准备流程参见 [`docs/release/gitcode-distribution.md`](docs/release/gitcode-distribution.md)。首次设置在 Git Bash 或 WSL2 中运行 `bash scripts/setup-gitcode-distribution.sh`；私钥和密码不得进入仓库、日志或发布附件。
+
 候选构建要求在干净的 `main` 工作树中运行。
 
 ## 参与贡献

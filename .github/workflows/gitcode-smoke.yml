@@ -1,0 +1,28 @@
+name: GitCode 分发冒烟
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+      GITCODE_REPOSITORY: ${{ vars.GITCODE_REPOSITORY }}
+      GITCODE_DEFAULT_BRANCH: ${{ vars.GITCODE_DEFAULT_BRANCH }}
+      SMOKE_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 验证公开仓库输入
+        shell: bash
+        run: |
+          test -n "$GITCODE_REPOSITORY"
+          test -n "$GITCODE_DEFAULT_BRANCH"
+          test -n "$GITCODE_TOKEN"
+      - name: 验证 GitCode Release、附件与测试清单
+        shell: bash
+        run: bash scripts/smoke-gitcode-release.sh

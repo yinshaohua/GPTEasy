@@ -21,6 +21,9 @@
     "uat:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-windows-uat.ps1",
     "release:tree": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-release-tree.ps1",
     "release:check": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-release-readiness.ps1",
+    "release:prepare": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-release.ps1",
+    "release:manifest": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-updater-manifest.ps1",
+    "release:trust-root": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-update-trust-root.ps1",
     "tauri": "tauri"
   },
   "dependencies": {

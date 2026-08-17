@@ -40,6 +40,8 @@ url = "2.5"
 uuid = { version = "1.18", features = ["v4"] }
 
 [dev-dependencies]
+base64 = "0.22"
+minisign-verify = "0.2.5"
 tempfile = "3.15"
 
 [target.'cfg(windows)'.dependencies]

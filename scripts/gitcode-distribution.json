@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "issue": 41,
+  "apiBaseUrl": "https://api.gitcode.com/api/v5",
+  "rawBaseUrl": "https://raw.gitcode.com",
+  "defaultBranch": "main",
+  "formalManifestPath": "latest.json",
+  "smokeManifestPrefix": "smoke/",
+  "platform": "windows-x86_64",
+  "repositoryVariable": "GITCODE_REPOSITORY",
+  "branchVariable": "GITCODE_DEFAULT_BRANCH",
+  "tokenSecret": "GITCODE_TOKEN"
+}
