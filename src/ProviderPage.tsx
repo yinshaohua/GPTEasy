@@ -23,7 +23,7 @@ import ProviderValidationDialog, {
   type ProviderValidationSession,
   type ProviderValidationSource,
 } from "./ProviderValidationDialog";
-import AppSidebar from "./AppSidebar";
+import AppSidebar, { type OpenAiSidebarAction } from "./AppSidebar";
 
 import {
   asProviderFailure,
@@ -116,7 +116,7 @@ type PageView = "catalog" | "detail";
 type Confirmation = "discard" | "validation" | null;
 type LinuxExportStep = "shell" | "success" | null;
 type ConfigChangeRequest =
-  | { kind: "provider"; provider: ProviderSummary }
+  | { kind: "provider"; provider: ProviderSummary; firstSaved?: boolean }
   | { kind: "openai" }
   | { kind: "provider_update"; validationId: string; provider: ProviderSummary; name: string };
 
@@ -134,7 +134,13 @@ function canApplyWslProvider(environment: WslEnvironmentSummary): boolean {
     && environment.configurationState !== "busy";
 }
 
-export default function ProviderPage({ onOpenSessions }: { onOpenSessions?: () => void }) {
+export default function ProviderPage({
+  onOpenAiActionChange,
+  onOpenSessions,
+}: {
+  onOpenAiActionChange?: (action: OpenAiSidebarAction) => void;
+  onOpenSessions?: () => void;
+}) {
   const [providers, setProviders] = useState<ProviderSummary[]>([]);
   const [listState, setListState] = useState<"loading" | "ready" | "error">("loading");
   const [environment, setEnvironment] = useState<EnvironmentSnapshot | null>(null);
@@ -288,7 +294,9 @@ export default function ProviderPage({ onOpenSessions }: { onOpenSessions?: () =
     };
   }, []);
 
-  function discardReceipt(nextStage: ProviderValidationStage | "idle" = "idle") {
+  function discardReceipt(
+    nextStage: ProviderValidationStage | "idle" | "complete" = "idle",
+  ) {
     if (receiptRef.current) void discardProviderValidation(receiptRef.current);
     receiptRef.current = null;
     setReceipt(null);
@@ -306,7 +314,7 @@ export default function ProviderPage({ onOpenSessions }: { onOpenSessions?: () =
   }
 
   function editProvider(provider: ProviderSummary) {
-    discardReceipt("models_confirmed");
+    discardReceipt("complete");
     setSelectedId(provider.id);
     setIsRecommendedCandidate(false);
     setName(provider.name);
@@ -551,6 +559,7 @@ export default function ProviderPage({ onOpenSessions }: { onOpenSessions?: () =
       let saved: ProviderSummary;
       if (!selected) {
         if (!validatedReceipt) return;
+        const isFirstProvider = providers.length === 0;
         if (isRecommendedCandidate) {
           try {
             saved = await saveDaywayProvider(validatedReceipt.validationId);
@@ -569,6 +578,9 @@ export default function ProviderPage({ onOpenSessions }: { onOpenSessions?: () =
         receiptRef.current = null;
         setProviders((current) => isRecommendedCandidate ? [saved, ...current] : [...current, saved]);
         resetEditor("catalog");
+        if (isFirstProvider && environment && canApplyProvider(environment)) {
+          setConfigChangeRequest({ kind: "provider", provider: saved, firstSaved: true });
+        }
         return;
       }
       if (criticalDirty) {
@@ -946,6 +958,7 @@ export default function ProviderPage({ onOpenSessions }: { onOpenSessions?: () =
     (baseUrl.trim() !== selected.baseUrl ||
       defaultModel !== selected.defaultModel ||
       apiKeyReplacement);
+  const savedCombinationUnchanged = selected !== null && !criticalDirty;
   const dirty = selected
     ? nameDirty || criticalDirty
     : isRecommendedCandidate || name.trim().length > 0 ||
@@ -957,22 +970,35 @@ export default function ProviderPage({ onOpenSessions }: { onOpenSessions?: () =
   const canValidate =
     models.length > 0 &&
     defaultModel.length > 0 &&
-    (!selected || criticalDirty) &&
     !busy;
   const canSave = name.trim().length > 0 && !busy && (selected ? dirty : true);
   const errorId = failure ? "provider-validation-error" : undefined;
   const openAiReason = openAiLoginReason(environment);
+  const openAiCurrent = environment?.mode === "openai_login";
   const openAiDisabled = busy
     || wslBusy
     || switchingMode
     || !environment
-    || environment.mode === "openai_login"
     || environment.loginStatus !== "logged_in";
+
+  useEffect(() => {
+    onOpenAiActionChange?.({
+      busy: switchingMode,
+      current: openAiCurrent,
+      description: openAiReason,
+      disabled: openAiDisabled,
+      onSelect: () => {
+        if (!environment || environment.loginStatus !== "logged_in" || openAiCurrent) return;
+        setConfigChangeRequest({ kind: "openai" });
+      },
+    });
+  }, [environment, onOpenAiActionChange, openAiCurrent, openAiDisabled, openAiReason, switchingMode]);
 
   return (
     <div className="app-shell">
       <AppSidebar onOpenSessions={onOpenSessions} openAiAction={{
         busy: switchingMode,
+        current: openAiCurrent,
         description: openAiReason,
         disabled: openAiDisabled,
         onSelect: () => void enableOpenAiLogin(),
@@ -1122,12 +1148,12 @@ export default function ProviderPage({ onOpenSessions }: { onOpenSessions?: () =
                     disabled={provider.isCurrent || busy || switchingProviderId === provider.id || !environment || !canApplyProvider(environment)}
                     aria-label={provider.isCurrent
                       ? providerMessages.currentProviderAccessibleName(provider.name)
-                      : providerMessages.switchProviderAccessibleName(provider.name)}
+                      : providerMessages.applyProviderAccessibleName(provider.name)}
                   >
                     {switchingProviderId === provider.id
                       ? <LoaderCircle className="is-spinning" size={16} aria-hidden="true" />
                       : <Check size={16} aria-hidden="true" />}
-                    {provider.isCurrent ? providerMessages.currentProvider : providerMessages.switchProvider}
+                    {provider.isCurrent ? providerMessages.currentProvider : providerMessages.applyProvider}
                   </button>
                 </div>
               </article>
@@ -1289,11 +1315,17 @@ export default function ProviderPage({ onOpenSessions }: { onOpenSessions?: () =
                 <button
                   className="secondary-button"
                   type="button"
-                  onClick={() => void runValidation()}
+                  onClick={() => void (savedCombinationUnchanged
+                    ? runRevalidation()
+                    : runValidation())}
                   disabled={!canValidate}
                 >
                   <ShieldCheck size={17} aria-hidden="true" />
-                  {selected ? providerMessages.validateUpdate : providerMessages.validateProvider}
+                  {savedCombinationUnchanged
+                    ? providerMessages.revalidate
+                    : selected
+                      ? providerMessages.validateUpdate
+                      : providerMessages.validateProvider}
                 </button>
               )}
               <span role="status">{candidateStatus(operation, validationStage, failure)}</span>
@@ -1345,9 +1377,13 @@ export default function ProviderPage({ onOpenSessions }: { onOpenSessions?: () =
       )}
       {configChangeRequest && (
         <ConfirmationDialog
-          title={providerMessages.configChangeTitle}
+          title={configChangeRequest.kind === "provider" && configChangeRequest.firstSaved
+            ? providerMessages.firstProviderApplyTitle
+            : providerMessages.configChangeTitle}
           message={configChangeMessage(configChangeRequest)}
-          primaryLabel={providerMessages.configChangePrimary}
+          primaryLabel={configChangeRequest.kind === "provider" && configChangeRequest.firstSaved
+            ? providerMessages.applyProvider
+            : providerMessages.configChangePrimary}
           secondaryLabel={providerMessages.configChangeCancel}
           onPrimary={() => void executeConfigChange(configChangeRequest)}
           onSecondary={() => setConfigChangeRequest(null)}
@@ -1818,6 +1854,9 @@ function openAiLoginReason(snapshot: EnvironmentSnapshot | null): string {
 function configChangeMessage(request: ConfigChangeRequest): string {
   const risk = providerMessages.configChangeConsumerRisk;
   if (request.kind === "provider") {
+    if (request.firstSaved) {
+      return `${providerMessages.firstProviderApplyMessage(request.provider.name)}${risk}`;
+    }
     return `${providerMessages.configChangeProviderTarget(request.provider.name)}${risk}`;
   }
   if (request.kind === "provider_update") {

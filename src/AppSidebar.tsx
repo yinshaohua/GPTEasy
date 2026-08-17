@@ -9,6 +9,7 @@ import { providerMessages } from "./messages";
 
 export interface OpenAiSidebarAction {
   busy: boolean;
+  current: boolean;
   description: string;
   disabled: boolean;
   onSelect: () => void;
@@ -54,6 +55,7 @@ export default function AppSidebar({
               type="button"
               onClick={openAiAction.onSelect}
               disabled={openAiAction.disabled}
+              aria-pressed={openAiAction.current}
               aria-description={openAiAction.description}
             >
               {openAiAction.busy

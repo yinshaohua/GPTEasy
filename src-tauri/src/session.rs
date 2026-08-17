@@ -27,9 +27,6 @@ use windows_sys::Win32::System::JobObjects::{
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
-use crate::consumer::{
-    ConsumerProcessExclusion, ConsumerScanner, ConsumerStatus, WindowsConsumerScanner,
-};
 use crate::state::{SessionProcessOwnership, StateStore};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
@@ -60,8 +57,6 @@ pub struct SessionAvailability {
 #[serde(rename_all = "snake_case")]
 pub enum SessionMutationAvailabilityStatus {
     Allowed,
-    ConsumersRunning,
-    ConsumerStateUnknown,
     Unavailable,
 }
 
@@ -77,7 +72,6 @@ pub struct SessionMutationAvailability {
 pub enum SessionMutationResultStatus {
     Succeeded,
     Failed,
-    Blocked,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -244,7 +238,6 @@ pub struct SessionApplication {
     gateway: AppServerGateway,
     leases: Arc<Mutex<LeaseState>>,
     list_requests: Arc<Mutex<HashMap<String, CancellationToken>>>,
-    consumer_scanner: Arc<dyn ConsumerScanner>,
     idle_grace: Duration,
 }
 
@@ -308,7 +301,6 @@ impl SessionApplication {
             gateway: AppServerGateway::new(state_store),
             leases: Arc::new(Mutex::new(LeaseState::default())),
             list_requests: Arc::new(Mutex::new(HashMap::new())),
-            consumer_scanner: Arc::new(WindowsConsumerScanner::new()),
             idle_grace: DEFAULT_IDLE_GRACE,
         }
     }
@@ -319,23 +311,6 @@ impl SessionApplication {
         program: PathBuf,
         args_prefix: Vec<OsString>,
         idle_grace: Duration,
-    ) -> Self {
-        Self::with_program_and_consumer_scanner_for_harness(
-            state_store,
-            program,
-            args_prefix,
-            idle_grace,
-            Arc::new(WindowsConsumerScanner::new()),
-        )
-    }
-
-    #[doc(hidden)]
-    pub fn with_program_and_consumer_scanner_for_harness(
-        state_store: StateStore,
-        program: PathBuf,
-        args_prefix: Vec<OsString>,
-        idle_grace: Duration,
-        consumer_scanner: Arc<dyn ConsumerScanner>,
     ) -> Self {
         Self {
             gateway: AppServerGateway::with_launch(
@@ -348,7 +323,6 @@ impl SessionApplication {
             ),
             leases: Arc::new(Mutex::new(LeaseState::default())),
             list_requests: Arc::new(Mutex::new(HashMap::new())),
-            consumer_scanner,
             idle_grace,
         }
     }
@@ -364,7 +338,7 @@ impl SessionApplication {
                 status: SessionAvailabilityStatus::Available,
                 message_id: "session.available".to_owned(),
                 codex_version: Some(capability.codex_version),
-                mutation: self.current_mutation_availability().await,
+                mutation: mutations_allowed(),
             },
             Err(failure) => availability_from_failure(failure),
         }
@@ -542,16 +516,6 @@ impl SessionApplication {
 
         let mut results = Vec::with_capacity(session_ids.len());
         for session_id in session_ids {
-            let availability = self.current_mutation_availability().await;
-            if availability.status != SessionMutationAvailabilityStatus::Allowed {
-                results.push(SessionMutationResult {
-                    session_id,
-                    status: SessionMutationResultStatus::Blocked,
-                    actual_state: mutation.initial_state(),
-                    message_id: availability.message_id,
-                });
-                continue;
-            }
             results.push(self.mutate_one(&session_id, mutation).await);
         }
         results
@@ -620,31 +584,6 @@ impl SessionApplication {
         }
     }
 
-    async fn current_mutation_availability(&self) -> SessionMutationAvailability {
-        let exclusions = self.gateway.owned_process_exclusions().await;
-        let scan = self.consumer_scanner.scan_excluding(&exclusions);
-        let (status, message_id) = if !scan.is_trustworthy() {
-            (
-                SessionMutationAvailabilityStatus::ConsumerStateUnknown,
-                "session.consumer_state_unknown",
-            )
-        } else if scan.desktop == ConsumerStatus::Running || scan.cli == ConsumerStatus::Running {
-            (
-                SessionMutationAvailabilityStatus::ConsumersRunning,
-                "session.consumers_running",
-            )
-        } else {
-            (
-                SessionMutationAvailabilityStatus::Allowed,
-                "session.mutations_allowed",
-            )
-        };
-        SessionMutationAvailability {
-            status,
-            message_id: message_id.to_owned(),
-        }
-    }
-
     fn schedule_idle_shutdown(&self, generation: u64, require_no_active_lease: bool) {
         let application = self.clone();
         tokio::spawn(async move {
@@ -658,6 +597,13 @@ impl SessionApplication {
                 application.gateway.shutdown().await;
             }
         });
+    }
+}
+
+fn mutations_allowed() -> SessionMutationAvailability {
+    SessionMutationAvailability {
+        status: SessionMutationAvailabilityStatus::Allowed,
+        message_id: "session.mutations_allowed".to_owned(),
     }
 }
 
@@ -712,7 +658,6 @@ struct AppServerConnection {
     next_id: u64,
     capability: AppServerCapability,
     ownership_generation: String,
-    process_exclusion: ConsumerProcessExclusion,
     #[cfg(windows)]
     process_tree: ProcessTreeJob,
 }
@@ -765,15 +710,6 @@ impl AppServerGateway {
         self.recovery_blocked.store(false, Ordering::SeqCst);
     }
 
-    async fn owned_process_exclusions(&self) -> Vec<ConsumerProcessExclusion> {
-        self.inner
-            .lock()
-            .await
-            .as_ref()
-            .map(|connection| vec![connection.process_exclusion.clone()])
-            .unwrap_or_default()
-    }
-
     async fn start(&self) -> Result<AppServerCapability, SessionFailure> {
         let mut inner = self.inner.lock().await;
         if let Some(connection) = inner.as_ref() {
@@ -796,7 +732,7 @@ impl AppServerGateway {
         let mut params = serde_json::Map::new();
         params.insert("archived".to_owned(), json!(query.archived));
         params.insert("limit".to_owned(), json!(query.limit.clamp(1, 100)));
-        params.insert("sortKey".to_owned(), json!("updated_at"));
+        params.insert("sortKey".to_owned(), json!("recency_at"));
         params.insert("sortDirection".to_owned(), json!("desc"));
         params.insert("sourceKinds".to_owned(), json!(INTERACTIVE_SOURCE_KINDS));
         if let Some(search_term) = query
@@ -960,13 +896,6 @@ async fn spawn_connection(
     let now = epoch_seconds();
     let process_created_at = process_creation_timestamp(&child).unwrap_or(now);
     let executable_path = launch.program.to_string_lossy();
-    let process_exclusion = ConsumerProcessExclusion {
-        pid,
-        started_at_epoch_millis: process_started_at_epoch_millis(&child)
-            .unwrap_or_else(epoch_millis),
-        executable: std::fs::canonicalize(&launch.program)
-            .unwrap_or_else(|_| launch.program.clone()),
-    };
     let capability_path = launch.identity.to_string_lossy();
     let _ = state_store.record_session_process_ownership(
         pid,
@@ -985,7 +914,6 @@ async fn spawn_connection(
             codex_version: codex_version.clone(),
         },
         ownership_generation,
-        process_exclusion,
         #[cfg(windows)]
         process_tree,
     };
@@ -1059,7 +987,7 @@ async fn probe_core_methods(connection: &mut AppServerConnection) -> Result<(), 
         json!({
             "archived": false,
             "limit": 1,
-            "sortKey": "updated_at",
+            "sortKey": "recency_at",
             "sortDirection": "desc",
             "sourceKinds": INTERACTIVE_SOURCE_KINDS,
         }),
@@ -1315,7 +1243,10 @@ fn parse_summary(thread: &Value) -> Result<SessionSummary, SessionFailure> {
         model_provider: string_value(thread, "modelProvider"),
         source: source_label(thread.get("source")),
         created_at: optional_i64(thread, "createdAt"),
-        updated_at: optional_i64(thread, "updatedAt"),
+        updated_at: thread
+            .get("recencyAt")
+            .and_then(Value::as_i64)
+            .unwrap_or_else(|| optional_i64(thread, "updatedAt")),
     })
 }
 
@@ -1585,26 +1516,6 @@ fn epoch_seconds() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
-}
-
-fn epoch_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
-#[cfg(not(windows))]
-fn process_started_at_epoch_millis(_child: &Child) -> Option<u64> {
-    None
-}
-
-#[cfg(windows)]
-fn process_started_at_epoch_millis(child: &Child) -> Option<u64> {
-    let file_time = process_creation_timestamp(child)? as u64;
-    file_time
-        .checked_div(10_000)
-        .and_then(|milliseconds| milliseconds.checked_sub(11_644_473_600_000))
 }
 
 #[cfg(not(windows))]

@@ -107,7 +107,8 @@ select {
 }
 
 .nav-item:hover,
-.nav-item[aria-current="page"] {
+.nav-item[aria-current="page"],
+.nav-item[aria-pressed="true"] {
   background: var(--surface);
   border-color: var(--border);
 }
@@ -244,14 +245,14 @@ select {
 
 .session-table-wrap {
   min-width: 0;
-  overflow-x: auto;
+  overflow-x: hidden;
   border-top: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
 }
 
 .session-table {
   width: 100%;
-  min-width: 860px;
+  min-width: 0;
   table-layout: fixed;
   border-collapse: collapse;
   font-size: 13px;
@@ -271,27 +272,27 @@ select {
 }
 
 .session-table th:nth-child(2) {
-  width: 28%;
+  width: 25%;
 }
 
 .session-table th:nth-child(3) {
-  width: 21%;
+  width: 18%;
 }
 
 .session-table th:nth-child(4) {
-  width: 15%;
+  width: 12%;
 }
 
 .session-table th:nth-child(5) {
-  width: 11%;
+  width: 10%;
 }
 
 .session-table th:nth-child(6) {
-  width: 15%;
+  width: 18%;
 }
 
 .session-table th:nth-child(7) {
-  width: 92px;
+  width: 76px;
 }
 
 .session-table td {
@@ -359,6 +360,23 @@ select {
   border: 1px solid var(--border);
   border-radius: 6px;
   font-size: 13px;
+}
+
+.session-selection-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.session-delete-targets {
+  max-height: 180px;
+  margin: 0;
+  padding: 10px 10px 10px 30px;
+  overflow-y: auto;
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
 }
 
 .session-mutation-gate {
@@ -1418,6 +1436,15 @@ select:focus-visible {
   color: var(--danger);
 }
 
+.validation-cost-notice {
+  margin: 12px 0 0;
+  padding-left: 10px;
+  color: var(--text-muted);
+  border-left: 2px solid var(--warning);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
 .validation-dialog-steps {
   display: grid;
   gap: 0;
@@ -1847,6 +1874,13 @@ select:focus-visible {
 }
 
 @media (max-width: 1020px) {
+  .session-table th:nth-child(4),
+  .session-table td:nth-child(4),
+  .session-table th:nth-child(5),
+  .session-table td:nth-child(5) {
+    display: none;
+  }
+
   .provider-list-row {
     grid-template-columns: 28px minmax(0, 1fr);
     gap: 10px;
@@ -1918,10 +1952,6 @@ select:focus-visible {
 
   .session-search {
     grid-column: 1 / -1;
-  }
-
-  .session-table {
-    min-width: 860px;
   }
 
   .session-metadata {

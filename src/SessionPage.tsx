@@ -12,7 +12,7 @@ import {
   Trash2,
 } from "lucide-react";
 
-import AppSidebar from "./AppSidebar";
+import AppSidebar, { type OpenAiSidebarAction } from "./AppSidebar";
 import {
   archiveSessions,
   asSessionFailure,
@@ -58,9 +58,11 @@ interface MutationOutcome {
 export default function SessionPage({
   active = true,
   onOpenProviders,
+  openAiAction,
 }: {
   active?: boolean;
   onOpenProviders: () => void;
+  openAiAction?: OpenAiSidebarAction;
 }) {
   const leaseId = useRef(`session-page-${createLeaseId()}`);
   const requestGeneration = useRef(0);
@@ -91,6 +93,7 @@ export default function SessionPage({
   const [mutationOutcomes, setMutationOutcomes] = useState<MutationOutcome[]>([]);
   const [mutationBusy, setMutationBusy] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<SessionDetail | null>(null);
+  const [bulkDeleteTargets, setBulkDeleteTargets] = useState<SessionSummary[]>([]);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteFailure, setDeleteFailure] = useState<string | null>(null);
   const [deleteLoadingId, setDeleteLoadingId] = useState<string | null>(null);
@@ -147,6 +150,7 @@ export default function SessionPage({
       return;
     }
 
+    listCache.current.clear();
     void checkAvailability();
     return () => {
       requestGeneration.current += 1;
@@ -167,6 +171,11 @@ export default function SessionPage({
     limit: 40,
   }), [modelProvider, project, searchTerm, tab]);
   const listQueryKey = JSON.stringify(baseQuery);
+
+  function refreshList() {
+    listCache.current.delete(listQueryKey);
+    setListRetry((current) => current + 1);
+  }
 
   useEffect(() => {
     tabRef.current = tab;
@@ -336,26 +345,12 @@ export default function SessionPage({
       : failed > 0
         ? sessionMessages.partialUnarchive(succeeded, failed)
         : sessionMessages.unarchiveComplete(succeeded));
-    const blocked = results.find((result) => result.status === "blocked");
-    if (blocked) updateMutationAvailability(blocked.messageId);
     const detailResult = detailState.kind === "loaded"
       ? byId.get(detailState.detail.id)
       : undefined;
     if (detailResult && !stateBelongsToTab(detailResult.actualState, tabRef.current)) {
       returnToList();
     }
-  }
-
-  function updateMutationAvailability(messageId: string) {
-    const status = messageId === "session.consumers_running"
-      ? "consumers_running"
-      : messageId === "session.consumer_state_unknown"
-        ? "consumer_state_unknown"
-        : "unavailable";
-    setAvailability((current) => current ? {
-      ...current,
-      mutation: { status, messageId },
-    } : current);
   }
 
   async function openDeleteConfirmation(summary: SessionSummary) {
@@ -380,13 +375,6 @@ export default function SessionPage({
     setDeleteFailure(null);
     try {
       const result = await deleteSession(deleteTarget.id);
-      if (result.status === "blocked") updateMutationAvailability(result.messageId);
-      setMutationResults({ [result.sessionId]: result });
-      setMutationOutcomes([{
-        sessionId: result.sessionId,
-        title: deleteTarget.title,
-        actualState: result.actualState,
-      }]);
       setSessions((current) => {
         const nextSessions = current.filter((session) => (
           session.id !== result.sessionId || stateBelongsToTab(result.actualState, tabRef.current)
@@ -397,6 +385,11 @@ export default function SessionPage({
       if (result.actualState === "deleted") {
         setDeleteTarget(null);
         setDetailState({ kind: "list" });
+        setSelectedIds((current) => {
+          const next = new Set(current);
+          next.delete(result.sessionId);
+          return next;
+        });
         setMutationSummary(sessionMessages.deleteOutcome(result.actualState));
       } else {
         setDeleteFailure(sessionMessages.deleteOutcome(result.actualState));
@@ -408,9 +401,54 @@ export default function SessionPage({
     }
   }
 
+  async function confirmBulkDelete() {
+    if (bulkDeleteTargets.length === 0 || deleteBusy) return;
+    setDeleteBusy(true);
+    setDeleteFailure(null);
+    const results: SessionMutationResult[] = [];
+    for (const target of bulkDeleteTargets) {
+      try {
+        results.push(await deleteSession(target.id));
+      } catch {
+        results.push({
+          sessionId: target.id,
+          status: "failed",
+          actualState: "unknown",
+          messageId: "session.request_failed",
+        });
+      }
+    }
+
+    const byId = new Map(results.map((result) => [result.sessionId, result]));
+    const titles = new Map(bulkDeleteTargets.map((target) => [target.id, target.title]));
+    setSessions((current) => {
+      const nextSessions = current.filter((session) => {
+        const result = byId.get(session.id);
+        return !result || stateBelongsToTab(result.actualState, tabRef.current);
+      });
+      listCache.current.set(listQueryKey, { sessions: nextSessions, nextCursor });
+      return nextSessions;
+    });
+    setSelectedIds(new Set(results
+      .filter((result) => stateBelongsToTab(result.actualState, tabRef.current))
+      .map((result) => result.sessionId)));
+    setMutationOutcomes(results.map((result) => ({
+      sessionId: result.sessionId,
+      title: titles.get(result.sessionId) ?? result.sessionId,
+      actualState: result.actualState,
+    })));
+    const deleted = results.filter((result) => result.actualState === "deleted").length;
+    const failed = results.length - deleted;
+    setMutationSummary(failed > 0
+      ? sessionMessages.partialDelete(deleted, failed)
+      : sessionMessages.deleteComplete(deleted));
+    setBulkDeleteTargets([]);
+    setDeleteBusy(false);
+  }
+
   if (!availability) {
     return (
-      <SessionShell onOpenProviders={onOpenProviders}>
+      <SessionShell onOpenProviders={onOpenProviders} openAiAction={openAiAction}>
         <div className="loading-state" role="status">
           <LoaderCircle className="is-spinning" size={22} aria-hidden="true" />
           <span>{sessionMessages.loading}</span>
@@ -421,7 +459,7 @@ export default function SessionPage({
 
   if (availability.status !== "available") {
     return (
-      <SessionShell onOpenProviders={onOpenProviders}>
+      <SessionShell onOpenProviders={onOpenProviders} openAiAction={openAiAction}>
         <UnavailableState availability={availability} onRetry={() => void checkAvailability()} />
       </SessionShell>
     );
@@ -434,7 +472,7 @@ export default function SessionPage({
   ) {
     const status = listFailure.category === "incompatible" ? "incompatible" : "recovery_failed";
     return (
-      <SessionShell onOpenProviders={onOpenProviders}>
+      <SessionShell onOpenProviders={onOpenProviders} openAiAction={openAiAction}>
         <UnavailableState
           availability={{
             status,
@@ -449,7 +487,7 @@ export default function SessionPage({
   }
 
   return (
-    <SessionShell onOpenProviders={onOpenProviders}>
+    <SessionShell onOpenProviders={onOpenProviders} openAiAction={openAiAction}>
       {detailState.kind === "list" ? (
         <SessionList
           tab={tab}
@@ -468,10 +506,8 @@ export default function SessionPage({
           hasQuery={Boolean(searchTerm.trim() || project || modelProvider)}
           nextCursor={nextCursor}
           onLoadMore={() => void loadMore()}
-          onRetry={() => {
-            listCache.current.delete(listQueryKey);
-            setListRetry((current) => current + 1);
-          }}
+          onRefresh={refreshList}
+          onRetry={refreshList}
           onRecover={() => void checkAvailability()}
           onOpen={(summary) => void openDetail(summary)}
           mutation={availability.mutation}
@@ -490,6 +526,12 @@ export default function SessionPage({
             tab === "active" ? "archive" : "unarchive",
           )}
           onDelete={(summary) => void openDeleteConfirmation(summary)}
+          onDeleteSelected={() => {
+            setMutationResults({});
+            setMutationSummary(null);
+            setMutationOutcomes([]);
+            setBulkDeleteTargets(sessions.filter((session) => selectedIds.has(session.id)));
+          }}
         />
       ) : (
         <SessionDetailView
@@ -513,6 +555,7 @@ export default function SessionPage({
       {deleteTarget && (
         <DeleteSessionDialog
           detail={deleteTarget}
+          targets={[deleteTarget]}
           knownDescendants={knownDescendants(deleteTarget.id, sessions)}
           busy={deleteBusy}
           failure={deleteFailure}
@@ -525,6 +568,21 @@ export default function SessionPage({
           onConfirm={() => void confirmDelete()}
         />
       )}
+      {bulkDeleteTargets.length > 0 && (
+        <DeleteSessionDialog
+          detail={null}
+          targets={bulkDeleteTargets}
+          knownDescendants={[]}
+          busy={deleteBusy}
+          failure={deleteFailure}
+          exportState="idle"
+          onCancel={() => {
+            setBulkDeleteTargets([]);
+            setDeleteFailure(null);
+          }}
+          onConfirm={() => void confirmBulkDelete()}
+        />
+      )}
     </SessionShell>
   );
 }
@@ -532,9 +590,11 @@ export default function SessionPage({
 function SessionShell({
   children,
   onOpenProviders,
+  openAiAction,
 }: {
   children: React.ReactNode;
   onOpenProviders: () => void;
+  openAiAction?: OpenAiSidebarAction;
 }) {
   return (
     <div className="app-shell">
@@ -542,6 +602,7 @@ function SessionShell({
         activeView="sessions"
         onOpenProviders={onOpenProviders}
         onOpenSessions={() => undefined}
+        openAiAction={openAiAction}
       />
       <main className="main-content session-main">{children}</main>
     </div>
@@ -565,6 +626,7 @@ function SessionList({
   hasQuery,
   nextCursor,
   onLoadMore,
+  onRefresh,
   onRetry,
   onRecover,
   onOpen,
@@ -579,6 +641,7 @@ function SessionList({
   onToggleAll,
   onMutate,
   onDelete,
+  onDeleteSelected,
 }: {
   tab: SessionTab;
   setTab: (tab: SessionTab) => void;
@@ -596,6 +659,7 @@ function SessionList({
   hasQuery: boolean;
   nextCursor: string | null;
   onLoadMore: () => void;
+  onRefresh: () => void;
   onRetry: () => void;
   onRecover: () => void;
   onOpen: (summary: SessionSummary) => void;
@@ -610,16 +674,31 @@ function SessionList({
   onToggleAll: () => void;
   onMutate: (sessionIds: string[]) => void;
   onDelete: (summary: SessionSummary) => void;
+  onDeleteSelected: () => void;
 }) {
   const mutationsAllowed = mutation.status === "allowed";
   const actionLabel = tab === "active" ? sessionMessages.archive : sessionMessages.unarchive;
-  const mutationDisabledReason = mutation.status === "allowed"
+  const mutationDisabledReason = mutationsAllowed
     ? undefined
-    : sessionMessages.mutationBlocked[mutation.status];
+    : sessionMessages.mutationBlocked.unavailable;
   return (
     <>
       <header className="page-header">
         <h1>{sessionMessages.pageTitle}</h1>
+        <button
+          className="icon-button"
+          type="button"
+          aria-label={sessionMessages.refreshList}
+          title={sessionMessages.refreshList}
+          onClick={onRefresh}
+          disabled={listState === "initial_loading" || listState === "loading_more"}
+        >
+          <RefreshCw
+            className={listState === "initial_loading" ? "is-spinning" : undefined}
+            size={17}
+            aria-hidden="true"
+          />
+        </button>
       </header>
       <div className="session-tabs" role="tablist" aria-label="会话范围">
         <button type="button" role="tab" aria-selected={tab === "active"} onClick={() => setTab("active")}>
@@ -673,18 +752,29 @@ function SessionList({
       {selectedIds.size > 0 && (
         <div className="session-selection-toolbar" aria-label="已选会话操作">
           <span>已选择 {selectedIds.size} 个会话</span>
-          <button
-            className="command-button compact"
-            type="button"
-            aria-label={tab === "active" ? sessionMessages.archiveSelected : sessionMessages.unarchiveSelected}
-            onClick={() => onMutate([...selectedIds])}
-            disabled={!mutationsAllowed || mutationBusy}
-          >
-            {tab === "active"
-              ? <ArchiveIcon size={16} aria-hidden="true" />
-              : <ArchiveRestore size={16} aria-hidden="true" />}
-            {tab === "active" ? sessionMessages.archiveSelected : sessionMessages.unarchiveSelected}
-          </button>
+          <div className="session-selection-actions">
+            <button
+              className="command-button compact"
+              type="button"
+              aria-label={tab === "active" ? sessionMessages.archiveSelected : sessionMessages.unarchiveSelected}
+              onClick={() => onMutate([...selectedIds])}
+              disabled={!mutationsAllowed || mutationBusy}
+            >
+              {tab === "active"
+                ? <ArchiveIcon size={16} aria-hidden="true" />
+                : <ArchiveRestore size={16} aria-hidden="true" />}
+              {tab === "active" ? sessionMessages.archiveSelected : sessionMessages.unarchiveSelected}
+            </button>
+            <button
+              className="danger-button compact"
+              type="button"
+              onClick={onDeleteSelected}
+              disabled={!mutationsAllowed || mutationBusy}
+            >
+              <Trash2 size={16} aria-hidden="true" />
+              {sessionMessages.deleteSelected}
+            </button>
+          </div>
         </div>
       )}
       {mutationSummary && <p className="session-mutation-summary" role="status">{mutationSummary}</p>}
@@ -858,9 +948,9 @@ function SessionDetailView({
 }) {
   const summary = state.kind === "loaded" ? state.detail : state.summary;
   const mutationsAllowed = mutation.status === "allowed";
-  const mutationDisabledReason = mutation.status === "allowed"
+  const mutationDisabledReason = mutationsAllowed
     ? undefined
-    : sessionMessages.mutationBlocked[mutation.status];
+    : sessionMessages.mutationBlocked.unavailable;
   return (
     <>
       <header className="page-header session-detail-header">
@@ -946,11 +1036,6 @@ function SessionDetailView({
 
 function MutationGate({ mutation }: { mutation: SessionMutationAvailability }) {
   if (mutation.status === "allowed") return null;
-  const message = mutation.status === "consumers_running"
-    ? sessionMessages.mutationBlocked.consumers_running
-    : mutation.status === "consumer_state_unknown"
-      ? sessionMessages.mutationBlocked.consumer_state_unknown
-      : sessionMessages.mutationBlocked.unavailable;
   return (
     <p
       className="session-mutation-gate"
@@ -958,7 +1043,7 @@ function MutationGate({ mutation }: { mutation: SessionMutationAvailability }) {
       aria-label={sessionMessages.mutationBlockedLabel}
     >
       <ShieldAlert size={17} aria-hidden="true" />
-      {message}
+      {sessionMessages.mutationBlocked.unavailable}
     </p>
   );
 }
@@ -978,6 +1063,7 @@ function MutationOutcomeList({ outcomes }: { outcomes: MutationOutcome[] }) {
 
 function DeleteSessionDialog({
   detail,
+  targets,
   knownDescendants: descendants,
   busy,
   failure,
@@ -986,13 +1072,14 @@ function DeleteSessionDialog({
   onExport,
   onConfirm,
 }: {
-  detail: SessionDetail;
+  detail: SessionDetail | null;
+  targets: SessionSummary[];
   knownDescendants: SessionSummary[];
   busy: boolean;
   failure: string | null;
   exportState: "idle" | "exporting" | "saved" | "error";
   onCancel: () => void;
-  onExport: () => void;
+  onExport?: () => void;
   onConfirm: () => void;
 }) {
   const dialogRef = useRef<HTMLElement>(null);
@@ -1037,6 +1124,9 @@ function DeleteSessionDialog({
     };
   }, []);
 
+  const isBulk = targets.length > 1 || detail === null;
+  const title = isBulk ? sessionMessages.deletionSelectedTitle : sessionMessages.deletionTitle;
+
   return (
     <div className="dialog-backdrop">
       <section
@@ -1050,13 +1140,19 @@ function DeleteSessionDialog({
         <div className="dialog-heading">
           <Trash2 size={22} aria-hidden="true" />
           <div>
-            <h2 id="session-delete-title">{sessionMessages.deletionTitle}</h2>
-            <p>{detail.title}</p>
+            <h2 id="session-delete-title">{title}</h2>
+            <p>{isBulk ? sessionMessages.deletionSelectedCount(targets.length) : detail?.title}</p>
           </div>
         </div>
-        <dl className="session-delete-target">
-          <div><dt>{sessionMessages.projectColumn}</dt><dd>{detail.project}</dd></div>
-        </dl>
+        {detail ? (
+          <dl className="session-delete-target">
+            <div><dt>{sessionMessages.projectColumn}</dt><dd>{detail.project}</dd></div>
+          </dl>
+        ) : (
+          <ul className="session-delete-targets">
+            {targets.map((target) => <li key={target.id}>{target.title}</li>)}
+          </ul>
+        )}
         <p className="session-delete-warning">{sessionMessages.deletionIrreversible}</p>
         {descendants.length > 0 && (
           <div className="session-delete-descendants">
@@ -1074,22 +1170,24 @@ function DeleteSessionDialog({
           <button ref={cancelRef} className="secondary-button" type="button" onClick={onCancel} disabled={busy}>
             {sessionMessages.cancelDelete}
           </button>
-          <button
-            className="secondary-button"
-            type="button"
-            onClick={onExport}
-            disabled={busy || exportState === "exporting"}
-          >
-            {exportState === "exporting"
-              ? <LoaderCircle className="is-spinning" size={16} aria-hidden="true" />
-              : <Download size={16} aria-hidden="true" />}
-            {sessionMessages.exportBeforeDelete}
-          </button>
+          {detail && onExport && (
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={onExport}
+              disabled={busy || exportState === "exporting"}
+            >
+              {exportState === "exporting"
+                ? <LoaderCircle className="is-spinning" size={16} aria-hidden="true" />
+                : <Download size={16} aria-hidden="true" />}
+              {sessionMessages.exportBeforeDelete}
+            </button>
+          )}
           <button className="danger-button" type="button" onClick={onConfirm} disabled={busy}>
             {busy
               ? <LoaderCircle className="is-spinning" size={16} aria-hidden="true" />
               : <Trash2 size={16} aria-hidden="true" />}
-            {sessionMessages.delete}
+            {isBulk ? sessionMessages.confirmDeleteSelected(targets.length) : sessionMessages.delete}
           </button>
         </div>
       </section>

@@ -5,7 +5,7 @@ import {
   ShieldAlert,
 } from "lucide-react";
 
-import AppSidebar from "./AppSidebar";
+import AppSidebar, { type OpenAiSidebarAction } from "./AppSidebar";
 import ProviderPage from "./ProviderPage";
 import SessionPage from "./SessionPage";
 import {
@@ -28,6 +28,7 @@ export default function App() {
   const [state, setState] = useState<ViewState>({ kind: "loading" });
   const [page, setPage] = useState<"providers" | "sessions">("providers");
   const [sessionVisited, setSessionVisited] = useState(false);
+  const [openAiAction, setOpenAiAction] = useState<OpenAiSidebarAction>();
 
   const load = useCallback(async (refresh: boolean) => {
     try {
@@ -59,16 +60,20 @@ export default function App() {
   return (
     <>
       <div className="app-view" hidden={page !== "providers"}>
-        <ProviderPage onOpenSessions={() => {
-          setSessionVisited(true);
-          setPage("sessions");
-        }} />
+        <ProviderPage
+          onOpenAiActionChange={setOpenAiAction}
+          onOpenSessions={() => {
+            setSessionVisited(true);
+            setPage("sessions");
+          }}
+        />
       </div>
       {sessionVisited && (
         <div className="app-view" hidden={page !== "sessions"}>
           <SessionPage
             active={page === "sessions"}
             onOpenProviders={() => setPage("providers")}
+            openAiAction={openAiAction}
           />
         </div>
       )}

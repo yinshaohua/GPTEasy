@@ -1,10 +1,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
-use gpteasy_lib::consumer::{ConsumerScan, ConsumerScanner, ConsumerStatus};
 use gpteasy_lib::session::{
     SessionApplication, SessionAvailabilityStatus, SessionEntryKind, SessionFailureCategory,
     SessionMutationAvailabilityStatus, SessionMutationResultStatus, SessionQuery,
@@ -44,6 +43,7 @@ async fn public_session_interface_uses_the_app_server_contract_for_read_only_his
     assert_eq!(page.sessions.len(), 1);
     assert_eq!(page.sessions[0].title, "登录修复");
     assert_eq!(page.sessions[0].model_provider, "history-provider");
+    assert_eq!(page.sessions[0].updated_at, 1_786_800_300);
     assert_eq!(page.next_cursor.as_deref(), Some("cursor-2"));
 
     application
@@ -88,7 +88,7 @@ async fn public_session_interface_uses_the_app_server_contract_for_read_only_his
     assert!(log.contains(r#""method":"initialize""#));
     assert!(log.contains(r#""method":"initialized""#));
     assert!(log.contains(r#""method":"thread/list""#));
-    assert!(log.contains(r#""sortKey":"updated_at""#));
+    assert!(log.contains(r#""sortKey":"recency_at""#));
     assert!(log.contains(r#""sortDirection":"desc""#));
     assert!(log.contains(r#""sourceKinds":["cli","vscode","appServer"]"#));
     assert!(log.contains(r#""searchTerm":"登录""#));
@@ -441,18 +441,16 @@ async fn returning_during_idle_grace_reuses_the_owned_app_server() {
 }
 
 #[tokio::test]
-async fn archive_rechecks_consumers_and_blocks_when_the_page_snapshot_is_stale() {
+async fn official_session_mutations_do_not_require_consumer_preconditions() {
     let harness = AppServerHarness::new();
     let state_root = TempDir::new().expect("state root");
     let store = StateStore::new(StatePaths::from_root(state_root.path()));
     assert!(store.bootstrap().is_ready());
-    let scanner = Arc::new(MutableConsumers::new(stopped_consumers()));
-    let application = SessionApplication::with_program_and_consumer_scanner_for_harness(
+    let application = SessionApplication::with_program_for_harness(
         store,
         harness.program(),
         vec!["--fixture-log".into(), harness.log().as_os_str().to_owned()],
         Duration::from_millis(20),
-        scanner.clone(),
     );
 
     let availability = application.enter("mutation-lease").await;
@@ -460,17 +458,21 @@ async fn archive_rechecks_consumers_and_blocks_when_the_page_snapshot_is_stale()
         availability.mutation.status,
         SessionMutationAvailabilityStatus::Allowed,
     );
-    scanner.set(running_cli());
+    let archived = application.archive(vec!["thread-1".to_owned()]).await;
+    let deleted = application.delete("thread-2").await;
 
-    let results = application.archive(vec!["thread-1".to_owned()]).await;
-
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].status, SessionMutationResultStatus::Blocked);
-    assert_eq!(results[0].message_id, "session.consumers_running");
+    assert_eq!(archived.len(), 1);
+    assert_eq!(archived[0].status, SessionMutationResultStatus::Succeeded);
+    assert_eq!(archived[0].message_id, "session.archived");
+    assert_eq!(deleted.status, SessionMutationResultStatus::Succeeded);
+    assert_eq!(deleted.message_id, "session.deleted");
     application.shutdown_now().await;
     let log = fs::read_to_string(harness.log()).expect("read fixture log");
-    assert!(!log.lines().any(|line| {
+    assert!(log.lines().any(|line| {
         line.contains(r#""method":"thread/archive""#) && line.contains(r#""threadId":"thread-1""#)
+    }));
+    assert!(log.lines().any(|line| {
+        line.contains(r#""method":"thread/delete""#) && line.contains(r#""threadId":"thread-2""#)
     }));
 }
 
@@ -480,7 +482,7 @@ async fn batch_archive_returns_each_official_result_without_rolling_back_success
     let state_root = TempDir::new().expect("state root");
     let store = StateStore::new(StatePaths::from_root(state_root.path()));
     assert!(store.bootstrap().is_ready());
-    let application = SessionApplication::with_program_and_consumer_scanner_for_harness(
+    let application = SessionApplication::with_program_for_harness(
         store,
         harness.program(),
         vec![
@@ -490,7 +492,6 @@ async fn batch_archive_returns_each_official_result_without_rolling_back_success
             "thread-2".into(),
         ],
         Duration::from_millis(20),
-        Arc::new(MutableConsumers::new(stopped_consumers())),
     );
     assert_eq!(
         application.enter("batch-lease").await.status,
@@ -531,7 +532,7 @@ async fn lost_archive_response_reconnects_and_refreshes_state_without_retrying_t
     let state_root = TempDir::new().expect("state root");
     let store = StateStore::new(StatePaths::from_root(state_root.path()));
     assert!(store.bootstrap().is_ready());
-    let application = SessionApplication::with_program_and_consumer_scanner_for_harness(
+    let application = SessionApplication::with_program_for_harness(
         store,
         harness.program(),
         vec![
@@ -541,7 +542,6 @@ async fn lost_archive_response_reconnects_and_refreshes_state_without_retrying_t
             archived_marker.as_os_str().to_owned(),
         ],
         Duration::from_millis(20),
-        Arc::new(MutableConsumers::new(stopped_consumers())),
     );
     assert_eq!(
         application.enter("lost-response-lease").await.status,
@@ -581,7 +581,7 @@ async fn lost_unarchive_response_reconnects_and_refreshes_state_without_retrying
     let state_root = TempDir::new().expect("state root");
     let store = StateStore::new(StatePaths::from_root(state_root.path()));
     assert!(store.bootstrap().is_ready());
-    let application = SessionApplication::with_program_and_consumer_scanner_for_harness(
+    let application = SessionApplication::with_program_for_harness(
         store,
         harness.program(),
         vec![
@@ -591,7 +591,6 @@ async fn lost_unarchive_response_reconnects_and_refreshes_state_without_retrying
             active_marker.as_os_str().to_owned(),
         ],
         Duration::from_millis(20),
-        Arc::new(MutableConsumers::new(stopped_consumers())),
     );
     assert_eq!(
         application.enter("lost-unarchive-lease").await.status,
@@ -627,7 +626,7 @@ async fn lost_delete_response_reconnects_and_refreshes_state_without_retrying_th
     let state_root = TempDir::new().expect("state root");
     let store = StateStore::new(StatePaths::from_root(state_root.path()));
     assert!(store.bootstrap().is_ready());
-    let application = SessionApplication::with_program_and_consumer_scanner_for_harness(
+    let application = SessionApplication::with_program_for_harness(
         store,
         harness.program(),
         vec![
@@ -637,7 +636,6 @@ async fn lost_delete_response_reconnects_and_refreshes_state_without_retrying_th
             deleted_marker.as_os_str().to_owned(),
         ],
         Duration::from_millis(20),
-        Arc::new(MutableConsumers::new(stopped_consumers())),
     );
     assert_eq!(
         application.enter("lost-delete-lease").await.status,
@@ -667,48 +665,16 @@ async fn lost_delete_response_reconnects_and_refreshes_state_without_retrying_th
 }
 
 #[tokio::test]
-async fn unknown_consumers_keep_history_readable_but_block_every_mutation() {
-    let harness = AppServerHarness::new();
-    let state_root = TempDir::new().expect("state root");
-    let store = StateStore::new(StatePaths::from_root(state_root.path()));
-    assert!(store.bootstrap().is_ready());
-    let application = SessionApplication::with_program_and_consumer_scanner_for_harness(
-        store,
-        harness.program(),
-        vec!["--fixture-log".into(), harness.log().as_os_str().to_owned()],
-        Duration::from_millis(20),
-        Arc::new(MutableConsumers::new(unknown_consumers())),
-    );
-
-    let availability = application.enter("unknown-consumers-lease").await;
-    let page = application
-        .list(default_query())
-        .await
-        .expect("history stays readable");
-    let result = application.delete("thread-1").await;
-
-    assert_eq!(availability.status, SessionAvailabilityStatus::Available);
-    assert_eq!(
-        availability.mutation.status,
-        SessionMutationAvailabilityStatus::ConsumerStateUnknown,
-    );
-    assert_eq!(page.sessions[0].id, "thread-1");
-    assert_eq!(result.status, SessionMutationResultStatus::Blocked);
-    assert_eq!(result.message_id, "session.consumer_state_unknown");
-}
-
-#[tokio::test]
 async fn unarchive_and_permanent_delete_use_their_distinct_official_methods() {
     let harness = AppServerHarness::new();
     let state_root = TempDir::new().expect("state root");
     let store = StateStore::new(StatePaths::from_root(state_root.path()));
     assert!(store.bootstrap().is_ready());
-    let application = SessionApplication::with_program_and_consumer_scanner_for_harness(
+    let application = SessionApplication::with_program_for_harness(
         store,
         harness.program(),
         vec!["--fixture-log".into(), harness.log().as_os_str().to_owned()],
         Duration::from_millis(20),
-        Arc::new(MutableConsumers::new(stopped_consumers())),
     );
     assert_eq!(
         application.enter("distinct-methods-lease").await.status,
@@ -760,47 +726,6 @@ fn default_query() -> SessionQuery {
         cursor: None,
         limit: 40,
     }
-}
-
-#[derive(Clone)]
-struct MutableConsumers(Arc<Mutex<ConsumerScan>>);
-
-impl MutableConsumers {
-    fn new(scan: ConsumerScan) -> Self {
-        Self(Arc::new(Mutex::new(scan)))
-    }
-
-    fn set(&self, scan: ConsumerScan) {
-        *self.0.lock().expect("lock consumer fixture") = scan;
-    }
-}
-
-impl ConsumerScanner for MutableConsumers {
-    fn scan(&self) -> ConsumerScan {
-        self.0.lock().expect("lock consumer fixture").clone()
-    }
-}
-
-fn stopped_consumers() -> ConsumerScan {
-    ConsumerScan {
-        desktop: ConsumerStatus::Stopped,
-        cli: ConsumerStatus::Stopped,
-        identities: Vec::new(),
-        desktop_roots: Vec::new(),
-    }
-}
-
-fn running_cli() -> ConsumerScan {
-    ConsumerScan {
-        desktop: ConsumerStatus::Stopped,
-        cli: ConsumerStatus::Running,
-        identities: Vec::new(),
-        desktop_roots: Vec::new(),
-    }
-}
-
-fn unknown_consumers() -> ConsumerScan {
-    ConsumerScan::unknown()
 }
 
 struct AppServerHarness {

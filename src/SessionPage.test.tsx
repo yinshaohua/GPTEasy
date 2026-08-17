@@ -111,7 +111,7 @@ describe("会话管理页面", () => {
     });
   });
 
-  it("页面暂时离开或切换页签后复用已读取的列表缓存", async () => {
+  it("切换页签复用缓存，重新进入会话管理时刷新当前列表", async () => {
     const { rerender } = render(<SessionPage active onOpenProviders={() => undefined} />);
 
     expect(await screen.findByRole("button", { name: "打开会话：登录修复" })).toBeInTheDocument();
@@ -129,7 +129,17 @@ describe("会话管理页面", () => {
     await waitFor(() => expect(sessionContract.leaveSessionManagement).toHaveBeenCalledTimes(1));
     rerender(<SessionPage active onOpenProviders={() => undefined} />);
     await waitFor(() => expect(sessionContract.enterSessionManagement).toHaveBeenCalledTimes(2));
-    expect(sessionContract.listSessions).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(sessionContract.listSessions).toHaveBeenCalledTimes(3));
+  });
+
+  it("列表顶部可以主动刷新并清除上一次操作结果", async () => {
+    render(<SessionPage onOpenProviders={() => undefined} />);
+
+    await screen.findByRole("button", { name: "打开会话：登录修复" });
+    expect(sessionContract.listSessions).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "刷新会话列表" }));
+
+    await waitFor(() => expect(sessionContract.listSessions).toHaveBeenCalledTimes(2));
   });
 
   it("筛选变化会取消仍在途的旧列表请求", async () => {
@@ -229,32 +239,30 @@ describe("会话管理页面", () => {
     });
   });
 
-  it("消费者运行时保持列表和详情可读，但禁用全部会话修改", async () => {
+  it("会话服务明确允许修改时启用列表和详情操作", async () => {
     sessionContract.enterSessionManagement.mockResolvedValue({
       status: "available",
       messageId: "session.available",
       codexVersion: "codex-cli 0.147.0",
       mutation: {
-        status: "consumers_running",
-        messageId: "session.consumers_running",
+        status: "allowed",
+        messageId: "session.mutations_allowed",
       },
     });
 
     render(<SessionPage onOpenProviders={() => undefined} />);
 
     expect(await screen.findByRole("button", { name: "打开会话：登录修复" })).toBeInTheDocument();
-    expect(screen.getByRole("status", { name: "会话修改已禁用" })).toHaveTextContent(
-      "检测到外部 Codex 消费者正在运行",
-    );
-    expect(screen.getByRole("checkbox", { name: "选择会话：登录修复" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "归档会话：登录修复" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "永久删除会话：登录修复" })).toBeDisabled();
+    expect(screen.queryByRole("status", { name: "会话修改已禁用" })).not.toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "选择会话：登录修复" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "归档会话：登录修复" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "永久删除会话：登录修复" })).toBeEnabled();
 
     fireEvent.click(screen.getByRole("button", { name: "打开会话：登录修复" }));
     expect(await screen.findByRole("heading", { name: "登录修复" })).toBeInTheDocument();
     expect(screen.getByText("请修复登录")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "归档会话" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "永久删除会话" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "归档会话" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "永久删除会话" })).toBeEnabled();
   });
 
   it("批量归档逐项保留部分成功，失败项可单独重试且不自动重发", async () => {
@@ -280,7 +288,6 @@ describe("会话管理页面", () => {
 
     fireEvent.click(await screen.findByRole("checkbox", { name: "选择会话：登录修复" }));
     fireEvent.click(screen.getByRole("checkbox", { name: "选择会话：发布检查" }));
-    expect(screen.queryByRole("button", { name: /永久删除所选/ })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "归档所选会话" }));
 
     await waitFor(() => expect(sessionContract.archiveSessions).toHaveBeenCalledWith([
@@ -295,6 +302,83 @@ describe("会话管理页面", () => {
     expect(within(outcomeList).getByText("登录修复：已归档")).toBeInTheDocument();
     expect(within(outcomeList).getByText("发布检查：仍在会话")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "重试归档：发布检查" })).toBeInTheDocument();
+  });
+
+  it("行内归档直接执行且不进入多选状态", async () => {
+    render(<SessionPage onOpenProviders={() => undefined} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "归档会话：登录修复" }));
+
+    await waitFor(() => expect(sessionContract.archiveSessions).toHaveBeenCalledWith(["thread-1"]));
+    expect(screen.queryByLabelText("已选会话操作")).not.toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "选择会话：登录修复" })).not.toBeChecked();
+  });
+
+  it("多选会话后可以确认并逐项永久删除", async () => {
+    sessionContract.listSessions.mockResolvedValue({
+      sessions: [firstSession, secondSession],
+      nextCursor: null,
+    });
+    sessionContract.deleteSession.mockImplementation((sessionId: string) => Promise.resolve({
+      sessionId,
+      status: "succeeded",
+      actualState: "deleted",
+      messageId: "session.deleted",
+    }));
+    render(<SessionPage onOpenProviders={() => undefined} />);
+
+    fireEvent.click(await screen.findByRole("checkbox", { name: "选择会话：登录修复" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "选择会话：发布检查" }));
+    fireEvent.click(screen.getByRole("button", { name: "永久删除所选会话" }));
+
+    const dialog = screen.getByRole("dialog", { name: "永久删除所选会话" });
+    expect(dialog).toHaveTextContent("登录修复");
+    expect(dialog).toHaveTextContent("发布检查");
+    expect(dialog).toHaveTextContent("不可撤销");
+    expect(sessionContract.deleteSession).not.toHaveBeenCalled();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "永久删除 2 个会话" }));
+    await waitFor(() => expect(sessionContract.deleteSession.mock.calls).toEqual([
+      ["thread-1"],
+      ["thread-2"],
+    ]));
+    expect(screen.queryByRole("button", { name: "打开会话：登录修复" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "打开会话：发布检查" })).not.toBeInTheDocument();
+  });
+
+  it("批量永久删除部分失败时保留失败会话和选择状态", async () => {
+    sessionContract.listSessions.mockResolvedValue({
+      sessions: [firstSession, secondSession],
+      nextCursor: null,
+    });
+    sessionContract.deleteSession
+      .mockResolvedValueOnce({
+        sessionId: "thread-1",
+        status: "succeeded",
+        actualState: "deleted",
+        messageId: "session.deleted",
+      })
+      .mockResolvedValueOnce({
+        sessionId: "thread-2",
+        status: "failed",
+        actualState: "active",
+        messageId: "session.request_failed",
+      });
+    render(<SessionPage onOpenProviders={() => undefined} />);
+
+    fireEvent.click(await screen.findByRole("checkbox", { name: "选择会话：登录修复" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "选择会话：发布检查" }));
+    fireEvent.click(screen.getByRole("button", { name: "永久删除所选会话" }));
+    fireEvent.click(within(screen.getByRole("dialog", { name: "永久删除所选会话" }))
+      .getByRole("button", { name: "永久删除 2 个会话" }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent("已永久删除 1 个，1 个未完成");
+    expect(screen.queryByRole("button", { name: "打开会话：登录修复" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "打开会话：发布检查" })).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "选择会话：发布检查" })).toBeChecked();
+    const outcomes = screen.getByRole("list", { name: "逐项操作结果" });
+    expect(within(outcomes).getByText("登录修复：已删除")).toBeInTheDocument();
+    expect(within(outcomes).getByText("发布检查：仍在会话")).toBeInTheDocument();
   });
 
   it("永久删除仅确认单项，展示影响说明并允许可选导出", async () => {
@@ -334,6 +418,26 @@ describe("会话管理页面", () => {
     expect(screen.queryByRole("dialog", { name: "永久删除会话" })).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "会话管理" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "打开会话：登录修复" })).not.toBeInTheDocument();
+  });
+
+  it("永久删除未完成时不把归档操作错误显示为重试归档", async () => {
+    sessionContract.deleteSession.mockResolvedValue({
+      sessionId: "thread-1",
+      status: "failed",
+      actualState: "active",
+      messageId: "session.request_failed",
+    });
+    render(<SessionPage onOpenProviders={() => undefined} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "永久删除会话：登录修复" }));
+    const dialog = await screen.findByRole("dialog", { name: "永久删除会话" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "永久删除会话" }));
+    expect(await within(dialog).findByText(/会话仍存在/)).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+
+    expect(screen.getByRole("button", { name: "归档会话：登录修复" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "重试归档：登录修复" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("list", { name: "逐项操作结果" })).not.toBeInTheDocument();
   });
 
   it("已归档页支持多选取消归档", async () => {

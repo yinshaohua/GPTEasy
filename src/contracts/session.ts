@@ -18,8 +18,6 @@ export interface SessionAvailability {
 
 export type SessionMutationAvailabilityStatus =
   | "allowed"
-  | "consumers_running"
-  | "consumer_state_unknown"
   | "unavailable";
 
 export interface SessionMutationAvailability {
@@ -28,7 +26,7 @@ export interface SessionMutationAvailability {
 }
 
 export type SessionActualState = "active" | "archived" | "deleted" | "unknown";
-export type SessionMutationResultStatus = "succeeded" | "failed" | "blocked";
+export type SessionMutationResultStatus = "succeeded" | "failed";
 
 export interface SessionMutationResult {
   sessionId: string;

@@ -46,9 +46,34 @@ describe("供应商创建", () => {
   });
 
   it("完整验证后仍需用户明确保存，且保存边界不接收 API Key", async () => {
+    const savedProvider = {
+      id: "68bf9ee2-3ba5-4517-b47e-12a11e038de4",
+      name: "Example Provider",
+      baseUrl: "https://provider.example/api/v1",
+      defaultModel: "model-b",
+      verifiedAtEpochSeconds: 1_786_140_000,
+      isCurrent: false,
+    };
+    const environment = {
+      state: "external",
+      mode: null,
+      messageId: "environment.external",
+      revision: "first-provider-revision",
+      requiresTakeoverConfirmation: true,
+      takeoverAvailable: true,
+      impacts: [],
+      currentProvider: null,
+      restoreAvailability: "no_backup",
+      restorePreview: null,
+      loginStatus: "logged_in",
+      pendingRestart: false,
+      requiresConsumerConfirmation: false,
+      consumers: { desktop: "stopped", cli: "stopped" },
+    };
     invoke.mockImplementation((command: string) => {
       if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
       if (command === "list_providers") return Promise.resolve([]);
+      if (command === "get_environment_snapshot") return Promise.resolve(environment);
       if (command === "discover_provider_models") {
         return Promise.resolve({
           normalizedBaseUrl: "https://provider.example/api/v1",
@@ -65,12 +90,16 @@ describe("供应商创建", () => {
         });
       }
       if (command === "save_verified_provider") {
+        return Promise.resolve(savedProvider);
+      }
+      if (command === "apply_environment_provider") {
         return Promise.resolve({
-          id: "68bf9ee2-3ba5-4517-b47e-12a11e038de4",
-          name: "Example Provider",
-          baseUrl: "https://provider.example/api/v1",
-          defaultModel: "model-b",
-          verifiedAtEpochSeconds: 1_786_140_000,
+          ...environment,
+          state: "managed",
+          mode: "provider",
+          revision: "first-provider-applied",
+          requiresTakeoverConfirmation: false,
+          currentProvider: { ...savedProvider, isCurrent: true },
         });
       }
       return Promise.resolve(undefined);
@@ -104,6 +133,15 @@ describe("供应商创建", () => {
     const saveCall = invoke.mock.calls.find(([command]) => command === "save_verified_provider");
     expect(saveCall?.[1]).toEqual({ validationId: "validation-1", name: "  Example Provider  " });
     expect(JSON.stringify(saveCall?.[1])).not.toContain("secret-provider-key");
+    const applyDialog = screen.getByRole("dialog", { name: "应用第一个供应商？" });
+    expect(applyDialog).toHaveTextContent("是否把“Example Provider”应用到当前 Codex 中？");
+    expect(invoke.mock.calls.some(([command]) => command === "apply_environment_provider")).toBe(false);
+
+    fireEvent.click(within(applyDialog).getByRole("button", { name: "应用" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("apply_environment_provider", {
+      providerId: savedProvider.id,
+      expectedRevision: environment.revision,
+    }));
   }, 10_000);
 
   it("候选地址手动验证不保存，从保存发起验证则在采用后自动保存", async () => {
@@ -172,7 +210,9 @@ describe("供应商创建", () => {
     }));
     expect(screen.getByLabelText("服务地址")).toHaveValue("https://provider.example/api");
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
-    expect(screen.getByRole("dialog", { name: "需要验证供应商" })).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "需要验证供应商" })).toHaveTextContent(
+      "验证会实际调用所选模型并产生少量费用，请确保供应商账户有可用余额。",
+    );
     expect(invoke.mock.calls.some(([command]) => command === "save_verified_provider")).toBe(false);
     fireEvent.click(screen.getByRole("button", { name: "继续编辑" }));
 
@@ -409,6 +449,9 @@ describe("逐项供应商验证弹窗", () => {
     fireEvent.click(screen.getByRole("button", { name: "验证供应商" }));
 
     const dialog = screen.getByRole("dialog", { name: "供应商验证" });
+    expect(dialog).toHaveTextContent(
+      "验证会实际调用所选模型并产生少量费用，请确保供应商账户有可用余额。",
+    );
     expect(dialog).toHaveTextContent("模型确认");
     expect(dialog).toHaveTextContent("Responses API 流式响应");
     expect(dialog).toHaveTextContent("工具调用闭环");
@@ -442,6 +485,44 @@ describe("逐项供应商验证弹窗", () => {
     fireEvent.click(screen.getByRole("button", { name: "返回修改" }));
     expect(screen.queryByRole("dialog", { name: "供应商验证" })).not.toBeInTheDocument();
   }, 10_000);
+
+  it("已保存供应商详情可以直接重新验证并复用已保存凭据", async () => {
+    const provider = {
+      id: "68bf9ee2-3ba5-4517-b47e-12a11e038de4",
+      name: "Atlas",
+      baseUrl: "https://atlas.example/v1",
+      defaultModel: "model-a",
+      verifiedAtEpochSeconds: 1_786_140_000,
+      isCurrent: false,
+    };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([provider]);
+      if (command === "revalidate_provider") {
+        return Promise.resolve({
+          provider: { ...provider, verifiedAtEpochSeconds: 1_786_140_900 },
+          validationReceipt: null,
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "修改 Atlas" }));
+
+    const revalidate = screen.getByRole("button", { name: "重新验证" });
+    expect(revalidate).toBeEnabled();
+    expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
+    fireEvent.click(revalidate);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("revalidate_provider", {
+        requestId: expect.any(String),
+        providerId: provider.id,
+      });
+    });
+    expect(await screen.findByText("验证通过")).toBeInTheDocument();
+  });
 
   it("目录重新验证在用户完成后更新验证证据并只显示页面内反馈", async () => {
     const notification = vi.fn();
@@ -562,7 +643,9 @@ describe("逐项供应商验证弹窗", () => {
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "验证 Atlas" }));
 
-    expect(await screen.findByText("API Key 未通过供应商认证。")).toBeInTheDocument();
+    expect(await screen.findByText(
+      "API Key 未通过供应商认证。请确认 API Key 有效且账户有可用余额；验证会实际调用模型并产生少量费用。",
+    )).toBeInTheDocument();
     expect(screen.getByRole("dialog", { name: "供应商验证" })).toHaveTextContent("验证失败");
     fireEvent.click(screen.getByRole("button", { name: "完成" }));
 
@@ -1017,7 +1100,7 @@ describe("供应商目录生命周期", () => {
     expect(screen.queryByRole("button", { name: "Atlas" })).not.toBeInTheDocument();
     expect(invoke.mock.calls.some(([command]) => command === "apply_environment_provider")).toBe(false);
 
-    fireEvent.click(screen.getByRole("button", { name: "切换到 Atlas" }));
+    fireEvent.click(screen.getByRole("button", { name: "应用 Atlas" }));
     const dialog = screen.getByRole("dialog", { name: "确认配置切换" });
     expect(dialog).toHaveTextContent("Atlas");
     expect(dialog).toHaveTextContent("运行中的 ChatGPT/Codex 桌面版或 Codex CLI 可能继续使用旧配置");
@@ -1143,10 +1226,10 @@ describe("供应商目录生命周期", () => {
     });
 
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "切换到 Concurrent Provider" }));
+    fireEvent.click(await screen.findByRole("button", { name: "应用 Concurrent Provider" }));
     fireEvent.click(screen.getByRole("button", { name: "切换" }));
 
-    const switchingButton = screen.getByRole("button", { name: "切换到 Concurrent Provider" });
+    const switchingButton = screen.getByRole("button", { name: "应用 Concurrent Provider" });
     const openAiButton = screen.getByRole("button", { name: "OpenAI 登录模式" });
     expect(switchingButton.querySelector(".is-spinning")).toBeInTheDocument();
     expect(openAiButton.querySelector(".is-spinning")).not.toBeInTheDocument();
@@ -1208,7 +1291,7 @@ describe("供应商目录生命周期", () => {
     });
 
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "切换到 Target Provider" }));
+    fireEvent.click(await screen.findByRole("button", { name: "应用 Target Provider" }));
     fireEvent.click(screen.getByRole("button", { name: "切换" }));
 
     expect(await screen.findByText("无法读取当前用户 Codex 环境。")).toBeInTheDocument();
@@ -1381,6 +1464,15 @@ describe("供应商目录生命周期", () => {
       providerId: provider.id,
       baseUrl: "https://atlas.example/next/v1",
       apiKey: null,
+    });
+    const validationCall = invoke.mock.calls.find(
+      ([command]) => command === "validate_provider_update",
+    );
+    expect(validationCall?.[1]?.input).toEqual({
+      providerId: provider.id,
+      baseUrl: "https://atlas.example/next/v1",
+      apiKey: null,
+      defaultModel: "model-b",
     });
   }, 10_000);
 
@@ -1691,7 +1783,7 @@ describe("Codex 环境接管", () => {
     });
     render(<App />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "切换到 Applied Provider" }));
+    fireEvent.click(await screen.findByRole("button", { name: "应用 Applied Provider" }));
 
     const dialog = screen.getByRole("dialog", { name: "确认配置切换" });
     expect(dialog).toHaveTextContent("将切换到“Applied Provider”");
@@ -1700,7 +1792,7 @@ describe("Codex 环境接管", () => {
     expect(dialog).not.toHaveTextContent("auth.json");
     fireEvent.click(screen.getByRole("button", { name: "取消" }));
     expect(invoke.mock.calls.some(([command]) => command === "apply_environment_provider")).toBe(false);
-    fireEvent.click(screen.getByRole("button", { name: "切换到 Applied Provider" }));
+    fireEvent.click(screen.getByRole("button", { name: "应用 Applied Provider" }));
     fireEvent.click(screen.getByRole("button", { name: "切换" }));
 
     await waitFor(() => {
@@ -1765,7 +1857,7 @@ describe("Codex 环境接管", () => {
       return Promise.resolve(undefined);
     });
     render(<App />);
-    const takeover = await screen.findByRole("button", { name: "切换到 Recovery Provider" });
+    const takeover = await screen.findByRole("button", { name: "应用 Recovery Provider" });
     expect(takeover).toBeEnabled();
     fireEvent.click(takeover);
     const dialog = screen.getByRole("dialog", { name: "确认配置切换" });
@@ -1821,7 +1913,7 @@ describe("Codex 环境接管", () => {
     });
 
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "切换到 Failure Provider" }));
+    fireEvent.click(await screen.findByRole("button", { name: "应用 Failure Provider" }));
     fireEvent.click(screen.getByRole("button", { name: "切换" }));
 
     expect(await screen.findByText(/运行中的 Codex 消费者可能继续使用旧配置/))
@@ -1871,7 +1963,7 @@ describe("Codex 环境接管", () => {
     });
 
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "切换到 Close Failure Provider" }));
+    fireEvent.click(await screen.findByRole("button", { name: "应用 Close Failure Provider" }));
     fireEvent.click(screen.getByRole("button", { name: "切换" }));
 
     expect(await screen.findByRole("alert")).toBeInTheDocument();
@@ -1922,7 +2014,7 @@ describe("Codex 环境接管", () => {
     });
 
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "切换到 Force Provider" }));
+    fireEvent.click(await screen.findByRole("button", { name: "应用 Force Provider" }));
     fireEvent.click(screen.getByRole("button", { name: "切换" }));
 
     await waitFor(() => {
@@ -1970,7 +2062,7 @@ describe("Codex 环境接管", () => {
     render(<App />);
 
     expect(await screen.findByText("无法安全解析当前配置，不能强制覆盖。")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "切换到 Blocked Provider" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "应用 Blocked Provider" })).toBeDisabled();
     expect(invoke.mock.calls.some(([command]) => command === "apply_environment_provider")).toBe(false);
   });
 
@@ -2022,7 +2114,8 @@ describe("Codex 环境接管", () => {
         expectedRevision: "openai-ready-revision",
       });
     });
-    await waitFor(() => expect(openAiButton).toBeDisabled());
+    await waitFor(() => expect(openAiButton).toBeEnabled());
+    expect(openAiButton).toHaveAttribute("aria-pressed", "true");
     expect(openAiButton).toHaveAccessibleDescription("当前已是 OpenAI 登录模式。");
   });
 
@@ -2109,7 +2202,7 @@ describe("Codex 环境接管", () => {
     await waitFor(() => expect(openAiButton).toHaveAccessibleDescription(
       "OpenAI 登录已在外部失效；当前模式保持不变。",
     ));
-    fireEvent.click(screen.getByRole("button", { name: "切换到 Return Provider" }));
+    fireEvent.click(screen.getByRole("button", { name: "应用 Return Provider" }));
     fireEvent.click(screen.getByRole("button", { name: "切换" }));
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("apply_environment_provider", {

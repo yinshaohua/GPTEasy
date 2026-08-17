@@ -93,6 +93,7 @@ export default function ProviderValidationDialog({
                 : providerMessages.validationFailed}
           </strong>
         </header>
+        <p className="validation-cost-notice">{providerMessages.validationCostNotice}</p>
 
         <ol className="validation-dialog-steps" aria-label={providerMessages.validationProgress}>
           {STAGES.map((stage, index) => {

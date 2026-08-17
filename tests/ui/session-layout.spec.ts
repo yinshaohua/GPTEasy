@@ -10,12 +10,47 @@ test("会话列表与详情在最小窗口保持可用布局", async ({ page }) 
   await expect(page.getByRole("searchbox", { name: "搜索标题或预览" })).toBeVisible();
   await expect(page.getByRole("button", { name: /打开会话/ }).first()).toBeVisible();
   const archiveAction = page.getByRole("button", { name: /归档会话：/ }).first();
-  await archiveAction.scrollIntoViewIfNeeded();
+  const deleteAction = page.getByRole("button", { name: /永久删除会话：/ }).first();
   await expect(archiveAction).toBeVisible();
-  await expect(page.getByRole("button", { name: /永久删除会话：/ }).first()).toBeVisible();
+  await expect(deleteAction).toBeVisible();
+  const tableViewport = await page.locator(".session-table-wrap").boundingBox();
+  const archiveBox = await archiveAction.boundingBox();
+  const deleteBox = await deleteAction.boundingBox();
+  expect(tableViewport).not.toBeNull();
+  expect(archiveBox).not.toBeNull();
+  expect(deleteBox).not.toBeNull();
+  expect(archiveBox!.x).toBeGreaterThanOrEqual(tableViewport!.x);
+  expect(deleteBox!.x + deleteBox!.width).toBeLessThanOrEqual(tableViewport!.x + tableViewport!.width);
 
   const documentWidth = await page.evaluate(() => document.documentElement.scrollWidth);
   expect(documentWidth).toBeLessThanOrEqual(680);
+
+  const firstSelection = page.getByRole("checkbox", { name: /选择会话：/ }).first();
+  await firstSelection.check();
+  const selectionToolbar = page.getByLabel("已选会话操作");
+  await expect(selectionToolbar.getByRole("button", { name: "归档所选会话" })).toBeVisible();
+  await expect(selectionToolbar.getByRole("button", { name: "永久删除所选会话" })).toBeVisible();
+  const selectionToolbarBox = await selectionToolbar.boundingBox();
+  expect(selectionToolbarBox).not.toBeNull();
+  expect(selectionToolbarBox!.x).toBeGreaterThanOrEqual(0);
+  expect(selectionToolbarBox!.x + selectionToolbarBox!.width).toBeLessThanOrEqual(680);
+
+  await selectionToolbar.getByRole("button", { name: "永久删除所选会话" }).click();
+  const bulkDeleteDialog = page.getByRole("dialog", { name: "永久删除所选会话" });
+  await expect(bulkDeleteDialog).toBeVisible();
+  await expect(bulkDeleteDialog.getByRole("button", { name: "永久删除 1 个会话" })).toBeVisible();
+  const bulkDeleteDialogBox = await bulkDeleteDialog.boundingBox();
+  expect(bulkDeleteDialogBox).not.toBeNull();
+  expect(bulkDeleteDialogBox!.x).toBeGreaterThanOrEqual(0);
+  expect(bulkDeleteDialogBox!.y).toBeGreaterThanOrEqual(0);
+  expect(bulkDeleteDialogBox!.x + bulkDeleteDialogBox!.width).toBeLessThanOrEqual(680);
+  expect(bulkDeleteDialogBox!.y + bulkDeleteDialogBox!.height).toBeLessThanOrEqual(520);
+  await bulkDeleteDialog.getByRole("button", { name: "取消" }).click();
+  await firstSelection.uncheck();
+
+  await archiveAction.click();
+  await expect(selectionToolbar).toHaveCount(0);
+  await expect(page.getByRole("checkbox", { name: /选择会话：/ }).first()).not.toBeChecked();
 
   await page.getByRole("button", { name: /打开会话/ }).first().click();
   await expect(page.getByRole("button", { name: "导出 Markdown" })).toBeVisible();
