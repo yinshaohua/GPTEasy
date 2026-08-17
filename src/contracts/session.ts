@@ -190,7 +190,7 @@ const previewSessions: Array<SessionSummary & { archived: boolean }> = [
     preview: "归档的兼容性调查记录",
     project: "C:\\src\\compatibility-long-project-name",
     modelProvider: "已移除的供应商",
-    source: "Codex 应用",
+    source: "ChatGPT/Codex 桌面版",
     createdAt: 1_786_000_000,
     updatedAt: 1_786_100_000,
     archived: true,

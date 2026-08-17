@@ -1265,9 +1265,25 @@ fn parse_list_page(value: &Value) -> Result<SessionListPage, SessionFailure> {
 }
 
 fn is_interactive_thread(source: Option<&Value>) -> bool {
-    source
-        .and_then(Value::as_str)
-        .is_some_and(|kind| INTERACTIVE_SOURCE_KINDS.contains(&kind))
+    match source {
+        Some(Value::String(kind)) => {
+            INTERACTIVE_SOURCE_KINDS.contains(&kind.as_str())
+                || !matches!(
+                    kind.as_str(),
+                    "exec"
+                        | "subAgent"
+                        | "subAgentReview"
+                        | "subAgentCompact"
+                        | "subAgentThreadSpawn"
+                        | "subAgentOther"
+                ) && kind != "unknown"
+        }
+        Some(Value::Object(value)) => value
+            .get("custom")
+            .and_then(Value::as_str)
+            .is_some_and(|custom| !custom.trim().is_empty()),
+        _ => false,
+    }
 }
 
 fn parse_summary(thread: &Value) -> Result<SessionSummary, SessionFailure> {
@@ -1426,7 +1442,7 @@ fn source_label(source: Option<&Value>) -> String {
         Some(Value::String(value)) => match value.as_str() {
             "cli" => "Codex CLI".to_owned(),
             "vscode" => "IDE".to_owned(),
-            "appServer" => "Codex 应用".to_owned(),
+            "appServer" => "ChatGPT/Codex 桌面版".to_owned(),
             value => value.to_owned(),
         },
         Some(Value::Object(value)) => value
@@ -1708,10 +1724,7 @@ unsafe impl Send for ProcessTreeJob {}
 impl ProcessTreeJob {
     fn assign(child: &Child) -> std::io::Result<Self> {
         let Some(raw_handle) = child.raw_handle() else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "child process handle unavailable",
-            ));
+            return Err(std::io::Error::other("child process handle unavailable"));
         };
         let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
         if handle.is_null() {
@@ -1749,5 +1762,23 @@ impl Drop for ProcessTreeJob {
         unsafe {
             let _ = CloseHandle(self.handle);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn custom_interactive_sources_are_preserved_but_internal_sources_are_filtered() {
+        let custom = json!({ "custom": "JetBrains" });
+        assert!(is_interactive_thread(Some(&custom)));
+        assert_eq!(source_label(Some(&custom)), "JetBrains");
+        assert_eq!(
+            source_label(Some(&json!("appServer"))),
+            "ChatGPT/Codex 桌面版"
+        );
+        assert!(!is_interactive_thread(Some(&json!("subAgent"))));
+        assert!(!is_interactive_thread(Some(&json!("unknown"))));
     }
 }
