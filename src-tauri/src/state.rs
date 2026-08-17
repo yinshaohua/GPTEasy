@@ -357,7 +357,8 @@ impl StateStore {
                 "DELETE FROM session_process_ownership WHERE ownership_generation = ?1",
                 [ownership_generation],
             )
-            .is_ok()
+            .map(|deleted| deleted == 1)
+            .unwrap_or(false)
     }
 
     pub fn session_process_ownership(&self) -> Option<SessionProcessOwnership> {
@@ -365,7 +366,8 @@ impl StateStore {
         connection
             .query_row(
                 "SELECT pid, process_created_at, executable_path, ownership_generation
-                 FROM session_process_ownership WHERE singleton = 1",
+                 FROM session_process_ownership
+                 WHERE singleton = 1 AND command_identity = 'app-server'",
                 [],
                 |row| {
                     Ok(SessionProcessOwnership {

@@ -1,4 +1,4 @@
-# Issue #28 Windows x64 真实 UAT 与安装交付
+# Issue #28 / #39 Windows x64 真实 UAT 与安装交付
 
 Issue #28 采用三层门禁，不能用自动化 fixture 替代真实 UAT，也不能用未签名验收包冒充正式发布包：
 
@@ -6,7 +6,9 @@ Issue #28 采用三层门禁，不能用自动化 fixture 替代真实 UAT，也
 2. `uat:windows` 只允许在一次性 Windows x64 当前用户账户中运行，记录真实供应商、Codex CLI、打包应用单实例与安装生命周期的脱敏证据。
 3. `release:check` 复核证据、提交、安装包哈希、发布树、当前领域/UI 合同和签名。`Acceptance` 允许未签名，`Release` 必须具有有效 Authenticode 签名。
 
-三层门禁共享 `scripts/windows-release-contract.json`：Issue 身份、窗口尺寸、当前合同文档和必需 UAT check ID 只在该结构化合同中定义一次。当前领域与 UI 文档使用稳定标记声明禁止主动桌面控制；正文措辞可以演进，但删除标记或加入肯定式桌面控制声明都会使发布合同门禁失败。
+三层门禁共享 `scripts/windows-release-contract.json`：Issue 身份、窗口尺寸、当前合同文档和必需 UAT check ID 只在该结构化合同中定义一次。合同同时登记 #39 的 `session_*` 检查，覆盖真实 App Server 方法/筛选、协议降级、外部消费者 mutation 门禁、无闪窗生命周期、Job Object 退出回收和精确所有权恢复。当前领域与 UI 文档使用稳定标记声明禁止主动桌面控制；正文措辞可以演进，但删除标记或加入肯定式桌面控制声明都会使发布合同门禁失败。
+
+真实 Codex App Server 合同测试位于 `src-tauri/tests/real_session_contract.rs`，默认 `#[ignore]`，不会把开发机的 Codex 登录状态变成普通 CI 前置条件。一次性 UAT 环境可设置 `GPTEASY_RUN_REAL_CODEX_SESSION_CONTRACT=1` 后用 `cargo test --manifest-path src-tauri/Cargo.toml --test real_session_contract -- --ignored` 运行；归档/取消归档还需要显式设置 `GPTEASY_RUN_REAL_CODEX_SESSION_MUTATIONS=1` 和目标 `GPTEASY_REAL_CODEX_SESSION_ID`，永久删除另需 `GPTEASY_ALLOW_REAL_CODEX_DELETE=1`。
 
 ## 构建候选
 

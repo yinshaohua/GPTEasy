@@ -61,6 +61,11 @@
     { "id": "usability_200_percent" },
     { "id": "usability_reduced_motion" },
     { "id": "usability_high_contrast" },
-    { "id": "usability_keyboard" }
+    { "id": "usability_keyboard" },
+    { "id": "session_app_server_contract" },
+    { "id": "session_mutation_safety" },
+    { "id": "session_protocol_degradation" },
+    { "id": "session_process_lifecycle" },
+    { "id": "session_process_recovery" }
   ]
 }

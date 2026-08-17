@@ -24,6 +24,8 @@ use windows_sys::Win32::System::JobObjects::{
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
     SetInformationJobObject, TerminateJobObject,
 };
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
 use crate::consumer::{
     ConsumerProcessExclusion, ConsumerScanner, ConsumerStatus, WindowsConsumerScanner,
@@ -927,7 +929,7 @@ async fn spawn_connection(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     #[cfg(windows)]
-    command.creation_flags(0x0800_0000);
+    command.creation_flags(CREATE_NO_WINDOW);
     let mut child = command.spawn().map_err(|_| {
         SessionFailure::new(
             SessionFailureCategory::CodexMissing,
@@ -1077,8 +1079,9 @@ async fn probe_core_methods(connection: &mut AppServerConnection) -> Result<(), 
     )
     .await
     {
-        Ok(_)
-        | Err(SessionFailure {
+        Ok(value) if value.get("thread").is_some_and(Value::is_object) => {}
+        Ok(_) => return Err(protocol_failure()),
+        Err(SessionFailure {
             category: SessionFailureCategory::RequestFailed,
             ..
         }) => {}
@@ -1093,8 +1096,9 @@ async fn probe_core_methods(connection: &mut AppServerConnection) -> Result<(), 
         )
         .await
         {
-            Ok(_)
-            | Err(SessionFailure {
+            Ok(value) if value.is_object() => {}
+            Ok(_) => return Err(protocol_failure()),
+            Err(SessionFailure {
                 category: SessionFailureCategory::RequestFailed,
                 ..
             }) => {}
@@ -1127,7 +1131,7 @@ async fn read_codex_version(launch: &LaunchCommand) -> Option<String> {
         .stdin(Stdio::null())
         .stderr(Stdio::null());
     #[cfg(windows)]
-    command.creation_flags(0x0800_0000);
+    command.creation_flags(CREATE_NO_WINDOW);
     let output = timeout(Duration::from_secs(3), command.output())
         .await
         .ok()?
@@ -1188,7 +1192,7 @@ impl AppServerConnection {
                 continue;
             }
             if let Some(error) = message.get("error") {
-                let category = if error.get("code").and_then(Value::as_i64) == Some(-32601) {
+                let category = if is_method_not_found_error(error) {
                     SessionFailureCategory::Incompatible
                 } else {
                     SessionFailureCategory::RequestFailed
@@ -1224,12 +1228,30 @@ impl AppServerConnection {
     }
 }
 
+fn is_method_not_found_error(error: &Value) -> bool {
+    if error.get("code").and_then(Value::as_i64) == Some(-32601) {
+        return true;
+    }
+    error
+        .get("message")
+        .and_then(Value::as_str)
+        .map(str::to_ascii_lowercase)
+        .is_some_and(|message| {
+            message.contains("method not found")
+                || message.contains("unknown method")
+                || message.contains("method not supported")
+        })
+}
+
 fn parse_list_page(value: &Value) -> Result<SessionListPage, SessionFailure> {
     let sessions = value
         .get("data")
         .and_then(Value::as_array)
         .ok_or_else(protocol_failure)?
         .iter()
+        // Older App Server builds may accept `sourceKinds` but fail to apply
+        // the filter. Keep the product boundary enforced by the consumer too.
+        .filter(|thread| is_interactive_thread(thread.get("source")))
         .map(parse_summary)
         .collect::<Result<Vec<_>, _>>()?;
     let next_cursor = value
@@ -1240,6 +1262,12 @@ fn parse_list_page(value: &Value) -> Result<SessionListPage, SessionFailure> {
         sessions,
         next_cursor,
     })
+}
+
+fn is_interactive_thread(source: Option<&Value>) -> bool {
+    source
+        .and_then(Value::as_str)
+        .is_some_and(|kind| INTERACTIVE_SOURCE_KINDS.contains(&kind))
 }
 
 fn parse_summary(thread: &Value) -> Result<SessionSummary, SessionFailure> {
@@ -1264,11 +1292,14 @@ fn parse_summary(thread: &Value) -> Result<SessionSummary, SessionFailure> {
         parent_thread_id: optional_string(thread, "parentThreadId"),
         title,
         preview,
-        project: required_string(thread, "cwd")?,
+        // These fields are metadata, not protocol prerequisites. Older
+        // App Server versions may omit them; keep the session usable while
+        // preserving the values when they are present.
+        project: string_value(thread, "cwd"),
         model_provider: string_value(thread, "modelProvider"),
         source: source_label(thread.get("source")),
-        created_at: required_i64(thread, "createdAt")?,
-        updated_at: required_i64(thread, "updatedAt")?,
+        created_at: optional_i64(thread, "createdAt"),
+        updated_at: optional_i64(thread, "updatedAt"),
     })
 }
 
@@ -1432,11 +1463,8 @@ fn optional_string(value: &Value, key: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn required_i64(value: &Value, key: &str) -> Result<i64, SessionFailure> {
-    value
-        .get(key)
-        .and_then(Value::as_i64)
-        .ok_or_else(protocol_failure)
+fn optional_i64(value: &Value, key: &str) -> i64 {
+    value.get(key).and_then(Value::as_i64).unwrap_or_default()
 }
 
 fn protocol_failure() -> SessionFailure {
@@ -1596,11 +1624,16 @@ fn recover_owned_process(state_store: &StateStore) {
     let Some(ownership) = state_store.session_process_ownership() else {
         return;
     };
+    // The generation is a fencing token. Claim the exact persisted record
+    // before inspecting or terminating the process so a newer owner can
+    // replace it without being affected by a stale recovery attempt.
+    if !state_store.clear_session_process_ownership(&ownership.ownership_generation) {
+        return;
+    }
     #[cfg(windows)]
     let _terminated = terminate_exact_owned_process(&ownership);
     #[cfg(not(windows))]
     let _terminated = false;
-    let _ = state_store.clear_session_process_ownership(&ownership.ownership_generation);
 }
 
 #[cfg(windows)]

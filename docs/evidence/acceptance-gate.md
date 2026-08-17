@@ -1,4 +1,4 @@
-# Issue #28 综合自动验收门禁
+# Issue #28 / #39 综合自动验收门禁
 
 在 Windows x64 开发机上运行：
 
@@ -10,4 +10,4 @@ npm run acceptance
 
 脚本在任何测试输出或证据写入前扫描运行时 API Key canary。含 canary 的输出会被丢弃，不会生成日志或证据文件；成功结果只写入 `src-tauri/target/acceptance/<session>/`，其中包括脱敏 `evidence.json`、Rust 测试日志、前端泄漏门禁日志和汇总 JSON。前端门禁运行真实 React DOM/HTML 快照辅助与 `window.confirm` 通知文本，并确认普通界面不会调用凭据揭示命令。目标 Codex 配置、凭据和备份留在临时工作区，不属于可导出的验收证据。
 
-门禁只断言 Provider/Environment/State 的公开应用结果、最终文件/数据库状态和故障恢复分类，不依赖内部函数或暂存文件名。前端测试还覆盖统一切换确认、成功后当前供应商更新和失败后环境实际状态回读；`candidate:windows` 另行运行 Playwright，覆盖 `1120 × 620` 默认尺寸和 `680 × 520` 最小尺寸布局。真实供应商和真实 Codex CLI 读取仍属于发布前 Windows x64 人工 UAT。
+门禁还覆盖 #39 会话管理的公开边界：App Server JSONL fixture 核对 `thread/list`、`thread/read`、归档、取消归档和永久删除方法及筛选参数，混合来源验证 exec/子代理不会进入列表，异常退出验证只读请求至多恢复一次而 mutation 不自动重试，消费者状态验证 mutation 只读门禁和批量部分成功。进程实现合同检查无窗口启动、Job Object 树回收、stdin EOF 优雅关闭和精确所有权恢复。前端测试还覆盖统一切换确认、成功后当前供应商更新和失败后环境实际状态回读；`candidate:windows` 另行运行 Playwright，覆盖 `1120 × 620` 默认尺寸和 `680 × 520` 最小尺寸布局。真实供应商、打包 Windows GUI 生命周期和真实 Codex CLI 读取仍属于发布前 Windows x64 人工 UAT，UAT 使用 `windows-release-contract.json` 中的 `session_*` 检查 ID。

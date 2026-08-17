@@ -87,6 +87,31 @@ fn first_close_notice_check_does_not_create_a_missing_database() {
 }
 
 #[test]
+fn process_ownership_generation_fences_stale_cleanup() {
+    let temp = TempDir::new().expect("temp dir");
+    let store = store_in(&temp);
+    assert!(store.bootstrap().is_ready());
+    assert!(store.record_session_process_ownership(
+        123,
+        456,
+        r"C:\\codex.exe",
+        "generation-new",
+        789,
+    ));
+
+    assert!(!store.clear_session_process_ownership("generation-old"));
+    assert_eq!(
+        store
+            .session_process_ownership()
+            .expect("new generation remains")
+            .ownership_generation,
+        "generation-new"
+    );
+    assert!(store.clear_session_process_ownership("generation-new"));
+    assert!(store.session_process_ownership().is_none());
+}
+
+#[test]
 fn migration_uses_a_consistent_backup_and_keeps_only_three() {
     let temp = TempDir::new().expect("temp dir");
     let store = store_in(&temp);

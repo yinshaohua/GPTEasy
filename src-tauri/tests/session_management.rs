@@ -46,6 +46,19 @@ async fn public_session_interface_uses_the_app_server_contract_for_read_only_his
     assert_eq!(page.sessions[0].model_provider, "history-provider");
     assert_eq!(page.next_cursor.as_deref(), Some("cursor-2"));
 
+    application
+        .list(SessionQuery {
+            request_id: None,
+            archived: false,
+            search_term: None,
+            project: None,
+            model_provider: None,
+            cursor: Some("cursor-2".to_owned()),
+            limit: 40,
+        })
+        .await
+        .expect("list the next cursor page");
+
     let detail = application.read("thread-1").await.expect("read session");
     assert_eq!(detail.entries.len(), 3);
     assert_eq!(detail.entries[0].kind, SessionEntryKind::User);
@@ -80,6 +93,7 @@ async fn public_session_interface_uses_the_app_server_contract_for_read_only_his
     assert!(log.contains(r#""sourceKinds":["cli","vscode","appServer"]"#));
     assert!(log.contains(r#""searchTerm":"登录""#));
     assert!(log.contains(r#""modelProviders":["history-provider"]"#));
+    assert!(log.contains(r#""cursor":"cursor-2""#));
     assert!(log.contains(r#""method":"thread/read""#));
     assert!(
         log.contains(r#""includeTurns":true"#),
@@ -101,6 +115,71 @@ async fn public_session_interface_uses_the_app_server_contract_for_read_only_his
         })
         .expect("read capability state");
     assert_eq!(capability_count, 1);
+}
+
+#[tokio::test]
+async fn list_keeps_internal_sources_out_even_when_the_server_ignores_source_kinds() {
+    let harness = AppServerHarness::new();
+    let state_root = TempDir::new().expect("state root");
+    let store = StateStore::new(StatePaths::from_root(state_root.path()));
+    assert!(store.bootstrap().is_ready());
+    let application = SessionApplication::with_program_for_harness(
+        store,
+        harness.program(),
+        vec![
+            "--fixture-log".into(),
+            harness.log().as_os_str().to_owned(),
+            "--mixed-sources".into(),
+        ],
+        Duration::from_millis(25),
+    );
+
+    assert_eq!(
+        application.enter("source-boundary-lease").await.status,
+        SessionAvailabilityStatus::Available
+    );
+    let page = application
+        .list(default_query())
+        .await
+        .expect("list sessions");
+
+    assert_eq!(page.sessions.len(), 1);
+    assert_eq!(page.sessions[0].id, "thread-1");
+    application.shutdown_now().await;
+}
+
+#[tokio::test]
+async fn missing_optional_thread_metadata_degrades_to_empty_values() {
+    let harness = AppServerHarness::new();
+    let state_root = TempDir::new().expect("state root");
+    let store = StateStore::new(StatePaths::from_root(state_root.path()));
+    assert!(store.bootstrap().is_ready());
+    let application = SessionApplication::with_program_for_harness(
+        store,
+        harness.program(),
+        vec![
+            "--fixture-log".into(),
+            harness.log().as_os_str().to_owned(),
+            "--legacy-metadata".into(),
+        ],
+        Duration::from_millis(25),
+    );
+
+    assert_eq!(
+        application.enter("legacy-metadata-lease").await.status,
+        SessionAvailabilityStatus::Available
+    );
+    let page = application
+        .list(default_query())
+        .await
+        .expect("missing optional metadata must not fail listing");
+
+    assert_eq!(page.sessions.len(), 1);
+    assert_eq!(page.sessions[0].id, "legacy-thread");
+    assert_eq!(page.sessions[0].project, "");
+    assert_eq!(page.sessions[0].created_at, 0);
+    assert_eq!(page.sessions[0].updated_at, 0);
+    application.shutdown_now().await;
 }
 
 #[tokio::test]

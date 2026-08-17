@@ -344,6 +344,31 @@ fn windows_release_contract_is_the_unique_issue_28_uat_schema() {
 }
 
 #[test]
+fn windows_release_contract_covers_issue_39_session_management() {
+    let root = repository_root();
+    let contract = windows_release_contract();
+    let ids = required_uat_checks(&contract)
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>();
+    for required in [
+        "session_app_server_contract",
+        "session_mutation_safety",
+        "session_protocol_degradation",
+        "session_process_lifecycle",
+        "session_process_recovery",
+    ] {
+        assert!(ids.contains(required), "release contract misses {required}");
+    }
+
+    let session = fs::read_to_string(root.join("src-tauri/src/session.rs"))
+        .expect("read session implementation");
+    assert!(session.contains("CREATE_NO_WINDOW"));
+    assert!(session.contains("JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE"));
+    assert!(session.contains("kill_on_drop(true)"));
+    assert!(session.contains("is_interactive_thread"));
+}
+
+#[test]
 fn release_contract_gate_rejects_an_affirmative_desktop_control_statement() {
     let root = repository_root();
     let temp = TempDir::new().expect("contract fixture");
