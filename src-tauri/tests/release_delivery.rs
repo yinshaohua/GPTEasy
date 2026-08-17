@@ -46,7 +46,7 @@ fn current_commit(root: &Path) -> String {
 fn unsigned_uat_fixture() -> (TempDir, PathBuf, PathBuf, PathBuf) {
     let root = repository_root();
     let temp = TempDir::new().expect("release fixture");
-    let installer = temp.path().join("GPTEasy_0.1.0_x64-setup.exe");
+    let installer = temp.path().join("GPTEasy_1.0.0_x64-setup.exe");
     fs::copy(
         std::env::current_exe().expect("current test executable"),
         &installer,
@@ -74,7 +74,7 @@ fn unsigned_uat_fixture() -> (TempDir, PathBuf, PathBuf, PathBuf) {
             "releaseContract": "passed"
         },
         "artifact": {
-            "path": "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/GPTEasy_0.1.0_x64-setup.exe",
+            "path": "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/GPTEasy_1.0.0_x64-setup.exe",
             "sha256": sha256,
             "size": bytes.len(),
             "authenticodeStatus": "NotSigned"
@@ -459,14 +459,14 @@ fn acceptance_readiness_rejects_synthetic_evidence_without_rejecting_unsigned_ar
 }
 
 #[test]
-fn formal_release_readiness_rejects_unsigned_installer() {
+fn formal_release_readiness_allows_unsigned_installer() {
     let (_temp, evidence, installer, manifest) = unsigned_uat_fixture();
     let output = run_readiness_gate("Release", &evidence, &installer, &manifest);
     assert!(!output.status.success());
     let report: Value = serde_json::from_slice(&output.stdout).expect("parse readiness failure");
     assert_eq!(report["passed"], false);
     assert!(
-        report["errors"]
+        !report["errors"]
             .as_array()
             .expect("errors array")
             .iter()
@@ -474,6 +474,7 @@ fn formal_release_readiness_rejects_unsigned_installer() {
                 .as_str()
                 .is_some_and(|value| value.contains("Authenticode")))
     );
+    assert_eq!(report["authenticodeStatus"], "NotSigned");
 }
 
 #[test]

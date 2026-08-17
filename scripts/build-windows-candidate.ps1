@@ -1,8 +1,3 @@
-[CmdletBinding()]
-param(
-    [switch]$RequireAuthenticode
-)
-
 $ErrorActionPreference = 'Stop'
 
 function Invoke-Checked([string]$Description, [scriptblock]$Command) {
@@ -92,10 +87,6 @@ $signature = Get-FileSignature $installer.FullName
 if ($signature.Status -ne 'Valid' -and $signature.Status -ne 'NotSigned') {
     throw "Installer Authenticode status is not acceptable: $($signature.Status)."
 }
-if ($RequireAuthenticode -and $signature.Status -ne 'Valid') {
-    throw 'Formal release candidate requires a valid Authenticode signature.'
-}
-
 $manifestRoot = Join-Path $repoRoot 'src-tauri\target\release-candidate'
 New-Item -ItemType Directory -Path $manifestRoot -Force | Out-Null
 $manifestPath = Join-Path $manifestRoot 'manifest.json'

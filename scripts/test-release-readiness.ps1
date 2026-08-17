@@ -160,10 +160,6 @@ if ($candidateManifest.artifact.authenticodeStatus -ne $signatureStatus) {
 if ($signatureStatus -ne 'Valid' -and $signatureStatus -ne 'NotSigned') {
     Add-GateError "Installer Authenticode status is not acceptable: $signatureStatus."
 }
-if ($Mode -eq 'Release' -and $signatureStatus -ne 'Valid') {
-    Add-GateError 'Formal release requires a valid Authenticode signature.'
-}
-
 $treeOutput = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'test-release-tree.ps1') -RepositoryRoot $root 2>&1 | Out-String)
 if ($LASTEXITCODE -ne 0) {
     Add-GateError 'Release tree gate failed.'

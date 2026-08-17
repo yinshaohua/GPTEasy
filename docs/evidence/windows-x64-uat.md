@@ -1,10 +1,10 @@
 # Issue #28 / #39 Windows x64 真实 UAT 与安装交付
 
-Issue #28 采用三层门禁，不能用自动化 fixture 替代真实 UAT，也不能用未签名验收包冒充正式发布包：
+Issue #28 采用三层门禁，不能用自动化 fixture 替代真实 UAT：
 
 1. `candidate:windows` 在干净的 `main` 上执行类型检查、完整测试、Issue #28 综合验收门禁、发布树检查、领域/UI 合同一致性检查和 Tauri x64 NSIS 构建。
 2. `uat:windows` 只允许在一次性 Windows x64 当前用户账户中运行，记录真实供应商、Codex CLI、打包应用单实例与安装生命周期的脱敏证据。
-3. `release:check` 复核证据、提交、安装包哈希、发布树、当前领域/UI 合同和签名。`Acceptance` 允许未签名，`Release` 必须具有有效 Authenticode 签名。
+3. `release:check` 复核证据、提交、安装包哈希、发布树、当前领域/UI 合同和 Authenticode 状态。`Acceptance` 与 `Release` 都允许 `Valid` 或 `NotSigned`，但候选清单、UAT 证据和安装包的状态必须一致；未签名正式发布必须在 GitHub Release 中明确提示 Windows SmartScreen 风险。
 
 三层门禁共享 `scripts/windows-release-contract.json`：Issue 身份、窗口尺寸、当前合同文档和必需 UAT check ID 只在该结构化合同中定义一次。合同同时登记 #39 的 `session_*` 检查，覆盖真实 App Server 方法/筛选、协议降级、外部消费者 mutation 门禁、无闪窗生命周期、Job Object 退出回收和精确所有权恢复。当前领域与 UI 文档使用稳定标记声明禁止主动桌面控制；正文措辞可以演进，但删除标记或加入肯定式桌面控制声明都会使发布合同门禁失败。
 
@@ -19,12 +19,6 @@ npm run candidate:windows
 ```
 
 构建清单写入 `src-tauri/target/release-candidate/manifest.json`，安装包位于对应 target 的 `release/bundle/nsis/`。两者都在 Git 忽略目录中。清单只记录相对路径、SHA-256、大小、提交和签名状态。
-
-正式对外候选使用：
-
-```powershell
-npm run candidate:windows -- --RequireAuthenticode
-```
 
 ## UAT 前置条件
 
@@ -52,7 +46,7 @@ npm run candidate:windows -- --RequireAuthenticode
 npm run uat:windows -- --InstallerPath <setup.exe> -CandidateManifestPath <manifest.json> -ConfirmDisposableEnvironment
 ```
 
-正式发布包追加 `-RequireAuthenticode`。脚本依次完成以下检查，只有操作员实际观察到行为后才能输入精确的 `PASS`：
+脚本依次完成以下检查，只有操作员实际观察到行为后才能输入精确的 `PASS`：
 
 - 安装后应用可启动，真实供应商完成模型发现、Responses API 流式 strict 工具调用和 nonce 回传，并经明确保存与切换生效。
 - 首次启动后记录同路径进程 PID；最小化设置窗口并再次启动同一安装，确认原窗口显示、取消最小化并聚焦，原 PID 保持唯一且托盘仍只有一个入口。
@@ -79,6 +73,6 @@ npm run release:check -- -Mode Acceptance -EvidencePath <evidence.json> -Install
 npm run release:check -- -Mode Release -EvidencePath <evidence.json> -InstallerPath <setup.exe> -CandidateManifestPath <manifest.json>
 ```
 
-复核会同时绑定候选 manifest、当前提交、UAT JSON 和安装包哈希，并默认拒绝测试生成的 synthetic evidence。它会重新运行发布树及领域/UI 合同一致性检查，确认 ADR-0026、领域词汇和当前 UI 合同都不允许主动桌面控制。正式发布模式会重新读取安装包 Authenticode 状态，只有 `Valid` 才通过。UAT JSON 中的历史签名字段、Tauri 更新签名或未签名功能验收结论都不能绕过该检查。
+复核会同时绑定候选 manifest、当前提交、UAT JSON 和安装包哈希，并默认拒绝测试生成的 synthetic evidence。它会重新运行发布树及领域/UI 合同一致性检查，确认 ADR-0026、领域词汇和当前 UI 合同都不允许主动桌面控制。正式发布模式会重新读取安装包 Authenticode 状态，只接受 `Valid` 或 `NotSigned`，并要求它与候选 manifest 和 UAT JSON 完全一致；无效、未知或被破坏的签名仍会失败。
 
-当前开发机不满足一次性账户、真实凭据和签名证书前置条件时，只能生成并校验未签名安装包，不能生成真实 UAT 通过证据，也不能关闭 Issue #28。
+当前开发机不满足一次性账户和真实凭据前置条件时，只能生成并校验未签名安装包，不能生成真实 UAT 通过证据，也不能关闭 Issue #28。

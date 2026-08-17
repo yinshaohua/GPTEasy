@@ -3,8 +3,7 @@ param(
     [string]$InstallerPath,
     [string]$CandidateManifestPath,
     [string]$SecretPath,
-    [switch]$ConfirmDisposableEnvironment,
-    [switch]$RequireAuthenticode
+    [switch]$ConfirmDisposableEnvironment
 )
 
 $ErrorActionPreference = 'Stop'
@@ -230,9 +229,6 @@ $installerHash = Get-Sha256File $installer.FullName
 $signature = Get-FileSignature $installer.FullName
 if ($signature.Status -ne 'Valid' -and $signature.Status -ne 'NotSigned') {
     throw "安装包的 Authenticode 状态不可接受：$($signature.Status)。"
-}
-if ($RequireAuthenticode -and $signature.Status -ne 'Valid') {
-    throw '正式发布 UAT 要求安装包具有有效的 Authenticode 签名。'
 }
 $candidateManifest = Get-Content -LiteralPath $candidateManifestFile.FullName -Raw | ConvertFrom-Json
 $candidateArtifactName = [System.IO.Path]::GetFileName(([string]$candidateManifest.artifact.path).Replace('/', '\'))
