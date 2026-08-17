@@ -224,6 +224,13 @@ executable_mode=$(gpteasy current 2>&1 || true)
 [[ "$executable_mode" == *'当前配置不包含可识别的 GPTEasy 管理区块'* ]]
 [[ "$executable_mode" != *'导出文件必须'* ]]
 
+if [[ "$(id -u)" == 0 ]]; then
+    chown 65534:65534 "$script"
+    non_owner=$(gpteasy current 2>&1 || true)
+    [[ "$non_owner" == *'当前配置不包含可识别的 GPTEasy 管理区块'* ]]
+    [[ "$non_owner" != *'导出文件必须'* ]]
+fi
+
 hardlink="$workspace/gpteasy-hardlink.sh"
 ln -- "$script" "$hardlink"
 # shellcheck disable=SC1090

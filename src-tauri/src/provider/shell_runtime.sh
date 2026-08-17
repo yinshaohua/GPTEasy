@@ -20,17 +20,17 @@ GPTEASY_HELP
 }
 
 gpteasy__require_snapshot_safe() {
-    local owner links kind
+    local links kind
     if [[ -L "$gpteasy__script_path" ]]; then
         printf '%s\n' '导出文件不能是符号链接；除帮助外已拒绝执行。' >&2
         return 1
     fi
-    if ! read -r owner links kind < <(stat -c '%u %h %F' -- "$gpteasy__script_path" 2>/dev/null); then
+    if ! read -r links kind < <(stat -c '%h %F' -- "$gpteasy__script_path" 2>/dev/null); then
         printf '%s\n' '无法确认导出文件身份；除帮助外已拒绝执行。' >&2
         return 1
     fi
-    if [[ "$owner" != "$(id -u)" || "$links" != 1 || "$kind" != 'regular file' ]]; then
-        printf '%s\n' '导出文件必须是当前用户拥有的单链接普通文件；除帮助外已拒绝执行。' >&2
+    if [[ ! -r "$gpteasy__script_path" || "$links" != 1 || "$kind" != 'regular file' ]]; then
+        printf '%s\n' '导出文件必须是当前操作用户可读取的单链接普通文件；除帮助外已拒绝执行。' >&2
         return 1
     fi
 }
@@ -75,10 +75,10 @@ gpteasy__require_codex_version() {
 }
 
 gpteasy__directory_is_owned() {
-    local directory=$1 require_private=${2:-0} owner mode kind
+    local directory=$1 require_private=${2:-0} mode kind
     [[ ! -L "$directory" ]] || return 1
-    read -r owner mode kind < <(stat -c '%u %a %F' -- "$directory" 2>/dev/null) || return 1
-    [[ "$owner" == "$(id -u)" && "$kind" == 'directory' ]] || return 1
+    read -r mode kind < <(stat -c '%a %F' -- "$directory" 2>/dev/null) || return 1
+    [[ "$kind" == 'directory' && -r "$directory" && -w "$directory" && -x "$directory" ]] || return 1
     if [[ "$require_private" -eq 1 ]]; then
         [[ "${mode: -2}" == '00' ]]
     else
@@ -92,7 +92,7 @@ gpteasy__ensure_private_dir() {
         mkdir -m 700 -- "$directory" || return
     fi
     if ! gpteasy__directory_is_owned "$directory" 1; then
-        printf '私有目录权限或所有者不安全：%s\n' "$directory" >&2
+        printf '私有目录权限或访问能力不安全：%s\n' "$directory" >&2
         return 1
     fi
 }
@@ -103,7 +103,7 @@ gpteasy__prepare_private_state() {
         mkdir -p -m 700 -- "$codex_home" || return
     fi
     if ! gpteasy__directory_is_owned "$codex_home" 0; then
-        printf '%s\n' '目标 Codex 环境不是当前用户所有的普通目录。' >&2
+        printf '%s\n' '目标 Codex 环境不是当前操作用户可访问的普通目录。' >&2
         return 1
     fi
     gpteasy__state_root="$codex_home/.gpteasy-shell"
@@ -134,13 +134,13 @@ gpteasy__require_existing_private_state_safe() {
     fi
     while IFS= read -r -d '' item; do
         if ! gpteasy__directory_is_owned "$item" 1; then
-            printf '%s\n' 'Linux 私有状态目录的权限或所有者不安全。' >&2
+            printf '%s\n' 'Linux 私有状态目录的权限或访问能力不安全。' >&2
             return 1
         fi
     done < <(find "$root" -type d -print0)
     while IFS= read -r -d '' item; do
         if ! gpteasy__private_file_is_safe "$item"; then
-            printf '%s\n' 'Linux 私有状态文件的权限、所有者或链接数不安全。' >&2
+            printf '%s\n' 'Linux 私有状态文件的权限、访问能力或链接数不安全。' >&2
             return 1
         fi
     done < <(find "$root" -type f -print0)
@@ -205,7 +205,7 @@ gpteasy__file_hash() {
 }
 
 gpteasy__resolve_config_target() {
-    local entry owner links kind parent
+    local entry links kind parent
     entry=$(gpteasy__config_path) || return
     gpteasy__config_entry=$entry
     if [[ -L "$entry" ]]; then
@@ -216,9 +216,9 @@ gpteasy__resolve_config_target() {
             return 1
         }
         gpteasy__config_entry_signature=$(stat -c '%d:%i:%u:%a:%h:%F' -- "$entry") || return
-        read -r owner links kind < <(stat -Lc '%u %h %F' -- "$gpteasy__config_target") || return
-        if [[ "$owner" != "$(id -u)" || "$links" != 1 || "$kind" != 'regular file' ]]; then
-            printf '%s\n' 'config.toml 符号链接最终目标不安全。' >&2
+        read -r links kind < <(stat -Lc '%h %F' -- "$gpteasy__config_target") || return
+        if [[ ! -r "$gpteasy__config_target" || ! -w "$gpteasy__config_target" || "$links" != 1 || "$kind" != 'regular file' ]]; then
+            printf '%s\n' 'config.toml 符号链接最终目标必须是当前操作用户可读写的单链接普通文件。' >&2
             return 1
         fi
     elif [[ -e "$entry" ]]; then
@@ -226,9 +226,9 @@ gpteasy__resolve_config_target() {
         gpteasy__config_target=$entry
         gpteasy__config_link_value=
         gpteasy__config_entry_signature=$(stat -c '%d:%i:%u:%a:%h:%F' -- "$entry") || return
-        read -r owner links kind < <(stat -c '%u %h %F' -- "$entry") || return
-        if [[ "$owner" != "$(id -u)" || "$links" != 1 || "$kind" != 'regular file' ]]; then
-            printf '%s\n' 'config.toml 必须是当前用户所有且没有 hardlink 的普通文件。' >&2
+        read -r links kind < <(stat -c '%h %F' -- "$entry") || return
+        if [[ ! -r "$entry" || ! -w "$entry" || "$links" != 1 || "$kind" != 'regular file' ]]; then
+            printf '%s\n' 'config.toml 必须是当前操作用户可读写的单链接普通文件。' >&2
             return 1
         fi
     else
@@ -251,7 +251,7 @@ gpteasy__resolve_config_target() {
 }
 
 gpteasy__config_target_unchanged() {
-    local signature target target_signature owner links kind
+    local signature target target_signature links kind
     case "$gpteasy__config_kind" in
         missing)
             [[ ! -e "$gpteasy__config_entry" && ! -L "$gpteasy__config_entry" ]] || return 1
@@ -273,8 +273,8 @@ gpteasy__config_target_unchanged() {
     if [[ -e "$gpteasy__config_target" ]]; then
         target_signature=$(stat -Lc '%d:%i:%u:%a:%h:%F' -- "$gpteasy__config_target") || return
         [[ "$target_signature" == "$gpteasy__config_target_signature" ]] || return 1
-        read -r owner links kind < <(stat -Lc '%u %h %F' -- "$gpteasy__config_target") || return
-        [[ "$owner" == "$(id -u)" && "$links" == 1 && "$kind" == 'regular file' ]] || return 1
+        read -r links kind < <(stat -Lc '%h %F' -- "$gpteasy__config_target") || return
+        [[ -r "$gpteasy__config_target" && -w "$gpteasy__config_target" && "$links" == 1 && "$kind" == 'regular file' ]] || return 1
     fi
     [[ "$(gpteasy__file_hash "$gpteasy__config_target")" == "$gpteasy__config_original_hash" ]]
 }
@@ -625,17 +625,17 @@ gpteasy__prune_restore_points() {
 }
 
 gpteasy__private_file_is_safe() {
-    local file=$1 owner mode links kind
+    local file=$1 mode links kind
     [[ -f "$file" && ! -L "$file" ]] || return 1
-    read -r owner mode links kind < <(stat -c '%u %a %h %F' -- "$file") || return 1
-    [[ "$owner" == "$(id -u)" && "${mode: -2}" == '00' && "$links" == 1 && "$kind" == 'regular file' ]]
+    read -r mode links kind < <(stat -c '%a %h %F' -- "$file") || return 1
+    [[ -r "$file" && -w "$file" && "${mode: -2}" == '00' && "$links" == 1 && "$kind" == 'regular file' ]]
 }
 
 gpteasy__owned_regular_file_is_safe() {
-    local file=$1 owner links kind
+    local file=$1 links kind
     [[ -f "$file" && ! -L "$file" ]] || return 1
-    read -r owner links kind < <(stat -c '%u %h %F' -- "$file") || return 1
-    [[ "$owner" == "$(id -u)" && "$links" == 1 && "$kind" == 'regular file' ]]
+    read -r links kind < <(stat -c '%h %F' -- "$file") || return 1
+    [[ -r "$file" && -w "$file" && "$links" == 1 && "$kind" == 'regular file' ]]
 }
 
 gpteasy__install_credential() {
@@ -904,7 +904,7 @@ gpteasy__restore_locked() {
         return 1
     fi
     if ! gpteasy__directory_is_owned "$latest" 1 || ! gpteasy__private_file_is_safe "$latest/config-kind"; then
-        printf '%s\n' '最新 Linux 恢复点的权限或所有者不安全。' >&2
+        printf '%s\n' '最新 Linux 恢复点的权限或访问能力不安全。' >&2
         return 1
     fi
     kind=$(cat -- "$latest/config-kind") || return
