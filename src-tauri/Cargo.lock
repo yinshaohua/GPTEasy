@@ -1460,7 +1460,7 @@ dependencies = [
 
 [[package]]
 name = "gpteasy"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "futures-util",
  "reqwest 0.12.28",

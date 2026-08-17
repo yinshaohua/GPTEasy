@@ -118,6 +118,42 @@ async fn public_session_interface_uses_the_app_server_contract_for_read_only_his
 }
 
 #[tokio::test]
+async fn unfiltered_session_list_explicitly_requests_all_model_providers() {
+    let harness = AppServerHarness::new();
+    let state_root = TempDir::new().expect("state root");
+    let store = StateStore::new(StatePaths::from_root(state_root.path()));
+    assert!(store.bootstrap().is_ready());
+    let application = SessionApplication::with_program_for_harness(
+        store,
+        harness.program(),
+        vec![
+            "--fixture-log".into(),
+            harness.log().as_os_str().to_owned(),
+            "--require-explicit-all-model-providers".into(),
+        ],
+        Duration::from_millis(25),
+    );
+
+    assert_eq!(
+        application.enter("all-provider-lease").await.status,
+        SessionAvailabilityStatus::Available,
+    );
+    let page = application
+        .list(default_query())
+        .await
+        .expect("list sessions from all model providers");
+
+    assert_eq!(page.sessions.len(), 1);
+    let log = fs::read_to_string(harness.log()).expect("read fixture log");
+    assert!(log.lines().any(|line| {
+        line.contains(r#""method":"thread/list""#)
+            && line.contains(r#""limit":40"#)
+            && line.contains(r#""modelProviders":[]"#)
+    }));
+    application.shutdown_now().await;
+}
+
+#[tokio::test]
 async fn list_keeps_internal_sources_out_even_when_the_server_ignores_source_kinds() {
     let harness = AppServerHarness::new();
     let state_root = TempDir::new().expect("state root");

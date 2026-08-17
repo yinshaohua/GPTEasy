@@ -23,13 +23,7 @@ GPTEasy 是一款面向 Windows 和 WSL2 用户的 Codex 配置与会话管理�
 下载后，请同时获取 Release 中的 `SHA256SUMS.txt`，并在 PowerShell 中校验安装包：
 
 ```powershell
-Get-FileHash .\GPTEasy_1.0.0_x64-setup.exe -Algorithm SHA256
-```
-
-当前 `v1.0.0` 安装包的 SHA-256 为：
-
-```text
-4ef3b09b336e7e3cb512bb13e14dc88e51cb8526ffce8e2584cda26c5c3c7985
+Get-FileHash .\GPTEasy_1.0.1_x64-setup.exe -Algorithm SHA256
 ```
 
 > [!WARNING]

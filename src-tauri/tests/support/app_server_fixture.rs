@@ -39,6 +39,18 @@ fn main() {
                 respond_error(id, -32601, "method not found");
                 continue;
             }
+            if !capability_probe
+                && args
+                    .iter()
+                    .any(|arg| arg == "--require-explicit-all-model-providers")
+                && !line.contains("\"modelProviders\":[]")
+            {
+                respond(
+                    id,
+                    r#"{"data":[],"nextCursor":null,"backwardsCursor":null}"#,
+                );
+                continue;
+            }
             if let Some(marker) = args
                 .windows(2)
                 .find(|pair| pair[0] == "--exit-first-list")

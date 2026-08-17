@@ -751,14 +751,16 @@ impl AppServerGateway {
         {
             params.insert("cwd".to_owned(), json!(project));
         }
-        if let Some(provider) = query
+        let model_providers = query
             .model_provider
             .as_deref()
             .map(str::trim)
             .filter(|v| !v.is_empty())
-        {
-            params.insert("modelProviders".to_owned(), json!([provider]));
-        }
+            .map(|provider| json!([provider]))
+            .unwrap_or_else(|| json!([]));
+        // Codex defaults an omitted provider filter to the active provider.
+        // An explicit empty list is required for the all-providers view.
+        params.insert("modelProviders".to_owned(), model_providers);
         if let Some(cursor) = query
             .cursor
             .as_deref()
