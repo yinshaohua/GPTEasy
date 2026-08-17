@@ -33,6 +33,16 @@ function Read-RustPackage([string]$ManifestPath) {
     }
 }
 
+function Get-ReleaseVersions([object]$JsonVersions, [string]$RustVersion) {
+    return @(
+        [string]$JsonVersions.package
+        [string]$JsonVersions.packageLock
+        [string]$JsonVersions.packageLockRoot
+        $RustVersion
+        [string]$JsonVersions.tauri
+    )
+}
+
 if ($Version -cnotmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
     throw 'Version must be a stable SemVer value such as 1.2.3.'
 }
@@ -63,13 +73,7 @@ if ($LASTEXITCODE -ne 0) {
 $jsonVersions = $jsonVersionOutput | ConvertFrom-Json
 $rustPackage = Read-RustPackage $cargoPath
 $rustVersion = [string]$rustPackage.version
-$currentVersions = @(
-    [string]$jsonVersions.package
-    [string]$jsonVersions.packageLock
-    [string]$jsonVersions.packageLockRoot
-    $rustVersion
-    [string]$jsonVersions.tauri
-)
+$currentVersions = @(Get-ReleaseVersions $jsonVersions $rustVersion)
 if (@($currentVersions | Select-Object -Unique).Count -ne 1) {
     throw "Existing JavaScript, lockfile, Rust, and Tauri versions do not match: $($currentVersions -join ', ')."
 }
@@ -107,13 +111,8 @@ if ($LASTEXITCODE -ne 0) {
     throw "Unable to verify JavaScript and Tauri versions: $verifiedJsonOutput"
 }
 $verifiedJson = $verifiedJsonOutput | ConvertFrom-Json
-$verifiedVersions = @(
-    [string]$verifiedJson.package
-    [string]$verifiedJson.packageLock
-    [string]$verifiedJson.packageLockRoot
-    [string](Read-RustPackage $cargoPath).version
-    [string]$verifiedJson.tauri
-)
+$verifiedRustVersion = [string](Read-RustPackage $cargoPath).version
+$verifiedVersions = @(Get-ReleaseVersions $verifiedJson $verifiedRustVersion)
 if (@($verifiedVersions | Where-Object { $_ -cne $Version }).Count -ne 0) {
     throw 'Release version verification failed after writing files.'
 }

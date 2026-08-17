@@ -187,6 +187,15 @@ finish() {
 TOTAL_STAGES=5
 [[ "$ENV_FILE" == ".env" ]] && ENV_FILE=".release.env"
 
+CONTRACT_PATH="scripts/gitcode-distribution.json"
+config_value() {
+  node scripts/gitcode-smoke-json.mjs config "$CONTRACT_PATH" "$1"
+}
+REPOSITORY_VARIABLE_NAME=$(config_value repositoryVariable)
+BRANCH_VARIABLE_NAME=$(config_value branchVariable)
+TOKEN_SECRET_NAME=$(config_value tokenSecret)
+CONTRACT_DEFAULT_BRANCH=$(config_value defaultBranch)
+
 banner "GPTEasy GitCode 分发设置"
 
 stage "创建公开分发仓库"
@@ -195,11 +204,11 @@ open_url "https://gitcode.com/new"
 step "创建公开仓库；使用 main 作为默认分支，并用下载说明初始化 README。"
 ask GITCODE_REPOSITORY "输入公开仓库坐标（owner/repo）："
 [[ "$GITCODE_REPOSITORY" =~ ^[^/[:space:]]+/[^/[:space:]]+$ ]] || { warn "仓库坐标必须是 owner/repo"; exit 1; }
-GITCODE_DEFAULT_BRANCH="main"
+GITCODE_DEFAULT_BRANCH="$CONTRACT_DEFAULT_BRANCH"
 write_env GITCODE_REPOSITORY "$GITCODE_REPOSITORY"
 write_env GITCODE_DEFAULT_BRANCH "$GITCODE_DEFAULT_BRANCH"
-set_var GITCODE_REPOSITORY "$GITCODE_REPOSITORY"
-set_var GITCODE_DEFAULT_BRANCH "$GITCODE_DEFAULT_BRANCH"
+set_var "$REPOSITORY_VARIABLE_NAME" "$GITCODE_REPOSITORY"
+set_var "$BRANCH_VARIABLE_NAME" "$GITCODE_DEFAULT_BRANCH"
 
 stage "创建最小权限 Token"
 open_url "https://gitcode.com/setting/token-classic"
@@ -207,7 +216,7 @@ step "创建仅能维护该公开仓库 Release 与仓库内容的 Token；不�
 step "复制 Token。页面关闭后通常无法再次查看。"
 ask_secret GITCODE_TOKEN "粘贴 GitCode Token（输入不会显示）："
 [[ -n "$GITCODE_TOKEN" ]] || { warn "Token 不能为空"; exit 1; }
-set_secret GITCODE_TOKEN "$GITCODE_TOKEN"
+set_secret "$TOKEN_SECRET_NAME" "$GITCODE_TOKEN"
 unset GITCODE_TOKEN
 
 stage "生成 updater 信任根"

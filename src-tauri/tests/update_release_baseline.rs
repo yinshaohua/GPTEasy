@@ -340,7 +340,7 @@ fn trust_root_gate_allows_only_public_inputs_and_rejects_tracked_private_keys() 
     .expect("write smoke script");
     fs::write(
         temp.path().join("scripts/setup-gitcode-distribution.sh"),
-        "#!/usr/bin/env bash\nask_secret GITCODE_TOKEN\nset_secret GITCODE_TOKEN\nunset GITCODE_TOKEN\n",
+        "#!/usr/bin/env bash\nask_secret GITCODE_TOKEN\nset_secret \"$TOKEN_SECRET_NAME\"\nunset GITCODE_TOKEN\n",
     )
     .expect("write setup wizard");
     let init = Command::new("git")
@@ -370,16 +370,14 @@ fn trust_root_gate_allows_only_public_inputs_and_rejects_tracked_private_keys() 
         String::from_utf8_lossy(&public_only.stderr)
     );
 
-    fs::write(
-        temp.path().join("updater.key"),
-        format!(
-            "untrusted comment: minisign {} secret key\nprivate\n",
-            "encrypted"
-        ),
-    )
-    .expect("write leaked private key");
+    let private_key_fixture = base64::engine::general_purpose::STANDARD.encode(format!(
+        "untrusted comment: tauri signer {} secret key\nfixture-only\n",
+        "encrypted"
+    ));
+    fs::write(temp.path().join("renamed.txt"), private_key_fixture)
+        .expect("write disguised private key");
     let add = Command::new("git")
-        .args(["add", "updater.key"])
+        .args(["add", "renamed.txt"])
         .current_dir(temp.path())
         .output()
         .expect("track leaked private key");
@@ -467,6 +465,8 @@ fn windows_candidate_requires_and_verifies_the_updater_signature() {
     assert!(script.contains("verify_updater_signature"));
     assert!(script.contains("updaterSignature = 'passed'"));
     assert!(script.contains("signaturePath"));
+    assert!(!script.contains("$env:TAURI_SIGNING_PRIVATE_KEY ="));
+    assert!(script.contains("Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY"));
 }
 
 #[test]
@@ -506,9 +506,21 @@ fn repository_declares_repeatable_gitcode_setup_without_formal_smoke_manifest_wr
     let root = repository_root();
     let wizard = fs::read_to_string(root.join("scripts/setup-gitcode-distribution.sh"))
         .expect("read GitCode setup wizard");
+    let contract = read_json(root.join("scripts/gitcode-distribution.json"));
+    let token_secret = contract["tokenSecret"].as_str().expect("token secret name");
+    let repository_variable = contract["repositoryVariable"]
+        .as_str()
+        .expect("repository variable name");
+    let branch_variable = contract["branchVariable"]
+        .as_str()
+        .expect("branch variable name");
     assert!(wizard.contains("ask_secret GITCODE_TOKEN"));
-    assert!(wizard.contains("set_secret GITCODE_TOKEN"));
-    assert!(wizard.contains("set_var GITCODE_REPOSITORY"));
+    assert!(wizard.contains("set_secret \"$TOKEN_SECRET_NAME\""));
+    assert!(wizard.contains("set_var \"$REPOSITORY_VARIABLE_NAME\""));
+    assert!(wizard.contains("set_var \"$BRANCH_VARIABLE_NAME\""));
+    assert_eq!(token_secret, "GITCODE_TOKEN");
+    assert_eq!(repository_variable, "GITCODE_REPOSITORY");
+    assert_eq!(branch_variable, "GITCODE_DEFAULT_BRANCH");
     assert!(wizard.contains("离线备份"));
     assert_eq!(wizard.matches("ask_secret GITCODE_TOKEN").count(), 1);
     assert!(wizard.contains("gh workflow run gitcode-smoke.yml"));

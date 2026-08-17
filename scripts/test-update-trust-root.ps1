@@ -11,6 +11,13 @@ $root = (Resolve-Path -LiteralPath $RepositoryRoot).Path
 $errors = [System.Collections.Generic.List[string]]::new()
 function Add-TrustError([string]$Message) { $errors.Add($Message) }
 
+function Test-UpdaterPrivateKeyText([string]$Value) {
+    $header = @([regex]::Split($Value, '\r?\n'))[0]
+    return $header.StartsWith('untrusted comment: ', [StringComparison]::Ordinal) -and
+        $header -match '\b(encrypted )?secret key\b' -and
+        $header -notmatch '\bsignature from\b'
+}
+
 try {
     $distribution = Get-Content -LiteralPath (Join-Path $root 'scripts/gitcode-distribution.json') -Raw | ConvertFrom-Json
 } catch {
@@ -99,7 +106,7 @@ if ($smoke.Contains('latest.json')) {
     Add-TrustError 'The API smoke command must not advance the formal latest manifest.'
 }
 if (-not $wizard.Contains('ask_secret GITCODE_TOKEN') -or
-    -not $wizard.Contains('set_secret GITCODE_TOKEN') -or
+    -not $wizard.Contains('set_secret "$TOKEN_SECRET_NAME"') -or
     -not $wizard.Contains('unset GITCODE_TOKEN')) {
     Add-TrustError 'The setup wizard must capture, store, and clear the GitCode Token safely.'
 }
@@ -127,7 +134,14 @@ foreach ($relativePath in $trackedFiles) {
     } catch {
         continue
     }
-    if ($content -match '(?i)minisign (encrypted )?secret key') {
+    $containsPrivateKey = Test-UpdaterPrivateKeyText $content
+    if (-not $containsPrivateKey) {
+        try {
+            $decodedContent = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($content.Trim()))
+            $containsPrivateKey = Test-UpdaterPrivateKeyText $decodedContent
+        } catch {}
+    }
+    if ($containsPrivateKey) {
         Add-TrustError "Tracked file contains an updater private key marker: $relativePath."
     }
     if ($content -match '(?i)TAURI_SIGNING_PRIVATE_KEY(_PASSWORD)?\s*=\s*[A-Za-z0-9+/]{12,}') {

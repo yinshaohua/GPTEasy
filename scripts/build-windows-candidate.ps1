@@ -49,7 +49,12 @@ $resolvedSigningKey = (Resolve-Path -LiteralPath $signingKeyPath).Path
 if ($resolvedSigningKey.StartsWith($repoRoot, [StringComparison]::OrdinalIgnoreCase)) {
     throw 'The updater private key must be stored outside the repository.'
 }
-$env:TAURI_SIGNING_PRIVATE_KEY = $resolvedSigningKey
+$env:TAURI_SIGNING_PRIVATE_KEY_PATH = $resolvedSigningKey
+Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY -ErrorAction SilentlyContinue
+& node (Join-Path $PSScriptRoot 'check-encrypted-updater-key.mjs') $resolvedSigningKey *> $null
+if ($LASTEXITCODE -ne 0) {
+    throw 'The updater private key must be encrypted with a password.'
+}
 if ([string]::IsNullOrWhiteSpace([string]$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD)) {
     throw 'TAURI_SIGNING_PRIVATE_KEY_PASSWORD is required for the encrypted updater private key.'
 }
