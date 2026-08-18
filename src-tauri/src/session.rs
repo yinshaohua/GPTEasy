@@ -218,7 +218,7 @@ pub struct SessionFailure {
 }
 
 impl SessionFailure {
-    fn new(category: SessionFailureCategory, message_id: &str) -> Self {
+    pub(crate) fn new(category: SessionFailureCategory, message_id: &str) -> Self {
         Self {
             category,
             message_id: message_id.to_owned(),

@@ -196,13 +196,14 @@ pub(crate) fn install_update(
     app: AppHandle,
     state: State<'_, UpdateRuntime>,
 ) -> Result<UpdateSnapshot, UpdateInstallFailure> {
-    let Some(_guard) = state.activity.try_begin_install() else {
+    let Some(guard) = state.activity.try_begin_install() else {
         return Err(UpdateInstallFailure {
             category: UpdateInstallFailureCategory::Busy,
             message_id: "update.busy",
         });
     };
     let snapshot = state.coordinator.confirm_install()?;
+    guard.commit_install();
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     {
         let _ = app.emit("update-install-started", snapshot.clone());
@@ -214,28 +215,37 @@ pub(crate) fn install_update(
 }
 
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-pub(crate) async fn perform_update_check(app: &AppHandle) -> UpdateSnapshot {
+pub(crate) async fn perform_update_check(
+    app: &AppHandle,
+    retry_incomplete: bool,
+) -> UpdateSnapshot {
     let runtime = app.state::<UpdateRuntime>();
     let coordinator = runtime.coordinator.clone();
     let event_app = app.clone();
-    let snapshot = coordinator
-        .check_and_download(move |snapshot| {
-            let _ = event_app.emit("update-progress", snapshot);
-        })
-        .await;
+    let progress = move |snapshot| {
+        let _ = event_app.emit("update-progress", snapshot);
+    };
+    let snapshot = if retry_incomplete {
+        coordinator.check_and_download(progress).await
+    } else {
+        coordinator.scheduled_check_and_download(progress).await
+    };
     runtime.notify_if_hidden(app, &snapshot);
     let _ = app.emit("update-progress", snapshot.clone());
     snapshot
 }
 
 #[cfg(not(all(target_os = "windows", target_arch = "x86_64")))]
-pub(crate) async fn perform_update_check(app: &AppHandle) -> UpdateSnapshot {
+pub(crate) async fn perform_update_check(
+    app: &AppHandle,
+    _retry_incomplete: bool,
+) -> UpdateSnapshot {
     app.state::<UpdateRuntime>().coordinator.snapshot()
 }
 
 #[tauri::command]
 pub(crate) async fn check_for_updates(app: AppHandle) -> UpdateSnapshot {
-    perform_update_check(&app).await
+    perform_update_check(&app, true).await
 }
 
 #[tauri::command]
@@ -319,7 +329,11 @@ pub(crate) async fn archive_sessions(
     state: State<'_, SessionRuntime>,
     session_ids: Vec<String>,
 ) -> Result<Vec<SessionMutationResult>, CommandFailure> {
-    let _activity = app.state::<UpdateRuntime>().activity.try_begin("会话修改");
+    let Some(_activity) = app.state::<UpdateRuntime>().activity.try_begin("会话修改") else {
+        return Err(CommandFailure {
+            message_id: "update.installing",
+        });
+    };
     Ok(state.application.archive(session_ids).await)
 }
 
@@ -329,7 +343,11 @@ pub(crate) async fn unarchive_sessions(
     state: State<'_, SessionRuntime>,
     session_ids: Vec<String>,
 ) -> Result<Vec<SessionMutationResult>, CommandFailure> {
-    let _activity = app.state::<UpdateRuntime>().activity.try_begin("会话修改");
+    let Some(_activity) = app.state::<UpdateRuntime>().activity.try_begin("会话修改") else {
+        return Err(CommandFailure {
+            message_id: "update.installing",
+        });
+    };
     Ok(state.application.unarchive(session_ids).await)
 }
 
@@ -339,7 +357,11 @@ pub(crate) async fn delete_session(
     state: State<'_, SessionRuntime>,
     session_id: String,
 ) -> Result<SessionMutationResult, CommandFailure> {
-    let _activity = app.state::<UpdateRuntime>().activity.try_begin("会话修改");
+    let Some(_activity) = app.state::<UpdateRuntime>().activity.try_begin("会话修改") else {
+        return Err(CommandFailure {
+            message_id: "update.installing",
+        });
+    };
     Ok(state.application.delete(&session_id).await)
 }
 
@@ -372,7 +394,12 @@ pub(crate) async fn export_session_markdown(
     detail: SessionDetail,
     destination: String,
 ) -> Result<(), SessionFailure> {
-    let _activity = app.state::<UpdateRuntime>().activity.try_begin("会话导出");
+    let Some(_activity) = app.state::<UpdateRuntime>().activity.try_begin("会话导出") else {
+        return Err(SessionFailure::new(
+            crate::session::SessionFailureCategory::WriteFailed,
+            "update.installing",
+        ));
+    };
     state
         .application
         .export_markdown(&detail, std::path::Path::new(&destination))
@@ -438,10 +465,16 @@ pub(crate) fn export_linux_script(
     destination: String,
     confirm_overwrite: bool,
 ) -> Result<LinuxExportResult, LinuxExportFailure> {
-    let _activity = app
+    let Some(_activity) = app
         .state::<UpdateRuntime>()
         .activity
-        .try_begin("Linux 导出");
+        .try_begin("Linux 导出")
+    else {
+        return Err(LinuxExportFailure {
+            category: crate::provider::LinuxExportFailureCategory::StateUnavailable,
+            message_id: "update.installing",
+        });
+    };
     state.application.export_linux_script(
         shell,
         std::path::Path::new(&destination),
@@ -483,7 +516,12 @@ pub(crate) async fn apply_wsl_provider(
     expected_revision: String,
     confirm: bool,
 ) -> Result<WslApplyResult, WslFailure> {
-    let _activity = app.state::<UpdateRuntime>().activity.try_begin("WSL2 应用");
+    let Some(_activity) = app.state::<UpdateRuntime>().activity.try_begin("WSL2 应用") else {
+        return Err(WslFailure::new(
+            crate::wsl::WslFailureCategory::StateUnavailable,
+            "update.installing",
+        ));
+    };
     let application = state.application.clone();
     tauri::async_runtime::spawn_blocking(move || {
         application.apply_provider(&environment_id, &provider_id, &expected_revision, confirm)
@@ -505,7 +543,16 @@ pub(crate) async fn refresh_wsl_environment(
     expected_revision: String,
     authorize_start: bool,
 ) -> Result<WslRefreshResult, WslFailure> {
-    let _activity = app.state::<UpdateRuntime>().activity.try_begin("WSL2 环境协调");
+    let Some(_activity) = app
+        .state::<UpdateRuntime>()
+        .activity
+        .try_begin("WSL2 环境协调")
+    else {
+        return Err(WslFailure::new(
+            crate::wsl::WslFailureCategory::StateUnavailable,
+            "update.installing",
+        ));
+    };
     let application = state.application.clone();
     tauri::async_runtime::spawn_blocking(move || {
         application.refresh_environment(&environment_id, &expected_revision, authorize_start)
@@ -526,7 +573,12 @@ pub(crate) async fn apply_environment_provider(
     provider_id: String,
     expected_revision: String,
 ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
-    let _activity = app.state::<UpdateRuntime>().activity.try_begin("配置写入");
+    let Some(_activity) = app.state::<UpdateRuntime>().activity.try_begin("配置写入") else {
+        return Err(EnvironmentFailure::new(
+            EnvironmentFailureCategory::StateUnavailable,
+            "update.installing",
+        ));
+    };
     let application = state.application.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         application.apply_provider_at_revision(&provider_id, true, &expected_revision)
@@ -543,7 +595,12 @@ pub(crate) async fn restore_last_environment_config(
     confirm_restore: bool,
     expected_revision: String,
 ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
-    let _activity = app.state::<UpdateRuntime>().activity.try_begin("配置恢复");
+    let Some(_activity) = app.state::<UpdateRuntime>().activity.try_begin("配置恢复") else {
+        return Err(EnvironmentFailure::new(
+            EnvironmentFailureCategory::StateUnavailable,
+            "update.installing",
+        ));
+    };
     let application = state.application.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         application.restore_last_config(confirm_restore, &expected_revision)
@@ -559,7 +616,12 @@ pub(crate) async fn switch_to_openai_login(
     state: State<'_, EnvironmentRuntime>,
     expected_revision: String,
 ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
-    let _activity = app.state::<UpdateRuntime>().activity.try_begin("配置写入");
+    let Some(_activity) = app.state::<UpdateRuntime>().activity.try_begin("配置写入") else {
+        return Err(EnvironmentFailure::new(
+            EnvironmentFailureCategory::StateUnavailable,
+            "update.installing",
+        ));
+    };
     let application = state.application.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         application.switch_to_openai_login(true, &expected_revision)
@@ -597,10 +659,16 @@ pub(crate) async fn validate_provider(
     request_id: String,
     input: ProviderValidationInput,
 ) -> Result<ProviderValidationReceipt, ProviderFailure> {
-    let _activity = app
+    let Some(_activity) = app
         .state::<UpdateRuntime>()
         .activity
-        .try_begin("供应商验证");
+        .try_begin("供应商验证")
+    else {
+        return Err(ProviderFailure::new(
+            ProviderFailureCategory::StateUnavailable,
+            "update.installing",
+        ));
+    };
     let progress_request_id = request_id.clone();
     state
         .application
@@ -623,10 +691,16 @@ pub(crate) async fn validate_provider_update(
     request_id: String,
     input: ProviderUpdateValidationInput,
 ) -> Result<ProviderValidationReceipt, ProviderFailure> {
-    let _activity = app
+    let Some(_activity) = app
         .state::<UpdateRuntime>()
         .activity
-        .try_begin("供应商验证");
+        .try_begin("供应商验证")
+    else {
+        return Err(ProviderFailure::new(
+            ProviderFailureCategory::StateUnavailable,
+            "update.installing",
+        ));
+    };
     let progress_request_id = request_id.clone();
     state
         .application
@@ -649,10 +723,16 @@ pub(crate) async fn revalidate_provider(
     request_id: String,
     provider_id: String,
 ) -> Result<ProviderRevalidationResult, ProviderFailure> {
-    let _activity = app
+    let Some(_activity) = app
         .state::<UpdateRuntime>()
         .activity
-        .try_begin("供应商验证");
+        .try_begin("供应商验证")
+    else {
+        return Err(ProviderFailure::new(
+            ProviderFailureCategory::StateUnavailable,
+            "update.installing",
+        ));
+    };
     let progress_request_id = request_id.clone();
     state
         .application
@@ -701,10 +781,16 @@ pub(crate) fn save_verified_provider(
     validation_id: String,
     name: String,
 ) -> Result<ProviderSummary, ProviderFailure> {
-    let _activity = app
+    let Some(_activity) = app
         .state::<UpdateRuntime>()
         .activity
-        .try_begin("供应商目录写入");
+        .try_begin("供应商目录写入")
+    else {
+        return Err(ProviderFailure::new(
+            ProviderFailureCategory::StateUnavailable,
+            "update.installing",
+        ));
+    };
     let result = state
         .application
         .save_verified_provider(&validation_id, &name);
@@ -718,10 +804,16 @@ pub(crate) fn save_dayway_provider(
     validation_id: String,
     confirm_name_conflict: bool,
 ) -> Result<ProviderSummary, ProviderFailure> {
-    let _activity = app
+    let Some(_activity) = app
         .state::<UpdateRuntime>()
         .activity
-        .try_begin("供应商目录写入");
+        .try_begin("供应商目录写入")
+    else {
+        return Err(ProviderFailure::new(
+            ProviderFailureCategory::StateUnavailable,
+            "update.installing",
+        ));
+    };
     let result = state
         .application
         .save_dayway_provider_with_name_conflict_confirmation(
@@ -754,10 +846,16 @@ pub(crate) fn rename_provider(
     provider_id: String,
     name: String,
 ) -> Result<ProviderSummary, ProviderFailure> {
-    let _activity = app
+    let Some(_activity) = app
         .state::<UpdateRuntime>()
         .activity
-        .try_begin("供应商目录写入");
+        .try_begin("供应商目录写入")
+    else {
+        return Err(ProviderFailure::new(
+            ProviderFailureCategory::StateUnavailable,
+            "update.installing",
+        ));
+    };
     let result = state.application.rename_provider(&provider_id, &name);
     refresh_tray_after(&app, result)
 }
@@ -770,10 +868,16 @@ pub(crate) fn save_provider_update(
     provider_id: String,
     name: String,
 ) -> Result<ProviderSummary, ProviderFailure> {
-    let _activity = app
+    let Some(_activity) = app
         .state::<UpdateRuntime>()
         .activity
-        .try_begin("供应商目录写入");
+        .try_begin("供应商目录写入")
+    else {
+        return Err(ProviderFailure::new(
+            ProviderFailureCategory::StateUnavailable,
+            "update.installing",
+        ));
+    };
     let result = state
         .application
         .save_provider_update(&validation_id, &provider_id, &name);
@@ -787,7 +891,12 @@ pub(crate) async fn save_and_apply_provider_update(
     provider_id: String,
     name: String,
 ) -> Result<AppliedProviderUpdate, ProviderFailure> {
-    let _activity = app.state::<UpdateRuntime>().activity.try_begin("配置写入");
+    let Some(_activity) = app.state::<UpdateRuntime>().activity.try_begin("配置写入") else {
+        return Err(ProviderFailure::new(
+            ProviderFailureCategory::StateUnavailable,
+            "update.installing",
+        ));
+    };
     let task_app = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let provider_state = task_app.state::<ProviderRuntime>();
@@ -839,10 +948,18 @@ pub(crate) async fn delete_provider(
     provider_id: String,
     authorize_stopped_wsl: bool,
 ) -> Result<DeleteProviderResult, DeleteProviderFailure> {
-    let _activity = app
+    let Some(_activity) = app
         .state::<UpdateRuntime>()
         .activity
-        .try_begin("供应商目录写入");
+        .try_begin("供应商目录写入")
+    else {
+        return Err(DeleteProviderFailure {
+            category: "state_unavailable",
+            message_id: "update.installing",
+            lifecycle_outcome: None,
+            lifecycle_results: Vec::new(),
+        });
+    };
     let task_app = app.clone();
     let audit_provider_id = provider_id.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
@@ -894,10 +1011,16 @@ pub(crate) fn reorder_providers(
     state: State<'_, ProviderRuntime>,
     provider_ids: Vec<String>,
 ) -> Result<Vec<ProviderSummary>, ProviderFailure> {
-    let _activity = app
+    let Some(_activity) = app
         .state::<UpdateRuntime>()
         .activity
-        .try_begin("供应商目录写入");
+        .try_begin("供应商目录写入")
+    else {
+        return Err(ProviderFailure::new(
+            ProviderFailureCategory::StateUnavailable,
+            "update.installing",
+        ));
+    };
     let result = state.application.reorder_providers(&provider_ids);
     refresh_tray_after(&app, result)
 }

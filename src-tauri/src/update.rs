@@ -14,6 +14,7 @@ pub const MANUAL_DOWNLOAD_URL: &str = "https://github.com/yinshaohua/GPTEasy/rel
 pub const GITCODE_RELEASES_URL: &str =
     "https://gitcode.com/ericyin99/GPTEasy-Releases/releases/tag";
 pub const CHECK_INTERVAL_SECONDS: u64 = 24 * 60 * 60;
+const NSIS_INSTALL_ARGUMENTS: [&str; 2] = ["/P", "/R"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -205,6 +206,7 @@ pub struct UpdateActivityGate {
 pub struct UpdateActivityGuard {
     gate: UpdateActivityGate,
     operation: Option<String>,
+    committed: bool,
 }
 
 #[derive(Default)]
@@ -224,6 +226,7 @@ impl UpdateActivityGate {
         Some(UpdateActivityGuard {
             gate: self.clone(),
             operation: Some(operation),
+            committed: false,
         })
     }
 
@@ -236,6 +239,7 @@ impl UpdateActivityGate {
         Some(UpdateActivityGuard {
             gate: self.clone(),
             operation: None,
+            committed: false,
         })
     }
 
@@ -247,6 +251,12 @@ impl UpdateActivityGate {
     }
 }
 
+impl UpdateActivityGuard {
+    pub fn commit_install(mut self) {
+        self.committed = true;
+    }
+}
+
 impl Drop for UpdateActivityGuard {
     fn drop(&mut self) {
         if let Ok(mut active) = self.gate.active.lock() {
@@ -254,7 +264,7 @@ impl Drop for UpdateActivityGuard {
                 if let Some(index) = active.operations.iter().position(|item| item == operation) {
                     active.operations.remove(index);
                 }
-            } else {
+            } else if !self.committed {
                 active.installing = false;
             }
         }
@@ -308,7 +318,7 @@ impl UpdateCoordinator {
         }
     }
 
-    pub(crate) fn with_state_path(
+    pub fn with_state_path(
         current_version: impl Into<String>,
         install_attempt_path: impl AsRef<Path>,
     ) -> Self {
@@ -357,11 +367,29 @@ impl UpdateCoordinator {
         }
     }
 
-    pub(crate) async fn check_and_download<F>(&self, mut progress: F) -> UpdateSnapshot
+    pub(crate) async fn check_and_download<F>(&self, progress: F) -> UpdateSnapshot
     where
         F: FnMut(UpdateSnapshot) + Send,
     {
-        if !self.begin_check() {
+        self.check_and_download_with_policy(progress, true).await
+    }
+
+    pub(crate) async fn scheduled_check_and_download<F>(&self, progress: F) -> UpdateSnapshot
+    where
+        F: FnMut(UpdateSnapshot) + Send,
+    {
+        self.check_and_download_with_policy(progress, false).await
+    }
+
+    async fn check_and_download_with_policy<F>(
+        &self,
+        mut progress: F,
+        retry_incomplete: bool,
+    ) -> UpdateSnapshot
+    where
+        F: FnMut(UpdateSnapshot) + Send,
+    {
+        if !self.begin_check(retry_incomplete) {
             return self.snapshot();
         }
 
@@ -427,7 +455,7 @@ impl UpdateCoordinator {
         self.snapshot()
     }
 
-    fn begin_check(&self) -> bool {
+    fn begin_check(&self, retry_incomplete: bool) -> bool {
         let Ok(mut state) = self.state.lock() else {
             return false;
         };
@@ -435,6 +463,7 @@ impl UpdateCoordinator {
             state.snapshot.state,
             UpdateState::Checking | UpdateState::Downloading
         ) || state.installing
+            || (state.snapshot.state == UpdateState::Incomplete && !retry_incomplete)
         {
             return false;
         }
@@ -557,9 +586,13 @@ impl UpdateCoordinator {
 
     pub(crate) fn confirm_install(&self) -> Result<UpdateSnapshot, UpdateInstallFailure> {
         let (version, bytes) = self.begin_install()?;
-        let prepared = self
-            .persist_install_attempt(&version)
-            .and_then(|_| self.write_installer(&version, &bytes));
+        let prepared = self.write_installer(&version, &bytes).and_then(|path| {
+            if let Err(failure) = self.persist_install_attempt(&version) {
+                let _ = fs::remove_file(&path);
+                return Err(failure);
+            }
+            Ok(path)
+        });
         let path = match prepared {
             Ok(path) => path,
             Err(failure) => {
@@ -568,7 +601,10 @@ impl UpdateCoordinator {
             }
         };
         #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-        let launched = std::process::Command::new(&path).arg("/P").spawn().is_ok();
+        let launched = std::process::Command::new(&path)
+            .args(NSIS_INSTALL_ARGUMENTS)
+            .spawn()
+            .is_ok();
         #[cfg(not(all(target_os = "windows", target_arch = "x86_64")))]
         let launched = false;
         if !launched {
@@ -784,10 +820,10 @@ mod tests {
     #[test]
     fn check_and_download_is_mutually_exclusive() {
         let coordinator = UpdateCoordinator::with_endpoint("1.0.0", "http://127.0.0.1", "key");
-        assert!(coordinator.begin_check());
-        assert!(!coordinator.begin_check());
+        assert!(coordinator.begin_check(true));
+        assert!(!coordinator.begin_check(true));
         coordinator.set_up_to_date();
-        assert!(coordinator.begin_check());
+        assert!(coordinator.begin_check(true));
     }
 
     #[test]
@@ -845,5 +881,125 @@ mod tests {
             coordinator.snapshot().release_notes_url.as_deref(),
             Some("https://gitcode.com/ericyin99/GPTEasy-Releases/releases/tag/v1.1.0")
         );
+    }
+
+    #[test]
+    fn duplicate_install_confirmation_is_rejected_until_the_first_attempt_finishes() {
+        let coordinator = UpdateCoordinator::with_endpoint("1.0.0", "http://127.0.0.1", "key");
+        coordinator.mark_ready(
+            Manifest {
+                version: "1.1.0".to_owned(),
+                notes: None,
+                pub_date: None,
+                platforms: std::collections::HashMap::new(),
+            },
+            vec![1, 2, 3],
+        );
+
+        assert!(coordinator.begin_install().is_ok());
+        let repeated = coordinator.begin_install().expect_err("duplicate install");
+        assert_eq!(repeated.category, UpdateInstallFailureCategory::Busy);
+        assert_eq!(repeated.message_id, "update.busy");
+    }
+
+    #[test]
+    fn failed_install_preparation_clears_attempt_state_and_keeps_the_package_pending() {
+        let root = TempDir::new().expect("update state root");
+        let blocking_file = root.path().join("not-a-directory");
+        fs::write(&blocking_file, b"block parent creation").expect("blocking file");
+        let attempt = blocking_file.join("update-install-attempt.json");
+        let coordinator = UpdateCoordinator::with_state_path("1.0.0", &attempt);
+        coordinator.mark_ready(
+            Manifest {
+                version: "9.9.7".to_owned(),
+                notes: None,
+                pub_date: None,
+                platforms: std::collections::HashMap::new(),
+            },
+            b"not-an-installer".to_vec(),
+        );
+
+        let failure = coordinator
+            .confirm_install()
+            .expect_err("preparation fails");
+
+        assert_eq!(
+            failure.category,
+            UpdateInstallFailureCategory::StateUnavailable
+        );
+        assert_eq!(coordinator.snapshot().state, UpdateState::Pending);
+        assert!(!attempt.exists());
+        assert!(
+            !std::env::temp_dir()
+                .join("GPTEasy-update-9.9.7.exe")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn process_restart_discards_the_pending_package_and_allows_a_fresh_download() {
+        let root = TempDir::new().expect("update state root");
+        let attempt = root.path().join("update-install-attempt.json");
+        let coordinator = UpdateCoordinator::with_state_path("1.0.0", &attempt);
+        coordinator.mark_ready(
+            Manifest {
+                version: "1.1.0".to_owned(),
+                notes: None,
+                pub_date: None,
+                platforms: std::collections::HashMap::new(),
+            },
+            vec![1, 2, 3],
+        );
+        assert!(coordinator.is_pending_version("1.1.0"));
+        drop(coordinator);
+
+        let restarted = UpdateCoordinator::with_state_path("1.0.0", &attempt);
+
+        assert_eq!(restarted.snapshot().state, UpdateState::Idle);
+        assert!(!restarted.is_pending_version("1.1.0"));
+        assert!(restarted.begin_check(true));
+    }
+
+    #[test]
+    fn automatic_check_preserves_incomplete_state_until_the_user_retries() {
+        let root = TempDir::new().expect("update state root");
+        let path = root.path().join("update-install-attempt.json");
+        fs::write(&path, br#"{"target_version":"1.1.0"}"#).expect("install attempt");
+        let coordinator = UpdateCoordinator::with_state_path("1.0.0", &path);
+
+        assert!(!coordinator.begin_check(false));
+        assert_eq!(coordinator.snapshot().state, UpdateState::Incomplete);
+        assert!(coordinator.begin_check(true));
+    }
+
+    #[test]
+    fn committed_install_gate_rejects_new_write_operations() {
+        let gate = UpdateActivityGate::default();
+        let install = gate.try_begin_install().expect("begin install");
+        install.commit_install();
+
+        assert!(gate.try_begin("配置写入").is_none());
+        assert!(gate.try_begin_install().is_none());
+    }
+
+    #[test]
+    fn install_attempt_record_contains_only_the_target_version() {
+        let root = TempDir::new().expect("update state root");
+        let path = root.path().join("update-install-attempt.json");
+        let coordinator = UpdateCoordinator::with_state_path("1.0.0", &path);
+
+        coordinator
+            .persist_install_attempt("1.1.0")
+            .expect("persist attempt");
+
+        assert_eq!(
+            fs::read_to_string(path).expect("read attempt"),
+            r#"{"target_version":"1.1.0"}"#
+        );
+    }
+
+    #[test]
+    fn nsis_install_is_passive_and_restarts_the_new_version() {
+        assert_eq!(NSIS_INSTALL_ARGUMENTS, ["/P", "/R"]);
     }
 }
