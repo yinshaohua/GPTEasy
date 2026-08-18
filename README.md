@@ -13,17 +13,19 @@ GPTEasy 是一款面向 Windows 和 WSL2 用户的 Codex 配置与会话管理�
 
 ## 下载与安装
 
-前往 [GitHub Releases](https://github.com/yinshaohua/GPTEasy/releases/latest) 下载最新的 Windows x64 当前用户安装包。安装不需要管理员权限。
+国内用户可从 [GitCode Releases](https://gitcode.com/ericyin99/GPTEasy-Releases/releases) 下载最新的 Windows x64 当前用户安装包；[GitHub Releases](https://github.com/yinshaohua/GPTEasy/releases/latest) 继续提供源码、发布说明和备用下载。两个平台分发同一次正式构建的安装包，安装不需要管理员权限。
+
+`v1.1.0` 是首个内置应用更新信任根的更新自举版本，必须先手工下载安装。此后的正式更新由应用自动检查和下载，签名验证通过后仍需用户明确选择“重启并更新”。
 
 系统要求：
 
 - Windows 10 22H2（build 19045）或更高版本，x64
 - Codex CLI `0.147.0` 或更高版本
 
-下载后，请同时获取 Release 中的 `SHA256SUMS.txt`，并在 PowerShell 中校验安装包：
+下载后，请同时获取同一 Release 中的 `SHA256SUMS.txt`，并在 PowerShell 中校验安装包：
 
 ```powershell
-Get-FileHash .\GPTEasy_1.0.1_x64-setup.exe -Algorithm SHA256
+Get-FileHash .\GPTEasy_1.1.0_x64-setup.exe -Algorithm SHA256
 ```
 
 > [!WARNING]
