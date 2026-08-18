@@ -475,7 +475,7 @@ fn windows_candidate_requires_and_verifies_the_updater_signature() {
     assert!(script.contains("verify_updater_signature"));
     assert!(script.contains("updaterSignature = 'passed'"));
     assert!(script.contains("signaturePath"));
-    assert!(!script.contains("$env:TAURI_SIGNING_PRIVATE_KEY ="));
+    assert!(script.contains("$env:TAURI_SIGNING_PRIVATE_KEY = $resolvedSigningKey"));
     assert!(script.contains("Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY"));
 }
 

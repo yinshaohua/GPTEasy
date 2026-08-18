@@ -87,7 +87,12 @@ try {
         powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-update-trust-root.ps1 -RepositoryRoot $repoRoot
     }
     Invoke-Checked 'Tauri Windows x64 NSIS build' {
-        npx --no-install tauri build --target x86_64-pc-windows-msvc
+        try {
+            $env:TAURI_SIGNING_PRIVATE_KEY = $resolvedSigningKey
+            npx --no-install tauri build --target x86_64-pc-windows-msvc
+        } finally {
+            Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY -ErrorAction SilentlyContinue
+        }
     }
 } finally {
     Pop-Location
