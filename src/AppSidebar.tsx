@@ -1,5 +1,4 @@
 import {
-  CircleCheck,
   Download,
   LoaderCircle,
   LogIn,
@@ -7,6 +6,7 @@ import {
   RefreshCw,
   Server,
   Settings,
+  TriangleAlert,
 } from "lucide-react";
 import { useState } from "react";
 
@@ -14,6 +14,7 @@ import type { UpdateSnapshot } from "./contracts/update";
 
 export interface UpdateSidebarState {
   snapshot: UpdateSnapshot;
+  installing: boolean;
   onOpen: () => void;
   onInstall?: () => void;
 }
@@ -81,10 +82,6 @@ function SidebarFooter({
   update?: UpdateSidebarState;
 }) {
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const snapshot = update?.snapshot;
-  const hasUpdate = Boolean(snapshot && ["downloading", "pending", "incomplete"].includes(snapshot.state) && snapshot.availableVersion);
-  const isDownloading = snapshot?.state === "downloading";
-  const isReady = snapshot?.state === "pending" || snapshot?.state === "incomplete";
   const providerLabel = currentProviderName || (openAiAction?.current ? "OpenAI 登录模式" : "未选择供应商");
 
   return (
@@ -126,19 +123,91 @@ function SidebarFooter({
           )}
         </div>
         <span className="sidebar-provider-name" title={providerLabel}>{providerLabel}</span>
-        {hasUpdate && update && (
-          <button
-            className={`sidebar-update-indicator${isReady ? " is-ready" : ""}${isDownloading ? " is-downloading" : ""}`}
-            type="button"
-            onClick={isReady && update.onInstall ? update.onInstall : update.onOpen}
-            title={isReady ? "点击重启升级" : undefined}
-            aria-label={isReady ? "点击重启升级" : `下载更新${snapshot?.progressPercent == null ? "" : ` ${snapshot.progressPercent}%`}`}
-          >
-            {isReady ? <CircleCheck size={18} aria-hidden="true" /> : <Download size={16} aria-hidden="true" />}
-            {isDownloading && <span>{snapshot?.progressPercent == null ? "..." : `${snapshot.progressPercent}%`}</span>}
-          </button>
-        )}
+        {update && <SidebarUpdateIndicator update={update} />}
       </div>
+      {update && (
+        <button
+          className="sidebar-version"
+          type="button"
+          onClick={update.onOpen}
+          aria-label={`当前版本 v${update.snapshot.currentVersion}`}
+        >
+          <span>当前版本</span>
+          <strong>v{update.snapshot.currentVersion}</strong>
+        </button>
+      )}
+    </div>
+  );
+}
+
+type UpdateIndicatorKind = "downloading" | "pending" | "installing" | "incomplete" | "failed";
+
+function SidebarUpdateIndicator({ update }: { update: UpdateSidebarState }) {
+  const { snapshot } = update;
+  if (!snapshot.availableVersion) return null;
+
+  let kind: UpdateIndicatorKind | null = null;
+  if (update.installing) kind = "installing";
+  else if (snapshot.state === "downloading") kind = "downloading";
+  else if (snapshot.state === "pending") kind = "pending";
+  else if (snapshot.state === "incomplete") kind = "incomplete";
+  else if (snapshot.state === "failed") kind = "failed";
+  if (!kind) return null;
+
+  const progress = snapshot.progressPercent;
+  const label = kind === "installing"
+    ? "正在启动更新"
+    : kind === "downloading"
+      ? progress == null ? "正在下载更新" : `正在下载更新 ${progress}%`
+      : kind === "pending"
+        ? "更新"
+        : kind === "incomplete"
+          ? "重试更新"
+          : "更新失败";
+  const onClick = update.onOpen;
+
+  return (
+    <div className={`sidebar-update-slot is-${kind}`} aria-live="polite">
+      <button
+        className={`sidebar-update-indicator is-${kind}${progress == null && kind === "downloading" ? " is-indeterminate" : ""}`}
+        type="button"
+        onClick={onClick}
+        disabled={kind === "installing"}
+        aria-label={label}
+        aria-busy={kind === "installing" || undefined}
+      >
+        {kind === "downloading" && progress != null && <span>{progress}%</span>}
+        {kind === "downloading" && progress == null && (
+          <>
+            <LoaderCircle className="is-spinning" size={18} aria-hidden="true" />
+            <span className="sidebar-update-motion-fallback">下载中</span>
+          </>
+        )}
+        {kind === "pending" && (
+          <>
+            <Download size={18} aria-hidden="true" />
+            <span className="sidebar-update-label">更新</span>
+          </>
+        )}
+        {kind === "incomplete" && (
+          <>
+            <RefreshCw size={18} aria-hidden="true" />
+            <span className="sidebar-update-label">重试更新</span>
+          </>
+        )}
+        {kind === "failed" && (
+          <>
+            <TriangleAlert size={18} aria-hidden="true" />
+            <span className="sidebar-update-label">更新失败</span>
+          </>
+        )}
+        {kind === "installing" && (
+          <>
+            <LoaderCircle className="is-spinning" size={18} aria-hidden="true" />
+            <span className="sidebar-update-motion-fallback">处理中</span>
+          </>
+        )}
+      </button>
     </div>
   );
 }

@@ -23,9 +23,25 @@ const providers = [
   },
 ];
 
+const pendingUpdate = {
+  currentVersion: "1.1.1",
+  state: "pending",
+  availableVersion: "1.2.0",
+  notes: "布局测试更新",
+  publishedAt: "2026-08-18T00:00:00Z",
+  checkedAtEpochSeconds: 1_787_027_200,
+  downloadedBytes: 100,
+  totalBytes: 100,
+  progressPercent: 100,
+  failureCategory: null,
+  errorMessage: null,
+  manualDownloadUrl: "https://github.com/yinshaohua/GPTEasy/releases/latest",
+  releaseNotesUrl: "https://gitcode.com/ericyin99/GPTEasy-Releases/releases/tag/v1.2.0",
+};
+
 async function openProviderCatalog(page: Page, width: number, height: number) {
   await page.setViewportSize({ width, height });
-  await page.addInitScript(({ catalog }) => {
+  await page.addInitScript(({ catalog, updateSnapshot }) => {
     let callbackId = 1;
     const callbacks = new Map<number, (...args: unknown[]) => void>();
     const tauri = {
@@ -73,6 +89,7 @@ async function openProviderCatalog(page: Page, width: number, height: number) {
           };
         }
         if (command === "list_providers") return catalog;
+        if (command === "get_update_snapshot") return updateSnapshot;
         if (command === "list_wsl_environments") {
           return [{
             environmentId: "{11111111-1111-1111-1111-111111111111}",
@@ -125,10 +142,11 @@ async function openProviderCatalog(page: Page, width: number, height: number) {
       },
     };
     Object.assign(window, { __TAURI_INTERNALS__: tauri });
-  }, { catalog: providers });
+  }, { catalog: providers, updateSnapshot: pendingUpdate });
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "供应商目录" })).toBeVisible();
   await expect(page.getByLabel("已验证供应商").getByText("Long Provider Name")).toBeVisible();
+  await expect(page.getByRole("button", { name: "更新" })).toBeVisible();
 }
 
 test("默认窗口横向展示目录行且底部操作可见", async ({ page }, testInfo) => {
@@ -172,6 +190,24 @@ test("默认窗口横向展示目录行且底部操作可见", async ({ page }, 
   await expect(wslProvider).toContainText("https://provider.example/very/long/responses/compatible/api/v1");
   await expect(wslProvider).toContainText("provider-model-with-a-very-long-version-identifier");
 
+  const providerName = page.locator(".sidebar-provider-name");
+  const updateIndicator = page.getByRole("button", { name: "更新" });
+  const providerBeforeHover = await providerName.boundingBox();
+  const indicatorBeforeHover = await updateIndicator.boundingBox();
+  await updateIndicator.hover();
+  await expect(updateIndicator.locator(".sidebar-update-label")).toHaveCSS("opacity", "1");
+  const providerAfterHover = await providerName.boundingBox();
+  const indicatorAfterHover = await updateIndicator.boundingBox();
+  expect(providerBeforeHover).not.toBeNull();
+  expect(indicatorBeforeHover).not.toBeNull();
+  expect(providerAfterHover).not.toBeNull();
+  expect(indicatorAfterHover).not.toBeNull();
+  expect(providerAfterHover!.x).toBeCloseTo(providerBeforeHover!.x, 1);
+  expect(providerAfterHover!.width).toBeCloseTo(providerBeforeHover!.width, 1);
+  expect(indicatorAfterHover!.width).toBeGreaterThan(indicatorBeforeHover!.width);
+
+  await page.screenshot({ path: testInfo.outputPath("update-ready-hover-1120x620.png"), fullPage: true });
+
   await page.screenshot({ path: testInfo.outputPath("provider-layout-1120x620.png"), fullPage: true });
 });
 
@@ -214,8 +250,8 @@ test("最小窗口无横向溢出且所有操作可滚动到达", async ({ page 
   await expect(page.getByRole("button", { name: "恢复上次配置" })).toHaveCount(0);
   await expect(page.getByText("其他环境供应商操作")).toHaveCount(0);
   await expect(page.getByText("当前 Windows Codex 环境操作")).toHaveCount(0);
-  const navigation = page.getByRole("navigation", { name: "主要菜单" });
-  await expect(navigation.getByRole("button", { name: "OpenAI 登录模式" })).toBeVisible();
+  await page.getByRole("button", { name: "设置" }).click();
+  await expect(page.getByRole("menuitem", { name: "返回 OpenAI 登录模式" })).toBeVisible();
   await expect(page.getByText("当前用户")).toHaveCount(0);
   await page.screenshot({ path: testInfo.outputPath("provider-layout-680x520.png"), fullPage: true });
 });

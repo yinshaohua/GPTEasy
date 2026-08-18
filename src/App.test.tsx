@@ -445,7 +445,7 @@ describe("应用更新", () => {
 
     render(<App />);
 
-    expect(await screen.findByRole("button", { name: "点击重启升级" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "更新" })).toBeInTheDocument();
     fireEvent.click(within(openSettingsMenu()).getByRole("menuitem", { name: "检查更新..." }));
     const dialog = screen.getByRole("dialog", { name: "GPTEasy 更新" });
     expect(dialog).toHaveTextContent("更新已下载并通过签名验证");
@@ -489,20 +489,20 @@ describe("应用更新", () => {
     });
 
     render(<App />);
-    await screen.findByRole("button", { name: "点击重启升级" });
+    await screen.findByRole("button", { name: "更新" });
     fireEvent.click(within(openSettingsMenu()).getByRole("menuitem", { name: "检查更新..." }));
     fireEvent.click(within(screen.getByRole("dialog", { name: "GPTEasy 更新" }))
       .getByRole("button", { name: "稍后" }));
     expect(invoke.mock.calls.some(([command]) => command === "install_update")).toBe(false);
     expect(screen.queryByRole("dialog", { name: "GPTEasy 更新" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "点击重启升级" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "更新" })).toBeInTheDocument();
 
     fireEvent.click(within(openSettingsMenu()).getByRole("menuitem", { name: "检查更新..." }));
     fireEvent.click(within(screen.getByRole("dialog", { name: "GPTEasy 更新" }))
       .getByRole("button", { name: "重启并更新" }));
     expect(await screen.findByText("当前有操作正在进行，请先完成或取消后再安装更新。"))
       .toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "点击重启升级" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "更新" })).toBeInTheDocument();
   });
 
   it("没有可用更新时明确显示已是最新版本", async () => {
@@ -567,13 +567,55 @@ describe("应用更新", () => {
     });
 
     render(<App />);
-    await screen.findByRole("button", { name: "点击重启升级" });
-    fireEvent.click(within(openSettingsMenu()).getByRole("menuitem", { name: "检查更新..." }));
+    await screen.findByRole("button", { name: "重试更新" });
+    fireEvent.click(screen.getByRole("button", { name: "重试更新" }));
+    expect(screen.getByRole("dialog", { name: "GPTEasy 更新" })).toBeInTheDocument();
+    expect(invoke.mock.calls.some(([command]) => command === "install_update")).toBe(false);
     const dialog = screen.getByRole("dialog", { name: "GPTEasy 更新" });
     expect(dialog).toHaveTextContent("上次确认的更新尚未完成");
-    expect(within(dialog).getByRole("button", { name: "检查更新" })).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "重新下载" })).toBeInTheDocument();
     expect(within(dialog).getByRole("button", { name: "GitHub 手工下载" })).toBeInTheDocument();
     expect(within(dialog).queryByRole("button", { name: "重启并更新" })).not.toBeInTheDocument();
+  });
+
+  it("确认安装后立即锁定所有安装入口", async () => {
+    const readyUpdate = {
+      currentVersion: "1.0.1",
+      state: "pending",
+      availableVersion: "1.1.0",
+      notes: null,
+      publishedAt: null,
+      checkedAtEpochSeconds: 1_787_027_200,
+      downloadedBytes: 100,
+      totalBytes: 100,
+      progressPercent: 100,
+      failureCategory: null,
+      errorMessage: null,
+      manualDownloadUrl: "https://github.com/yinshaohua/GPTEasy/releases/latest",
+      releaseNotesUrl: null,
+    };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "get_update_snapshot") return Promise.resolve(readyUpdate);
+      if (command === "install_update") return new Promise(() => undefined);
+      if (command === "list_providers" || command === "list_wsl_environments") return Promise.resolve([]);
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "更新" }));
+
+    const dialog = screen.getByRole("dialog", { name: "GPTEasy 更新" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "重启并更新" }));
+
+    const installing = within(screen.getByRole("complementary", { name: "应用导航" }))
+      .getByRole("button", { name: "正在启动更新" });
+    expect(installing).toBeDisabled();
+    expect(invoke.mock.calls.filter(([command]) => command === "install_update")).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    fireEvent.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: "检查更新..." }));
+    expect(within(screen.getByRole("dialog", { name: "GPTEasy 更新" })).getByRole("button", { name: "正在启动更新" })).toBeDisabled();
   });
 });
 

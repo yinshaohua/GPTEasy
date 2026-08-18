@@ -154,7 +154,36 @@ select {
   white-space: nowrap;
 }
 
-.sidebar-update-indicator,
+.sidebar-version {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 30px;
+  margin-top: 3px;
+  padding: 5px 8px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sidebar-version:hover,
+.sidebar-version:focus-visible {
+  color: var(--text);
+  background: var(--surface);
+  border-color: var(--border);
+}
+
+.sidebar-version strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
 .sidebar-settings-button {
   flex: 0 0 auto;
   display: inline-flex;
@@ -172,7 +201,6 @@ select {
   cursor: pointer;
 }
 
-.sidebar-update-indicator:hover,
 .sidebar-settings-button:hover,
 .sidebar-settings-button[aria-expanded="true"] {
   color: var(--text);
@@ -180,38 +208,123 @@ select {
   border-color: var(--border);
 }
 
-.sidebar-update-indicator.is-downloading {
-  min-width: 78px;
-  color: #ffffff;
-  background: #5b99f1;
-  border-color: #5b99f1;
-  border-radius: 999px;
-  font-size: 14px;
-  font-weight: 700;
+.sidebar-update-slot {
+  --update-slot-width: 70px;
+  flex: 0 0 var(--update-slot-width);
+  width: var(--update-slot-width);
+  display: flex;
+  justify-content: flex-end;
 }
 
-.sidebar-update-indicator.is-downloading:hover {
-  color: #ffffff;
-  background: #4f8be3;
-  border-color: #4f8be3;
+.sidebar-update-slot.is-downloading {
+  --update-slot-width: 78px;
 }
 
-.sidebar-update-indicator.is-ready {
+.sidebar-update-slot.is-incomplete,
+.sidebar-update-slot.is-failed {
+  --update-slot-width: 94px;
+}
+
+.sidebar-update-indicator {
+  flex: 0 0 auto;
   width: 36px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  overflow: hidden;
+  padding: 0 8px;
   color: #ffffff;
   background: #5b99f1;
-  border-color: #5b99f1;
-  border-radius: 50%;
+  border: 1px solid #5b99f1;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: width 160ms ease, background-color 160ms ease, border-color 160ms ease;
 }
 
-.sidebar-update-indicator.is-ready:hover {
-  color: #ffffff;
+.sidebar-update-indicator svg {
+  flex: 0 0 auto;
+}
+
+.sidebar-update-indicator:hover,
+.sidebar-update-indicator:focus-visible {
   background: #4f8be3;
   border-color: #4f8be3;
 }
 
-.sidebar-update-indicator.is-ready:hover svg {
-  animation: update-ready-wiggle 650ms ease-in-out;
+.sidebar-update-indicator.is-pending:hover,
+.sidebar-update-indicator.is-pending:focus-visible,
+.sidebar-update-indicator.is-incomplete:hover,
+.sidebar-update-indicator.is-incomplete:focus-visible,
+.sidebar-update-indicator.is-failed:hover,
+.sidebar-update-indicator.is-failed:focus-visible {
+  width: 100%;
+}
+
+.sidebar-update-indicator.is-downloading {
+  width: 100%;
+  color: #ffffff;
+  font-size: 14px;
+}
+
+.sidebar-update-indicator.is-downloading.is-indeterminate {
+  width: 36px;
+}
+
+.sidebar-update-indicator.is-incomplete {
+  color: var(--warning);
+  background: var(--warning-soft);
+  border-color: color-mix(in srgb, var(--warning) 45%, transparent);
+}
+
+.sidebar-update-indicator.is-incomplete:hover,
+.sidebar-update-indicator.is-incomplete:focus-visible {
+  background: color-mix(in srgb, var(--warning-soft) 82%, var(--warning));
+  border-color: var(--warning);
+}
+
+.sidebar-update-indicator.is-failed {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+}
+
+.sidebar-update-indicator.is-failed:hover,
+.sidebar-update-indicator.is-failed:focus-visible {
+  background: color-mix(in srgb, var(--danger-soft) 82%, var(--danger));
+  border-color: var(--danger);
+}
+
+.sidebar-update-indicator:disabled {
+  cursor: progress;
+  opacity: 1;
+}
+
+.sidebar-update-label {
+  max-width: 0;
+  overflow: hidden;
+  opacity: 0;
+  transition: max-width 160ms ease, opacity 120ms ease;
+}
+
+.sidebar-update-indicator:hover .sidebar-update-label,
+.sidebar-update-indicator:focus-visible .sidebar-update-label {
+  max-width: 64px;
+  opacity: 1;
+}
+
+.sidebar-update-motion-fallback {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
 }
 
 .sidebar-settings-wrap {
@@ -257,12 +370,6 @@ select {
 .sidebar-settings-menu button:disabled {
   color: var(--text-muted);
   cursor: not-allowed;
-}
-
-@keyframes update-ready-wiggle {
-  0%, 100% { transform: rotate(0); }
-  35% { transform: rotate(-12deg); }
-  70% { transform: rotate(10deg); }
 }
 
 .main-content {
@@ -759,6 +866,9 @@ select {
 .secondary-button:focus-visible,
 .danger-button:focus-visible,
 .field-icon-button:focus-visible,
+.sidebar-settings-button:focus-visible,
+.sidebar-version:focus-visible,
+.sidebar-update-indicator:focus-visible,
 .provider-list-row:focus-visible,
 .nav-item:focus-visible,
 input:focus-visible,
@@ -2314,6 +2424,32 @@ select:focus-visible {
 @media (prefers-reduced-motion: reduce) {
   .is-spinning {
     animation: none;
+  }
+
+  .sidebar-update-indicator {
+    transition: none;
+  }
+
+  .sidebar-update-label {
+    transition: none;
+  }
+
+  .sidebar-update-indicator.is-installing,
+  .sidebar-update-indicator.is-downloading.is-indeterminate {
+    width: 100%;
+  }
+
+  .sidebar-update-indicator.is-installing svg,
+  .sidebar-update-indicator.is-downloading.is-indeterminate svg {
+    display: none;
+  }
+
+  .sidebar-update-motion-fallback {
+    position: static;
+    width: auto;
+    height: auto;
+    overflow: visible;
+    clip: auto;
   }
 }
 
