@@ -199,8 +199,7 @@ async function readCurrentManifest() {
   const validOrigin = url.origin === new URL(configuration.gitcodeRawBase).origin;
   const validTestUrl = configuration.testMode && url.protocol === "http:" && url.hostname === "127.0.0.1";
   if (!validOrigin && !validTestUrl) throw new Error("GitCode returned an unexpected manifest download URL");
-  const response = await fetch(url, { redirect: "follow" });
-  if (!response.ok) throw new Error(`Anonymous current manifest download failed with HTTP ${response.status}`);
+  const response = await fetchAnonymousWithRetry(url, "Anonymous current manifest download");
   let manifest;
   try { manifest = JSON.parse(await response.text()); } catch { throw new Error("current manifest is not valid JSON"); }
   validateManifest(manifest);
@@ -217,10 +216,8 @@ async function verifyRawBaseline() {
   const validOrigin = url.origin === new URL(configuration.gitcodeRawBase).origin;
   const validTestUrl = configuration.testMode && url.protocol === "http:" && url.hostname === "127.0.0.1";
   if (!validOrigin && !validTestUrl) throw new Error("GitCode returned an unexpected README download URL");
-  const response = await fetch(url, { redirect: "follow" });
-  if (!response.ok || !(await response.text()).trim()) {
-    throw new Error(`Anonymous GitCode Raw baseline download failed with HTTP ${response.status}`);
-  }
+  const response = await fetchAnonymousWithRetry(url, "Anonymous GitCode Raw baseline download");
+  if (!(await response.text()).trim()) throw new Error("Anonymous GitCode Raw baseline download returned an empty response");
 }
 
 function selectArtifacts(assets, version) {
@@ -303,6 +300,25 @@ async function verifyAnonymous(url, asset) {
     break;
   }
   throw new Error(`Anonymous download failed for ${asset.name} with HTTP ${lastStatus}`);
+}
+
+async function fetchAnonymousWithRetry(url, description) {
+  let lastStatus = 0;
+  for (let attempt = 1; attempt <= configuration.anonymousAttempts; attempt += 1) {
+    const response = await fetch(url, { redirect: "follow" });
+    lastStatus = response.status;
+    if (response.ok) return response;
+    if (attempt < configuration.anonymousAttempts && isRetryableAnonymousStatus(response.status)) {
+      await new Promise((resolve) => setTimeout(resolve, configuration.anonymousDelayMs));
+      continue;
+    }
+    break;
+  }
+  throw new Error(`${description} failed with HTTP ${lastStatus}`);
+}
+
+function isRetryableAnonymousStatus(status) {
+  return [403, 404, 418, 429, 500, 502, 503, 504].includes(status);
 }
 
 function validateManifest(manifest) {

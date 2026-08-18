@@ -167,6 +167,33 @@ test("首次发布的 Raw 匿名读取不可用时不推进分发", async () => 
   }
 });
 
+test("已有清单的 Raw 临时返回 418 时会重试并继续同步", async () => {
+  const adapter = await startAdapter({
+    currentManifest: {
+      version: "1.1.1",
+      notes: "previous",
+      pub_date: "2026-08-18T08:00:00Z",
+      platforms: {
+        "windows-x86_64": {
+          url: "http://127.0.0.1:1/installer.exe",
+          signature: SIGNATURE_TEXT,
+          sha256: "a".repeat(64),
+          size: 1,
+        },
+      },
+    },
+    transientRawManifestFailures: 2,
+  });
+  try {
+    const result = await runSync(adapter.baseUrl);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(adapter.state.rawManifestAttempts, 3);
+    assert.equal(adapter.state.manifests.length, 1);
+  } finally {
+    await adapter.close();
+  }
+});
+
 async function runSync(baseUrl) {
   const child = spawn(process.execPath, ["scripts/sync-gitcode-release.mjs"], {
     cwd: process.cwd(),
@@ -181,6 +208,8 @@ async function runSync(baseUrl) {
       GITHUB_API_URL: `${baseUrl}/github`,
       GITCODE_API_BASE_URL: `${baseUrl}/gitcode`,
       GITCODE_SYNC_TEST_MODE: "1",
+      GITCODE_SYNC_ANONYMOUS_ATTEMPTS: "3",
+      GITCODE_SYNC_RETRY_DELAY_MS: "0",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -202,6 +231,8 @@ async function startAdapter(options = {}) {
     releasePatch: options.releasePatch ?? {},
     releaseAssets: options.releaseAssets,
     failRawBaseline: options.failRawBaseline ?? false,
+    transientRawManifestFailures: options.transientRawManifestFailures ?? 0,
+    rawManifestAttempts: 0,
     records: [],
     manifests: [],
   };
@@ -276,6 +307,8 @@ async function startAdapter(options = {}) {
     }
     if (request.method === "GET" && url.pathname === "/raw/latest.md") {
       assert.equal(authorization, undefined);
+      state.rawManifestAttempts += 1;
+      if (state.rawManifestAttempts <= state.transientRawManifestFailures) return bytes(response, 418, Buffer.from("warming up"));
       return json(response, 200, state.currentManifest);
     }
     if (request.method === "GET" && url.pathname === "/raw/README.md") {
