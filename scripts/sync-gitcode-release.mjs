@@ -284,7 +284,10 @@ function attachmentUrl(config, name) {
 async function verifyAnonymous(url, asset) {
   let lastStatus = 0;
   for (let attempt = 1; attempt <= configuration.anonymousAttempts; attempt += 1) {
-    const response = await fetch(url, { redirect: "follow" });
+    const response = await fetch(url, {
+      redirect: "follow",
+      headers: { "user-agent": "Mozilla/5.0 (compatible; GPTEasy release sync)" },
+    });
     lastStatus = response.status;
     if (response.ok) {
       const bytes = Buffer.from(await response.arrayBuffer());
@@ -305,7 +308,10 @@ async function verifyAnonymous(url, asset) {
 async function fetchAnonymousWithRetry(url, description) {
   let lastStatus = 0;
   for (let attempt = 1; attempt <= configuration.anonymousAttempts; attempt += 1) {
-    const response = await fetch(url, { redirect: "follow" });
+    const response = await fetch(url, {
+      redirect: "follow",
+      headers: { "user-agent": "Mozilla/5.0 (compatible; GPTEasy release sync)" },
+    });
     lastStatus = response.status;
     if (response.ok) return response;
     if (attempt < configuration.anonymousAttempts && isRetryableAnonymousStatus(response.status)) {
