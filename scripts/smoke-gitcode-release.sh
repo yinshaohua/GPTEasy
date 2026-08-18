@@ -71,14 +71,15 @@ request_json() {
   fi
 }
 
-ANONYMOUS_RETRY_DELAY_SECONDS=2
+ANONYMOUS_MAX_ATTEMPTS=40
+ANONYMOUS_RETRY_DELAY_SECONDS=5
 if [[ "${GITCODE_SMOKE_TEST_MODE:-0}" == "1" ]]; then
   ANONYMOUS_RETRY_DELAY_SECONDS="${GITCODE_SMOKE_RETRY_DELAY_SECONDS:-0}"
 fi
 
 download_anonymously() {
   local url="$1" output="$2" description="$3" status attempt
-  for attempt in $(seq 1 15); do
+  for attempt in $(seq 1 "$ANONYMOUS_MAX_ATTEMPTS"); do
     status=$(curl \
       --silent --show-error --location \
       --output "$output" \
@@ -87,7 +88,7 @@ download_anonymously() {
     if [[ "$status" =~ ^2[0-9][0-9]$ ]]; then
       return
     fi
-    if (( attempt == 15 )) || [[ ! "$status" =~ ^(000|403|404|418|429|5[0-9][0-9])$ ]]; then
+    if (( attempt == ANONYMOUS_MAX_ATTEMPTS )) || [[ ! "$status" =~ ^(000|403|404|418|429|5[0-9][0-9])$ ]]; then
       printf '%s failed after %s attempt(s): HTTP %s\n' "$description" "$attempt" "$status" >&2
       exit 1
     fi
