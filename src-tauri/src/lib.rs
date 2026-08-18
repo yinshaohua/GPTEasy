@@ -9,18 +9,20 @@ pub mod single_instance;
 pub mod startup;
 pub mod state;
 mod tray;
+pub mod update;
 pub mod wsl;
 
 use codex::{CodexInspector, LoginStatusCommand};
 use commands::{
-    EnvironmentRuntime, ProviderRuntime, SessionRuntime, StartupRuntime, WslRuntime,
+    EnvironmentRuntime, ProviderRuntime, SessionRuntime, StartupRuntime, UpdateRuntime, WslRuntime,
     apply_environment_provider, apply_wsl_provider, archive_sessions, cancel_provider_request,
-    cancel_session_request, choose_linux_export_destination, choose_session_export_destination,
-    confirm_provider_validation_base_url, copy_provider_api_key, delete_provider, delete_session,
-    discard_provider_validation, discover_provider_models, discover_provider_models_for_update,
-    enter_session_management, export_linux_script, export_session_markdown,
-    get_environment_snapshot, get_startup_snapshot, leave_session_management, list_providers,
-    list_sessions, list_wsl_environments, open_dayway_website, read_session,
+    cancel_session_request, check_for_updates, choose_linux_export_destination,
+    choose_session_export_destination, confirm_provider_validation_base_url, copy_provider_api_key,
+    delete_provider, delete_session, discard_provider_validation, discover_provider_models,
+    discover_provider_models_for_update, enter_session_management, export_linux_script,
+    export_session_markdown, get_environment_snapshot, get_startup_snapshot, get_update_snapshot,
+    leave_session_management, list_providers, list_sessions, list_wsl_environments,
+    open_dayway_website, open_update_manual_download, perform_update_check, read_session,
     refresh_startup_snapshot, refresh_wsl_environment, rename_provider, reorder_providers,
     restore_last_environment_config, revalidate_provider, reveal_provider_api_key,
     save_and_apply_provider_update, save_dayway_provider, save_provider_update,
@@ -36,6 +38,7 @@ use startup::StartupCoordinator;
 use state::{StatePaths, StateStore};
 use tauri::Manager;
 use tray::LifecycleRuntime;
+use update::UpdateCoordinator;
 use wsl::WslApplication;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -57,6 +60,9 @@ pub fn run() {
             let home = app.path().home_dir()?;
             let state_store = StateStore::new(StatePaths::from_root(state_root));
             app.manage(LifecycleRuntime::new(state_store.clone()));
+            app.manage(UpdateRuntime::new(UpdateCoordinator::new(env!(
+                "CARGO_PKG_VERSION"
+            ))));
             let codex_home = home.join(".codex");
             let coordinator = StartupCoordinator::new(
                 state_store.clone(),
@@ -78,6 +84,8 @@ pub fn run() {
             )));
             #[cfg(windows)]
             {
+                // Windows toast activation re-enters the single-instance listener,
+                // which only reveals settings and never starts installation.
                 let activation_handle = app.app_handle().clone();
                 app.manage(primary_instance.listen(move || {
                     let main_thread_handle = activation_handle.clone();
@@ -87,12 +95,17 @@ pub fn run() {
                 })?);
             }
             tray::setup(app)?;
+            #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+            start_update_monitor(app.app_handle().clone());
             Ok(())
         })
         .on_window_event(tray::handle_window_event)
         .invoke_handler(tauri::generate_handler![
             get_startup_snapshot,
             refresh_startup_snapshot,
+            get_update_snapshot,
+            check_for_updates,
+            open_update_manual_download,
             get_environment_snapshot,
             enter_session_management,
             leave_session_management,
@@ -134,4 +147,19 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("GPTEasy runtime failed");
+}
+
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+fn start_update_monitor(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let _ = perform_update_check(&app).await;
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+            update::CHECK_INTERVAL_SECONDS,
+        ));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let _ = perform_update_check(&app).await;
+        }
+    });
 }

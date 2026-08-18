@@ -9,6 +9,39 @@ import type {
   PendingOperationResolution,
 } from "./contracts/startup";
 import type { AuthenticationMode, ConsumerStatus, EnvironmentState } from "./contracts/environment";
+import type { UpdateFailureCategory, UpdateState } from "./contracts/update";
+
+export const updateMessages = {
+  eyebrow: "应用更新",
+  title: "GPTEasy 更新",
+  currentVersion: "当前版本",
+  lastCheck: "上次检查",
+  targetVersion: "目标版本",
+  neverChecked: "尚未检查",
+  pendingNote: "更新已下载并通过签名验证，下一步安装需要用户确认。",
+  manualDownload: "GitHub 手工下载",
+  check: "检查更新",
+  retry: "重试",
+  close: "关闭",
+  downloading: "正在下载",
+  progressLabel: "更新下载进度",
+  notificationTitle: "GPTEasy 有待安装更新",
+  notificationBody: (version: string) => `版本 ${version} 已下载并通过签名验证。打开设置查看。`,
+  status: {
+    idle: "检查更新",
+    checking: "正在检查更新",
+    downloading: "正在下载更新",
+    up_to_date: "已是最新版本",
+    pending: (version: string | null) => `待安装 ${version ?? "更新"}`,
+    failed: "更新检查失败",
+  } satisfies Record<Exclude<UpdateState, "pending">, string> & { pending: (version: string | null) => string },
+  errors: {
+    check_failed: "暂时无法检查应用更新，请稍后重试。",
+    manifest_invalid: "更新清单无效，已停止本次更新。",
+    download_failed: "应用更新下载失败，请重试。",
+    signature_invalid: "应用更新未通过签名验证，已拒绝使用。",
+  } satisfies Record<UpdateFailureCategory, string>,
+} as const;
 
 export const databaseStatusMessages: Record<DatabaseStatus, string> = {
   initialized: "本地状态已初始化",

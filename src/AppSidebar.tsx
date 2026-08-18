@@ -2,10 +2,18 @@ import {
   LoaderCircle,
   LogIn,
   MessageSquare,
+  PackageCheck,
+  RefreshCw,
   Server,
 } from "lucide-react";
 
-import { providerMessages } from "./messages";
+import { providerMessages, updateMessages } from "./messages";
+import type { UpdateSnapshot } from "./contracts/update";
+
+export interface UpdateSidebarState {
+  snapshot: UpdateSnapshot;
+  onOpen: () => void;
+}
 
 export interface OpenAiSidebarAction {
   busy: boolean;
@@ -20,11 +28,13 @@ export default function AppSidebar({
   onOpenProviders,
   onOpenSessions,
   openAiAction,
+  update,
 }: {
   activeView?: "providers" | "sessions";
   onOpenProviders?: () => void;
   onOpenSessions?: () => void;
   openAiAction?: OpenAiSidebarAction;
+  update?: UpdateSidebarState;
 }) {
   return (
     <aside className="sidebar" aria-label="应用导航">
@@ -66,7 +76,28 @@ export default function AppSidebar({
           )}
         </nav>
       )}
+      {update && <UpdateStatus update={update} />}
     </aside>
+  );
+}
+
+function UpdateStatus({ update }: { update: UpdateSidebarState }) {
+  const { snapshot } = update;
+  const label = snapshot.state === "pending"
+    ? updateMessages.status.pending(snapshot.availableVersion)
+    : updateMessages.status[snapshot.state];
+  const Icon = snapshot.state === "pending" ? PackageCheck : RefreshCw;
+  return (
+    <div className="sidebar-update">
+      <button className="sidebar-update-button" type="button" onClick={update.onOpen}>
+        <Icon className={snapshot.state === "checking" || snapshot.state === "downloading" ? "is-spinning" : undefined} size={16} aria-hidden="true" />
+        <span>{label}</span>
+      </button>
+      <button className="sidebar-version" type="button" onClick={update.onOpen}>
+        <span>当前版本</span>
+        <strong>v{snapshot.currentVersion}</strong>
+      </button>
+    </div>
   );
 }
 

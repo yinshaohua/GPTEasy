@@ -12,7 +12,7 @@ import {
   Trash2,
 } from "lucide-react";
 
-import AppSidebar, { type OpenAiSidebarAction } from "./AppSidebar";
+import AppSidebar, { type OpenAiSidebarAction, type UpdateSidebarState } from "./AppSidebar";
 import {
   archiveSessions,
   asSessionFailure,
@@ -59,10 +59,12 @@ export default function SessionPage({
   active = true,
   onOpenProviders,
   openAiAction,
+  update,
 }: {
   active?: boolean;
   onOpenProviders: () => void;
   openAiAction?: OpenAiSidebarAction;
+  update?: UpdateSidebarState;
 }) {
   const leaseId = useRef(`session-page-${createLeaseId()}`);
   const requestGeneration = useRef(0);
@@ -448,7 +450,7 @@ export default function SessionPage({
 
   if (!availability) {
     return (
-      <SessionShell onOpenProviders={onOpenProviders} openAiAction={openAiAction}>
+      <SessionShell onOpenProviders={onOpenProviders} openAiAction={openAiAction} update={update}>
         <div className="loading-state" role="status">
           <LoaderCircle className="is-spinning" size={22} aria-hidden="true" />
           <span>{sessionMessages.loading}</span>
@@ -459,7 +461,7 @@ export default function SessionPage({
 
   if (availability.status !== "available") {
     return (
-      <SessionShell onOpenProviders={onOpenProviders} openAiAction={openAiAction}>
+      <SessionShell onOpenProviders={onOpenProviders} openAiAction={openAiAction} update={update}>
         <UnavailableState availability={availability} onRetry={() => void checkAvailability()} />
       </SessionShell>
     );
@@ -472,7 +474,7 @@ export default function SessionPage({
   ) {
     const status = listFailure.category === "incompatible" ? "incompatible" : "recovery_failed";
     return (
-      <SessionShell onOpenProviders={onOpenProviders} openAiAction={openAiAction}>
+      <SessionShell onOpenProviders={onOpenProviders} openAiAction={openAiAction} update={update}>
         <UnavailableState
           availability={{
             status,
@@ -487,7 +489,7 @@ export default function SessionPage({
   }
 
   return (
-    <SessionShell onOpenProviders={onOpenProviders} openAiAction={openAiAction}>
+    <SessionShell onOpenProviders={onOpenProviders} openAiAction={openAiAction} update={update}>
       {detailState.kind === "list" ? (
         <SessionList
           tab={tab}
@@ -591,10 +593,12 @@ function SessionShell({
   children,
   onOpenProviders,
   openAiAction,
+  update,
 }: {
   children: React.ReactNode;
   onOpenProviders: () => void;
   openAiAction?: OpenAiSidebarAction;
+  update?: UpdateSidebarState;
 }) {
   return (
     <div className="app-shell">
@@ -603,6 +607,7 @@ function SessionShell({
         onOpenProviders={onOpenProviders}
         onOpenSessions={() => undefined}
         openAiAction={openAiAction}
+        update={update}
       />
       <main className="main-content session-main">{children}</main>
     </div>

@@ -5,6 +5,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_notification::NotificationExt;
 
 use crate::environment::{
     EnvironmentApplication, EnvironmentFailure, EnvironmentFailureCategory, EnvironmentSnapshot,
@@ -22,6 +23,7 @@ use crate::session::{
 };
 use crate::startup::{StartupCoordinator, StartupSnapshot};
 use crate::tray;
+use crate::update::{UpdateCoordinator, UpdateSnapshot, UpdateState};
 use crate::wsl::{
     WslApplication, WslApplyResult, WslDeletionAuditError, WslEnvironmentSummary, WslFailure,
     WslLifecycleOutcome, WslLifecycleResult, WslRefreshResult,
@@ -45,6 +47,56 @@ pub(crate) struct WslRuntime {
 
 pub(crate) struct SessionRuntime {
     application: SessionApplication,
+}
+
+pub(crate) struct UpdateRuntime {
+    pub(crate) coordinator: UpdateCoordinator,
+    notified_version: Mutex<Option<String>>,
+}
+
+impl UpdateRuntime {
+    pub(crate) fn new(coordinator: UpdateCoordinator) -> Self {
+        Self {
+            coordinator,
+            notified_version: Mutex::new(None),
+        }
+    }
+
+    fn notify_if_hidden(&self, app: &AppHandle, snapshot: &UpdateSnapshot) {
+        let Some(version) = snapshot.available_version.as_deref() else {
+            return;
+        };
+        if snapshot.state != UpdateState::Pending {
+            return;
+        }
+        let hidden = app
+            .get_webview_window("main")
+            .and_then(|window| window.is_visible().ok())
+            .map(|visible| !visible)
+            .unwrap_or(true);
+        if !hidden {
+            return;
+        }
+        let Ok(mut notified) = self.notified_version.lock() else {
+            return;
+        };
+        if notified.as_deref() == Some(version) {
+            return;
+        }
+        if app
+            .notification()
+            .builder()
+            .title("GPTEasy 有待安装更新")
+            .body(format!(
+                "版本 {version} 已下载并通过签名验证。打开设置查看。"
+            ))
+            .extra("open_settings", true)
+            .show()
+            .is_ok()
+        {
+            *notified = Some(version.to_owned());
+        }
+    }
 }
 
 impl ProviderRuntime {
@@ -127,6 +179,56 @@ pub(crate) fn get_startup_snapshot(
     state: State<'_, StartupRuntime>,
 ) -> Result<StartupSnapshot, CommandFailure> {
     state.inspect()
+}
+
+#[tauri::command]
+pub(crate) fn get_update_snapshot(state: State<'_, UpdateRuntime>) -> UpdateSnapshot {
+    state.coordinator.snapshot()
+}
+
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+pub(crate) async fn perform_update_check(app: &AppHandle) -> UpdateSnapshot {
+    let runtime = app.state::<UpdateRuntime>();
+    let coordinator = runtime.coordinator.clone();
+    let event_app = app.clone();
+    let snapshot = coordinator
+        .check_and_download(move |snapshot| {
+            let _ = event_app.emit("update-progress", snapshot);
+        })
+        .await;
+    runtime.notify_if_hidden(app, &snapshot);
+    let _ = app.emit("update-progress", snapshot.clone());
+    snapshot
+}
+
+#[cfg(not(all(target_os = "windows", target_arch = "x86_64")))]
+pub(crate) async fn perform_update_check(app: &AppHandle) -> UpdateSnapshot {
+    app.state::<UpdateRuntime>().coordinator.snapshot()
+}
+
+#[tauri::command]
+pub(crate) async fn check_for_updates(app: AppHandle) -> UpdateSnapshot {
+    perform_update_check(&app).await
+}
+
+#[tauri::command]
+pub(crate) fn open_update_manual_download() -> Result<(), CommandFailure> {
+    use std::process::Command;
+    #[cfg(target_os = "windows")]
+    let result = Command::new("explorer.exe")
+        .arg(crate::update::MANUAL_DOWNLOAD_URL)
+        .spawn();
+    #[cfg(target_os = "macos")]
+    let result = Command::new("open")
+        .arg(crate::update::MANUAL_DOWNLOAD_URL)
+        .spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let result = Command::new("xdg-open")
+        .arg(crate::update::MANUAL_DOWNLOAD_URL)
+        .spawn();
+    result.map(|_| ()).map_err(|_| CommandFailure {
+        message_id: "update.manual_download_failed",
+    })
 }
 
 #[tauri::command]

@@ -4,7 +4,7 @@
 
 > 本文是已经交付的 v0.1 历史基线。v0.1 之后的当前目标见 [`PROVIDER-MANAGEMENT-SPEC.md`](./PROVIDER-MANAGEMENT-SPEC.md)。
 
-本合同只覆盖 Windows x64 首个可验收版本。界面只提供简体中文并始终跟随 Windows 主题，不包含搜索、分页、WSL2、Linux 脚本、DayWay、自动更新、诊断导出或登录启动设置。
+本合同只覆盖 Windows x64 首个可验收版本。界面只提供简体中文并始终跟随 Windows 主题；v0.1 基线不包含搜索、分页、WSL2、Linux 脚本、DayWay、自动更新、诊断导出或登录启动设置。#42 的当前目标在独立更新合同中增加自动更新检查、下载和待安装展示。
 
 ## Experience
 

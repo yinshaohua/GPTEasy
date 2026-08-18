@@ -395,6 +395,66 @@ describe("供应商创建", () => {
   });
 });
 
+describe("应用更新", () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  beforeEach(() => {
+    invoke.mockReset();
+    listen.mockReset();
+    listen.mockResolvedValue(() => undefined);
+  });
+
+  it("从侧边栏当前版本和失败状态打开同一个更新窗口并可重试", async () => {
+    const readyUpdate = {
+      currentVersion: "1.0.1",
+      state: "pending",
+      availableVersion: "1.1.0",
+      notes: "修复稳定性问题",
+      publishedAt: "2026-08-18T00:00:00Z",
+      checkedAtEpochSeconds: 1_787_027_200,
+      downloadedBytes: 100,
+      totalBytes: 100,
+      progressPercent: 100,
+      failureCategory: null,
+      errorMessage: null,
+      manualDownloadUrl: "https://github.com/yinshaohua/GPTEasy/releases/latest",
+    };
+    const failedUpdate = {
+      ...readyUpdate,
+      state: "failed",
+      availableVersion: null,
+      progressPercent: null,
+      errorMessage: "更新签名验证失败",
+      failureCategory: "signature_invalid",
+    };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "get_update_snapshot") return Promise.resolve(readyUpdate);
+      if (command === "check_for_updates") return Promise.resolve(failedUpdate);
+      if (command === "list_providers" || command === "list_wsl_environments") return Promise.resolve([]);
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+
+    await screen.findByRole("button", { name: "当前版本 v1.0.1" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const version = screen.getByRole("button", { name: "当前版本 v1.0.1" });
+    expect(screen.getByRole("button", { name: "待安装 1.1.0" })).toBeInTheDocument();
+    fireEvent.click(version);
+    const dialog = screen.getByRole("dialog", { name: "GPTEasy 更新" });
+    expect(dialog).toHaveTextContent("更新已下载并通过签名验证");
+    expect(dialog).toHaveTextContent("修复稳定性问题");
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "检查更新" }));
+    expect(await screen.findByText("更新签名验证失败")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "更新检查失败" })).toBeInTheDocument();
+    expect(within(screen.getByRole("dialog", { name: "GPTEasy 更新" })).getByRole("button", { name: "重试" })).toBeInTheDocument();
+  });
+});
+
 describe("逐项供应商验证弹窗", () => {
   afterEach(() => {
     vi.useRealTimers();

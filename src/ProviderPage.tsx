@@ -23,7 +23,7 @@ import ProviderValidationDialog, {
   type ProviderValidationSession,
   type ProviderValidationSource,
 } from "./ProviderValidationDialog";
-import AppSidebar, { type OpenAiSidebarAction } from "./AppSidebar";
+import AppSidebar, { type OpenAiSidebarAction, type UpdateSidebarState } from "./AppSidebar";
 
 import {
   asProviderFailure,
@@ -137,9 +137,11 @@ function canApplyWslProvider(environment: WslEnvironmentSummary): boolean {
 export default function ProviderPage({
   onOpenAiActionChange,
   onOpenSessions,
+  update,
 }: {
   onOpenAiActionChange?: (action: OpenAiSidebarAction) => void;
   onOpenSessions?: () => void;
+  update?: UpdateSidebarState;
 }) {
   const [providers, setProviders] = useState<ProviderSummary[]>([]);
   const [listState, setListState] = useState<"loading" | "ready" | "error">("loading");
@@ -996,7 +998,7 @@ export default function ProviderPage({
 
   return (
     <div className="app-shell">
-      <AppSidebar onOpenSessions={onOpenSessions} openAiAction={{
+      <AppSidebar onOpenSessions={onOpenSessions} update={update} openAiAction={{
         busy: switchingMode,
         current: openAiCurrent,
         description: openAiReason,
