@@ -124,17 +124,6 @@ function SidebarFooter({
         <span className="sidebar-provider-name" title={providerLabel}>{providerLabel}</span>
         {update && <SidebarUpdateIndicator update={update} />}
       </div>
-      {update && (
-        <button
-          className="sidebar-version"
-          type="button"
-          onClick={update.onOpen}
-          aria-label={`当前版本 v${update.snapshot.currentVersion}`}
-        >
-          <span>当前版本</span>
-          <strong>v{update.snapshot.currentVersion}</strong>
-        </button>
-      )}
     </div>
   );
 }

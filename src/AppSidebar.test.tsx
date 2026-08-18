@@ -51,17 +51,6 @@ describe("侧栏应用更新入口", () => {
     expect(update.onOpen).toHaveBeenCalledOnce();
   });
 
-  it("始终显示当前版本并点击打开更新详情", () => {
-    const update = updateState({ state: "idle", availableVersion: null, currentVersion: "1.1.1" });
-    render(<AppSidebar update={update} />);
-
-    const version = screen.getByRole("button", { name: "当前版本 v1.1.1" });
-    expect(version).toHaveTextContent("当前版本");
-    expect(version).toHaveTextContent("v1.1.1");
-    fireEvent.click(version);
-    expect(update.onOpen).toHaveBeenCalledOnce();
-  });
-
   it("未完成更新和已发现版本的失败状态只打开详情", () => {
     const incomplete = updateState({ state: "incomplete" });
     const { rerender } = render(<AppSidebar update={incomplete} />);
