@@ -41,7 +41,7 @@ if [[ "${GITCODE_SMOKE_TEST_MODE:-0}" != "1" ]]; then
 fi
 SMOKE_TAG="smoke-${SMOKE_RUN_ID}"
 ASSET_NAME="gpteasy-${SMOKE_TAG}.txt"
-MANIFEST_PATH="${SMOKE_MANIFEST_PREFIX}${SMOKE_TAG}.json"
+MANIFEST_PATH="${SMOKE_MANIFEST_PREFIX}${SMOKE_TAG}.txt"
 [[ "$MANIFEST_PATH" != "$FORMAL_MANIFEST_PATH" ]] || { printf 'smoke manifest overlaps formal manifest\n' >&2; exit 2; }
 WORK_DIR=$(mktemp -d)
 trap 'rm -rf -- "$WORK_DIR"' EXIT

@@ -30,7 +30,7 @@ if ($null -ne $distribution) {
     if ($distribution.schemaVersion -ne 1 -or $distribution.issue -ne 41 -or
         -not [Uri]::TryCreate([string]$distribution.apiBaseUrl, [UriKind]::Absolute, [ref]$apiUri) -or $apiUri.Scheme -cne 'https' -or
         -not [Uri]::TryCreate([string]$distribution.rawBaseUrl, [UriKind]::Absolute, [ref]$rawUri) -or $rawUri.Scheme -cne 'https' -or
-        $distribution.formalManifestPath -cne 'latest.json' -or
+        [string]$distribution.formalManifestPath -notmatch '^[^/\s]+\.txt$' -or
         -not ([string]$distribution.smokeManifestPrefix).StartsWith('smoke/', [StringComparison]::Ordinal) -or
         $distribution.platform -cne 'windows-x86_64' -or
         $distribution.repositoryVariable -cne 'GITCODE_REPOSITORY' -or
@@ -62,9 +62,9 @@ if ($null -ne $config) {
         if (-not [Uri]::TryCreate($endpoint, [UriKind]::Absolute, [ref]$uri) -or
             $uri.Scheme -cne 'https' -or
             $uri.Host -cne 'raw.gitcode.com' -or
-            -not $uri.AbsolutePath.EndsWith('/latest.json', [StringComparison]::Ordinal) -or
+            -not $uri.AbsolutePath.EndsWith("/$([string]$distribution.formalManifestPath)", [StringComparison]::Ordinal) -or
             $uri.Query) {
-            Add-TrustError 'The updater endpoint must be one HTTPS raw.gitcode.com latest.json URL.'
+            Add-TrustError 'The updater endpoint must be one HTTPS raw.gitcode.com text manifest URL.'
         }
     }
     $publicKey = [string]$config.plugins.updater.pubkey
@@ -102,7 +102,7 @@ if (-not $smoke.Contains('Authorization: Bearer $GITCODE_TOKEN') -or
 if (-not $smoke.Contains('gitcode-distribution.json')) {
     Add-TrustError 'GitCode smoke must consume the public distribution contract.'
 }
-if ($smoke.Contains('latest.json')) {
+if ($smoke.Contains([string]$distribution.formalManifestPath)) {
     Add-TrustError 'The API smoke command must not advance the formal latest manifest.'
 }
 if (-not $wizard.Contains('ask_secret GITCODE_TOKEN') -or
