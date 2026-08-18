@@ -59,6 +59,20 @@ switch (command) {
     }
     break;
   }
+  case "download-url": {
+    const [metadataPath, expectedRawBase] = args;
+    const metadata = JSON.parse(await readFile(metadataPath, "utf8"));
+    const downloadUrl = new URL(metadata.download_url);
+    const expectedOrigin = new URL(expectedRawBase).origin;
+    if (
+      downloadUrl.origin !== expectedOrigin ||
+      !downloadUrl.pathname.includes("/blobs/")
+    ) {
+      throw new Error("GitCode content metadata returned an unexpected Raw URL");
+    }
+    process.stdout.write(downloadUrl.toString());
+    break;
+  }
   case "report": {
     const [tag, attachment, manifest] = args;
     process.stdout.write(

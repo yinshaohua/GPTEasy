@@ -126,7 +126,14 @@ CONTENT_BODY=$(node "$JSON_TOOL" content-body \
 CONTENT_RESPONSE="$WORK_DIR/content.json"
 request_json POST "$API_BASE/repos/$GITCODE_REPOSITORY/contents/$MANIFEST_PATH" "$CONTENT_BODY" "$CONTENT_RESPONSE"
 
+CONTENT_READ_RESPONSE="$WORK_DIR/content-read.json"
+ENCODED_BRANCH=$(node "$JSON_TOOL" urlencode "$GITCODE_DEFAULT_BRANCH")
+download_anonymously \
+  "$API_BASE/repos/$GITCODE_REPOSITORY/contents/$MANIFEST_PATH?ref=$ENCODED_BRANCH" \
+  "$CONTENT_READ_RESPONSE" \
+  'anonymous manifest metadata download'
+RAW_MANIFEST_URL=$(node "$JSON_TOOL" download-url "$CONTENT_READ_RESPONSE" "$RAW_BASE")
 RAW_RESULT="$WORK_DIR/raw.json"
-download_anonymously "$RAW_BASE/$MANIFEST_PATH" "$RAW_RESULT" 'anonymous Raw manifest download'
+download_anonymously "$RAW_MANIFEST_URL" "$RAW_RESULT" 'anonymous Raw manifest download'
 node "$JSON_TOOL" verify-manifest "$RAW_RESULT" "$SMOKE_TAG" "$ASSET_SHA256"
-node "$JSON_TOOL" report "$SMOKE_TAG" "$DOWNLOAD_URL" "$RAW_BASE/$MANIFEST_PATH"
+node "$JSON_TOOL" report "$SMOKE_TAG" "$DOWNLOAD_URL" "$RAW_MANIFEST_URL"

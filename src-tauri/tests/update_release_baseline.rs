@@ -573,7 +573,7 @@ fn gitcode_smoke_exercises_authenticated_writes_and_anonymous_reads() {
         let mut raw_manifest = String::new();
         let mut attachment_downloads = 0;
         let mut raw_downloads = 0;
-        for _ in 0..8 {
+        for _ in 0..9 {
             let (mut stream, _) = listener.accept().expect("accept fake GitCode request");
             let mut request = Vec::new();
             let mut buffer = [0_u8; 8192];
@@ -660,7 +660,18 @@ fn gitcode_smoke_exercises_authenticated_writes_and_anonymous_reads() {
                     .expect("decode test manifest");
                 raw_manifest = String::from_utf8(decoded).expect("test manifest UTF-8");
                 (201, "application/json", "{}".to_owned())
-            } else if method == "GET" && path.starts_with("/raw/smoke/") {
+            } else if method == "GET"
+                && path.contains("/contents/smoke/")
+                && path.ends_with("?ref=main")
+            {
+                (
+                    200,
+                    "application/json",
+                    format!(
+                        "{{\"download_url\":\"http://{address}/raw/blobs/fixture/smoke/smoke-42-1.md\"}}"
+                    ),
+                )
+            } else if method == "GET" && path.starts_with("/raw/blobs/") {
                 raw_downloads += 1;
                 if raw_downloads == 1 {
                     (403, "text/plain", "not propagated".to_owned())
@@ -715,15 +726,16 @@ fn gitcode_smoke_exercises_authenticated_writes_and_anonymous_reads() {
     assert_eq!(report["formalManifestAdvanced"], false);
 
     let records = records.lock().expect("read request records");
-    assert_eq!(records.len(), 8);
+    assert_eq!(records.len(), 9);
     assert!(
         records
             .iter()
             .all(|record| !record.path.contains("latest.md"))
     );
     for record in records.iter() {
-        let authenticated =
-            record.path.starts_with("/api/v5/") && !record.path.ends_with("/download");
+        let authenticated = record.path.starts_with("/api/v5/")
+            && !record.path.ends_with("/download")
+            && !(record.method == "GET" && record.path.contains("/contents/smoke/"));
         if authenticated {
             assert_eq!(record.authorization.as_deref(), Some("Bearer test-token"));
         } else {
@@ -733,5 +745,5 @@ fn gitcode_smoke_exercises_authenticated_writes_and_anonymous_reads() {
     assert_eq!(records[0].method, "POST");
     assert_eq!(records[2].method, "PUT");
     assert_eq!(records[2].upload_test_header.as_deref(), Some("fixture"));
-    assert_eq!(records[7].method, "GET");
+    assert_eq!(records[8].method, "GET");
 }

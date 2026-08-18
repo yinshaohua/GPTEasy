@@ -46,7 +46,7 @@ bash scripts/setup-gitcode-distribution.sh
 2. 获取上传地址并上传小附件；
 3. 匿名下载附件并核对 SHA-256；
 4. 写入 JSON 正文的 `smoke/<name>.md` 测试清单；
-5. 匿名读取 GitCode Raw 内容并核对字段。
+5. 匿名读取 contents 元数据返回的官方 GitCode Raw blob，并核对字段。
 
 冒烟命令不包含正式清单路径，因此不能推进正式稳定版本。失败时只报告操作与公开错误，不输出 Token。
 
