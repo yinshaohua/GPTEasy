@@ -4,7 +4,7 @@
   "apiBaseUrl": "https://api.gitcode.com/api/v5",
   "rawBaseUrl": "https://raw.gitcode.com",
   "defaultBranch": "main",
-  "formalManifestPath": "latest.txt",
+  "formalManifestPath": "latest.md",
   "smokeManifestPrefix": "smoke/",
   "platform": "windows-x86_64",
   "repositoryVariable": "GITCODE_REPOSITORY",

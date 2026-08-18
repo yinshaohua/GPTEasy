@@ -30,7 +30,7 @@ if ($null -ne $distribution) {
     if ($distribution.schemaVersion -ne 1 -or $distribution.issue -ne 41 -or
         -not [Uri]::TryCreate([string]$distribution.apiBaseUrl, [UriKind]::Absolute, [ref]$apiUri) -or $apiUri.Scheme -cne 'https' -or
         -not [Uri]::TryCreate([string]$distribution.rawBaseUrl, [UriKind]::Absolute, [ref]$rawUri) -or $rawUri.Scheme -cne 'https' -or
-        [string]$distribution.formalManifestPath -notmatch '^[^/\s]+\.txt$' -or
+        [string]$distribution.formalManifestPath -notmatch '^[^/\s]+\.md$' -or
         -not ([string]$distribution.smokeManifestPrefix).StartsWith('smoke/', [StringComparison]::Ordinal) -or
         $distribution.platform -cne 'windows-x86_64' -or
         $distribution.repositoryVariable -cne 'GITCODE_REPOSITORY' -or
@@ -64,7 +64,7 @@ if ($null -ne $config) {
             $uri.Host -cne 'raw.gitcode.com' -or
             -not $uri.AbsolutePath.EndsWith("/$([string]$distribution.formalManifestPath)", [StringComparison]::Ordinal) -or
             $uri.Query) {
-            Add-TrustError 'The updater endpoint must be one HTTPS raw.gitcode.com text manifest URL.'
+            Add-TrustError 'The updater endpoint must be one HTTPS raw.gitcode.com Markdown manifest URL.'
         }
     }
     $publicKey = [string]$config.plugins.updater.pubkey

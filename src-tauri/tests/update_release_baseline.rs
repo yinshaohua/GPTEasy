@@ -304,7 +304,7 @@ fn trust_root_gate_allows_only_public_inputs_and_rejects_tracked_private_keys() 
             "apiBaseUrl": "https://api.gitcode.com/api/v5",
             "rawBaseUrl": "https://raw.gitcode.com",
             "defaultBranch": "main",
-            "formalManifestPath": "latest.txt",
+            "formalManifestPath": "latest.md",
             "smokeManifestPrefix": "smoke/",
             "platform": "windows-x86_64",
             "repositoryVariable": "GITCODE_REPOSITORY",
@@ -320,7 +320,7 @@ fn trust_root_gate_allows_only_public_inputs_and_rejects_tracked_private_keys() 
             "bundle": { "createUpdaterArtifacts": true },
             "plugins": {
                 "updater": {
-                    "endpoints": ["https://raw.gitcode.com/example/releases/raw/main/latest.txt"],
+                    "endpoints": ["https://raw.gitcode.com/example/releases/raw/main/latest.md"],
                     "pubkey": PUBLIC_KEY
                 }
             }
@@ -417,7 +417,7 @@ fn configure_trust_root_writes_only_public_endpoint_and_key() {
     assert_eq!(config["plugins"]["updater"]["pubkey"], PUBLIC_KEY);
     assert_eq!(
         config["plugins"]["updater"]["endpoints"],
-        json!(["https://raw.gitcode.com/example/releases/raw/main/latest.txt"])
+        json!(["https://raw.gitcode.com/example/releases/raw/main/latest.md"])
     );
     let serialized = serde_json::to_string(&config).expect("serialize configured trust root");
     assert!(!serialized.contains("GITCODE_TOKEN"));
@@ -533,7 +533,7 @@ fn repository_declares_repeatable_gitcode_setup_without_formal_smoke_manifest_wr
     let smoke = fs::read_to_string(root.join("scripts/smoke-gitcode-release.sh"))
         .expect("read GitCode smoke command");
     assert!(smoke.contains("smoke-"));
-    assert!(!smoke.contains("latest.txt"));
+    assert!(!smoke.contains("latest.md"));
 }
 
 #[test]
@@ -543,7 +543,7 @@ fn gitcode_distribution_contract_contains_only_public_protocol_configuration() {
     assert_eq!(contract["issue"], 41);
     assert_eq!(contract["apiBaseUrl"], "https://api.gitcode.com/api/v5");
     assert_eq!(contract["rawBaseUrl"], "https://raw.gitcode.com");
-    assert_eq!(contract["formalManifestPath"], "latest.txt");
+    assert_eq!(contract["formalManifestPath"], "latest.md");
     assert_eq!(contract["smokeManifestPrefix"], "smoke/");
     assert_eq!(contract["platform"], "windows-x86_64");
     assert_eq!(contract["repositoryVariable"], "GITCODE_REPOSITORY");
@@ -644,7 +644,7 @@ fn gitcode_smoke_exercises_authenticated_writes_and_anonymous_reads() {
             } else if method == "GET" && path.ends_with("/download") {
                 attachment_downloads += 1;
                 if attachment_downloads == 1 {
-                    (403, "text/plain", "not propagated".to_owned())
+                    (418, "text/plain", "not propagated".to_owned())
                 } else {
                     (
                         200,
@@ -678,6 +678,7 @@ fn gitcode_smoke_exercises_authenticated_writes_and_anonymous_reads() {
                 200 => "OK",
                 201 => "Created",
                 403 => "Forbidden",
+                418 => "I'm a teapot",
                 _ => "Not Found",
             };
             write!(
@@ -718,7 +719,7 @@ fn gitcode_smoke_exercises_authenticated_writes_and_anonymous_reads() {
     assert!(
         records
             .iter()
-            .all(|record| !record.path.contains("latest.txt"))
+            .all(|record| !record.path.contains("latest.md"))
     );
     for record in records.iter() {
         let authenticated =

@@ -5,11 +5,11 @@
 GitHub 是源码、Tag、版本、候选构建和中文发布说明的唯一权威来源。公开的 GitCode 分发仓库只允许包含：
 
 - `README.md` 下载与校验说明；
-- JSON 正文的正式稳定清单 `latest.txt`；
+- JSON 正文的正式稳定清单 `latest.md`；
 - `smoke/` 下的非正式 API 冒烟清单；
 - 不可变 Release 及其 NSIS 安装包、`.sig` 和 SHA-256 信息。
 
-GitCode 仓库不是源码镜像，不运行构建，不单独维护版本或发布说明。正式同步与 `latest.txt` 推进属于后续发布切片；本基线只建立可信输入、候选签名门禁和真实 API 冒烟路径。GitCode Raw 不提供 `.json` 路径正文，因此清单使用 `.txt` 扩展名承载 Tauri JSON。
+GitCode 仓库不是源码镜像，不运行构建，不单独维护版本或发布说明。正式同步与 `latest.md` 推进属于后续发布切片；本基线只建立可信输入、候选签名门禁和真实 API 冒烟路径。GitCode Raw 对 `.json` 和 `.txt` 路径返回“暂不支持预览”，因此清单使用已验证可匿名读取的 `.md` 扩展名承载 Tauri JSON。
 
 ## 配置位置
 
@@ -45,7 +45,7 @@ bash scripts/setup-gitcode-distribution.sh
 1. 通过 Bearer Token 创建非正式 Release；
 2. 获取上传地址并上传小附件；
 3. 匿名下载附件并核对 SHA-256；
-4. 写入 JSON 正文的 `smoke/<name>.txt` 测试清单；
+4. 写入 JSON 正文的 `smoke/<name>.md` 测试清单；
 5. 匿名读取 GitCode Raw 内容并核对字段。
 
 冒烟命令不包含正式清单路径，因此不能推进正式稳定版本。失败时只报告操作与公开错误，不输出 Token。
@@ -74,5 +74,5 @@ Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY_PATH, Env:TAURI_SIGNING_PRIVATE_KEY_PA
 候选门禁要求公开信任根已配置，Tauri 生成同一 NSIS 安装包及其 `.sig`，并以应用内公钥真实验证签名。候选 manifest 同时绑定安装包和 `.sig` 的路径、大小与 SHA-256。静态清单可用以下命令独立校验：
 
 ```powershell
-npm run release:manifest -- -ManifestPath <latest.txt>
+npm run release:manifest -- -ManifestPath <latest.md>
 ```
