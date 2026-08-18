@@ -85,17 +85,16 @@ it("从左侧导航进入真实会话历史列表", async () => {
   });
 
   render(<App />);
-  const initialNavigation = await screen.findByRole("navigation", { name: "主要菜单" });
-  const initialOpenAi = within(initialNavigation).getByRole("button", { name: "OpenAI 登录模式" });
-  await waitFor(() => expect(initialOpenAi).toBeEnabled());
-  expect(initialOpenAi).toHaveAttribute("aria-pressed", "true");
+  await screen.findByRole("navigation", { name: "主要菜单" });
+  fireEvent.click(screen.getByRole("button", { name: "设置" }));
+  const initialOpenAi = within(screen.getByRole("menu")).getByRole("menuitem", { name: "返回 OpenAI 登录模式" });
+  await waitFor(() => expect(initialOpenAi).toBeDisabled());
   fireEvent.click(await screen.findByRole("button", { name: "会话管理" }));
 
   expect(await screen.findByRole("heading", { name: "会话管理" })).toBeInTheDocument();
   expect(await screen.findByRole("button", { name: "打开会话：真实历史" })).toBeInTheDocument();
-  const sessionNavigation = screen.getByRole("navigation", { name: "主要菜单" });
-  const sessionOpenAi = within(sessionNavigation).getByRole("button", { name: "OpenAI 登录模式" });
-  expect(sessionOpenAi).toBeEnabled();
-  expect(sessionOpenAi).toHaveAttribute("aria-pressed", "true");
+  fireEvent.click(screen.getByRole("button", { name: "设置" }));
+  const sessionOpenAi = within(screen.getByRole("menu")).getByRole("menuitem", { name: "返回 OpenAI 登录模式" });
+  expect(sessionOpenAi).toBeDisabled();
   expect(screen.queryByText(/即将支持/)).not.toBeInTheDocument();
 });

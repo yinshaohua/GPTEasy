@@ -136,10 +136,12 @@ function canApplyWslProvider(environment: WslEnvironmentSummary): boolean {
 
 export default function ProviderPage({
   onOpenAiActionChange,
+  onCurrentProviderNameChange,
   onOpenSessions,
   update,
 }: {
   onOpenAiActionChange?: (action: OpenAiSidebarAction) => void;
+  onCurrentProviderNameChange?: (name: string | null) => void;
   onOpenSessions?: () => void;
   update?: UpdateSidebarState;
 }) {
@@ -996,9 +998,13 @@ export default function ProviderPage({
     });
   }, [environment, onOpenAiActionChange, openAiCurrent, openAiDisabled, openAiReason, switchingMode]);
 
+  useEffect(() => {
+    onCurrentProviderNameChange?.(openAiCurrent ? "OpenAI 登录模式" : environment?.currentProvider?.name ?? null);
+  }, [environment, onCurrentProviderNameChange, openAiCurrent]);
+
   return (
     <div className="app-shell">
-      <AppSidebar onOpenSessions={onOpenSessions} update={update} openAiAction={{
+      <AppSidebar onOpenSessions={onOpenSessions} update={update} currentProviderName={openAiCurrent ? "OpenAI 登录模式" : environment?.currentProvider?.name} openAiAction={{
         busy: switchingMode,
         current: openAiCurrent,
         description: openAiReason,

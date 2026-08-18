@@ -34,6 +34,11 @@ const readySnapshot = {
   },
 };
 
+function openSettingsMenu() {
+  fireEvent.click(screen.getByRole("button", { name: "设置" }));
+  return screen.getByRole("menu");
+}
+
 describe("供应商创建", () => {
   afterEach(() => {
     cleanup();
@@ -406,7 +411,7 @@ describe("应用更新", () => {
     listen.mockResolvedValue(() => undefined);
   });
 
-  it("从侧边栏当前版本和失败状态打开同一个更新窗口并可重试", async () => {
+  it("从设置菜单打开更新窗口，并在失败时提供重试入口", async () => {
     const readyUpdate = {
       currentVersion: "1.0.1",
       state: "pending",
@@ -440,11 +445,8 @@ describe("应用更新", () => {
 
     render(<App />);
 
-    await screen.findByRole("button", { name: "当前版本 v1.0.1" });
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    const version = screen.getByRole("button", { name: "当前版本 v1.0.1" });
-    expect(screen.getByRole("button", { name: "待安装 1.1.0" })).toBeInTheDocument();
-    fireEvent.click(version);
+    expect(await screen.findByRole("button", { name: "点击重启升级" })).toBeInTheDocument();
+    fireEvent.click(within(openSettingsMenu()).getByRole("menuitem", { name: "检查更新..." }));
     const dialog = screen.getByRole("dialog", { name: "GPTEasy 更新" });
     expect(dialog).toHaveTextContent("更新已下载并通过签名验证");
     expect(dialog).toHaveTextContent("修复稳定性问题");
@@ -456,7 +458,7 @@ describe("应用更新", () => {
 
     fireEvent.click(within(dialog).getByRole("button", { name: "检查更新" }));
     expect(await screen.findByText("更新签名验证失败")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "更新检查失败" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /更新检查失败/ })).not.toBeInTheDocument();
     expect(within(screen.getByRole("dialog", { name: "GPTEasy 更新" })).getByRole("button", { name: "重试" })).toBeInTheDocument();
   });
 
@@ -487,19 +489,58 @@ describe("应用更新", () => {
     });
 
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "待安装 1.1.0" }));
+    await screen.findByRole("button", { name: "点击重启升级" });
+    fireEvent.click(within(openSettingsMenu()).getByRole("menuitem", { name: "检查更新..." }));
     fireEvent.click(within(screen.getByRole("dialog", { name: "GPTEasy 更新" }))
       .getByRole("button", { name: "稍后" }));
     expect(invoke.mock.calls.some(([command]) => command === "install_update")).toBe(false);
     expect(screen.queryByRole("dialog", { name: "GPTEasy 更新" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "待安装 1.1.0" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "点击重启升级" })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "待安装 1.1.0" }));
+    fireEvent.click(within(openSettingsMenu()).getByRole("menuitem", { name: "检查更新..." }));
     fireEvent.click(within(screen.getByRole("dialog", { name: "GPTEasy 更新" }))
       .getByRole("button", { name: "重启并更新" }));
     expect(await screen.findByText("当前有操作正在进行，请先完成或取消后再安装更新。"))
       .toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "待安装 1.1.0" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "点击重启升级" })).toBeInTheDocument();
+  });
+
+  it("没有可用更新时明确显示已是最新版本", async () => {
+    const idleUpdate = {
+      currentVersion: "1.1.1",
+      state: "idle",
+      availableVersion: null,
+      notes: null,
+      publishedAt: null,
+      checkedAtEpochSeconds: null,
+      downloadedBytes: 0,
+      totalBytes: null,
+      progressPercent: null,
+      failureCategory: null,
+      errorMessage: null,
+      manualDownloadUrl: "https://github.com/yinshaohua/GPTEasy/releases/latest",
+      releaseNotesUrl: null,
+    };
+    const currentUpdate = {
+      ...idleUpdate,
+      state: "up_to_date",
+      checkedAtEpochSeconds: 1_787_027_200,
+    };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "get_update_snapshot") return Promise.resolve(idleUpdate);
+      if (command === "check_for_updates") return Promise.resolve(currentUpdate);
+      if (command === "list_providers" || command === "list_wsl_environments") return Promise.resolve([]);
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+    await screen.findByRole("heading", { name: "供应商管理" });
+    fireEvent.click(within(openSettingsMenu()).getByRole("menuitem", { name: "检查更新..." }));
+    fireEvent.click(within(screen.getByRole("dialog", { name: "GPTEasy 更新" }))
+      .getByRole("button", { name: "检查更新" }));
+
+    expect(await screen.findByText("已是最新版本")).toBeInTheDocument();
   });
 
   it("启动确认未完成更新后提供重新下载和手工入口", async () => {
@@ -526,7 +567,8 @@ describe("应用更新", () => {
     });
 
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "未完成更新 1.1.0" }));
+    await screen.findByRole("button", { name: "点击重启升级" });
+    fireEvent.click(within(openSettingsMenu()).getByRole("menuitem", { name: "检查更新..." }));
     const dialog = screen.getByRole("dialog", { name: "GPTEasy 更新" });
     expect(dialog).toHaveTextContent("上次确认的更新尚未完成");
     expect(within(dialog).getByRole("button", { name: "检查更新" })).toBeInTheDocument();
@@ -1179,10 +1221,9 @@ describe("供应商目录生命周期", () => {
     expect(screen.queryByRole("button", { name: "恢复上次配置" })).not.toBeInTheDocument();
     expect(screen.queryByText("其他环境供应商操作")).not.toBeInTheDocument();
     expect(screen.queryByText("当前 Windows Codex 环境操作")).not.toBeInTheDocument();
-    const navigation = screen.getByRole("navigation", { name: "主要菜单" });
-    const openAi = within(navigation).getByRole("button", { name: "OpenAI 登录模式" });
+    const openAi = within(openSettingsMenu()).getByRole("menuitem", { name: "返回 OpenAI 登录模式" });
     expect(openAi).toBeEnabled();
-    expect(openAi).toHaveAccessibleDescription("使用 Codex 已有的 OpenAI 登录。");
+    expect(openAi).toHaveAttribute("title", "使用 Codex 已有的 OpenAI 登录。");
     expect(screen.queryByText("当前用户")).not.toBeInTheDocument();
   });
 
@@ -1370,7 +1411,7 @@ describe("供应商目录生命周期", () => {
     fireEvent.click(screen.getByRole("button", { name: "切换" }));
 
     const switchingButton = screen.getByRole("button", { name: "应用 Concurrent Provider" });
-    const openAiButton = screen.getByRole("button", { name: "OpenAI 登录模式" });
+    const openAiButton = within(openSettingsMenu()).getByRole("menuitem", { name: "返回 OpenAI 登录模式" });
     expect(switchingButton.querySelector(".is-spinning")).toBeInTheDocument();
     expect(openAiButton.querySelector(".is-spinning")).not.toBeInTheDocument();
     await waitFor(() => expect(environmentReads).toBe(2));
@@ -1857,13 +1898,9 @@ describe("Codex 环境接管", () => {
     expect(await screen.findByRole("heading", { name: "供应商管理" })).toBeInTheDocument();
     const navigation = screen.getByRole("navigation", { name: "主要菜单" });
     const navigationItems = within(navigation).getAllByRole("button");
-    const openAi = within(navigation).getByRole("button", { name: "OpenAI 登录模式" });
+    expect(navigationItems.map((button) => button.textContent)).toEqual(["供应商管理", "会话管理"]);
+    const openAi = within(openSettingsMenu()).getByRole("menuitem", { name: "返回 OpenAI 登录模式" });
     await waitFor(() => expect(openAi).toBeEnabled());
-    expect(navigationItems.map((button) => button.textContent)).toEqual([
-      "供应商管理",
-      "会话管理",
-      "OpenAI 登录模式",
-    ]);
     expect(screen.queryByRole("heading", { name: "外部配置" })).not.toBeInTheDocument();
     expect(screen.queryByText("待重启")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "恢复上次配置" })).not.toBeInTheDocument();
@@ -2240,7 +2277,8 @@ describe("Codex 环境接管", () => {
     });
     render(<App />);
 
-    const openAiButton = await screen.findByRole("button", { name: "OpenAI 登录模式" });
+    await screen.findByRole("heading", { name: "供应商管理" });
+    const openAiButton = within(openSettingsMenu()).getByRole("menuitem", { name: "返回 OpenAI 登录模式" });
     await waitFor(() => expect(openAiButton).toBeEnabled());
     expect(screen.queryByRole("heading", { name: "外部配置" })).not.toBeInTheDocument();
     fireEvent.click(openAiButton);
@@ -2254,9 +2292,9 @@ describe("Codex 环境接管", () => {
         expectedRevision: "openai-ready-revision",
       });
     });
-    await waitFor(() => expect(openAiButton).toBeEnabled());
-    expect(openAiButton).toHaveAttribute("aria-pressed", "true");
-    expect(openAiButton).toHaveAccessibleDescription("当前已是 OpenAI 登录模式。");
+    const activeOpenAi = within(openSettingsMenu()).getByRole("menuitem", { name: "返回 OpenAI 登录模式" });
+    expect(activeOpenAi).toBeDisabled();
+    expect(activeOpenAi).toHaveAttribute("title", "当前已是 OpenAI 登录模式。");
   });
 
   it("登录缺失或不可判断时解释原因且不发起 OpenAI 模式写入", async () => {
@@ -2289,8 +2327,9 @@ describe("Codex 环境接管", () => {
 
       render(<App />);
 
-      const openAiButton = await screen.findByRole("button", { name: "OpenAI 登录模式" });
-      await waitFor(() => expect(openAiButton).toHaveAccessibleDescription(message));
+      await screen.findByRole("heading", { name: "供应商管理" });
+      const openAiButton = within(openSettingsMenu()).getByRole("menuitem", { name: "返回 OpenAI 登录模式" });
+      await waitFor(() => expect(openAiButton).toHaveAttribute("title", message));
       expect(openAiButton).toBeDisabled();
       expect(invoke.mock.calls.some(([command]) => command === "switch_to_openai_login")).toBe(
         false,
@@ -2338,8 +2377,9 @@ describe("Codex 环境接管", () => {
     });
     render(<App />);
 
-    const openAiButton = await screen.findByRole("button", { name: "OpenAI 登录模式" });
-    await waitFor(() => expect(openAiButton).toHaveAccessibleDescription(
+    await screen.findByRole("heading", { name: "供应商管理" });
+    const openAiButton = within(openSettingsMenu()).getByRole("menuitem", { name: "返回 OpenAI 登录模式" });
+    await waitFor(() => expect(openAiButton).toHaveAttribute("title",
       "OpenAI 登录已在外部失效；当前模式保持不变。",
     ));
     fireEvent.click(screen.getByRole("button", { name: "应用 Return Provider" }));
@@ -2392,8 +2432,8 @@ describe("启动状态", () => {
     render(<App />);
     await screen.findByRole("heading", { name: "供应商管理" });
 
-    const openAiButton = screen.getByRole("button", { name: "OpenAI 登录模式" });
-    await waitFor(() => expect(openAiButton).toHaveAccessibleDescription(
+    const openAiButton = within(openSettingsMenu()).getByRole("menuitem", { name: "返回 OpenAI 登录模式" });
+    await waitFor(() => expect(openAiButton).toHaveAttribute("title",
       "请先在 Codex 中完成 OpenAI 登录。",
     ));
     expect(screen.queryByRole("heading", { name: "外部配置" })).not.toBeInTheDocument();

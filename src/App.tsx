@@ -43,6 +43,20 @@ export default function App() {
   const [update, setUpdate] = useState<UpdateSnapshot>(initialUpdateSnapshot);
   const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
   const [installError, setInstallError] = useState<string | null>(null);
+  const [currentProviderName, setCurrentProviderName] = useState<string | null>(null);
+
+  const handleInstall = useCallback(() => {
+    void installUpdate().then((snapshot) => {
+      setInstallError(null);
+      if (snapshot) setUpdate(snapshot);
+    }).catch((error: { messageId?: string; message_id?: string }) => {
+      const messageId = error?.messageId ?? error?.message_id;
+      setInstallError(messageId === "update.busy"
+        ? updateMessages.installBusy
+        : updateMessages.errors[(messageId?.replace("update.", "") ?? "") as keyof typeof updateMessages.errors]
+          ?? updateMessages.errors.launch_failed);
+    });
+  }, []);
 
   const load = useCallback(async (refresh: boolean) => {
     try {
@@ -75,6 +89,7 @@ export default function App() {
   const updateSidebar: UpdateSidebarState = {
     snapshot: update,
     onOpen: () => setUpdateDialogOpen(true),
+    onInstall: handleInstall,
   };
 
   if (state.kind !== "loaded" || state.snapshot.mode === "blocked") {
@@ -94,6 +109,7 @@ export default function App() {
       <div className="app-view" hidden={page !== "providers"}>
         <ProviderPage
           onOpenAiActionChange={setOpenAiAction}
+          onCurrentProviderNameChange={setCurrentProviderName}
           update={updateSidebar}
           onOpenSessions={() => {
             setSessionVisited(true);
@@ -107,6 +123,7 @@ export default function App() {
             active={page === "sessions"}
             onOpenProviders={() => setPage("providers")}
             openAiAction={openAiAction}
+            currentProviderName={currentProviderName}
             update={updateSidebar}
           />
         </div>
@@ -121,16 +138,7 @@ export default function App() {
             if (snapshot) setUpdate(snapshot);
           }).catch(() => undefined)}
           onManualDownload={() => void openUpdateManualDownload()}
-          onInstall={() => void installUpdate().then((snapshot) => {
-            setInstallError(null);
-            if (snapshot) setUpdate(snapshot);
-          }).catch((error: { messageId?: string; message_id?: string }) => {
-            const messageId = error?.messageId ?? error?.message_id;
-            setInstallError(messageId === "update.busy"
-              ? updateMessages.installBusy
-              : updateMessages.errors[(messageId?.replace("update.", "") ?? "") as keyof typeof updateMessages.errors]
-                ?? updateMessages.errors.launch_failed);
-          })}
+          onInstall={handleInstall}
         />
       )}
     </>
@@ -189,6 +197,12 @@ function UpdateDialog({
         </dl>
         {pending && <p className="update-ready-note">{updateMessages.pendingNote}</p>}
         {incomplete && <p className="update-ready-note">{updateMessages.incompleteNote}</p>}
+        {snapshot.state === "checking" && (
+          <p className="update-status-note" role="status">{updateMessages.status.checking}</p>
+        )}
+        {snapshot.state === "up_to_date" && (
+          <p className="update-ready-note" role="status">{updateMessages.status.up_to_date}</p>
+        )}
         {snapshot.state === "failed" && <p className="inline-error">{snapshot.errorMessage ?? (snapshot.failureCategory ? updateMessages.errors[snapshot.failureCategory] : updateMessages.errors.check_failed)}</p>}
         {installError && <p className="inline-error">{installError}</p>}
         {progress && <div className="update-progress" aria-label={updateMessages.progressLabel}><span style={{ width: snapshot.progressPercent === null ? "35%" : `${snapshot.progressPercent}%` }} /><strong>{progress}</strong></div>}

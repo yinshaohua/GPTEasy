@@ -1,18 +1,21 @@
 import {
+  CircleCheck,
+  Download,
   LoaderCircle,
   LogIn,
   MessageSquare,
-  PackageCheck,
   RefreshCw,
   Server,
+  Settings,
 } from "lucide-react";
+import { useState } from "react";
 
-import { providerMessages, updateMessages } from "./messages";
 import type { UpdateSnapshot } from "./contracts/update";
 
 export interface UpdateSidebarState {
   snapshot: UpdateSnapshot;
   onOpen: () => void;
+  onInstall?: () => void;
 }
 
 export interface OpenAiSidebarAction {
@@ -29,12 +32,14 @@ export default function AppSidebar({
   onOpenSessions,
   openAiAction,
   update,
+  currentProviderName,
 }: {
   activeView?: "providers" | "sessions";
   onOpenProviders?: () => void;
   onOpenSessions?: () => void;
   openAiAction?: OpenAiSidebarAction;
   update?: UpdateSidebarState;
+  currentProviderName?: string | null;
 }) {
   return (
     <aside className="sidebar" aria-label="应用导航">
@@ -59,46 +64,81 @@ export default function AppSidebar({
             <MessageSquare size={18} aria-hidden="true" />
             <span>会话管理</span>
           </button>
-          {openAiAction && (
-            <button
-              className="nav-item"
-              type="button"
-              onClick={openAiAction.onSelect}
-              disabled={openAiAction.disabled}
-              aria-pressed={openAiAction.current}
-              aria-description={openAiAction.description}
-            >
-              {openAiAction.busy
-                ? <LoaderCircle className="is-spinning" size={18} aria-hidden="true" />
-                : <LogIn size={18} aria-hidden="true" />}
-              <span>{providerMessages.switchToOpenAiLogin}</span>
-            </button>
-          )}
         </nav>
       )}
-      {update && <UpdateStatus update={update} />}
+      <SidebarFooter currentProviderName={currentProviderName} openAiAction={openAiAction} update={update} />
     </aside>
   );
 }
 
-function UpdateStatus({ update }: { update: UpdateSidebarState }) {
-  const { snapshot } = update;
-  const label = snapshot.state === "pending"
-    ? updateMessages.status.pending(snapshot.availableVersion)
-    : snapshot.state === "incomplete"
-      ? updateMessages.status.incomplete(snapshot.availableVersion)
-      : updateMessages.status[snapshot.state];
-  const Icon = snapshot.state === "pending" || snapshot.state === "incomplete" ? PackageCheck : RefreshCw;
+function SidebarFooter({
+  currentProviderName,
+  openAiAction,
+  update,
+}: {
+  currentProviderName?: string | null;
+  openAiAction?: OpenAiSidebarAction;
+  update?: UpdateSidebarState;
+}) {
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const snapshot = update?.snapshot;
+  const hasUpdate = Boolean(snapshot && ["downloading", "pending", "incomplete"].includes(snapshot.state) && snapshot.availableVersion);
+  const isDownloading = snapshot?.state === "downloading";
+  const isReady = snapshot?.state === "pending" || snapshot?.state === "incomplete";
+  const providerLabel = currentProviderName || (openAiAction?.current ? "OpenAI 登录模式" : "未选择供应商");
+
   return (
-    <div className="sidebar-update">
-      <button className="sidebar-update-button" type="button" onClick={update.onOpen}>
-        <Icon className={snapshot.state === "checking" || snapshot.state === "downloading" ? "is-spinning" : undefined} size={16} aria-hidden="true" />
-        <span>{label}</span>
-      </button>
-      <button className="sidebar-version" type="button" onClick={update.onOpen}>
-        <span>当前版本</span>
-        <strong>v{snapshot.currentVersion}</strong>
-      </button>
+    <div className="sidebar-footer">
+      <div className="sidebar-footer-row">
+        <div className="sidebar-settings-wrap">
+          <button
+            className="sidebar-settings-button"
+            type="button"
+            aria-label="设置"
+            aria-expanded={settingsOpen}
+            onClick={() => setSettingsOpen((value) => !value)}
+          >
+            <Settings size={17} aria-hidden="true" />
+          </button>
+          {settingsOpen && (
+            <div className="sidebar-settings-menu" role="menu">
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  if (!openAiAction) return;
+                  setSettingsOpen(false);
+                  openAiAction.onSelect();
+                }}
+                disabled={!openAiAction || openAiAction.disabled || openAiAction.current}
+                title={openAiAction?.description ?? "正在读取 Codex 登录状态。"}
+              >
+                {openAiAction?.busy ? <LoaderCircle className="is-spinning" size={15} aria-hidden="true" /> : <LogIn size={15} aria-hidden="true" />}
+                返回 OpenAI 登录模式
+              </button>
+              {update && (
+                <button type="button" role="menuitem" onClick={() => { setSettingsOpen(false); update.onOpen(); }}>
+                  <RefreshCw size={15} aria-hidden="true" />
+                  检查更新...
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+        <span className="sidebar-provider-name" title={providerLabel}>{providerLabel}</span>
+        {hasUpdate && update && (
+          <button
+            className={`sidebar-update-indicator${isReady ? " is-ready" : ""}${isDownloading ? " is-downloading" : ""}`}
+            type="button"
+            onClick={isReady && update.onInstall ? update.onInstall : update.onOpen}
+            title={isReady ? "点击重启升级" : undefined}
+            aria-label={isReady ? "点击重启升级" : `下载更新${snapshot?.progressPercent == null ? "" : ` ${snapshot.progressPercent}%`}`}
+          >
+            {isReady ? <CircleCheck size={18} aria-hidden="true" /> : <Download size={16} aria-hidden="true" />}
+            {isDownloading && <span>{snapshot?.progressPercent == null ? "..." : `${snapshot.progressPercent}%`}</span>}
+          </button>
+        )}
+      </div>
     </div>
   );
 }
