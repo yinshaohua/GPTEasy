@@ -98,7 +98,6 @@ export default function App() {
     snapshot: update,
     installing: installingUpdate,
     onOpen: () => setUpdateDialogOpen(true),
-    onInstall: handleInstall,
   };
 
   if (state.kind !== "loaded" || state.snapshot.mode === "blocked") {

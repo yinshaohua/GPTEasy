@@ -16,7 +16,6 @@ export interface UpdateSidebarState {
   snapshot: UpdateSnapshot;
   installing: boolean;
   onOpen: () => void;
-  onInstall?: () => void;
 }
 
 export interface OpenAiSidebarAction {
@@ -140,14 +139,15 @@ function SidebarFooter({
   );
 }
 
-type UpdateIndicatorKind = "downloading" | "pending" | "installing" | "incomplete" | "failed";
+type UpdateIndicatorKind = "checking" | "downloading" | "pending" | "installing" | "incomplete" | "failed";
 
 function SidebarUpdateIndicator({ update }: { update: UpdateSidebarState }) {
   const { snapshot } = update;
-  if (!snapshot.availableVersion) return null;
+  if (!snapshot.availableVersion && snapshot.state !== "checking" && snapshot.state !== "failed") return null;
 
   let kind: UpdateIndicatorKind | null = null;
   if (update.installing) kind = "installing";
+  else if (snapshot.state === "checking") kind = "checking";
   else if (snapshot.state === "downloading") kind = "downloading";
   else if (snapshot.state === "pending") kind = "pending";
   else if (snapshot.state === "incomplete") kind = "incomplete";
@@ -157,6 +157,8 @@ function SidebarUpdateIndicator({ update }: { update: UpdateSidebarState }) {
   const progress = snapshot.progressPercent;
   const label = kind === "installing"
     ? "正在启动更新"
+    : kind === "checking"
+      ? "正在检查更新"
     : kind === "downloading"
       ? progress == null ? "正在下载更新" : `正在下载更新 ${progress}%`
       : kind === "pending"
@@ -176,6 +178,7 @@ function SidebarUpdateIndicator({ update }: { update: UpdateSidebarState }) {
         aria-label={label}
         aria-busy={kind === "installing" || undefined}
       >
+        {kind === "checking" && <RefreshCw className="is-spinning" size={18} aria-hidden="true" />}
         {kind === "downloading" && progress != null && <span>{progress}%</span>}
         {kind === "downloading" && progress == null && (
           <>

@@ -12,7 +12,6 @@ function updateState(
     snapshot: { ...initialUpdateSnapshot, availableVersion: "1.1.0", ...snapshot },
     installing: false,
     onOpen: vi.fn(),
-    onInstall: vi.fn(),
     ...overrides,
   };
 }
@@ -29,7 +28,6 @@ describe("侧栏应用更新入口", () => {
     fireEvent.click(indicator);
 
     expect(update.onOpen).toHaveBeenCalledOnce();
-    expect(update.onInstall).not.toHaveBeenCalled();
   });
 
   it("未知下载进度使用不定进度状态", () => {
@@ -51,7 +49,6 @@ describe("侧栏应用更新入口", () => {
     fireEvent.click(indicator);
 
     expect(update.onOpen).toHaveBeenCalledOnce();
-    expect(update.onInstall).not.toHaveBeenCalled();
   });
 
   it("始终显示当前版本并点击打开更新详情", () => {
@@ -71,7 +68,6 @@ describe("侧栏应用更新入口", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "重试更新" }));
     expect(incomplete.onOpen).toHaveBeenCalledOnce();
-    expect(incomplete.onInstall).not.toHaveBeenCalled();
 
     const failed = updateState({
       state: "failed",
@@ -81,18 +77,16 @@ describe("侧栏应用更新入口", () => {
     rerender(<AppSidebar update={failed} />);
     fireEvent.click(screen.getByRole("button", { name: "更新失败" }));
     expect(failed.onOpen).toHaveBeenCalledOnce();
-    expect(failed.onInstall).not.toHaveBeenCalled();
   });
 
-  it("未发现目标版本的检查失败不占用侧栏", () => {
-    const update = updateState({
-      state: "failed",
-      availableVersion: null,
-      failureCategory: "check_failed",
-    });
-    render(<AppSidebar update={update} />);
+  it("检查中和没有目标版本的检查失败仍显示固定状态入口", () => {
+    const checking = updateState({ state: "checking", availableVersion: null });
+    const { rerender } = render(<AppSidebar update={checking} />);
+    expect(screen.getByRole("button", { name: "正在检查更新" })).toBeInTheDocument();
 
-    expect(screen.queryByRole("button", { name: "更新失败" })).not.toBeInTheDocument();
+    const failed = updateState({ state: "failed", availableVersion: null, failureCategory: "check_failed" });
+    rerender(<AppSidebar update={failed} />);
+    expect(screen.getByRole("button", { name: "更新失败" })).toBeInTheDocument();
   });
 
   it("安装交接期间禁用入口并显示工作状态", () => {

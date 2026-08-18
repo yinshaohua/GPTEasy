@@ -209,20 +209,11 @@ select {
 }
 
 .sidebar-update-slot {
-  --update-slot-width: 70px;
+  --update-slot-width: 94px;
   flex: 0 0 var(--update-slot-width);
   width: var(--update-slot-width);
   display: flex;
   justify-content: flex-end;
-}
-
-.sidebar-update-slot.is-downloading {
-  --update-slot-width: 78px;
-}
-
-.sidebar-update-slot.is-incomplete,
-.sidebar-update-slot.is-failed {
-  --update-slot-width: 94px;
 }
 
 .sidebar-update-indicator {
@@ -270,6 +261,12 @@ select {
   width: 100%;
   color: #ffffff;
   font-size: 14px;
+}
+
+.sidebar-update-indicator.is-checking {
+  color: var(--text-muted);
+  background: var(--surface);
+  border-color: var(--border);
 }
 
 .sidebar-update-indicator.is-downloading.is-indeterminate {
