@@ -334,10 +334,20 @@ fn trust_root_gate_allows_only_public_inputs_and_rejects_tracked_private_keys() 
     )
     .expect("write workflow");
     fs::write(
+        temp.path().join(".github/workflows/gitcode-sync.yml"),
+        "on:\n  release:\n    types: [published]\nenv:\n  GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}\n  GITCODE_REPOSITORY: ${{ vars.GITCODE_REPOSITORY }}\n",
+    )
+    .expect("write sync workflow");
+    fs::write(
         temp.path().join("scripts/smoke-gitcode-release.sh"),
         "#!/usr/bin/env bash\n# gitcode-distribution.json\nAuthorization: Bearer $GITCODE_TOKEN\n",
     )
     .expect("write smoke script");
+    fs::write(
+        temp.path().join("scripts/sync-gitcode-release.mjs"),
+        "const headers = { Authorization: `Bearer ${configuration.gitcodeToken}` };\n",
+    )
+    .expect("write sync script");
     fs::write(
         temp.path().join("scripts/setup-gitcode-distribution.sh"),
         "#!/usr/bin/env bash\nask_secret GITCODE_TOKEN\nset_secret \"$TOKEN_SECRET_NAME\"\nunset GITCODE_TOKEN\n",

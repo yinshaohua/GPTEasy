@@ -9,7 +9,7 @@ GitHub 是源码、Tag、版本、候选构建和中文发布说明的唯一权�
 - `smoke/` 下的非正式 API 冒烟清单；
 - 不可变 Release 及其 NSIS 安装包、`.sig` 和 SHA-256 信息。
 
-GitCode 仓库不是源码镜像，不运行构建，不单独维护版本或发布说明。正式同步与 `latest.md` 推进属于后续发布切片；本基线只建立可信输入、候选签名门禁和真实 API 冒烟路径。GitCode Raw 对 `.json` 和 `.txt` 路径返回“暂不支持预览”，因此清单使用已验证可匿名读取的 `.md` 扩展名承载 Tauri JSON。
+GitCode 仓库不是源码镜像，不运行构建，不单独维护版本或发布说明。正式同步在 GitHub Release 发布后自动执行。GitCode Raw 对 `.json` 和 `.txt` 路径返回“暂不支持预览”，因此正式 `latest.json` 的 JSON 正文通过已验证可匿名读取的 `latest.md` 路径传输；Tauri 解析正文，不依赖 URL 扩展名。
 
 ## 配置位置
 
@@ -49,6 +49,18 @@ bash scripts/setup-gitcode-distribution.sh
 5. 匿名读取 contents 元数据返回的官方 GitCode Raw blob，并核对字段。
 
 冒烟命令不包含正式清单路径，因此不能推进正式稳定版本。失败时只报告操作与公开错误，不输出 Token。
+
+## 正式同步
+
+`.github/workflows/gitcode-sync.yml` 由 GitHub Release `published` 事件触发，也允许维护者输入同一 Tag 人工重试。工作流只调用 `scripts/sync-gitcode-release.mjs` 下载 Release 附件，不运行应用构建。同步器执行以下顺序：
+
+1. 拒绝草稿、预发布和非稳定 SemVer Release，并匿名读取当前正式清单以阻止版本降级；
+2. 下载 GitHub Release 中的 Windows x64 NSIS 安装包及其 `.sig`，计算大小和 SHA-256，并生成 `SHA256SUMS.txt`；
+3. 创建或复用同 Tag GitCode Release，正文直接采用 GitHub 中文发布说明；
+4. 已存在的同名附件必须经匿名下载证明大小和 SHA-256 相同，缺失附件才上传；冲突立即停止；
+5. 所有附件上传后再次匿名下载校验，最后才写入正式清单。
+
+正式清单只包含 `windows-x86_64`，签名字段保存 `.sig` 正文。任何附件、匿名下载或版本门禁失败都不会写入清单，也不会修改或删除 GitHub Release。可控 HTTP adapter 测试通过 `npm run test:gitcode-sync` 运行。
 
 ## 发布准备
 

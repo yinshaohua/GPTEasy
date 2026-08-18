@@ -1,0 +1,298 @@
+/* global Buffer, URL, process */
+
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import http from "node:http";
+import { test } from "node:test";
+
+const TAG = "v1.2.3";
+const INSTALLER = "GPTEasy_1.2.3_x64-setup.exe";
+const SIGNATURE = `${INSTALLER}.sig`;
+const INSTALLER_BYTES = Buffer.from("accepted-windows-installer");
+const SIGNATURE_TEXT = "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIG1pbmlzaWduIHNlY3JldCBrZXkKUlVRZjZMUkNHQTlpNTU5cjNnN1YxcU55SkRBcEdpcDhNZnFjYWRJZ1Q5Q3VoVjNFTWhIb04xbUdUa1VpZEYvejdTcmxRZ1hkeThvZmpiN2JOSkp5bERPb2NyQ284S0x6WndvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNTU2MTkzMzM1CWZpbGU6dGVzdAp5L3JVdzJ5OC9oT1VZalpVNzFlSHAvV28xS1o0MGZHeTJWSkVEbDM0WE1KTStUWDQ4U3MvMTd1M0l2SWZiVlIxRmtaWlNOQ2lzUWJ1UVkrYkh3aEVCZz09";
+
+test("首次同步验证所有附件后最后推进正式清单", async () => {
+  const adapter = await startAdapter();
+  try {
+    const result = await runSync(adapter.baseUrl);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(adapter.state.uploads.size, 3);
+    assert.equal(adapter.state.manifests.length, 1);
+    assert.equal(adapter.state.records.at(-1).operation, "manifest-write");
+    const manifest = adapter.state.manifests[0];
+    assert.deepEqual(Object.keys(manifest.platforms), ["windows-x86_64"]);
+    assert.equal(manifest.version, "1.2.3");
+    assert.equal(manifest.notes, "正式中文发布说明");
+    assert.equal(manifest.pub_date, "2026-08-18T08:00:00Z");
+    assert.equal(manifest.platforms["windows-x86_64"].signature, SIGNATURE_TEXT);
+    assert.match(manifest.platforms["windows-x86_64"].url, /\/attach_files\/GPTEasy_1\.2\.3_x64-setup\.exe\/download$/);
+    assert.ok(adapter.state.records.filter((record) => record.operation === "anonymous-download")
+      .every((record) => record.authorization === undefined));
+  } finally {
+    await adapter.close();
+  }
+});
+
+test("部分上传后重跑会复用匹配附件并补传缺失附件", async () => {
+  const adapter = await startAdapter({
+    releaseExists: true,
+    uploads: new Map([[INSTALLER, INSTALLER_BYTES]]),
+  });
+  try {
+    const result = await runSync(adapter.baseUrl);
+    assert.equal(result.code, 0, result.stderr);
+    assert.deepEqual(adapter.state.uploadedThisRun.sort(), ["SHA256SUMS.txt", SIGNATURE].sort());
+    assert.equal(adapter.state.manifests.length, 1);
+  } finally {
+    await adapter.close();
+  }
+});
+
+test("同名附件内容冲突时停止且不推进正式清单", async () => {
+  const adapter = await startAdapter({
+    releaseExists: true,
+    uploads: new Map([[INSTALLER, Buffer.from("different-installer")]]),
+  });
+  try {
+    const result = await runSync(adapter.baseUrl);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /does not match the GitHub Release bytes/);
+    assert.equal(adapter.state.manifests.length, 0);
+  } finally {
+    await adapter.close();
+  }
+});
+
+test("匿名附件下载失败时保持旧清单不变", async () => {
+  const adapter = await startAdapter({ failAnonymousName: INSTALLER });
+  try {
+    const result = await runSync(adapter.baseUrl);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /Anonymous download failed/);
+    assert.equal(adapter.state.manifests.length, 0);
+  } finally {
+    await adapter.close();
+  }
+});
+
+test("旧版本人工重跑不会覆盖较新的正式清单", async () => {
+  const adapter = await startAdapter({
+    currentManifest: {
+      version: "2.0.0",
+      notes: "newer",
+      pub_date: "2026-08-19T08:00:00Z",
+      platforms: {
+        "windows-x86_64": {
+          url: "http://127.0.0.1:1/installer.exe",
+          signature: SIGNATURE_TEXT,
+          sha256: "a".repeat(64),
+          size: 1,
+        },
+      },
+    },
+  });
+  try {
+    const result = await runSync(adapter.baseUrl);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /refusing to replace newer manifest/);
+    assert.equal(adapter.state.uploads.size, 0);
+    assert.equal(adapter.state.manifests.length, 0);
+  } finally {
+    await adapter.close();
+  }
+});
+
+test("草稿或预发布 GitHub Release 不进入正式分发", async () => {
+  for (const releasePatch of [{ draft: true }, { prerelease: true }]) {
+    const adapter = await startAdapter({ releasePatch });
+    try {
+      const result = await runSync(adapter.baseUrl);
+      assert.notEqual(result.code, 0);
+      assert.match(result.stderr, /published stable release/);
+      assert.equal(adapter.state.uploads.size, 0);
+      assert.equal(adapter.state.manifests.length, 0);
+    } finally {
+      await adapter.close();
+    }
+  }
+});
+
+test("缺少 Windows x64 NSIS 产物时不创建正式分发", async () => {
+  const adapter = await startAdapter({
+    releaseAssets: [
+      { name: "GPTEasy_1.2.3_arm64-setup.exe" },
+      { name: "GPTEasy_1.2.3_arm64-setup.exe.sig" },
+    ],
+  });
+  try {
+    const result = await runSync(adapter.baseUrl);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /must include \*_x64-setup\.exe/);
+    assert.equal(adapter.state.uploads.size, 0);
+    assert.equal(adapter.state.manifests.length, 0);
+  } finally {
+    await adapter.close();
+  }
+});
+
+async function runSync(baseUrl) {
+  const child = spawn(process.execPath, ["scripts/sync-gitcode-release.mjs"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      GITHUB_TOKEN: "github-test-token",
+      GITHUB_REPOSITORY: "source/project",
+      RELEASE_TAG: TAG,
+      GITCODE_TOKEN: "gitcode-test-token",
+      GITCODE_REPOSITORY: "dist/releases",
+      GITCODE_DEFAULT_BRANCH: "main",
+      GITHUB_API_URL: `${baseUrl}/github`,
+      GITCODE_API_BASE_URL: `${baseUrl}/gitcode`,
+      GITCODE_SYNC_TEST_MODE: "1",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
+  child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk; });
+  const code = await new Promise((resolve) => child.on("close", resolve));
+  return { code, stdout, stderr };
+}
+
+async function startAdapter(options = {}) {
+  const state = {
+    releaseExists: options.releaseExists ?? false,
+    uploads: options.uploads ?? new Map(),
+    uploadedThisRun: [],
+    failAnonymousName: options.failAnonymousName,
+    currentManifest: options.currentManifest,
+    releasePatch: options.releasePatch ?? {},
+    releaseAssets: options.releaseAssets,
+    records: [],
+    manifests: [],
+  };
+  const server = http.createServer(async (request, response) => {
+    const url = new URL(request.url, "http://127.0.0.1");
+    const body = await requestBody(request);
+    const authorization = request.headers.authorization;
+    const record = { method: request.method, path: url.pathname, authorization };
+
+    if (url.pathname === `/github/repos/source/project/releases/tags/${TAG}`) {
+      assert.equal(authorization, "Bearer github-test-token");
+      const releaseAssets = state.releaseAssets ?? [
+        { name: INSTALLER },
+        { name: SIGNATURE },
+      ];
+      return json(response, 200, {
+        tag_name: TAG,
+        name: "GPTEasy 1.2.3",
+        body: "正式中文发布说明",
+        draft: false,
+        prerelease: false,
+        published_at: "2026-08-18T08:00:00Z",
+        assets: releaseAssets.map((asset) => ({
+          ...asset,
+          url: `${origin(server)}/github-assets/${asset.name}`,
+        })),
+        ...state.releasePatch,
+      });
+    }
+    if (url.pathname.startsWith("/github-assets/")) {
+      assert.equal(authorization, "Bearer github-test-token");
+      const name = decodeURIComponent(url.pathname.slice("/github-assets/".length));
+      return bytes(response, 200, name === INSTALLER ? INSTALLER_BYTES : Buffer.from(SIGNATURE_TEXT));
+    }
+    if (url.pathname.startsWith("/gitcode/") && !url.pathname.endsWith("/download")) {
+      assert.equal(authorization, "Bearer gitcode-test-token");
+    }
+    if (request.method === "GET" && url.pathname.endsWith(`/releases/${TAG}`)) {
+      if (!state.releaseExists) return json(response, 404, { message: "not found" });
+      return json(response, 200, releaseResponse(state, server));
+    }
+    if (request.method === "POST" && url.pathname.endsWith("/releases")) {
+      state.releaseExists = true;
+      state.records.push({ ...record, operation: "release-create" });
+      return json(response, 201, releaseResponse(state, server));
+    }
+    if (request.method === "GET" && url.pathname.endsWith("/upload_url")) {
+      const name = url.searchParams.get("file_name");
+      return json(response, 200, { url: `${origin(server)}/upload/${encodeURIComponent(name)}`, headers: { "x-upload": "fixture" } });
+    }
+    if (request.method === "GET" && url.pathname.endsWith("/contents/latest.md")) {
+      if (!state.currentManifest) return json(response, 404, { message: "not found" });
+      return json(response, 200, { sha: "manifest-sha", download_url: `${origin(server)}/raw/latest.md` });
+    }
+    if (request.method === "PUT" && url.pathname.startsWith("/upload/")) {
+      assert.equal(authorization, undefined);
+      const name = decodeURIComponent(url.pathname.slice("/upload/".length));
+      state.uploads.set(name, body);
+      state.uploadedThisRun.push(name);
+      state.records.push({ ...record, operation: "upload" });
+      return json(response, 201, {});
+    }
+    if (request.method === "GET" && url.pathname.includes("/attach_files/") && url.pathname.endsWith("/download")) {
+      assert.equal(authorization, undefined);
+      const name = decodeURIComponent(url.pathname.split("/attach_files/")[1].slice(0, -"/download".length));
+      state.records.push({ ...record, operation: "anonymous-download" });
+      if (state.failAnonymousName === name) return bytes(response, 403, Buffer.from("forbidden"));
+      return bytes(response, state.uploads.has(name) ? 200 : 404, state.uploads.get(name) ?? Buffer.from("missing"));
+    }
+    if (request.method === "GET" && url.pathname === "/raw/latest.md") {
+      assert.equal(authorization, undefined);
+      return json(response, 200, state.currentManifest);
+    }
+    if (["POST", "PUT"].includes(request.method) && url.pathname.endsWith("/contents/latest.md")) {
+      const payload = JSON.parse(body.toString("utf8"));
+      state.manifests.push(JSON.parse(Buffer.from(payload.content, "base64").toString("utf8")));
+      state.records.push({ ...record, operation: "manifest-write" });
+      return json(response, 201, {});
+    }
+    return json(response, 404, { message: "unhandled" });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return {
+    baseUrl: origin(server),
+    state,
+    close: () => new Promise((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+      server.closeAllConnections();
+    }),
+  };
+}
+
+function releaseResponse(state, server) {
+  return {
+    tag_name: TAG,
+    name: "GPTEasy 1.2.3",
+    body: "正式中文发布说明",
+    assets: [...state.uploads.keys()].map((name) => ({
+      name,
+      download_url: `${origin(server)}/gitcode/repos/dist/releases/releases/${TAG}/attach_files/${encodeURIComponent(name)}/download`,
+    })),
+  };
+}
+
+function origin(server) {
+  return `http://127.0.0.1:${server.address().port}`;
+}
+
+function requestBody(request) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    request.on("data", (chunk) => chunks.push(chunk));
+    request.on("end", () => resolve(Buffer.concat(chunks)));
+    request.on("error", reject);
+  });
+}
+
+function json(response, status, value) {
+  const body = Buffer.from(JSON.stringify(value));
+  response.writeHead(status, { "Content-Type": "application/json", "Content-Length": body.length });
+  response.end(body);
+}
+
+function bytes(response, status, value) {
+  response.writeHead(status, { "Content-Type": "application/octet-stream", "Content-Length": value.length });
+  response.end(value);
+}

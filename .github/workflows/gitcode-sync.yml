@@ -1,0 +1,38 @@
+name: GitCode 正式分发同步
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要重试的 GitHub Release tag"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GITHUB_REPOSITORY: ${{ github.repository }}
+      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+      GITCODE_REPOSITORY: ${{ vars.GITCODE_REPOSITORY }}
+      GITCODE_DEFAULT_BRANCH: ${{ vars.GITCODE_DEFAULT_BRANCH }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 验证同步输入
+        shell: bash
+        run: |
+          test -n "$RELEASE_TAG"
+          test -n "$GITCODE_REPOSITORY"
+          test -n "$GITCODE_DEFAULT_BRANCH"
+          test -n "$GITCODE_TOKEN"
+      - name: 从 GitHub Release 下载并同步 GitCode
+        shell: bash
+        run: node scripts/sync-gitcode-release.mjs

@@ -83,10 +83,14 @@ if ($null -ne $config) {
 }
 
 $workflowPath = Join-Path $root '.github/workflows/gitcode-smoke.yml'
+$syncWorkflowPath = Join-Path $root '.github/workflows/gitcode-sync.yml'
 $smokePath = Join-Path $root 'scripts/smoke-gitcode-release.sh'
+$syncPath = Join-Path $root 'scripts/sync-gitcode-release.mjs'
 $wizardPath = Join-Path $root 'scripts/setup-gitcode-distribution.sh'
 try { $workflow = [System.IO.File]::ReadAllText($workflowPath) } catch { $workflow = ''; Add-TrustError 'GitCode smoke workflow is missing.' }
+try { $syncWorkflow = [System.IO.File]::ReadAllText($syncWorkflowPath) } catch { $syncWorkflow = ''; Add-TrustError 'GitCode sync workflow is missing.' }
 try { $smoke = [System.IO.File]::ReadAllText($smokePath) } catch { $smoke = ''; Add-TrustError 'GitCode smoke command is missing.' }
+try { $sync = [System.IO.File]::ReadAllText($syncPath) } catch { $sync = ''; Add-TrustError 'GitCode sync command is missing.' }
 try { $wizard = [System.IO.File]::ReadAllText($wizardPath) } catch { $wizard = ''; Add-TrustError 'GitCode setup wizard is missing.' }
 
 if (-not $workflow.Contains('GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}')) {
@@ -94,6 +98,16 @@ if (-not $workflow.Contains('GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}')) {
 }
 if (-not $workflow.Contains('GITCODE_REPOSITORY: ${{ vars.GITCODE_REPOSITORY }}')) {
     Add-TrustError 'GitCode repository must come from a public Actions variable.'
+}
+if (-not $syncWorkflow.Contains('types: [published]') -or
+    -not $syncWorkflow.Contains('GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}') -or
+    -not $syncWorkflow.Contains('GITCODE_REPOSITORY: ${{ vars.GITCODE_REPOSITORY }}') -or
+    $syncWorkflow -match '(?i)(npm run (build|tauri)|cargo build|tauri build)') {
+    Add-TrustError 'GitCode formal sync must consume published Release assets without rebuilding.'
+}
+if (-not $sync.Contains('Authorization: `Bearer ${configuration.gitcodeToken}`') -or
+    $sync -match '(?i)(access_token=|PRIVATE-TOKEN)') {
+    Add-TrustError 'GitCode formal sync authentication must use the Bearer header only.'
 }
 if (-not $smoke.Contains('Authorization: Bearer $GITCODE_TOKEN') -or
     $smoke -match '(?i)(access_token=|PRIVATE-TOKEN)') {
