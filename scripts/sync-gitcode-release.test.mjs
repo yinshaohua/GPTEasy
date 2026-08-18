@@ -18,6 +18,7 @@ test("首次同步验证所有附件后最后推进正式清单", async () => {
     assert.equal(result.code, 0, result.stderr);
     assert.equal(adapter.state.uploads.size, 3);
     assert.equal(adapter.state.manifests.length, 1);
+    assert.ok(adapter.state.records.some((record) => record.operation === "anonymous-raw-baseline"));
     assert.equal(adapter.state.records.at(-1).operation, "manifest-write");
     const manifest = adapter.state.manifests[0];
     assert.deepEqual(Object.keys(manifest.platforms), ["windows-x86_64"]);
@@ -127,7 +128,38 @@ test("缺少 Windows x64 NSIS 产物时不创建正式分发", async () => {
   try {
     const result = await runSync(adapter.baseUrl);
     assert.notEqual(result.code, 0);
-    assert.match(result.stderr, /must include \*_x64-setup\.exe/);
+    assert.match(result.stderr, /must include GPTEasy_1\.2\.3_x64-setup\.exe/);
+    assert.equal(adapter.state.uploads.size, 0);
+    assert.equal(adapter.state.manifests.length, 0);
+  } finally {
+    await adapter.close();
+  }
+});
+
+test("安装包文件名版本与 Release Tag 不同时不进入正式分发", async () => {
+  const adapter = await startAdapter({
+    releaseAssets: [
+      { name: "GPTEasy_1.1.0_x64-setup.exe" },
+      { name: "GPTEasy_1.1.0_x64-setup.exe.sig" },
+    ],
+  });
+  try {
+    const result = await runSync(adapter.baseUrl);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /must include GPTEasy_1\.2\.3_x64-setup\.exe/);
+    assert.equal(adapter.state.uploads.size, 0);
+    assert.equal(adapter.state.manifests.length, 0);
+  } finally {
+    await adapter.close();
+  }
+});
+
+test("首次发布的 Raw 匿名读取不可用时不推进分发", async () => {
+  const adapter = await startAdapter({ failRawBaseline: true });
+  try {
+    const result = await runSync(adapter.baseUrl);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /Raw baseline download failed/);
     assert.equal(adapter.state.uploads.size, 0);
     assert.equal(adapter.state.manifests.length, 0);
   } finally {
@@ -169,6 +201,7 @@ async function startAdapter(options = {}) {
     currentManifest: options.currentManifest,
     releasePatch: options.releasePatch ?? {},
     releaseAssets: options.releaseAssets,
+    failRawBaseline: options.failRawBaseline ?? false,
     records: [],
     manifests: [],
   };
@@ -223,6 +256,9 @@ async function startAdapter(options = {}) {
       if (!state.currentManifest) return json(response, 404, { message: "not found" });
       return json(response, 200, { sha: "manifest-sha", download_url: `${origin(server)}/raw/latest.md` });
     }
+    if (request.method === "GET" && url.pathname.endsWith("/contents/README.md")) {
+      return json(response, 200, { download_url: `${origin(server)}/raw/README.md` });
+    }
     if (request.method === "PUT" && url.pathname.startsWith("/upload/")) {
       assert.equal(authorization, undefined);
       const name = decodeURIComponent(url.pathname.slice("/upload/".length));
@@ -241,6 +277,12 @@ async function startAdapter(options = {}) {
     if (request.method === "GET" && url.pathname === "/raw/latest.md") {
       assert.equal(authorization, undefined);
       return json(response, 200, state.currentManifest);
+    }
+    if (request.method === "GET" && url.pathname === "/raw/README.md") {
+      assert.equal(authorization, undefined);
+      state.records.push({ ...record, operation: "anonymous-raw-baseline" });
+      if (state.failRawBaseline) return bytes(response, 403, Buffer.from("forbidden"));
+      return bytes(response, 200, Buffer.from("# GPTEasy Releases\n"));
     }
     if (["POST", "PUT"].includes(request.method) && url.pathname.endsWith("/contents/latest.md")) {
       const payload = JSON.parse(body.toString("utf8"));

@@ -11,10 +11,11 @@ try {
   const release = await githubRequest(`/repos/${configuration.githubRepository}/releases/tags/${encodeURIComponent(configuration.tag)}`);
   validateRelease(release, configuration.tag);
   const currentManifest = await readCurrentManifest();
+  if (!currentManifest) await verifyRawBaseline();
   if (currentManifest && compareVersions(release.tag_name.slice(1), currentManifest.manifest.version) < 0) {
     throw new Error(`refusing to replace newer manifest ${currentManifest.manifest.version} with ${release.tag_name.slice(1)}`);
   }
-  const artifacts = selectArtifacts(release.assets ?? []);
+  const artifacts = selectArtifacts(release.assets ?? [], release.tag_name.slice(1));
   const downloaded = [];
   for (const asset of artifacts) {
     const target = path.join(workspace, asset.name);
@@ -125,7 +126,7 @@ async function loadConfiguration() {
   if (!/^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(tag)) {
     throw new Error("RELEASE_TAG must be a stable vSemVer tag");
   }
-  const formalManifestPath = process.env.GITCODE_FORMAL_MANIFEST_PATH ?? contract.formalManifestPath;
+  const formalManifestPath = contract.formalManifestPath;
   if (!/^[^/\s]+\.md$/.test(formalManifestPath)) {
     throw new Error("formal manifest must be a single .md path");
   }
@@ -206,10 +207,29 @@ async function readCurrentManifest() {
   return { manifest, sha: typeof metadata.sha === "string" ? metadata.sha : undefined };
 }
 
-function selectArtifacts(assets) {
-  const installer = assets.find((asset) => /_x64-setup\.exe$/i.test(asset.name));
+async function verifyRawBaseline() {
+  const endpoint = `/repos/${configuration.gitcodeRepository}/contents/README.md?ref=${encodeURIComponent(configuration.gitcodeBranch)}`;
+  const metadata = await gitcodeRequest(endpoint);
+  if (!metadata || typeof metadata.download_url !== "string") {
+    throw new Error("GitCode distribution README metadata is unavailable");
+  }
+  const url = new URL(metadata.download_url);
+  const validOrigin = url.origin === new URL(configuration.gitcodeRawBase).origin;
+  const validTestUrl = configuration.testMode && url.protocol === "http:" && url.hostname === "127.0.0.1";
+  if (!validOrigin && !validTestUrl) throw new Error("GitCode returned an unexpected README download URL");
+  const response = await fetch(url, { redirect: "follow" });
+  if (!response.ok || !(await response.text()).trim()) {
+    throw new Error(`Anonymous GitCode Raw baseline download failed with HTTP ${response.status}`);
+  }
+}
+
+function selectArtifacts(assets, version) {
+  const expectedInstaller = `GPTEasy_${version}_x64-setup.exe`;
+  const installer = assets.find((asset) => asset.name.toLowerCase() === expectedInstaller.toLowerCase());
   const signature = assets.find((asset) => asset.name.toLowerCase() === `${installer?.name.toLowerCase()}.sig`);
-  if (!installer || !signature) throw new Error("Release assets must include *_x64-setup.exe and its .sig");
+  if (!installer || !signature) {
+    throw new Error(`Release assets must include ${expectedInstaller} and its .sig`);
+  }
   return [installer, signature];
 }
 
