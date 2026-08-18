@@ -571,7 +571,9 @@ fn gitcode_smoke_exercises_authenticated_writes_and_anonymous_reads() {
     let server_records = Arc::clone(&records);
     let server = thread::spawn(move || {
         let mut raw_manifest = String::new();
-        for _ in 0..6 {
+        let mut attachment_downloads = 0;
+        let mut raw_downloads = 0;
+        for _ in 0..8 {
             let (mut stream, _) = listener.accept().expect("accept fake GitCode request");
             let mut request = Vec::new();
             let mut buffer = [0_u8; 8192];
@@ -640,11 +642,16 @@ fn gitcode_smoke_exercises_authenticated_writes_and_anonymous_reads() {
             } else if method == "PUT" && path == "/upload" {
                 (201, "application/json", "{}".to_owned())
             } else if method == "GET" && path.ends_with("/download") {
-                (
-                    200,
-                    "text/plain",
-                    "GPTEasy GitCode distribution smoke smoke-42-1\n".to_owned(),
-                )
+                attachment_downloads += 1;
+                if attachment_downloads == 1 {
+                    (403, "text/plain", "not propagated".to_owned())
+                } else {
+                    (
+                        200,
+                        "text/plain",
+                        "GPTEasy GitCode distribution smoke smoke-42-1\n".to_owned(),
+                    )
+                }
             } else if method == "POST" && path.contains("/contents/smoke/") {
                 let body = &request[header_end..header_end + content_length];
                 let content: Value = serde_json::from_slice(body).expect("content request JSON");
@@ -654,7 +661,12 @@ fn gitcode_smoke_exercises_authenticated_writes_and_anonymous_reads() {
                 raw_manifest = String::from_utf8(decoded).expect("test manifest UTF-8");
                 (201, "application/json", "{}".to_owned())
             } else if method == "GET" && path.starts_with("/raw/smoke/") {
-                (200, "application/json", raw_manifest.clone())
+                raw_downloads += 1;
+                if raw_downloads == 1 {
+                    (403, "text/plain", "not propagated".to_owned())
+                } else {
+                    (200, "application/json", raw_manifest.clone())
+                }
             } else {
                 (
                     404,
@@ -662,12 +674,11 @@ fn gitcode_smoke_exercises_authenticated_writes_and_anonymous_reads() {
                     "{\"message\":\"not found\"}".to_owned(),
                 )
             };
-            let reason = if status == 200 {
-                "OK"
-            } else if status == 201 {
-                "Created"
-            } else {
-                "Not Found"
+            let reason = match status {
+                200 => "OK",
+                201 => "Created",
+                403 => "Forbidden",
+                _ => "Not Found",
             };
             write!(
                 stream,
@@ -687,6 +698,7 @@ fn gitcode_smoke_exercises_authenticated_writes_and_anonymous_reads() {
         .env("GITCODE_SMOKE_TEST_MODE", "1")
         .env("GITCODE_API_BASE_URL", format!("http://{address}/api/v5"))
         .env("GITCODE_RAW_BASE_URL", format!("http://{address}/raw"))
+        .env("GITCODE_SMOKE_RETRY_DELAY_SECONDS", "0")
         .current_dir(repository_root())
         .output()
         .expect("run GitCode smoke against fake server");
@@ -702,7 +714,7 @@ fn gitcode_smoke_exercises_authenticated_writes_and_anonymous_reads() {
     assert_eq!(report["formalManifestAdvanced"], false);
 
     let records = records.lock().expect("read request records");
-    assert_eq!(records.len(), 6);
+    assert_eq!(records.len(), 8);
     assert!(
         records
             .iter()
@@ -720,5 +732,5 @@ fn gitcode_smoke_exercises_authenticated_writes_and_anonymous_reads() {
     assert_eq!(records[0].method, "POST");
     assert_eq!(records[2].method, "PUT");
     assert_eq!(records[2].upload_test_header.as_deref(), Some("fixture"));
-    assert_eq!(records[5].method, "GET");
+    assert_eq!(records[7].method, "GET");
 }

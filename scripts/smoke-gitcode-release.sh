@@ -71,6 +71,30 @@ request_json() {
   fi
 }
 
+ANONYMOUS_RETRY_DELAY_SECONDS=2
+if [[ "${GITCODE_SMOKE_TEST_MODE:-0}" == "1" ]]; then
+  ANONYMOUS_RETRY_DELAY_SECONDS="${GITCODE_SMOKE_RETRY_DELAY_SECONDS:-0}"
+fi
+
+download_anonymously() {
+  local url="$1" output="$2" description="$3" status attempt
+  for attempt in $(seq 1 15); do
+    status=$(curl \
+      --silent --show-error --location \
+      --output "$output" \
+      --write-out '%{http_code}' \
+      "$url") || status=000
+    if [[ "$status" =~ ^2[0-9][0-9]$ ]]; then
+      return
+    fi
+    if (( attempt == 15 )) || [[ ! "$status" =~ ^(000|403|404|429|5[0-9][0-9])$ ]]; then
+      printf '%s failed after %s attempt(s): HTTP %s\n' "$description" "$attempt" "$status" >&2
+      exit 1
+    fi
+    sleep "$ANONYMOUS_RETRY_DELAY_SECONDS"
+  done
+}
+
 RELEASE_RESPONSE="$WORK_DIR/release.json"
 RELEASE_BODY=$(node "$JSON_TOOL" release-body "$SMOKE_TAG")
 request_json POST "$API_BASE/repos/$GITCODE_REPOSITORY/releases" "$RELEASE_BODY" "$RELEASE_RESPONSE"
@@ -85,7 +109,7 @@ node "$SCRIPT_DIR/gitcode-upload.mjs" \
 
 DOWNLOAD_PATH="$WORK_DIR/downloaded.txt"
 DOWNLOAD_URL="$API_BASE/repos/$GITCODE_REPOSITORY/releases/$SMOKE_TAG/attach_files/$ASSET_NAME/download"
-curl --silent --show-error --fail --location --output "$DOWNLOAD_PATH" "$DOWNLOAD_URL"
+download_anonymously "$DOWNLOAD_URL" "$DOWNLOAD_PATH" 'anonymous attachment download'
 DOWNLOADED_SHA256=$(sha256sum "$DOWNLOAD_PATH" | cut -d ' ' -f 1)
 if [[ "$DOWNLOADED_SHA256" != "$ASSET_SHA256" ]]; then
   printf 'anonymous attachment SHA-256 does not match uploaded content\n' >&2
@@ -102,6 +126,6 @@ CONTENT_RESPONSE="$WORK_DIR/content.json"
 request_json POST "$API_BASE/repos/$GITCODE_REPOSITORY/contents/$MANIFEST_PATH" "$CONTENT_BODY" "$CONTENT_RESPONSE"
 
 RAW_RESULT="$WORK_DIR/raw.json"
-curl --silent --show-error --fail --location --output "$RAW_RESULT" "$RAW_BASE/$MANIFEST_PATH"
+download_anonymously "$RAW_BASE/$MANIFEST_PATH" "$RAW_RESULT" 'anonymous Raw manifest download'
 node "$JSON_TOOL" verify-manifest "$RAW_RESULT" "$SMOKE_TAG" "$ASSET_SHA256"
 node "$JSON_TOOL" report "$SMOKE_TAG" "$DOWNLOAD_URL" "$RAW_BASE/$MANIFEST_PATH"
