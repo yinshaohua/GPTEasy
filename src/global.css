@@ -1675,6 +1675,21 @@ select:focus-visible {
   line-height: 1.5;
 }
 
+.update-dialog .text-link {
+  display: inline-block;
+  margin: 0 0 12px;
+  color: var(--accent);
+  font-size: 13px;
+}
+
+.update-dialog .dialog-actions {
+  flex-wrap: wrap;
+}
+
+.update-dialog .dialog-actions > button {
+  white-space: nowrap;
+}
+
 .update-progress {
   position: relative;
   height: 26px;

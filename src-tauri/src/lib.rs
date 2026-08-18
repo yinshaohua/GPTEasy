@@ -21,7 +21,7 @@ use commands::{
     delete_provider, delete_session, discard_provider_validation, discover_provider_models,
     discover_provider_models_for_update, enter_session_management, export_linux_script,
     export_session_markdown, get_environment_snapshot, get_startup_snapshot, get_update_snapshot,
-    leave_session_management, list_providers, list_sessions, list_wsl_environments,
+    install_update, leave_session_management, list_providers, list_sessions, list_wsl_environments,
     open_dayway_website, open_update_manual_download, perform_update_check, read_session,
     refresh_startup_snapshot, refresh_wsl_environment, rename_provider, reorder_providers,
     restore_last_environment_config, revalidate_provider, reveal_provider_api_key,
@@ -60,9 +60,13 @@ pub fn run() {
             let home = app.path().home_dir()?;
             let state_store = StateStore::new(StatePaths::from_root(state_root));
             app.manage(LifecycleRuntime::new(state_store.clone()));
-            app.manage(UpdateRuntime::new(UpdateCoordinator::new(env!(
-                "CARGO_PKG_VERSION"
-            ))));
+            app.manage(UpdateRuntime::new(UpdateCoordinator::with_state_path(
+                env!("CARGO_PKG_VERSION"),
+                state_store
+                    .paths()
+                    .root()
+                    .join("update-install-attempt.json"),
+            )));
             let codex_home = home.join(".codex");
             let coordinator = StartupCoordinator::new(
                 state_store.clone(),
@@ -105,6 +109,7 @@ pub fn run() {
             refresh_startup_snapshot,
             get_update_snapshot,
             check_for_updates,
+            install_update,
             open_update_manual_download,
             get_environment_snapshot,
             enter_session_management,

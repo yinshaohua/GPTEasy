@@ -1,4 +1,6 @@
 use std::cmp::Ordering;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -9,6 +11,8 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 pub const MANUAL_DOWNLOAD_URL: &str = "https://github.com/yinshaohua/GPTEasy/releases/latest";
+pub const GITCODE_RELEASES_URL: &str =
+    "https://gitcode.com/ericyin99/GPTEasy-Releases/releases/tag";
 pub const CHECK_INTERVAL_SECONDS: u64 = 24 * 60 * 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -19,6 +23,7 @@ pub enum UpdateState {
     Downloading,
     UpToDate,
     Pending,
+    Incomplete,
     Failed,
 }
 
@@ -46,6 +51,7 @@ pub struct UpdateSnapshot {
     pub failure_category: Option<UpdateFailureCategory>,
     pub error_message: Option<String>,
     pub manual_download_url: String,
+    pub release_notes_url: Option<String>,
 }
 
 impl UpdateSnapshot {
@@ -63,6 +69,7 @@ impl UpdateSnapshot {
             failure_category: None,
             error_message: None,
             manual_download_url: MANUAL_DOWNLOAD_URL.to_owned(),
+            release_notes_url: None,
         }
     }
 }
@@ -156,13 +163,109 @@ fn is_prerelease_version(value: &str) -> bool {
 #[derive(Debug, Clone)]
 struct PendingUpdate {
     version: String,
-    _bytes: Vec<u8>,
+    bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct InstallAttempt {
+    target_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateInstallFailureCategory {
+    NoPendingUpdate,
+    Busy,
+    UnsupportedPlatform,
+    StateUnavailable,
+    LaunchFailed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateInstallFailure {
+    pub category: UpdateInstallFailureCategory,
+    pub message_id: &'static str,
+}
+
+impl UpdateInstallFailure {
+    fn new(category: UpdateInstallFailureCategory, message_id: &'static str) -> Self {
+        Self {
+            category,
+            message_id,
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct UpdateActivityGate {
+    active: Arc<Mutex<UpdateActivityState>>,
+}
+
+pub struct UpdateActivityGuard {
+    gate: UpdateActivityGate,
+    operation: Option<String>,
+}
+
+#[derive(Default)]
+struct UpdateActivityState {
+    operations: Vec<String>,
+    installing: bool,
+}
+
+impl UpdateActivityGate {
+    pub fn try_begin(&self, operation: impl Into<String>) -> Option<UpdateActivityGuard> {
+        let mut active = self.active.lock().ok()?;
+        if active.installing {
+            return None;
+        }
+        let operation = operation.into();
+        active.operations.push(operation.clone());
+        Some(UpdateActivityGuard {
+            gate: self.clone(),
+            operation: Some(operation),
+        })
+    }
+
+    pub fn try_begin_install(&self) -> Option<UpdateActivityGuard> {
+        let mut active = self.active.lock().ok()?;
+        if active.installing || !active.operations.is_empty() {
+            return None;
+        }
+        active.installing = true;
+        Some(UpdateActivityGuard {
+            gate: self.clone(),
+            operation: None,
+        })
+    }
+
+    pub fn active_operation(&self) -> Option<String> {
+        self.active
+            .lock()
+            .ok()
+            .and_then(|active| active.operations.first().cloned())
+    }
+}
+
+impl Drop for UpdateActivityGuard {
+    fn drop(&mut self) {
+        if let Ok(mut active) = self.gate.active.lock() {
+            if let Some(operation) = self.operation.as_ref() {
+                if let Some(index) = active.operations.iter().position(|item| item == operation) {
+                    active.operations.remove(index);
+                }
+            } else {
+                active.installing = false;
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
 struct CoordinatorState {
     snapshot: UpdateSnapshot,
     pending: Option<PendingUpdate>,
+    installing: bool,
 }
 
 #[derive(Clone)]
@@ -172,6 +275,7 @@ pub struct UpdateCoordinator {
     endpoint: String,
     public_key: String,
     state: Arc<Mutex<CoordinatorState>>,
+    install_attempt_path: Option<PathBuf>,
 }
 
 impl UpdateCoordinator {
@@ -197,9 +301,22 @@ impl UpdateCoordinator {
             state: Arc::new(Mutex::new(CoordinatorState {
                 snapshot: UpdateSnapshot::new(&current_version),
                 pending: None,
+                installing: false,
             })),
             current_version,
+            install_attempt_path: None,
         }
+    }
+
+    pub(crate) fn with_state_path(
+        current_version: impl Into<String>,
+        install_attempt_path: impl AsRef<Path>,
+    ) -> Self {
+        let (endpoint, public_key) = configured_trust_root();
+        let mut coordinator = Self::with_endpoint(current_version, endpoint, public_key);
+        coordinator.install_attempt_path = Some(install_attempt_path.as_ref().to_path_buf());
+        coordinator.restore_install_attempt();
+        coordinator
     }
 
     pub fn snapshot(&self) -> UpdateSnapshot {
@@ -207,6 +324,37 @@ impl UpdateCoordinator {
             .lock()
             .map(|state| state.snapshot.clone())
             .unwrap_or_else(|_| UpdateSnapshot::new(&self.current_version))
+    }
+
+    fn restore_install_attempt(&self) {
+        let Some(path) = self.install_attempt_path.as_ref() else {
+            return;
+        };
+        let Ok(bytes) = fs::read(path) else {
+            return;
+        };
+        let Ok(attempt) = serde_json::from_slice::<InstallAttempt>(&bytes) else {
+            let _ = fs::remove_file(path);
+            return;
+        };
+        let Ok(target) = StableVersion::parse(&attempt.target_version) else {
+            let _ = fs::remove_file(path);
+            return;
+        };
+        let Ok(current) = StableVersion::parse(&self.current_version) else {
+            return;
+        };
+        if current >= target {
+            let _ = fs::remove_file(path);
+            self.set_up_to_date();
+            return;
+        }
+        if let Ok(mut state) = self.state.lock() {
+            state.snapshot.state = UpdateState::Incomplete;
+            state.snapshot.available_version = Some(attempt.target_version);
+            state.snapshot.progress_percent = None;
+            state.snapshot.checked_at_epoch_seconds = Some(now_epoch_seconds());
+        }
     }
 
     pub(crate) async fn check_and_download<F>(&self, mut progress: F) -> UpdateSnapshot
@@ -286,7 +434,8 @@ impl UpdateCoordinator {
         if matches!(
             state.snapshot.state,
             UpdateState::Checking | UpdateState::Downloading
-        ) {
+        ) || state.installing
+        {
             return false;
         }
         state.snapshot.state = UpdateState::Checking;
@@ -353,15 +502,16 @@ impl UpdateCoordinator {
             let version = manifest.version;
             state.pending = Some(PendingUpdate {
                 version: version.clone(),
-                _bytes: bytes,
+                bytes,
             });
             state.snapshot.state = UpdateState::Pending;
-            state.snapshot.available_version = Some(version);
+            state.snapshot.available_version = Some(version.clone());
             state.snapshot.notes = manifest.notes;
             state.snapshot.published_at = manifest.pub_date;
             state.snapshot.progress_percent = Some(100);
             state.snapshot.failure_category = None;
             state.snapshot.error_message = None;
+            state.snapshot.release_notes_url = Some(release_notes_url(&version));
             state.snapshot.checked_at_epoch_seconds = Some(now_epoch_seconds());
         }
     }
@@ -376,9 +526,14 @@ impl UpdateCoordinator {
                 state.snapshot.checked_at_epoch_seconds = Some(now_epoch_seconds());
                 return;
             }
+            if state.snapshot.state == UpdateState::Incomplete {
+                state.snapshot.checked_at_epoch_seconds = Some(now_epoch_seconds());
+                return;
+            }
             state.pending = None;
             state.snapshot.state = UpdateState::UpToDate;
             state.snapshot.available_version = None;
+            state.snapshot.release_notes_url = None;
             state.snapshot.notes = None;
             state.snapshot.published_at = None;
             state.snapshot.downloaded_bytes = 0;
@@ -400,6 +555,136 @@ impl UpdateCoordinator {
         }
     }
 
+    pub(crate) fn confirm_install(&self) -> Result<UpdateSnapshot, UpdateInstallFailure> {
+        let (version, bytes) = self.begin_install()?;
+        let prepared = self
+            .persist_install_attempt(&version)
+            .and_then(|_| self.write_installer(&version, &bytes));
+        let path = match prepared {
+            Ok(path) => path,
+            Err(failure) => {
+                self.cancel_install();
+                return Err(failure);
+            }
+        };
+        #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+        let launched = std::process::Command::new(&path).arg("/P").spawn().is_ok();
+        #[cfg(not(all(target_os = "windows", target_arch = "x86_64")))]
+        let launched = false;
+        if !launched {
+            let _ = fs::remove_file(&path);
+            self.clear_install_attempt();
+            self.cancel_install();
+            return Err(UpdateInstallFailure::new(
+                if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+                    UpdateInstallFailureCategory::LaunchFailed
+                } else {
+                    UpdateInstallFailureCategory::UnsupportedPlatform
+                },
+                if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+                    "update.install_launch_failed"
+                } else {
+                    "update.unsupported_platform"
+                },
+            ));
+        }
+        Ok(self.snapshot())
+    }
+
+    fn begin_install(&self) -> Result<(String, Vec<u8>), UpdateInstallFailure> {
+        let mut state = self.state.lock().map_err(|_| {
+            UpdateInstallFailure::new(
+                UpdateInstallFailureCategory::StateUnavailable,
+                "update.state_unavailable",
+            )
+        })?;
+        if state.installing {
+            return Err(UpdateInstallFailure::new(
+                UpdateInstallFailureCategory::Busy,
+                "update.busy",
+            ));
+        }
+        let pending = state.pending.as_ref().ok_or_else(|| {
+            UpdateInstallFailure::new(
+                UpdateInstallFailureCategory::NoPendingUpdate,
+                "update.no_pending_update",
+            )
+        })?;
+        let result = (pending.version.clone(), pending.bytes.clone());
+        state.installing = true;
+        Ok(result)
+    }
+
+    fn cancel_install(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.installing = false;
+        }
+    }
+
+    fn persist_install_attempt(&self, version: &str) -> Result<(), UpdateInstallFailure> {
+        let Some(path) = self.install_attempt_path.as_ref() else {
+            return Ok(());
+        };
+        let parent = path.parent().ok_or_else(|| {
+            UpdateInstallFailure::new(
+                UpdateInstallFailureCategory::StateUnavailable,
+                "update.state_unavailable",
+            )
+        })?;
+        fs::create_dir_all(parent).map_err(|_| {
+            UpdateInstallFailure::new(
+                UpdateInstallFailureCategory::StateUnavailable,
+                "update.state_unavailable",
+            )
+        })?;
+        let temporary = path.with_extension("tmp");
+        let bytes = serde_json::to_vec(&InstallAttempt {
+            target_version: version.to_owned(),
+        })
+        .map_err(|_| {
+            UpdateInstallFailure::new(
+                UpdateInstallFailureCategory::StateUnavailable,
+                "update.state_unavailable",
+            )
+        })?;
+        fs::write(&temporary, bytes).map_err(|_| {
+            UpdateInstallFailure::new(
+                UpdateInstallFailureCategory::StateUnavailable,
+                "update.state_unavailable",
+            )
+        })?;
+        #[cfg(windows)]
+        let _ = fs::remove_file(path);
+        fs::rename(&temporary, path).map_err(|_| {
+            UpdateInstallFailure::new(
+                UpdateInstallFailureCategory::StateUnavailable,
+                "update.state_unavailable",
+            )
+        })?;
+        Ok(())
+    }
+
+    fn clear_install_attempt(&self) {
+        if let Some(path) = self.install_attempt_path.as_ref() {
+            let _ = fs::remove_file(path);
+        }
+    }
+
+    fn write_installer(
+        &self,
+        version: &str,
+        bytes: &[u8],
+    ) -> Result<PathBuf, UpdateInstallFailure> {
+        let path = std::env::temp_dir().join(format!("GPTEasy-update-{version}.exe"));
+        fs::write(&path, bytes).map_err(|_| {
+            UpdateInstallFailure::new(
+                UpdateInstallFailureCategory::StateUnavailable,
+                "update.installer_write_failed",
+            )
+        })?;
+        Ok(path)
+    }
+
     fn fail(&self, category: UpdateFailureCategory) -> UpdateSnapshot {
         if let Ok(mut state) = self.state.lock() {
             state.snapshot.state = UpdateState::Failed;
@@ -419,6 +704,10 @@ impl UpdateCoordinator {
         }
         self.snapshot()
     }
+}
+
+fn release_notes_url(version: &str) -> String {
+    format!("{GITCODE_RELEASES_URL}/v{version}")
 }
 
 fn now_epoch_seconds() -> u64 {
@@ -451,6 +740,7 @@ fn verify_signature(bytes: &[u8], signature: &str, public_key: &str) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn stable_version_rejects_prerelease_and_build_suffixes() {
@@ -498,5 +788,62 @@ mod tests {
         assert!(!coordinator.begin_check());
         coordinator.set_up_to_date();
         assert!(coordinator.begin_check());
+    }
+
+    #[test]
+    fn startup_reports_an_incomplete_install_without_using_the_business_database() {
+        let root = TempDir::new().expect("update state root");
+        let path = root.path().join("update-install-attempt.json");
+        fs::write(&path, br#"{"target_version":"1.1.0"}"#).expect("install attempt");
+
+        let coordinator = UpdateCoordinator::with_state_path("1.0.0", &path);
+
+        let snapshot = coordinator.snapshot();
+        assert_eq!(snapshot.state, UpdateState::Incomplete);
+        assert_eq!(snapshot.available_version.as_deref(), Some("1.1.0"));
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn startup_confirms_the_target_version_and_clears_the_install_attempt() {
+        let root = TempDir::new().expect("update state root");
+        let path = root.path().join("update-install-attempt.json");
+        fs::write(&path, br#"{"target_version":"1.1.0"}"#).expect("install attempt");
+
+        let coordinator = UpdateCoordinator::with_state_path("1.1.0", &path);
+
+        assert_eq!(coordinator.snapshot().state, UpdateState::UpToDate);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn activity_gate_blocks_install_until_the_user_operation_finishes() {
+        let gate = UpdateActivityGate::default();
+        let guard = gate.try_begin("供应商验证").expect("begin activity");
+
+        assert_eq!(gate.active_operation().as_deref(), Some("供应商验证"));
+        assert!(gate.try_begin_install().is_none());
+
+        drop(guard);
+        assert!(gate.try_begin_install().is_some());
+    }
+
+    #[test]
+    fn pending_snapshot_links_to_the_versioned_gitcode_release() {
+        let coordinator = UpdateCoordinator::with_endpoint("1.0.0", "http://127.0.0.1", "key");
+        coordinator.mark_ready(
+            Manifest {
+                version: "1.1.0".to_owned(),
+                notes: Some("首段\n\n完整说明".to_owned()),
+                pub_date: None,
+                platforms: std::collections::HashMap::new(),
+            },
+            vec![1, 2, 3],
+        );
+
+        assert_eq!(
+            coordinator.snapshot().release_notes_url.as_deref(),
+            Some("https://gitcode.com/ericyin99/GPTEasy-Releases/releases/tag/v1.1.0")
+        );
     }
 }

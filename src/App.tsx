@@ -23,6 +23,7 @@ import {
 import {
   checkForUpdates,
   getUpdateSnapshot,
+  installUpdate,
   openUpdateManualDownload,
   initialUpdateSnapshot,
   type UpdateSnapshot,
@@ -41,6 +42,7 @@ export default function App() {
   const [openAiAction, setOpenAiAction] = useState<OpenAiSidebarAction>();
   const [update, setUpdate] = useState<UpdateSnapshot>(initialUpdateSnapshot);
   const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
+  const [installError, setInstallError] = useState<string | null>(null);
 
   const load = useCallback(async (refresh: boolean) => {
     try {
@@ -113,10 +115,22 @@ export default function App() {
         <UpdateDialog
           snapshot={update}
           onClose={() => setUpdateDialogOpen(false)}
+          installError={installError}
           onCheck={() => void checkForUpdates().then((snapshot) => {
+            setInstallError(null);
             if (snapshot) setUpdate(snapshot);
           }).catch(() => undefined)}
           onManualDownload={() => void openUpdateManualDownload()}
+          onInstall={() => void installUpdate().then((snapshot) => {
+            setInstallError(null);
+            if (snapshot) setUpdate(snapshot);
+          }).catch((error: { messageId?: string; message_id?: string }) => {
+            const messageId = error?.messageId ?? error?.message_id;
+            setInstallError(messageId === "update.busy"
+              ? updateMessages.installBusy
+              : updateMessages.errors[(messageId?.replace("update.", "") ?? "") as keyof typeof updateMessages.errors]
+                ?? updateMessages.errors.launch_failed);
+          })}
         />
       )}
     </>
@@ -137,11 +151,15 @@ function UpdateDialog({
   onClose,
   onCheck,
   onManualDownload,
+  onInstall,
+  installError,
 }: {
   snapshot: UpdateSnapshot;
   onClose: () => void;
   onCheck: () => void;
   onManualDownload: () => void;
+  onInstall: () => void;
+  installError: string | null;
 }) {
   const checkedAt = snapshot.checkedAtEpochSeconds
     ? new Date(snapshot.checkedAtEpochSeconds * 1000).toLocaleString("zh-CN")
@@ -149,6 +167,9 @@ function UpdateDialog({
   const progress = snapshot.progressPercent === null
     ? snapshot.state === "downloading" ? updateMessages.downloading : null
     : `${snapshot.progressPercent}%`;
+  const releaseNotes = snapshot.notes?.split(/\n\s*\n/)[0]?.trim() || null;
+  const pending = snapshot.state === "pending";
+  const incomplete = snapshot.state === "incomplete";
   return (
     <div className="dialog-backdrop">
       <section className="update-dialog" role="dialog" aria-modal="true" aria-labelledby="update-dialog-title">
@@ -166,12 +187,21 @@ function UpdateDialog({
           <div><dt>{updateMessages.lastCheck}</dt><dd>{checkedAt}</dd></div>
           {snapshot.availableVersion && <div><dt>{updateMessages.targetVersion}</dt><dd>v{snapshot.availableVersion}</dd></div>}
         </dl>
-        {snapshot.state === "pending" && <p className="update-ready-note">{updateMessages.pendingNote}</p>}
+        {pending && <p className="update-ready-note">{updateMessages.pendingNote}</p>}
+        {incomplete && <p className="update-ready-note">{updateMessages.incompleteNote}</p>}
         {snapshot.state === "failed" && <p className="inline-error">{snapshot.errorMessage ?? (snapshot.failureCategory ? updateMessages.errors[snapshot.failureCategory] : updateMessages.errors.check_failed)}</p>}
+        {installError && <p className="inline-error">{installError}</p>}
         {progress && <div className="update-progress" aria-label={updateMessages.progressLabel}><span style={{ width: snapshot.progressPercent === null ? "35%" : `${snapshot.progressPercent}%` }} /><strong>{progress}</strong></div>}
-        {snapshot.notes && <p className="secondary-note">{snapshot.notes}</p>}
+        {releaseNotes && <p className="secondary-note">{releaseNotes}</p>}
+        {pending && snapshot.releaseNotesUrl && (
+          <a className="text-link" href={snapshot.releaseNotesUrl} target="_blank" rel="noreferrer">
+            {updateMessages.releaseNotes}
+          </a>
+        )}
         <div className="dialog-actions">
           <button className="secondary-button" type="button" onClick={onManualDownload}>{updateMessages.manualDownload}</button>
+          {pending && <button className="secondary-button" type="button" onClick={onClose}>{updateMessages.later}</button>}
+          {pending && <button className="command-button" type="button" onClick={onInstall}>{updateMessages.install}</button>}
           <button className="command-button" type="button" onClick={onCheck} disabled={snapshot.state === "checking" || snapshot.state === "downloading"}>
             <RefreshCw size={16} aria-hidden="true" />
             {snapshot.state === "failed" ? updateMessages.retry : updateMessages.check}

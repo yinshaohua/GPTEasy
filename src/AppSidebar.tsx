@@ -85,8 +85,10 @@ function UpdateStatus({ update }: { update: UpdateSidebarState }) {
   const { snapshot } = update;
   const label = snapshot.state === "pending"
     ? updateMessages.status.pending(snapshot.availableVersion)
-    : updateMessages.status[snapshot.state];
-  const Icon = snapshot.state === "pending" ? PackageCheck : RefreshCw;
+    : snapshot.state === "incomplete"
+      ? updateMessages.status.incomplete(snapshot.availableVersion)
+      : updateMessages.status[snapshot.state];
+  const Icon = snapshot.state === "pending" || snapshot.state === "incomplete" ? PackageCheck : RefreshCw;
   return (
     <div className="sidebar-update">
       <button className="sidebar-update-button" type="button" onClick={update.onOpen}>

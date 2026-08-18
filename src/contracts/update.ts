@@ -2,8 +2,17 @@ import { invoke } from "@tauri-apps/api/core";
 
 import { isBrowserPreview } from "./browser-preview";
 
-export type UpdateState = "idle" | "checking" | "downloading" | "up_to_date" | "pending" | "failed";
-export type UpdateFailureCategory = "check_failed" | "manifest_invalid" | "download_failed" | "signature_invalid";
+export type UpdateState = "idle" | "checking" | "downloading" | "up_to_date" | "pending" | "incomplete" | "failed";
+export type UpdateFailureCategory =
+  | "check_failed"
+  | "manifest_invalid"
+  | "download_failed"
+  | "signature_invalid"
+  | "no_pending_update"
+  | "busy"
+  | "unsupported_platform"
+  | "state_unavailable"
+  | "launch_failed";
 
 export interface UpdateSnapshot {
   currentVersion: string;
@@ -18,6 +27,7 @@ export interface UpdateSnapshot {
   failureCategory: UpdateFailureCategory | null;
   errorMessage: string | null;
   manualDownloadUrl: string;
+  releaseNotesUrl: string | null;
 }
 
 export const initialUpdateSnapshot: UpdateSnapshot = {
@@ -33,6 +43,7 @@ export const initialUpdateSnapshot: UpdateSnapshot = {
   failureCategory: null,
   errorMessage: null,
   manualDownloadUrl: "https://github.com/yinshaohua/GPTEasy/releases/latest",
+  releaseNotesUrl: null,
 };
 
 export function getUpdateSnapshot(): Promise<UpdateSnapshot> {
@@ -51,4 +62,15 @@ export function openUpdateManualDownload(): Promise<void> {
   return isBrowserPreview()
     ? Promise.resolve()
     : invoke<void>("open_update_manual_download");
+}
+
+export interface UpdateInstallFailure {
+  category: "no_pending_update" | "busy" | "unsupported_platform" | "state_unavailable" | "launch_failed";
+  messageId: string;
+}
+
+export function installUpdate(): Promise<UpdateSnapshot> {
+  return isBrowserPreview()
+    ? Promise.reject<UpdateSnapshot>({ category: "unsupported_platform", messageId: "update.unsupported_platform" } satisfies UpdateInstallFailure)
+    : invoke<UpdateSnapshot>("install_update");
 }

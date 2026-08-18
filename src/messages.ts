@@ -19,7 +19,12 @@ export const updateMessages = {
   targetVersion: "目标版本",
   neverChecked: "尚未检查",
   pendingNote: "更新已下载并通过签名验证，下一步安装需要用户确认。",
+  incompleteNote: "上次确认的更新尚未完成，当前仍是旧版本。可以重新下载或手工安装。",
   manualDownload: "GitHub 手工下载",
+  releaseNotes: "查看 GitCode 完整发布说明",
+  later: "稍后",
+  install: "重启并更新",
+  installBusy: "当前有操作正在进行，请先完成或取消后再安装更新。",
   check: "检查更新",
   retry: "重试",
   close: "关闭",
@@ -33,13 +38,22 @@ export const updateMessages = {
     downloading: "正在下载更新",
     up_to_date: "已是最新版本",
     pending: (version: string | null) => `待安装 ${version ?? "更新"}`,
+    incomplete: (version: string | null) => `未完成更新 ${version ?? ""}`.trim(),
     failed: "更新检查失败",
-  } satisfies Record<Exclude<UpdateState, "pending">, string> & { pending: (version: string | null) => string },
+  } satisfies Record<Exclude<UpdateState, "pending" | "incomplete">, string> & {
+    pending: (version: string | null) => string;
+    incomplete: (version: string | null) => string;
+  },
   errors: {
     check_failed: "暂时无法检查应用更新，请稍后重试。",
     manifest_invalid: "更新清单无效，已停止本次更新。",
     download_failed: "应用更新下载失败，请重试。",
     signature_invalid: "应用更新未通过签名验证，已拒绝使用。",
+    no_pending_update: "当前没有可安装的更新，请重新检查。",
+    busy: "当前有操作正在进行，请先完成或取消后再安装更新。",
+    unsupported_platform: "当前平台不支持内置安装。",
+    state_unavailable: "无法记录安装尝试，更新尚未启动。",
+    launch_failed: "无法启动安装程序，更新尚未开始。",
   } satisfies Record<UpdateFailureCategory, string>,
 } as const;
 

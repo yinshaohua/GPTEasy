@@ -411,7 +411,7 @@ describe("应用更新", () => {
       currentVersion: "1.0.1",
       state: "pending",
       availableVersion: "1.1.0",
-      notes: "修复稳定性问题",
+      notes: "修复稳定性问题\n\n第二段完整说明不在摘要中显示",
       publishedAt: "2026-08-18T00:00:00Z",
       checkedAtEpochSeconds: 1_787_027_200,
       downloadedBytes: 100,
@@ -420,6 +420,7 @@ describe("应用更新", () => {
       failureCategory: null,
       errorMessage: null,
       manualDownloadUrl: "https://github.com/yinshaohua/GPTEasy/releases/latest",
+      releaseNotesUrl: "https://gitcode.com/ericyin99/GPTEasy-Releases/releases/tag/v1.1.0",
     };
     const failedUpdate = {
       ...readyUpdate,
@@ -447,11 +448,90 @@ describe("应用更新", () => {
     const dialog = screen.getByRole("dialog", { name: "GPTEasy 更新" });
     expect(dialog).toHaveTextContent("更新已下载并通过签名验证");
     expect(dialog).toHaveTextContent("修复稳定性问题");
+    expect(dialog).not.toHaveTextContent("第二段完整说明不在摘要中显示");
+    expect(within(dialog).getByRole("link", { name: "查看 GitCode 完整发布说明" }))
+      .toHaveAttribute("href", readyUpdate.releaseNotesUrl);
+    expect(within(dialog).getByRole("button", { name: "稍后" })).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "重启并更新" })).toBeInTheDocument();
 
     fireEvent.click(within(dialog).getByRole("button", { name: "检查更新" }));
     expect(await screen.findByText("更新签名验证失败")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "更新检查失败" })).toBeInTheDocument();
     expect(within(screen.getByRole("dialog", { name: "GPTEasy 更新" })).getByRole("button", { name: "重试" })).toBeInTheDocument();
+  });
+
+  it("稍后不会启动安装，繁忙拒绝保持待安装状态", async () => {
+    const readyUpdate = {
+      currentVersion: "1.0.1",
+      state: "pending",
+      availableVersion: "1.1.0",
+      notes: "修复稳定性问题",
+      publishedAt: "2026-08-18T00:00:00Z",
+      checkedAtEpochSeconds: 1_787_027_200,
+      downloadedBytes: 100,
+      totalBytes: 100,
+      progressPercent: 100,
+      failureCategory: null,
+      errorMessage: null,
+      manualDownloadUrl: "https://github.com/yinshaohua/GPTEasy/releases/latest",
+      releaseNotesUrl: "https://gitcode.com/ericyin99/GPTEasy-Releases/releases/tag/v1.1.0",
+    };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "get_update_snapshot") return Promise.resolve(readyUpdate);
+      if (command === "install_update") {
+        return Promise.reject({ category: "busy", messageId: "update.busy" });
+      }
+      if (command === "list_providers" || command === "list_wsl_environments") return Promise.resolve([]);
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "待安装 1.1.0" }));
+    fireEvent.click(within(screen.getByRole("dialog", { name: "GPTEasy 更新" }))
+      .getByRole("button", { name: "稍后" }));
+    expect(invoke.mock.calls.some(([command]) => command === "install_update")).toBe(false);
+    expect(screen.queryByRole("dialog", { name: "GPTEasy 更新" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "待安装 1.1.0" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "待安装 1.1.0" }));
+    fireEvent.click(within(screen.getByRole("dialog", { name: "GPTEasy 更新" }))
+      .getByRole("button", { name: "重启并更新" }));
+    expect(await screen.findByText("当前有操作正在进行，请先完成或取消后再安装更新。"))
+      .toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "待安装 1.1.0" })).toBeInTheDocument();
+  });
+
+  it("启动确认未完成更新后提供重新下载和手工入口", async () => {
+    const incompleteUpdate = {
+      currentVersion: "1.0.1",
+      state: "incomplete",
+      availableVersion: "1.1.0",
+      notes: null,
+      publishedAt: null,
+      checkedAtEpochSeconds: 1_787_027_200,
+      downloadedBytes: 0,
+      totalBytes: null,
+      progressPercent: null,
+      failureCategory: null,
+      errorMessage: null,
+      manualDownloadUrl: "https://github.com/yinshaohua/GPTEasy/releases/latest",
+      releaseNotesUrl: null,
+    };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "get_update_snapshot") return Promise.resolve(incompleteUpdate);
+      if (command === "list_providers" || command === "list_wsl_environments") return Promise.resolve([]);
+      return Promise.resolve(incompleteUpdate);
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "未完成更新 1.1.0" }));
+    const dialog = screen.getByRole("dialog", { name: "GPTEasy 更新" });
+    expect(dialog).toHaveTextContent("上次确认的更新尚未完成");
+    expect(within(dialog).getByRole("button", { name: "检查更新" })).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "GitHub 手工下载" })).toBeInTheDocument();
+    expect(within(dialog).queryByRole("button", { name: "重启并更新" })).not.toBeInTheDocument();
   });
 });
 
