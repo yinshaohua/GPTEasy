@@ -183,7 +183,7 @@ select {
   flex: 0 0 var(--update-slot-width);
   width: var(--update-slot-width);
   display: flex;
-  justify-content: flex-end;
+  justify-content: center;
 }
 
 .sidebar-update-indicator {
