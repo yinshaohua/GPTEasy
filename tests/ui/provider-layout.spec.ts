@@ -194,6 +194,14 @@ test("默认窗口横向展示目录行且底部操作可见", async ({ page }, 
   const updateIndicator = page.getByRole("button", { name: "更新" });
   const providerBeforeHover = await providerName.boundingBox();
   const indicatorBeforeHover = await updateIndicator.boundingBox();
+  const updateIconBeforeHover = await updateIndicator.locator("svg").boundingBox();
+  expect(indicatorBeforeHover).not.toBeNull();
+  expect(updateIconBeforeHover).not.toBeNull();
+  expect(indicatorBeforeHover!.width).toBe(32);
+  expect(indicatorBeforeHover!.height).toBe(32);
+  expect(updateIconBeforeHover!.x + updateIconBeforeHover!.width / 2)
+    .toBeCloseTo(indicatorBeforeHover!.x + indicatorBeforeHover!.width / 2, 1);
+  await page.screenshot({ path: testInfo.outputPath("update-ready-collapsed-1120x620.png"), fullPage: true });
   await updateIndicator.hover();
   await expect(updateIndicator.locator(".sidebar-update-label")).toHaveCSS("opacity", "1");
   const providerAfterHover = await providerName.boundingBox();

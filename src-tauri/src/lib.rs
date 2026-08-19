@@ -22,12 +22,12 @@ use commands::{
     discover_provider_models_for_update, enter_session_management, export_linux_script,
     export_session_markdown, get_environment_snapshot, get_startup_snapshot, get_update_snapshot,
     install_update, leave_session_management, list_providers, list_sessions, list_wsl_environments,
-    open_dayway_website, open_update_manual_download, perform_update_check, read_session,
-    refresh_startup_snapshot, refresh_wsl_environment, rename_provider, reorder_providers,
-    restore_last_environment_config, revalidate_provider, reveal_provider_api_key,
-    save_and_apply_provider_update, save_dayway_provider, save_provider_update,
-    save_verified_provider, switch_to_openai_login, unarchive_sessions, validate_provider,
-    validate_provider_update,
+    open_dayway_website, open_update_manual_download, open_update_release_notes,
+    perform_update_check, read_session, refresh_startup_snapshot, refresh_wsl_environment,
+    rename_provider, reorder_providers, restore_last_environment_config, revalidate_provider,
+    reveal_provider_api_key, save_and_apply_provider_update, save_dayway_provider,
+    save_provider_update, save_verified_provider, switch_to_openai_login, unarchive_sessions,
+    validate_provider, validate_provider_update,
 };
 use environment::EnvironmentApplication;
 use provider::{ProviderApplication, ProviderValidator, ValidationTimeouts};
@@ -111,6 +111,7 @@ pub fn run() {
             check_for_updates,
             install_update,
             open_update_manual_download,
+            open_update_release_notes,
             get_environment_snapshot,
             enter_session_management,
             leave_session_management,

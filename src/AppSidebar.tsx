@@ -15,6 +15,7 @@ import type { UpdateSnapshot } from "./contracts/update";
 export interface UpdateSidebarState {
   snapshot: UpdateSnapshot;
   installing: boolean;
+  onInstall: () => void;
   onOpen: () => void;
 }
 
@@ -155,7 +156,7 @@ function SidebarUpdateIndicator({ update }: { update: UpdateSidebarState }) {
         : kind === "incomplete"
           ? "重试更新"
           : "更新失败";
-  const onClick = update.onOpen;
+  const onClick = kind === "pending" ? update.onInstall : update.onOpen;
 
   return (
     <div className={`sidebar-update-slot is-${kind}`} aria-live="polite">

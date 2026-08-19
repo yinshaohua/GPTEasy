@@ -451,12 +451,17 @@ describe("应用更新", () => {
     expect(dialog).toHaveTextContent("更新已下载并通过签名验证");
     expect(dialog).toHaveTextContent("修复稳定性问题");
     expect(dialog).not.toHaveTextContent("第二段完整说明不在摘要中显示");
-    expect(within(dialog).getByRole("link", { name: "查看 GitCode 完整发布说明" }))
-      .toHaveAttribute("href", readyUpdate.releaseNotesUrl);
+    fireEvent.click(within(dialog).getByRole("button", { name: "查看 GitCode 完整发布说明" }));
+    expect(invoke).toHaveBeenCalledWith("open_update_release_notes", {
+      url: readyUpdate.releaseNotesUrl,
+    });
     expect(within(dialog).getByRole("button", { name: "稍后" })).toBeInTheDocument();
-    expect(within(dialog).getByRole("button", { name: "重启并更新" })).toBeInTheDocument();
+    const installButton = within(dialog).getByRole("button", { name: "重启并更新" });
+    const checkButton = within(dialog).getByRole("button", { name: "检查更新" });
+    expect(checkButton.compareDocumentPosition(installButton) & Node.DOCUMENT_POSITION_FOLLOWING)
+      .toBeTruthy();
 
-    fireEvent.click(within(dialog).getByRole("button", { name: "检查更新" }));
+    fireEvent.click(checkButton);
     expect(await screen.findByText("更新签名验证失败")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /更新检查失败/ })).not.toBeInTheDocument();
     expect(within(screen.getByRole("dialog", { name: "GPTEasy 更新" })).getByRole("button", { name: "重试" })).toBeInTheDocument();
@@ -500,9 +505,12 @@ describe("应用更新", () => {
     fireEvent.click(within(openSettingsMenu()).getByRole("menuitem", { name: "检查更新..." }));
     fireEvent.click(within(screen.getByRole("dialog", { name: "GPTEasy 更新" }))
       .getByRole("button", { name: "重启并更新" }));
+    expect(screen.queryByRole("dialog", { name: "GPTEasy 更新" })).not.toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "更新" })).toBeInTheDocument();
+
+    fireEvent.click(within(openSettingsMenu()).getByRole("menuitem", { name: "检查更新..." }));
     expect(await screen.findByText("当前有操作正在进行，请先完成或取消后再安装更新。"))
       .toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "更新" })).toBeInTheDocument();
   });
 
   it("没有可用更新时明确显示已是最新版本", async () => {
@@ -578,7 +586,7 @@ describe("应用更新", () => {
     expect(within(dialog).queryByRole("button", { name: "重启并更新" })).not.toBeInTheDocument();
   });
 
-  it("确认安装后立即锁定所有安装入口", async () => {
+  it("侧栏直接启动安装，且只有侧栏显示转圈状态", async () => {
     const readyUpdate = {
       currentVersion: "1.0.1",
       state: "pending",
@@ -605,17 +613,18 @@ describe("应用更新", () => {
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "更新" }));
 
-    const dialog = screen.getByRole("dialog", { name: "GPTEasy 更新" });
-    fireEvent.click(within(dialog).getByRole("button", { name: "重启并更新" }));
-
     const installing = within(screen.getByRole("complementary", { name: "应用导航" }))
       .getByRole("button", { name: "正在启动更新" });
     expect(installing).toBeDisabled();
+    expect(installing.querySelector(".is-spinning")).toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "GPTEasy 更新" })).not.toBeInTheDocument();
     expect(invoke.mock.calls.filter(([command]) => command === "install_update")).toHaveLength(1);
 
     fireEvent.click(screen.getByRole("button", { name: "设置" }));
     fireEvent.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: "检查更新..." }));
-    expect(within(screen.getByRole("dialog", { name: "GPTEasy 更新" })).getByRole("button", { name: "正在启动更新" })).toBeDisabled();
+    const dialog = screen.getByRole("dialog", { name: "GPTEasy 更新" });
+    expect(within(dialog).getByRole("button", { name: "重启并更新" })).toBeDisabled();
+    expect(dialog.querySelector(".is-spinning")).not.toBeInTheDocument();
   });
 });
 

@@ -64,6 +64,12 @@ export function openUpdateManualDownload(): Promise<void> {
     : invoke<void>("open_update_manual_download");
 }
 
+export function openUpdateReleaseNotes(url: string): Promise<void> {
+  return isBrowserPreview()
+    ? Promise.resolve()
+    : invoke<void>("open_update_release_notes", { url });
+}
+
 export interface UpdateInstallFailure {
   category: "no_pending_update" | "busy" | "unsupported_platform" | "state_unavailable" | "launch_failed";
   messageId: string;

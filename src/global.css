@@ -188,14 +188,14 @@ select {
 
 .sidebar-update-indicator {
   flex: 0 0 auto;
-  width: 36px;
+  width: 32px;
   height: 32px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 5px;
+  gap: 0;
   overflow: hidden;
-  padding: 0 8px;
+  padding: 0;
   color: #ffffff;
   background: #5b99f1;
   border: 1px solid #5b99f1;
@@ -210,6 +210,10 @@ select {
 
 .sidebar-update-indicator svg {
   flex: 0 0 auto;
+}
+
+.sidebar-update-indicator.is-pending svg {
+  transform: translateY(-1px);
 }
 
 .sidebar-update-indicator:hover,
@@ -240,7 +244,7 @@ select {
 }
 
 .sidebar-update-indicator.is-downloading.is-indeterminate {
-  width: 36px;
+  width: 32px;
 }
 
 .sidebar-update-indicator.is-incomplete {
@@ -274,14 +278,16 @@ select {
 
 .sidebar-update-label {
   max-width: 0;
+  margin-left: 0;
   overflow: hidden;
   opacity: 0;
-  transition: max-width 160ms ease, opacity 120ms ease;
+  transition: max-width 160ms ease, margin-left 160ms ease, opacity 120ms ease;
 }
 
 .sidebar-update-indicator:hover .sidebar-update-label,
 .sidebar-update-indicator:focus-visible .sidebar-update-label {
   max-width: 64px;
+  margin-left: 5px;
   opacity: 1;
 }
 
@@ -1846,11 +1852,28 @@ select:focus-visible {
   font-size: 13px;
 }
 
-.update-dialog .dialog-actions {
+.update-release-link {
+  padding: 0;
+  background: transparent;
+  border: 0;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.update-dialog-actions {
+  display: grid;
+  gap: 8px;
+}
+
+.update-check-button {
+  justify-self: end;
+}
+
+.update-dialog-actions .dialog-actions {
   flex-wrap: wrap;
 }
 
-.update-dialog .dialog-actions > button {
+.update-dialog-actions .dialog-actions > button {
   white-space: nowrap;
 }
 

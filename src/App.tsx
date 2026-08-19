@@ -25,6 +25,7 @@ import {
   getUpdateSnapshot,
   installUpdate,
   openUpdateManualDownload,
+  openUpdateReleaseNotes,
   initialUpdateSnapshot,
   type UpdateSnapshot,
 } from "./contracts/update";
@@ -50,6 +51,7 @@ export default function App() {
   const handleInstall = useCallback(() => {
     if (installInFlight.current) return;
     installInFlight.current = true;
+    setUpdateDialogOpen(false);
     setInstallingUpdate(true);
     setInstallError(null);
     void installUpdate().then((snapshot) => {
@@ -97,6 +99,7 @@ export default function App() {
   const updateSidebar: UpdateSidebarState = {
     snapshot: update,
     installing: installingUpdate,
+    onInstall: handleInstall,
     onOpen: () => setUpdateDialogOpen(true),
   };
 
@@ -147,6 +150,7 @@ export default function App() {
             if (snapshot) setUpdate(snapshot);
           }).catch(() => undefined)}
           onManualDownload={() => void openUpdateManualDownload()}
+          onOpenReleaseNotes={(url) => void openUpdateReleaseNotes(url)}
           onInstall={handleInstall}
         />
       )}
@@ -168,6 +172,7 @@ function UpdateDialog({
   onClose,
   onCheck,
   onManualDownload,
+  onOpenReleaseNotes,
   onInstall,
   installError,
   installing,
@@ -176,6 +181,7 @@ function UpdateDialog({
   onClose: () => void;
   onCheck: () => void;
   onManualDownload: () => void;
+  onOpenReleaseNotes: (url: string) => void;
   onInstall: () => void;
   installError: string | null;
   installing: boolean;
@@ -219,23 +225,24 @@ function UpdateDialog({
         {progress && <div className="update-progress" aria-label={updateMessages.progressLabel}><span style={{ width: snapshot.progressPercent === null ? "35%" : `${snapshot.progressPercent}%` }} /><strong>{progress}</strong></div>}
         {releaseNotes && <p className="secondary-note">{releaseNotes}</p>}
         {pending && snapshot.releaseNotesUrl && (
-          <a className="text-link" href={snapshot.releaseNotesUrl} target="_blank" rel="noreferrer">
+          <button className="text-link update-release-link" type="button" onClick={() => onOpenReleaseNotes(snapshot.releaseNotesUrl!)}>
             {updateMessages.releaseNotes}
-          </a>
+          </button>
         )}
-        <div className="dialog-actions">
-          <button className="secondary-button" type="button" onClick={onManualDownload} disabled={installing}>{updateMessages.manualDownload}</button>
-          {pending && <button className="secondary-button" type="button" onClick={onClose} disabled={installing}>{updateMessages.later}</button>}
-          {pending && (
-            <button className="command-button" type="button" onClick={onInstall} disabled={installing}>
-              {installing && <LoaderCircle className="is-spinning" size={16} aria-hidden="true" />}
-              {installing ? updateMessages.installing : updateMessages.install}
-            </button>
-          )}
-          <button className="command-button" type="button" onClick={onCheck} disabled={installing || snapshot.state === "checking" || snapshot.state === "downloading"}>
+        <div className="update-dialog-actions">
+          <button className="secondary-button update-check-button" type="button" onClick={onCheck} disabled={installing || snapshot.state === "checking" || snapshot.state === "downloading"}>
             <RefreshCw size={16} aria-hidden="true" />
             {snapshot.state === "incomplete" ? updateMessages.redownload : snapshot.state === "failed" ? updateMessages.retry : updateMessages.check}
           </button>
+          <div className="dialog-actions">
+            <button className="secondary-button" type="button" onClick={onManualDownload} disabled={installing}>{updateMessages.manualDownload}</button>
+            {pending && <button className="secondary-button" type="button" onClick={onClose} disabled={installing}>{updateMessages.later}</button>}
+            {pending && (
+              <button className="command-button" type="button" onClick={onInstall} disabled={installing}>
+                {updateMessages.install}
+              </button>
+            )}
+          </div>
         </div>
       </section>
     </div>

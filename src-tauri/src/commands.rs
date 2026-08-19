@@ -250,19 +250,62 @@ pub(crate) async fn check_for_updates(app: AppHandle) -> UpdateSnapshot {
 
 #[tauri::command]
 pub(crate) fn open_update_manual_download() -> Result<(), CommandFailure> {
-    use std::process::Command;
+    open_external_url(crate::update::MANUAL_DOWNLOAD_URL)
+}
+
+#[tauri::command]
+pub(crate) fn open_update_release_notes(url: String) -> Result<(), CommandFailure> {
+    if !is_valid_update_release_notes_url(&url) {
+        return Err(CommandFailure {
+            message_id: "update.release_notes_invalid",
+        });
+    }
+    open_external_url(&url)
+}
+
+fn is_valid_update_release_notes_url(url: &str) -> bool {
+    let prefix = format!("{}/v", crate::update::GITCODE_RELEASES_URL);
+    let Some(version) = url.strip_prefix(&prefix) else {
+        return false;
+    };
+    let parts = version.split('.').collect::<Vec<_>>();
+    parts.len() == 3
+        && parts
+            .iter()
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+#[cfg(test)]
+mod update_release_notes_tests {
+    use super::is_valid_update_release_notes_url;
+
+    #[test]
+    fn accepts_the_expected_gitcode_release_url() {
+        assert!(is_valid_update_release_notes_url(
+            "https://gitcode.com/ericyin99/GPTEasy-Releases/releases/tag/v1.1.4"
+        ));
+    }
+
+    #[test]
+    fn rejects_untrusted_or_malformed_release_urls() {
+        for url in [
+            "https://example.com/releases/tag/v1.1.4",
+            "https://gitcode.com/ericyin99/GPTEasy-Releases/releases/tag/v1.1",
+            "https://gitcode.com/ericyin99/GPTEasy-Releases/releases/tag/v1.1.4/notes",
+            "https://gitcode.com/ericyin99/GPTEasy-Releases/releases/tag/v1.1.4?next=evil",
+        ] {
+            assert!(!is_valid_update_release_notes_url(url), "accepted {url}");
+        }
+    }
+}
+
+fn open_external_url(url: &str) -> Result<(), CommandFailure> {
     #[cfg(target_os = "windows")]
-    let result = Command::new("explorer.exe")
-        .arg(crate::update::MANUAL_DOWNLOAD_URL)
-        .spawn();
+    let result = Command::new("explorer.exe").arg(url).spawn();
     #[cfg(target_os = "macos")]
-    let result = Command::new("open")
-        .arg(crate::update::MANUAL_DOWNLOAD_URL)
-        .spawn();
+    let result = Command::new("open").arg(url).spawn();
     #[cfg(all(unix, not(target_os = "macos")))]
-    let result = Command::new("xdg-open")
-        .arg(crate::update::MANUAL_DOWNLOAD_URL)
-        .spawn();
+    let result = Command::new("xdg-open").arg(url).spawn();
     result.map(|_| ()).map_err(|_| CommandFailure {
         message_id: "update.manual_download_failed",
     })

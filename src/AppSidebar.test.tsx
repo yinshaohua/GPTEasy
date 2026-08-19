@@ -11,6 +11,7 @@ function updateState(
   return {
     snapshot: { ...initialUpdateSnapshot, availableVersion: "1.1.0", ...snapshot },
     installing: false,
+    onInstall: vi.fn(),
     onOpen: vi.fn(),
     ...overrides,
   };
@@ -39,7 +40,7 @@ describe("侧栏应用更新入口", () => {
     expect(indicator).toHaveTextContent("下载中");
   });
 
-  it("待安装更新点击后打开确认详情而不直接安装", () => {
+  it("待安装更新点击后直接启动安装", () => {
     const update = updateState({ state: "pending", progressPercent: 100 });
     render(<AppSidebar update={update} />);
 
@@ -48,7 +49,8 @@ describe("侧栏应用更新入口", () => {
     expect(indicator).toHaveTextContent("更新");
     fireEvent.click(indicator);
 
-    expect(update.onOpen).toHaveBeenCalledOnce();
+    expect(update.onInstall).toHaveBeenCalledOnce();
+    expect(update.onOpen).not.toHaveBeenCalled();
   });
 
   it("未完成更新和已发现版本的失败状态只打开详情", () => {
