@@ -190,6 +190,57 @@ fn missing_codex_artifacts_are_previewed_without_being_created() {
 }
 
 #[test]
+fn confirmed_first_provider_application_initializes_a_never_started_codex_home() {
+    let (temp, _, application) = fixture();
+    let codex_home = temp.path().join(".codex");
+
+    let applied = application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("confirmed application initializes missing Codex artifacts");
+
+    assert_eq!(applied.state, EnvironmentState::Managed);
+    assert_eq!(applied.mode, Some(AuthenticationMode::Provider));
+    assert!(codex_home.join("config.toml").is_file());
+    assert!(codex_home.join("auth.json").is_file());
+    let config =
+        fs::read_to_string(codex_home.join("config.toml")).expect("read initialized config");
+    assert!(config.contains("model_provider = \"9f319739-f219-48ee-be35-22e08d5402d7\""));
+    assert!(config.contains("requires_openai_auth = true"));
+    let credentials: Value = serde_json::from_slice(
+        &fs::read(codex_home.join("auth.json")).expect("read initialized credentials"),
+    )
+    .expect("parse initialized credentials");
+    assert_eq!(credentials["auth_mode"], "apikey");
+    assert_eq!(credentials["OPENAI_API_KEY"], API_KEY);
+}
+
+#[test]
+fn missing_codex_artifacts_can_be_recreated_by_standard_provider_application() {
+    let (temp, _, application) = fixture();
+    let codex_home = temp.path().join(".codex");
+    application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("establish provider mode");
+    fs::remove_file(codex_home.join("config.toml")).expect("remove config fixture");
+    fs::remove_file(codex_home.join("auth.json")).expect("remove credentials fixture");
+
+    let missing = application
+        .inspect()
+        .expect("inspect missing Codex artifacts");
+    assert_eq!(missing.state, EnvironmentState::Conflict);
+    assert!(missing.takeover_available);
+
+    let reapplied = application
+        .apply_provider_at_revision(PROVIDER_ID, true, &missing.revision)
+        .expect("standard provider application recreates missing artifacts");
+
+    assert_eq!(reapplied.state, EnvironmentState::Managed);
+    assert_eq!(reapplied.mode, Some(AuthenticationMode::Provider));
+    assert!(codex_home.join("config.toml").is_file());
+    assert!(codex_home.join("auth.json").is_file());
+}
+
+#[test]
 fn changes_after_preview_abort_before_backup_or_write() {
     let (temp, _, application) = fixture();
     let codex_home = temp.path().join(".codex");

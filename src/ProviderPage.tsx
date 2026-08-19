@@ -23,7 +23,7 @@ import ProviderValidationDialog, {
   type ProviderValidationSession,
   type ProviderValidationSource,
 } from "./ProviderValidationDialog";
-import AppSidebar, { type OpenAiSidebarAction, type UpdateSidebarState } from "./AppSidebar";
+import type { OpenAiSidebarAction } from "./AppSidebar";
 
 import {
   asProviderFailure,
@@ -137,13 +137,10 @@ function canApplyWslProvider(environment: WslEnvironmentSummary): boolean {
 export default function ProviderPage({
   onOpenAiActionChange,
   onCurrentProviderNameChange,
-  onOpenSessions,
-  update,
 }: {
   onOpenAiActionChange?: (action: OpenAiSidebarAction) => void;
   onCurrentProviderNameChange?: (name: string | null) => void;
   onOpenSessions?: () => void;
-  update?: UpdateSidebarState;
 }) {
   const [providers, setProviders] = useState<ProviderSummary[]>([]);
   const [listState, setListState] = useState<"loading" | "ready" | "error">("loading");
@@ -238,6 +235,20 @@ export default function ProviderPage({
       if (receiptRef.current) void discardProviderValidation(receiptRef.current);
     };
   }, []);
+
+  useEffect(() => {
+    if (!environment || listState !== "ready") return;
+    const currentProviderId = environment.currentProvider?.id ?? null;
+    setProviders((current) => {
+      if (current.every((provider) => provider.isCurrent === (provider.id === currentProviderId))) {
+        return current;
+      }
+      return current.map((provider) => ({
+        ...provider,
+        isCurrent: provider.id === currentProviderId,
+      }));
+    });
+  }, [environment, listState]);
 
   useEffect(() => {
     let disposed = false;
@@ -677,11 +688,6 @@ export default function ProviderPage({
     setConfigChangeRequest({ kind: "provider", provider });
   }
 
-  async function enableOpenAiLogin() {
-    if (!environment || environment.loginStatus !== "logged_in" || environment.mode === "openai_login") return;
-    setConfigChangeRequest({ kind: "openai" });
-  }
-
   async function openWslDialog() {
     setWslDialogOpen(true);
     setWslFailure(null);
@@ -1003,15 +1009,7 @@ export default function ProviderPage({
   }, [environment, onCurrentProviderNameChange, openAiCurrent]);
 
   return (
-    <div className="app-shell">
-      <AppSidebar onOpenSessions={onOpenSessions} update={update} currentProviderName={openAiCurrent ? "OpenAI 登录模式" : environment?.currentProvider?.name} openAiAction={{
-        busy: switchingMode,
-        current: openAiCurrent,
-        description: openAiReason,
-        disabled: openAiDisabled,
-        onSelect: () => void enableOpenAiLogin(),
-      }} />
-      <main className="main-content">
+    <main className="main-content">
       <header className="page-header">
         <h1>{providerMessages.pageTitle}</h1>
         {view === "catalog" && (
@@ -1459,8 +1457,7 @@ export default function ProviderPage({
           onClose={closeLinuxExport}
         />
       )}
-      </main>
-    </div>
+    </main>
   );
 }
 

@@ -138,7 +138,7 @@ describe("供应商创建", () => {
     const saveCall = invoke.mock.calls.find(([command]) => command === "save_verified_provider");
     expect(saveCall?.[1]).toEqual({ validationId: "validation-1", name: "  Example Provider  " });
     expect(JSON.stringify(saveCall?.[1])).not.toContain("secret-provider-key");
-    const applyDialog = screen.getByRole("dialog", { name: "应用第一个供应商？" });
+    const applyDialog = screen.getByRole("dialog", { name: "应用供应商？" });
     expect(applyDialog).toHaveTextContent("是否把“Example Provider”应用到当前 Codex 中？");
     expect(invoke.mock.calls.some(([command]) => command === "apply_environment_provider")).toBe(false);
 
@@ -2490,6 +2490,47 @@ describe("启动状态", () => {
     expect(screen.queryByRole("heading", { name: "外部配置" })).not.toBeInTheDocument();
     expect(invoke).toHaveBeenCalledWith("get_startup_snapshot");
     expect(invoke.mock.calls.some(([command]) => command.startsWith("apply_"))).toBe(false);
+  });
+
+  it("Codex 配置缺失时历史供应商恢复为可应用状态", async () => {
+    const provider = {
+      id: "saved-provider",
+      name: "Saved Provider",
+      baseUrl: "https://saved.example/v1",
+      defaultModel: "saved-model",
+      verifiedAtEpochSeconds: 1_786_140_000,
+      isCurrent: true,
+      recommendationId: null,
+      hasRecommendationUpdate: false,
+    };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([provider]);
+      if (command === "get_environment_snapshot") {
+        return Promise.resolve({
+          state: "conflict",
+          mode: null,
+          messageId: "environment.managed_conflict",
+          revision: "missing-codex-revision",
+          requiresTakeoverConfirmation: true,
+          takeoverAvailable: true,
+          impacts: [],
+          currentProvider: null,
+          restoreAvailability: "artifacts_changed",
+          restorePreview: null,
+          loginStatus: "unavailable",
+          pendingRestart: false,
+          requiresConsumerConfirmation: false,
+          consumers: { desktop: "stopped", cli: "stopped" },
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+
+    const apply = await screen.findByRole("button", { name: "应用 Saved Provider" });
+    expect(apply).toBeEnabled();
   });
 
   it("数据库来自更高版本时只显示阻断状态", async () => {

@@ -8,7 +8,7 @@ import {
   Settings,
   TriangleAlert,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { UpdateSnapshot } from "./contracts/update";
 
@@ -45,28 +45,26 @@ export default function AppSidebar({
   return (
     <aside className="sidebar" aria-label="应用导航">
       <Brand />
-      {(openAiAction || onOpenProviders || onOpenSessions) && (
-        <nav className="sidebar-nav" aria-label="主要菜单">
-          <button
-            className="nav-item"
-            type="button"
-            aria-current={activeView === "providers" ? "page" : undefined}
-            onClick={onOpenProviders}
-          >
-            <Server size={18} aria-hidden="true" />
-            供应商管理
-          </button>
-          <button
-            className="nav-item"
-            type="button"
-            aria-current={activeView === "sessions" ? "page" : undefined}
-            onClick={onOpenSessions}
-          >
-            <MessageSquare size={18} aria-hidden="true" />
-            <span>会话管理</span>
-          </button>
-        </nav>
-      )}
+      <nav className="sidebar-nav" aria-label="主要菜单">
+        <button
+          className="nav-item"
+          type="button"
+          aria-current={activeView === "providers" ? "page" : undefined}
+          onClick={onOpenProviders}
+        >
+          <Server size={18} aria-hidden="true" />
+          供应商管理
+        </button>
+        <button
+          className="nav-item"
+          type="button"
+          aria-current={activeView === "sessions" ? "page" : undefined}
+          onClick={onOpenSessions}
+        >
+          <MessageSquare size={18} aria-hidden="true" />
+          <span>会话管理</span>
+        </button>
+      </nav>
       <SidebarFooter currentProviderName={currentProviderName} openAiAction={openAiAction} update={update} />
     </aside>
   );
@@ -82,12 +80,27 @@ function SidebarFooter({
   update?: UpdateSidebarState;
 }) {
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const settingsWrapRef = useRef<HTMLDivElement>(null);
   const providerLabel = currentProviderName || (openAiAction?.current ? "OpenAI 登录模式" : "未选择供应商");
+
+  useEffect(() => {
+    if (!settingsOpen) return;
+
+    const handleDocumentClick = (event: MouseEvent) => {
+      const target = event.target;
+      if (target instanceof Node && !settingsWrapRef.current?.contains(target)) {
+        setSettingsOpen(false);
+      }
+    };
+
+    document.addEventListener("click", handleDocumentClick);
+    return () => document.removeEventListener("click", handleDocumentClick);
+  }, [settingsOpen]);
 
   return (
     <div className="sidebar-footer">
       <div className="sidebar-footer-row">
-        <div className="sidebar-settings-wrap">
+        <div className="sidebar-settings-wrap" ref={settingsWrapRef}>
           <button
             className="sidebar-settings-button"
             type="button"
@@ -96,6 +109,7 @@ function SidebarFooter({
             onClick={() => setSettingsOpen((value) => !value)}
           >
             <Settings size={17} aria-hidden="true" />
+            <span className="sidebar-settings-label">设置</span>
           </button>
           {settingsOpen && (
             <div className="sidebar-settings-menu" role="menu">
@@ -133,7 +147,7 @@ type UpdateIndicatorKind = "checking" | "downloading" | "pending" | "installing"
 
 function SidebarUpdateIndicator({ update }: { update: UpdateSidebarState }) {
   const { snapshot } = update;
-  if (!snapshot.availableVersion && snapshot.state !== "checking" && snapshot.state !== "failed") return null;
+  if (snapshot.state === "idle" || snapshot.state === "up_to_date") return null;
 
   let kind: UpdateIndicatorKind | null = null;
   if (update.installing) kind = "installing";

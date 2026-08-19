@@ -105,7 +105,17 @@ export default function App() {
 
   if (state.kind !== "loaded" || state.snapshot.mode === "blocked") {
     return (
-      <Shell update={updateSidebar}>
+      <Shell
+        page={page}
+        onOpenProviders={() => setPage("providers")}
+        onOpenSessions={() => {
+          setSessionVisited(true);
+          setPage("sessions");
+        }}
+        openAiAction={openAiAction}
+        currentProviderName={currentProviderName}
+        update={updateSidebar}
+      >
         {state.kind === "loading" && <LoadingState />}
         {state.kind === "error" && <UnavailableState onRetry={() => void load(true)} />}
         {state.kind === "loaded" && (
@@ -116,26 +126,28 @@ export default function App() {
   }
 
   return (
-    <>
+    <div className="app-shell">
+      <AppSidebar
+        activeView={page}
+        onOpenProviders={() => setPage("providers")}
+        onOpenSessions={() => {
+          setSessionVisited(true);
+          setPage("sessions");
+        }}
+        openAiAction={openAiAction}
+        currentProviderName={currentProviderName}
+        update={updateSidebar}
+      />
       <div className="app-view" hidden={page !== "providers"}>
         <ProviderPage
           onOpenAiActionChange={setOpenAiAction}
           onCurrentProviderNameChange={setCurrentProviderName}
-          update={updateSidebar}
-          onOpenSessions={() => {
-            setSessionVisited(true);
-            setPage("sessions");
-          }}
         />
       </div>
       {sessionVisited && (
         <div className="app-view" hidden={page !== "sessions"}>
           <SessionPage
             active={page === "sessions"}
-            onOpenProviders={() => setPage("providers")}
-            openAiAction={openAiAction}
-            currentProviderName={currentProviderName}
-            update={updateSidebar}
           />
         </div>
       )}
@@ -154,14 +166,37 @@ export default function App() {
           onInstall={handleInstall}
         />
       )}
-    </>
+    </div>
   );
 }
 
-function Shell({ children, update }: { children: React.ReactNode; update?: UpdateSidebarState }) {
+function Shell({
+  children,
+  page,
+  onOpenProviders,
+  onOpenSessions,
+  openAiAction,
+  currentProviderName,
+  update,
+}: {
+  children: React.ReactNode;
+  page: "providers" | "sessions";
+  onOpenProviders: () => void;
+  onOpenSessions: () => void;
+  openAiAction?: OpenAiSidebarAction;
+  currentProviderName?: string | null;
+  update?: UpdateSidebarState;
+}) {
   return (
     <div className="app-shell">
-      <AppSidebar update={update} />
+      <AppSidebar
+        activeView={page}
+        onOpenProviders={onOpenProviders}
+        onOpenSessions={onOpenSessions}
+        openAiAction={openAiAction}
+        currentProviderName={currentProviderName}
+        update={update}
+      />
       <main className="main-content">{children}</main>
     </div>
   );

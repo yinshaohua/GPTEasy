@@ -52,6 +52,10 @@ select {
 
 .sidebar {
   min-width: 0;
+  position: sticky;
+  top: 0;
+  align-self: start;
+  height: 100vh;
   display: flex;
   flex-direction: column;
   padding: 22px 14px 16px;
@@ -134,6 +138,7 @@ select {
   position: relative;
   margin-top: auto;
   padding-top: 18px;
+  border-top: 1px solid var(--border);
 }
 
 .sidebar-footer-row {
@@ -171,6 +176,10 @@ select {
   cursor: pointer;
 }
 
+.sidebar-settings-label {
+  line-height: 1;
+}
+
 .sidebar-settings-button:hover,
 .sidebar-settings-button[aria-expanded="true"] {
   color: var(--text);
@@ -179,7 +188,7 @@ select {
 }
 
 .sidebar-update-slot {
-  --update-slot-width: 94px;
+  --update-slot-width: 72px;
   flex: 0 0 var(--update-slot-width);
   width: var(--update-slot-width);
   display: flex;
@@ -263,6 +272,21 @@ select {
   color: var(--danger);
   background: var(--danger-soft);
   border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+}
+
+.sidebar-update-indicator.is-idle {
+  color: var(--text-muted);
+  background: transparent;
+  border-color: transparent;
+  border-radius: 6px;
+}
+
+.sidebar-update-indicator.is-idle:hover,
+.sidebar-update-indicator.is-idle:focus-visible {
+  color: var(--text);
+  background: var(--surface);
+  border-color: var(--border);
+  width: 100%;
 }
 
 .sidebar-update-indicator.is-failed:hover,
@@ -2262,6 +2286,8 @@ select:focus-visible {
   }
 
   .sidebar {
+    position: static;
+    height: auto;
     display: flex;
     flex-direction: row;
     flex-wrap: wrap;

@@ -336,6 +336,66 @@ fn managed_config_fingerprint_conflict_blocks_startup_coordination() {
 }
 
 #[test]
+fn missing_codex_environment_with_saved_provider_evidence_opens_settings_for_reapply() {
+    let app_data = TempDir::new().expect("app data");
+    let codex_home = TempDir::new().expect("codex home");
+    let store = StateStore::new(StatePaths::from_root(app_data.path()));
+    assert!(store.bootstrap().is_ready());
+    let connection = rusqlite::Connection::open(store.paths().database()).expect("open state");
+    connection
+        .execute(
+            "INSERT INTO providers (id, name, base_url, api_key, default_model, verified_at, verification_fingerprint) \
+             VALUES ('provider-1', 'Provider', 'https://provider.example/v1', 'test-key', 'model', '2026-08-07T00:00:00Z', 'verification')",
+            [],
+        )
+        .expect("insert provider evidence");
+    connection
+        .execute(
+            "INSERT INTO last_applied_state (singleton, mode, provider_id, config_fingerprint, credentials_fingerprint, applied_at) \
+             VALUES (1, 'provider', 'provider-1', 'previous-config', 'previous-credentials', '2026-08-07T00:00:00Z')",
+            [],
+        )
+        .expect("insert last applied evidence");
+
+    let coordinator = StartupCoordinator::new(
+        store,
+        CodexInspector::new(codex_home.path(), login_command(7)),
+    );
+    let snapshot = coordinator.inspect();
+
+    assert_eq!(snapshot.codex.config_status, CodexConfigStatus::Missing);
+    assert_eq!(snapshot.mode, ApplicationMode::Ready);
+    assert_eq!(snapshot.block_reason, None);
+}
+
+#[test]
+fn openai_login_mode_without_config_evidence_does_not_block_startup() {
+    let app_data = TempDir::new().expect("app data");
+    let codex_home = TempDir::new().expect("codex home");
+    fs::write(codex_home.path().join("config.toml"), "model = 'gpt-5'\n")
+        .expect("write valid config");
+    let store = StateStore::new(StatePaths::from_root(app_data.path()));
+    assert!(store.bootstrap().is_ready());
+    let connection = rusqlite::Connection::open(store.paths().database()).expect("open state");
+    connection
+        .execute(
+            "INSERT INTO last_applied_state (singleton, mode, provider_id, config_fingerprint, applied_at) \
+             VALUES (1, 'openai_login', NULL, NULL, '2026-08-07T00:00:00Z')",
+            [],
+        )
+        .expect("insert login mode evidence");
+
+    let coordinator = StartupCoordinator::new(
+        store,
+        CodexInspector::new(codex_home.path(), login_command(7)),
+    );
+    let snapshot = coordinator.inspect();
+
+    assert_eq!(snapshot.mode, ApplicationMode::Ready);
+    assert_eq!(snapshot.block_reason, None);
+}
+
+#[test]
 fn external_openai_logout_stays_in_login_mode_with_a_warning() {
     let app_data = TempDir::new().expect("app data");
     let codex_home = TempDir::new().expect("codex home");

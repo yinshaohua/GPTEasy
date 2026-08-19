@@ -126,14 +126,17 @@ fn startup_block_reason(
     if contents.has_pending_config_operation {
         return Some(StartupBlockReason::PendingConfigOperation);
     }
+    if codex.config_status == CodexConfigStatus::Missing {
+        return None;
+    }
     if codex.recovered_desktop_rewrite
         && (contents.last_applied_mode != Some(AppliedMode::Provider)
             || contents.last_applied_config_fingerprint.as_ref() != Some(&codex.config_fingerprint))
     {
         return Some(StartupBlockReason::ManagedConfigConflict);
     }
-    if let Some(expected) = &contents.last_applied_config_fingerprint {
-        if expected.as_ref() != codex.config_fingerprint.as_ref() {
+    if let Some(Some(expected)) = &contents.last_applied_config_fingerprint {
+        if codex.config_fingerprint.as_ref() != Some(expected) {
             return Some(StartupBlockReason::ManagedConfigConflict);
         }
     }

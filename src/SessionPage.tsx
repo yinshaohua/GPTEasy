@@ -12,7 +12,7 @@ import {
   Trash2,
 } from "lucide-react";
 
-import AppSidebar, { type OpenAiSidebarAction, type UpdateSidebarState } from "./AppSidebar";
+import type { OpenAiSidebarAction } from "./AppSidebar";
 import {
   archiveSessions,
   asSessionFailure,
@@ -57,16 +57,11 @@ interface MutationOutcome {
 
 export default function SessionPage({
   active = true,
-  onOpenProviders,
-  openAiAction,
-  currentProviderName,
-  update,
 }: {
   active?: boolean;
-  onOpenProviders: () => void;
+  onOpenProviders?: () => void;
   openAiAction?: OpenAiSidebarAction;
   currentProviderName?: string | null;
-  update?: UpdateSidebarState;
 }) {
   const leaseId = useRef(`session-page-${createLeaseId()}`);
   const requestGeneration = useRef(0);
@@ -81,10 +76,8 @@ export default function SessionPage({
   const [tab, setTab] = useState<SessionTab>("active");
   const [searchTerm, setSearchTerm] = useState("");
   const [project, setProject] = useState("");
-  const [modelProvider, setModelProvider] = useState("");
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [knownProjects, setKnownProjects] = useState<string[]>([]);
-  const [knownProviders, setKnownProviders] = useState<string[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [listState, setListState] = useState<ListState>("initial_loading");
   const [listFailure, setListFailure] = useState<SessionFailure | null>(null);
@@ -171,9 +164,9 @@ export default function SessionPage({
     archived: tab === "archived",
     searchTerm: searchTerm.trim() || null,
     project: project || null,
-    modelProvider: modelProvider || null,
+    modelProvider: null,
     limit: 40,
-  }), [modelProvider, project, searchTerm, tab]);
+  }), [project, searchTerm, tab]);
   const listQueryKey = JSON.stringify(baseQuery);
 
   function refreshList() {
@@ -218,7 +211,7 @@ export default function SessionPage({
         const nextSessions = uniqueSessions(page.sessions);
         listCache.current.set(listQueryKey, { sessions: nextSessions, nextCursor: page.nextCursor });
         setSessions(nextSessions);
-        rememberFacets(page.sessions, setKnownProjects, setKnownProviders);
+        rememberProjects(page.sessions, setKnownProjects);
         setNextCursor(page.nextCursor);
         setListState("ready");
       })
@@ -246,7 +239,7 @@ export default function SessionPage({
         listCache.current.set(listQueryKey, { sessions: nextSessions, nextCursor: page.nextCursor });
         return nextSessions;
       });
-      rememberFacets(page.sessions, setKnownProjects, setKnownProviders);
+      rememberProjects(page.sessions, setKnownProjects);
       setNextCursor(page.nextCursor);
       setListState("ready");
     } catch (error) {
@@ -452,7 +445,7 @@ export default function SessionPage({
 
   if (!availability) {
     return (
-      <SessionShell onOpenProviders={onOpenProviders} openAiAction={openAiAction} currentProviderName={currentProviderName} update={update}>
+      <SessionShell>
         <div className="loading-state" role="status">
           <LoaderCircle className="is-spinning" size={22} aria-hidden="true" />
           <span>{sessionMessages.loading}</span>
@@ -463,7 +456,7 @@ export default function SessionPage({
 
   if (availability.status !== "available") {
     return (
-      <SessionShell onOpenProviders={onOpenProviders} openAiAction={openAiAction} currentProviderName={currentProviderName} update={update}>
+      <SessionShell>
         <UnavailableState availability={availability} onRetry={() => void checkAvailability()} />
       </SessionShell>
     );
@@ -476,7 +469,7 @@ export default function SessionPage({
   ) {
     const status = listFailure.category === "incompatible" ? "incompatible" : "recovery_failed";
     return (
-      <SessionShell onOpenProviders={onOpenProviders} openAiAction={openAiAction} currentProviderName={currentProviderName} update={update}>
+      <SessionShell>
         <UnavailableState
           availability={{
             status,
@@ -491,7 +484,7 @@ export default function SessionPage({
   }
 
   return (
-    <SessionShell onOpenProviders={onOpenProviders} openAiAction={openAiAction} currentProviderName={currentProviderName} update={update}>
+    <SessionShell>
       {detailState.kind === "list" ? (
         <SessionList
           tab={tab}
@@ -500,14 +493,11 @@ export default function SessionPage({
           setSearchTerm={setSearchTerm}
           project={project}
           setProject={setProject}
-          modelProvider={modelProvider}
-          setModelProvider={setModelProvider}
           projects={knownProjects}
-          providers={knownProviders}
           sessions={sessions}
           listState={listState}
           listFailure={listFailure}
-          hasQuery={Boolean(searchTerm.trim() || project || modelProvider)}
+          hasQuery={Boolean(searchTerm.trim() || project)}
           nextCursor={nextCursor}
           onLoadMore={() => void loadMore()}
           onRefresh={refreshList}
@@ -593,30 +583,10 @@ export default function SessionPage({
 
 function SessionShell({
   children,
-  onOpenProviders,
-  openAiAction,
-  currentProviderName,
-  update,
 }: {
   children: React.ReactNode;
-  onOpenProviders: () => void;
-  openAiAction?: OpenAiSidebarAction;
-  currentProviderName?: string | null;
-  update?: UpdateSidebarState;
 }) {
-  return (
-    <div className="app-shell">
-      <AppSidebar
-        activeView="sessions"
-        onOpenProviders={onOpenProviders}
-        onOpenSessions={() => undefined}
-        openAiAction={openAiAction}
-        currentProviderName={currentProviderName}
-        update={update}
-      />
-      <main className="main-content session-main">{children}</main>
-    </div>
-  );
+  return <main className="main-content session-main">{children}</main>;
 }
 
 function SessionList({
@@ -626,10 +596,7 @@ function SessionList({
   setSearchTerm,
   project,
   setProject,
-  modelProvider,
-  setModelProvider,
   projects,
-  providers,
   sessions,
   listState,
   listFailure,
@@ -659,10 +626,7 @@ function SessionList({
   setSearchTerm: (value: string) => void;
   project: string;
   setProject: (value: string) => void;
-  modelProvider: string;
-  setModelProvider: (value: string) => void;
   projects: string[];
-  providers: string[];
   sessions: SessionSummary[];
   listState: ListState;
   listFailure: SessionFailure | null;
@@ -741,19 +705,6 @@ function SessionList({
           />
           <datalist id="session-project-options">
             {projects.map((value) => <option key={value} value={value} />)}
-          </datalist>
-        </label>
-        <label>
-          <span>{sessionMessages.providerFilter}</span>
-          <input
-            type="text"
-            list="session-provider-options"
-            placeholder={sessionMessages.allProviders}
-            value={modelProvider}
-            onChange={(event) => setModelProvider(event.currentTarget.value)}
-          />
-          <datalist id="session-provider-options">
-            {providers.map((value) => <option key={value} value={value} />)}
           </datalist>
         </label>
       </div>
@@ -1223,13 +1174,11 @@ function UnavailableState({ availability, onRetry }: { availability: SessionAvai
   );
 }
 
-function rememberFacets(
+function rememberProjects(
   sessions: SessionSummary[],
   setProjects: React.Dispatch<React.SetStateAction<string[]>>,
-  setProviders: React.Dispatch<React.SetStateAction<string[]>>,
 ) {
   setProjects((current) => sortedUnique([...current, ...sessions.map((session) => session.project)]));
-  setProviders((current) => sortedUnique([...current, ...sessions.map((session) => session.modelProvider).filter(Boolean)]));
 }
 
 function uniqueSessions(sessions: SessionSummary[]): SessionSummary[] {

@@ -20,6 +20,29 @@ function updateState(
 describe("侧栏应用更新入口", () => {
   afterEach(cleanup);
 
+  it("点击设置菜单外部区域会收起菜单", () => {
+    render(<AppSidebar />);
+
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "供应商管理" }));
+
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  });
+
+  it("没有更新时不显示升级入口", () => {
+    const update = updateState({ availableVersion: null, state: "idle" });
+    const { rerender } = render(<AppSidebar update={update} />);
+
+    expect(screen.getByRole("button", { name: "供应商管理" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "会话管理" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "升级" })).not.toBeInTheDocument();
+
+    rerender(<AppSidebar update={updateState({ state: "up_to_date" })} />);
+    expect(screen.queryByRole("button", { name: /更新|升级/ })).not.toBeInTheDocument();
+  });
+
   it("下载时展示百分比并从侧栏打开详情", () => {
     const update = updateState({ state: "downloading", progressPercent: 42 });
     render(<AppSidebar currentProviderName="custom" update={update} />);

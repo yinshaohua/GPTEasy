@@ -219,21 +219,19 @@ describe("会话管理页面", () => {
     });
   });
 
-  it("项目和会话供应商筛选接受首批结果之外的值", async () => {
+  it("项目筛选接受首批结果之外的值且不显示无效的供应商筛选", async () => {
     render(<SessionPage onOpenProviders={() => undefined} />);
     await screen.findByRole("button", { name: "打开会话：登录修复" });
 
     fireEvent.change(screen.getByRole("combobox", { name: "项目筛选" }), {
       target: { value: "C:\\src\\not-loaded" },
     });
-    fireEvent.change(screen.getByRole("combobox", { name: "会话供应商筛选" }), {
-      target: { value: "not-loaded-provider" },
-    });
+    expect(screen.queryByRole("combobox", { name: "会话供应商筛选" })).not.toBeInTheDocument();
 
     await waitFor(() => {
       expect(sessionContract.listSessions.mock.calls.at(-1)?.[0]).toMatchObject({
         project: "C:\\src\\not-loaded",
-        modelProvider: "not-loaded-provider",
+        modelProvider: null,
         cursor: null,
       });
     });

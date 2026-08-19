@@ -1,5 +1,28 @@
 import { expect, test } from "@playwright/test";
 
+test("完整会话列表不会把侧栏设置区推离视口", async ({ page }) => {
+  await page.setViewportSize({ width: 1120, height: 520 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "会话管理" }).click();
+
+  await expect(page.getByRole("heading", { name: "会话管理" })).toBeVisible();
+  await page.locator(".session-main").evaluate((element) => {
+    (element as HTMLElement).style.minHeight = "1600px";
+  });
+
+  const settings = page.getByRole("button", { name: "设置" });
+  await expect(settings).toBeVisible();
+  const beforeScroll = await settings.boundingBox();
+  expect(beforeScroll).not.toBeNull();
+  expect(beforeScroll!.y + beforeScroll!.height).toBeLessThanOrEqual(520);
+
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+  const afterScroll = await settings.boundingBox();
+  expect(afterScroll).not.toBeNull();
+  expect(afterScroll!.y).toBeGreaterThanOrEqual(0);
+  expect(afterScroll!.y + afterScroll!.height).toBeLessThanOrEqual(520);
+});
+
 test("会话列表与详情在最小窗口保持可用布局", async ({ page }) => {
   await page.setViewportSize({ width: 680, height: 520 });
   await page.goto("/");
