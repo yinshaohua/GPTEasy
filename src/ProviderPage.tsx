@@ -5,6 +5,7 @@ import {
   Download,
   Eye,
   EyeOff,
+  ExternalLink,
   GripVertical,
   LoaderCircle,
   Pencil,
@@ -1220,7 +1221,23 @@ export default function ProviderPage({
               )}
             </label>
             <div className="form-field full-width">
-              <label htmlFor="provider-api-key">{providerMessages.apiKey}</label>
+              <div className="api-key-label-row">
+                <label htmlFor="provider-api-key">{providerMessages.apiKey}</label>
+                {isDaywayEditor && (
+                  <span className="dayway-api-key-hint" role="note">
+                    <span>{providerMessages.daywayApiKeyHint}</span>
+                    <button
+                      className="dayway-api-key-link"
+                      type="button"
+                      onClick={() => void visitDaywayWebsite()}
+                      disabled={busy}
+                    >
+                      {providerMessages.daywayApiKeyLink}
+                      <ExternalLink size={14} aria-hidden="true" />
+                    </button>
+                  </span>
+                )}
+              </div>
               <div className="secret-input">
                 <input
                   ref={apiKeyRef}
@@ -1469,6 +1486,7 @@ function RecommendedBadge({ onVisit }: { onVisit: () => Promise<void> }) {
       title={providerMessages.visitDaywayWebsite}
     >
       推荐
+      <ExternalLink size={12} aria-hidden="true" />
     </button>
   );
 }

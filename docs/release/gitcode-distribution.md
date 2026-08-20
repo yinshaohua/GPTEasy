@@ -72,16 +72,18 @@ npm run release:prepare -- -Version 1.1.0 -Tag v1.1.0
 
 命令拒绝非稳定 SemVer、现有版本漂移、非 `main`、脏工作树、已存在 Tag 和 Tag/版本不匹配。修改完成后先审查并提交，再创建 Tag。
 
-构建 Windows 候选前，从安全的交互式环境设置私钥路径和密码：
+构建 Windows 候选前，确认当前 PowerShell 会话能够读取签名私钥路径和密码。密码可以预先配置在系统环境变量 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 中，构建脚本不会再交互式读取：
 
 ```powershell
-$env:TAURI_SIGNING_PRIVATE_KEY_PATH = "$HOME\.tauri\gpteasy-updater.key"
-$securePassword = Read-Host -AsSecureString
-$credential = New-Object System.Management.Automation.PSCredential('', $securePassword)
-$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = $credential.GetNetworkCredential().Password
+$env:TAURI_SIGNING_PRIVATE_KEY_PATH = Join-Path $env:USERPROFILE ".tauri\gpteasy-updater.key"
+if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD)) {
+    throw '请先设置 TAURI_SIGNING_PRIVATE_KEY_PASSWORD。'
+}
 npm run candidate:windows
-Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY_PATH, Env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY_PATH
 ```
+
+如果密码来自系统环境变量，通常不需要在构建后删除它；如只想让当前 PowerShell 会话失效，可执行 `Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD`，不会修改系统环境变量。
 
 候选门禁要求公开信任根已配置，Tauri 生成同一 NSIS 安装包及其 `.sig`，并以应用内公钥真实验证签名。候选 manifest 同时绑定安装包和 `.sig` 的路径、大小与 SHA-256。静态清单可用以下命令独立校验：
 

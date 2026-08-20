@@ -1003,18 +1003,21 @@ describe("供应商目录生命周期", () => {
     render(<App />);
 
     expect(await screen.findByText("DayWay", {}, { timeout: 5_000 })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "访问 DayWay 官网" })).toHaveTextContent("推荐");
+    expect(screen.getByRole("button", { name: "访问 DayWay 官网获取 API Key" })).toHaveTextContent("推荐");
     expect(screen.getByText("待配置")).toBeInTheDocument();
     expect(screen.getByRole("img", { name: "DayWay 固定在首位" })).toBeInTheDocument();
     expect(screen.getByText("https://dayway.site/v1")).toBeInTheDocument();
     expect(screen.getByText("尚未选择")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "访问 DayWay 官网" }));
+    fireEvent.click(screen.getByRole("button", { name: "访问 DayWay 官网获取 API Key" }));
     expect(invoke).toHaveBeenCalledWith("open_dayway_website");
 
     fireEvent.click(screen.getByRole("button", { name: "配置 DayWay" }));
     expect(screen.getByLabelText("供应商名称")).toHaveValue("DayWay");
     expect(screen.getByLabelText("供应商名称")).toBeDisabled();
     expect(screen.getByLabelText("服务地址")).toHaveValue("https://dayway.site/v1");
+    expect(screen.getByRole("note")).toHaveTextContent("还没有 API Key？");
+    fireEvent.click(screen.getByRole("button", { name: "前往 DayWay 官网获取 API Key" }));
+    expect(invoke).toHaveBeenCalledWith("open_dayway_website");
     fireEvent.change(screen.getByLabelText("API Key"), { target: { value: "secret" } });
     fireEvent.click(screen.getByRole("button", { name: "获取模型" }));
     expect(await screen.findByRole("option", { name: "dayway-model" })).toBeInTheDocument();
@@ -1030,7 +1033,7 @@ describe("供应商目录生命周期", () => {
       });
     });
     expect(screen.getByText("已验证")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "访问 DayWay 官网" })).toHaveTextContent("推荐");
+    expect(screen.getByRole("button", { name: "访问 DayWay 官网获取 API Key" })).toHaveTextContent("推荐");
     expect(screen.queryByText("待配置")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "拖拽排序 DayWay" })).not.toBeInTheDocument();
 

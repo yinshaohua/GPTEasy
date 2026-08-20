@@ -1505,12 +1505,63 @@ select:focus-visible {
 }
 
 .recommended-badge-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   font-family: inherit;
   cursor: pointer;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
 }
 
 .recommended-badge-link:hover {
   border-color: #b48d1f;
+  background: #ffefbd;
+}
+
+.api-key-label-row {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+}
+
+.dayway-api-key-hint {
+  display: inline-flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.45;
+}
+
+.dayway-api-key-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 0;
+  padding: 0;
+  color: var(--accent);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+.dayway-api-key-link:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.dayway-api-key-link:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
 }
 
 .pending-badge {
