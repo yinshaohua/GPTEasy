@@ -47,9 +47,9 @@ export const updateMessages = {
     incomplete: (version: string | null) => string;
   },
   errors: {
-    check_failed: "暂时无法检查应用更新，请稍后重试。",
+    check_failed: "暂时无法检查应用更新，将在后台自动重试；也可以立即重试。",
     manifest_invalid: "更新清单无效，已停止本次更新。",
-    download_failed: "应用更新下载失败，请重试。",
+    download_failed: "应用更新下载失败，将在后台自动重试；也可以立即重试。",
     signature_invalid: "应用更新未通过签名验证，已拒绝使用。",
     no_pending_update: "当前没有可安装的更新，请重新检查。",
     busy: "当前有操作正在进行，请先完成或取消后再安装更新。",

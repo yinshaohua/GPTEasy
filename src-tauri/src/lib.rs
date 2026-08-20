@@ -158,14 +158,10 @@ pub fn run() {
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 fn start_update_monitor(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
-        let _ = perform_update_check(&app, false).await;
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(
-            update::CHECK_INTERVAL_SECONDS,
-        ));
-        interval.tick().await;
+        let mut schedule = update::UpdateCheckSchedule::default();
         loop {
-            interval.tick().await;
-            let _ = perform_update_check(&app, false).await;
+            let snapshot = perform_update_check(&app, false).await;
+            tokio::time::sleep(schedule.next_delay(&snapshot)).await;
         }
     });
 }
