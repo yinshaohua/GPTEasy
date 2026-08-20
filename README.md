@@ -4,12 +4,7 @@
 ![Windows x64](https://img.shields.io/badge/platform-Windows%20x64-0078D4)
 [![MIT License](https://img.shields.io/badge/license-MIT-2ea44f)](LICENSE)
 
-GPTEasy 是一款面向 Windows 和 WSL2 用户的 Codex 配置与会话管理工具。它可以集中管理 OpenAI 兼容 API 供应商，在供应商模式与 OpenAI 登录模式之间切换，并整理本地 Codex 会话。
-
-> [!IMPORTANT]
-> GPTEasy 当前处于早期开发阶段，配置格式与功能行为可能调整。
-
-![GPTEasy 供应商管理主界面](docs/assets/gpteasy-main.png)
+GPTEasy 是一款面向 Windows 用户的 Codex 配置与会话管理工具。主要特点：简单好用，轻巧干净。既让一般用户上手容易，又让 WSL2 甚至 Linux 上工作者都能使用。
 
 ## 下载与安装
 
@@ -31,6 +26,19 @@ Get-FileHash .\GPTEasy_1.1.0_x64-setup.exe -Algorithm SHA256
 > [!WARNING]
 > 安装包目前没有 Authenticode 代码签名，Windows Defender SmartScreen 可能显示“Windows 已保护你的电脑”。请确认安装包来自本仓库的 Release，并且 SHA-256 与 `SHA256SUMS.txt` 一致；确认后可通过“更多信息”选择“仍要运行”。
 
+## 推荐供应商
+
+<div align="center">
+  <a href="https://dayway.site/">
+    <img src="https://raw.githubusercontent.com/yinshaohua/GPTEasy/main/images/dayway-512x512.png" alt="DayWay" width="180">
+  </a>
+  <h3><a href="https://dayway.site/">DayWay：GPTEasy 唯一赞助商</a></h3>
+</div>
+
+> **DayWay 提供 GPT 模型，便宜，稳定，有独立生图台，能开国内发票。**
+
+立即访问 [DayWay 官网](https://dayway.site/) 了解服务详情。
+
 ## 主要功能
 
 - **供应商管理**：新增、编辑、排序和删除 OpenAI 兼容 API 供应商，发现可用模型，并在保存前实际验证连接。
@@ -42,6 +50,14 @@ Get-FileHash .\GPTEasy_1.1.0_x64-setup.exe -Algorithm SHA256
 
 会话管理只通过 Codex 官方 App Server 访问用户交互会话，不用于在 GPTEasy 内继续对话。
 
+## 界面预览
+
+![GPTEasy 主界面和供应商管理界面](https://raw.githubusercontent.com/yinshaohua/GPTEasy/main/images/gpteasy-main.png)
+
+![GPTEasy WSL2 配置界面](https://raw.githubusercontent.com/yinshaohua/GPTEasy/main/images/gpteasy-wsl2.png)
+
+![GPTEasy 生成 Linux 配置脚本界面](https://raw.githubusercontent.com/yinshaohua/GPTEasy/main/images/gpteasy-linux.png)
+
 ## 基本用法
 
 1. 在“供应商管理”中添加服务地址和 API Key，发现模型并完成验证。
@@ -49,12 +65,6 @@ Get-FileHash .\GPTEasy_1.1.0_x64-setup.exe -Algorithm SHA256
 3. 如果 Codex 正在运行，请自行重启相关桌面客户端或 CLI，使新配置生效。
 
 GPTEasy 只负责配置和管理，不会主动启动、关闭或重启用户的 Codex 进程。
-
-## 推荐供应商
-
-[DayWay](https://dayway.site/) 是 GPTEasy 的内置推荐供应商模板。
-
-GPTEasy 推荐 DayWay：价格实惠、使用稳定，提供方便的[绘图台](https://dayway.site/images/)，并支持[电子发票](https://dayway.site/pages/docs/platform/invoices.html)。价格与模型可用性请以 DayWay 实时页面为准。
 
 ## 本地开发
 
