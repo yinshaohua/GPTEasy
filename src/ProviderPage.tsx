@@ -5,7 +5,6 @@ import {
   Download,
   Eye,
   EyeOff,
-  ExternalLink,
   GripVertical,
   LoaderCircle,
   Pencil,
@@ -1049,14 +1048,13 @@ export default function ProviderPage({
                 <div className="provider-row-summary">
                   <div className="provider-row-title">
                     <strong className="provider-row-name">{DAYWAY_NAME}</strong>
-                    <span className="recommended-badge">推荐</span>
+                    <RecommendedBadge onVisit={visitDaywayWebsite} />
                     <span className="pending-badge">待配置</span>
                   </div>
                   <span className="provider-row-url" title={DAYWAY_BASE_URL}>{DAYWAY_BASE_URL}</span>
                   <span className="provider-row-model">尚未选择</span>
                 </div>
                 <div className="provider-row-actions">
-                  <DaywayWebsiteButton onVisit={visitDaywayWebsite} />
                   <button className="command-button compact" type="button" onClick={configureDayway} disabled={busy} aria-label={providerMessages.configureDayway}>
                     <Pencil size={16} aria-hidden="true" />
                     配置
@@ -1101,12 +1099,11 @@ export default function ProviderPage({
                 <div className="provider-row-summary">
                   <div className="provider-row-title">
                     <strong className="provider-row-name">{provider.name}</strong>
-                    {provider.recommendationId === "dayway" && <span className="recommended-badge">推荐</span>}
+                    {provider.recommendationId === "dayway" && (
+                      <RecommendedBadge onVisit={visitDaywayWebsite} />
+                    )}
                     {provider.hasRecommendationUpdate && <span className="pending-badge">推荐地址已更新</span>}
                     <span className="verified-badge">{providerMessages.verified}</span>
-                    {provider.isCurrent && (
-                      <span className="current-badge">{providerMessages.currentProvider}</span>
-                    )}
                   </div>
                   <span className="provider-row-url" title={provider.baseUrl}>{provider.baseUrl}</span>
                   <span className="provider-row-model" title={provider.defaultModel}>
@@ -1114,19 +1111,6 @@ export default function ProviderPage({
                   </span>
                 </div>
                 <div className="provider-row-actions">
-                  {provider.recommendationId === "dayway" && (
-                    <DaywayWebsiteButton onVisit={visitDaywayWebsite} />
-                  )}
-                  <button
-                    className="secondary-button compact row-icon-button"
-                    type="button"
-                    onClick={() => void runRevalidation(provider)}
-                    disabled={busy}
-                    aria-label={providerMessages.verifyProviderAccessibleName(provider.name)}
-                    title={providerMessages.verify}
-                  >
-                    <RefreshCw size={16} aria-hidden="true" />
-                  </button>
                   <button
                     className="secondary-button compact row-icon-button"
                     type="button"
@@ -1154,12 +1138,12 @@ export default function ProviderPage({
                     disabled={provider.isCurrent || busy || switchingProviderId === provider.id || !environment || !canApplyProvider(environment)}
                     aria-label={provider.isCurrent
                       ? providerMessages.currentProviderAccessibleName(provider.name)
-                      : providerMessages.applyProviderAccessibleName(provider.name)}
+                      : providerMessages.selectProviderAccessibleName(provider.name)}
                   >
                     {switchingProviderId === provider.id
                       ? <LoaderCircle className="is-spinning" size={16} aria-hidden="true" />
                       : <Check size={16} aria-hidden="true" />}
-                    {provider.isCurrent ? providerMessages.currentProvider : providerMessages.applyProvider}
+                    {provider.isCurrent ? providerMessages.currentProvider : providerMessages.selectProvider}
                   </button>
                 </div>
               </article>
@@ -1475,16 +1459,16 @@ function EnvironmentReadNotice({
   return null;
 }
 
-function DaywayWebsiteButton({ onVisit }: { onVisit: () => Promise<void> }) {
+function RecommendedBadge({ onVisit }: { onVisit: () => Promise<void> }) {
   return (
     <button
-      className="secondary-button compact row-icon-button"
+      className="recommended-badge recommended-badge-link"
       type="button"
       onClick={() => void onVisit()}
       aria-label={providerMessages.visitDaywayWebsiteAccessibleName}
       title={providerMessages.visitDaywayWebsite}
     >
-      <ExternalLink size={16} aria-hidden="true" />
+      推荐
     </button>
   );
 }

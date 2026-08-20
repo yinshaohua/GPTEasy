@@ -5,6 +5,7 @@ import {
   ArrowLeft,
   ChevronDown,
   Download,
+  Info,
   LoaderCircle,
   RefreshCw,
   Search,
@@ -1157,18 +1158,26 @@ function DeleteSessionDialog({
 }
 
 function UnavailableState({ availability, onRetry }: { availability: SessionAvailability; onRetry: () => void }) {
-  const copy = sessionMessages.unavailable[availability.status as Exclude<SessionAvailabilityStatus, "available">];
+  const codexMissing = availability.status === "codex_missing"
+    || availability.messageId === "session.codex_missing";
+  const copy = codexMissing
+    ? sessionMessages.unavailable.codex_missing
+    : sessionMessages.unavailable[availability.status as Exclude<SessionAvailabilityStatus, "available">];
   return (
-    <section className="blocked-state" role="alert">
-      <ShieldAlert size={26} aria-hidden="true" />
+    <section className={codexMissing ? "session-unavailable-note" : "blocked-state"} role={codexMissing ? "status" : "alert"}>
+      {codexMissing
+        ? <Info size={24} aria-hidden="true" />
+        : <ShieldAlert size={26} aria-hidden="true" />}
       <div>
         <h2>{copy.title}</h2>
         <p>{copy.body}</p>
         {availability.codexVersion && <p className="secondary-note">{availability.codexVersion}</p>}
-        <button className="command-button" type="button" onClick={onRetry}>
-          <RefreshCw size={17} aria-hidden="true" />
-          {sessionMessages.retryCheck}
-        </button>
+        {!codexMissing && (
+          <button className="command-button" type="button" onClick={onRetry}>
+            <RefreshCw size={17} aria-hidden="true" />
+            {sessionMessages.retryCheck}
+          </button>
+        )}
       </div>
     </section>
   );

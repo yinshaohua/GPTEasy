@@ -200,6 +200,23 @@ describe("会话管理页面", () => {
     expect(within(screen.getByRole("alert")).getByRole("button", { name: "重新检查" })).toBeInTheDocument();
   });
 
+  it("未找到兼容 Codex 时显示中性提示且不提供重新检查按钮", async () => {
+    sessionContract.enterSessionManagement.mockResolvedValue({
+      status: "initialization_failed",
+      messageId: "session.codex_missing",
+      codexVersion: null,
+    });
+
+    render(<SessionPage onOpenProviders={() => undefined} />);
+
+    const notice = await screen.findByText("未找到兼容的 Codex");
+    const noticeContainer = notice.closest("section");
+    expect(noticeContainer).not.toBeNull();
+    expect(noticeContainer).toHaveTextContent("请先安装 Codex CLI。GPTEasy 不会自动安装或升级。");
+    expect(noticeContainer).toHaveClass("session-unavailable-note");
+    expect(within(noticeContainer as HTMLElement).queryByRole("button", { name: "重新检查" })).not.toBeInTheDocument();
+  });
+
   it("返回列表后忽略迟到的详情响应", async () => {
     let resolveDetail: ((detail: unknown) => void) | undefined;
     sessionContract.readSession.mockReturnValue(new Promise((resolve) => {

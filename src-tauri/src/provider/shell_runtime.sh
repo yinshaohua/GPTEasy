@@ -48,11 +48,11 @@ gpteasy__matches() {
     ' "$2"
 }
 
-gpteasy__require_codex_version() {
+gpteasy__check_codex_compatibility() {
     local output version remainder major minor patch
     if ! command -v codex >/dev/null 2>&1; then
-        printf '%s\n' '未找到 Codex CLI，请先安装 0.147.0 或更高版本，或确认 codex 已加入 PATH。' >&2
-        return 1
+        gpteasy__codex_cli_state=missing
+        return 0
     fi
     if ! output=$(codex --version 2>/dev/null); then
         printf '%s\n' '无法确认 Codex CLI 版本，未写入任何内容。' >&2
@@ -72,17 +72,91 @@ gpteasy__require_codex_version() {
         printf '%s\n' 'Codex CLI 版本过低，请升级到 0.147.0 或更高版本；未写入任何内容。' >&2
         return 1
     fi
+    gpteasy__codex_cli_state=ready
+}
+
+gpteasy__current_uid() {
+    id -u
+}
+
+gpteasy__owner_label() {
+    local uid=$1 name
+    name=$(id -nu "$uid" 2>/dev/null || true)
+    if [[ -n "$name" ]]; then
+        printf '%s（uid=%s）' "$name" "$uid"
+    else
+        printf 'uid=%s' "$uid"
+    fi
 }
 
 gpteasy__directory_is_owned() {
-    local directory=$1 require_private=${2:-0} mode kind
+    local directory=$1 owner kind
     [[ ! -L "$directory" ]] || return 1
-    read -r mode kind < <(stat -c '%a %F' -- "$directory" 2>/dev/null) || return 1
-    [[ "$kind" == 'directory' && -r "$directory" && -w "$directory" && -x "$directory" ]] || return 1
-    if [[ "$require_private" -eq 1 ]]; then
-        [[ "${mode: -2}" == '00' ]]
-    else
-        (( (8#$mode & 8#22) == 0 ))
+    read -r owner kind < <(stat -c '%u %F' -- "$directory" 2>/dev/null) || return 1
+    [[ "$owner" == "$(gpteasy__current_uid)" && "$kind" == 'directory' && -r "$directory" && -w "$directory" && -x "$directory" ]]
+}
+
+gpteasy__warn_if_permissions_are_broad() {
+    local path=$1 mode
+    mode=$(stat -c '%a' -- "$path" 2>/dev/null) || return
+    if (( (8#$mode & 8#77) != 0 )); then
+        gpteasy__permission_warning=1
+    fi
+}
+
+gpteasy__report_identity_mismatch() {
+    local path=$1 owner sudo_user=${SUDO_USER:-}
+    owner=$(stat -c '%u' -- "$path" 2>/dev/null) || return
+    printf '目标环境身份不匹配：当前用户 %s（uid=%s）不能管理 %s（所有者 %s）。请以该所有者身份执行；例如 sudo -u <用户> -H。' \
+        "$(id -un)" "$(gpteasy__current_uid)" "$path" "$(gpteasy__owner_label "$owner")" >&2
+    if [[ -n "$sudo_user" ]]; then
+        printf ' 检测到 SUDO_USER=%s；sudo 可能正在为错误的用户环境写入。' "$sudo_user" >&2
+    fi
+    printf '\n' >&2
+}
+
+gpteasy__require_codex_home() {
+    local codex_home=${CODEX_HOME:-"$HOME/.codex"} parent owner
+    gpteasy__codex_home=$codex_home
+    if [[ -L "$codex_home" ]]; then
+        printf 'CODEX_HOME 不能是符号链接：%s\n' "$codex_home" >&2
+        return 1
+    fi
+    if [[ -e "$codex_home" ]]; then
+        if [[ ! -d "$codex_home" ]]; then
+            printf '目标 Codex 环境不是普通目录：%s\n' "$codex_home" >&2
+            return 1
+        fi
+        owner=$(stat -c '%u' -- "$codex_home" 2>/dev/null) || return 1
+        if [[ "$owner" != "$(gpteasy__current_uid)" ]]; then
+            gpteasy__report_identity_mismatch "$codex_home"
+            return 1
+        fi
+        if [[ ! -r "$codex_home" || ! -w "$codex_home" || ! -x "$codex_home" ]]; then
+            printf '当前用户 %s（uid=%s）无法访问或写入目标 Codex 环境 %s（所有者 %s）。请切换到其所有者或修复权限后重试。\n' \
+                "$(id -un)" "$(gpteasy__current_uid)" "$codex_home" "$(gpteasy__owner_label "$owner")" >&2
+            return 1
+        fi
+        gpteasy__warn_if_permissions_are_broad "$codex_home"
+        return
+    fi
+    parent=$codex_home
+    while [[ ! -e "$parent" && ! -L "$parent" ]]; do
+        parent=${parent%/*}
+        [[ -n "$parent" ]] || parent=/
+    done
+    if [[ -L "$parent" || ! -d "$parent" || ! -w "$parent" || ! -x "$parent" ]]; then
+        owner=$(stat -c '%u' -- "$parent" 2>/dev/null || printf '%s' unknown)
+        printf '无法在目标路径创建 Codex 环境：最近存在的父目录 %s 对当前用户 %s（uid=%s）不可写或不可搜索；所有者 %s。\n' \
+            "$parent" "$(id -un)" "$(gpteasy__current_uid)" "$(gpteasy__owner_label "$owner")" >&2
+        return 1
+    fi
+    if [[ "$(gpteasy__current_uid)" == 0 ]]; then
+        owner=$(stat -c '%u' -- "$parent" 2>/dev/null) || return 1
+        if [[ "$owner" != 0 ]]; then
+            gpteasy__report_identity_mismatch "$parent"
+            return 1
+        fi
     fi
 }
 
@@ -92,9 +166,10 @@ gpteasy__ensure_private_dir() {
         mkdir -m 700 -- "$directory" || return
     fi
     if ! gpteasy__directory_is_owned "$directory" 1; then
-        printf '私有目录权限或访问能力不安全：%s\n' "$directory" >&2
+        printf 'Linux 私有状态目录不属于当前用户或不可安全访问：%s\n' "$directory" >&2
         return 1
     fi
+    gpteasy__warn_if_permissions_are_broad "$directory"
 }
 
 gpteasy__prepare_private_state() {
@@ -102,8 +177,8 @@ gpteasy__prepare_private_state() {
     if [[ ! -e "$codex_home" && ! -L "$codex_home" ]]; then
         mkdir -p -m 700 -- "$codex_home" || return
     fi
-    if ! gpteasy__directory_is_owned "$codex_home" 0; then
-        printf '%s\n' '目标 Codex 环境不是当前操作用户可访问的普通目录。' >&2
+    if ! gpteasy__directory_is_owned "$codex_home"; then
+        printf '目标 Codex 环境在预检后发生变化，已停止写入：%s\n' "$codex_home" >&2
         return 1
     fi
     gpteasy__state_root="$codex_home/.gpteasy-shell"
@@ -133,16 +208,18 @@ gpteasy__require_existing_private_state_safe() {
         return 1
     fi
     while IFS= read -r -d '' item; do
-        if ! gpteasy__directory_is_owned "$item" 1; then
-            printf '%s\n' 'Linux 私有状态目录的权限或访问能力不安全。' >&2
+        if ! gpteasy__directory_is_owned "$item"; then
+            printf 'Linux 私有状态目录不属于当前用户或不可访问：%s\n' "$item" >&2
             return 1
         fi
+        gpteasy__warn_if_permissions_are_broad "$item"
     done < <(find "$root" -type d -print0)
     while IFS= read -r -d '' item; do
         if ! gpteasy__private_file_is_safe "$item"; then
-            printf '%s\n' 'Linux 私有状态文件的权限、访问能力或链接数不安全。' >&2
+            printf 'Linux 私有状态文件不属于当前用户、不可访问或链接数不安全：%s\n' "$item" >&2
             return 1
         fi
+        gpteasy__warn_if_permissions_are_broad "$item"
     done < <(find "$root" -type f -print0)
 }
 
@@ -205,7 +282,7 @@ gpteasy__file_hash() {
 }
 
 gpteasy__resolve_config_target() {
-    local entry links kind parent
+    local entry links kind parent owner
     entry=$(gpteasy__config_path) || return
     gpteasy__config_entry=$entry
     if [[ -L "$entry" ]]; then
@@ -217,20 +294,34 @@ gpteasy__resolve_config_target() {
         }
         gpteasy__config_entry_signature=$(stat -c '%d:%i:%u:%a:%h:%F' -- "$entry") || return
         read -r links kind < <(stat -Lc '%h %F' -- "$gpteasy__config_target") || return
-        if [[ ! -r "$gpteasy__config_target" || ! -w "$gpteasy__config_target" || "$links" != 1 || "$kind" != 'regular file' ]]; then
-            printf '%s\n' 'config.toml 符号链接最终目标必须是当前操作用户可读写的单链接普通文件。' >&2
+        owner=$(stat -Lc '%u' -- "$gpteasy__config_target") || return
+        if [[ "$owner" != "$(gpteasy__current_uid)" ]]; then
+            gpteasy__report_identity_mismatch "$gpteasy__config_target"
             return 1
         fi
+        if [[ ! -r "$gpteasy__config_target" || ! -w "$gpteasy__config_target" || "$links" != 1 || "$kind" != 'regular file' ]]; then
+            printf 'config.toml 符号链接最终目标必须是当前用户可读写的单链接普通文件：%s（当前用户 %s，所有者 %s）。\n' \
+                "$gpteasy__config_target" "$(id -un)" "$(gpteasy__owner_label "$owner")" >&2
+            return 1
+        fi
+        gpteasy__warn_if_permissions_are_broad "$gpteasy__config_target"
     elif [[ -e "$entry" ]]; then
         gpteasy__config_kind=regular
         gpteasy__config_target=$entry
         gpteasy__config_link_value=
         gpteasy__config_entry_signature=$(stat -c '%d:%i:%u:%a:%h:%F' -- "$entry") || return
         read -r links kind < <(stat -c '%h %F' -- "$entry") || return
-        if [[ ! -r "$entry" || ! -w "$entry" || "$links" != 1 || "$kind" != 'regular file' ]]; then
-            printf '%s\n' 'config.toml 必须是当前操作用户可读写的单链接普通文件。' >&2
+        owner=$(stat -c '%u' -- "$entry") || return
+        if [[ "$owner" != "$(gpteasy__current_uid)" ]]; then
+            gpteasy__report_identity_mismatch "$entry"
             return 1
         fi
+        if [[ ! -r "$entry" || ! -w "$entry" || "$links" != 1 || "$kind" != 'regular file' ]]; then
+            printf 'config.toml 必须是当前用户可读写的单链接普通文件：%s（当前用户 %s，所有者 %s）。\n' \
+                "$entry" "$(id -un)" "$(gpteasy__owner_label "$owner")" >&2
+            return 1
+        fi
+        gpteasy__warn_if_permissions_are_broad "$entry"
     else
         gpteasy__config_kind=missing
         gpteasy__config_target=$entry
@@ -238,8 +329,13 @@ gpteasy__resolve_config_target() {
         gpteasy__config_entry_signature=missing
     fi
     parent=${gpteasy__config_target%/*}
-    if ! gpteasy__directory_is_owned "$parent" 0; then
-        printf '%s\n' 'config.toml 最终目标目录不安全。' >&2
+    if [[ -e "$parent" || -L "$parent" ]]; then
+        if [[ -L "$parent" || ! -d "$parent" || ! -r "$parent" || ! -w "$parent" || ! -x "$parent" ]]; then
+            printf 'config.toml 最终目标目录对当前用户不可读写或不可搜索：%s\n' "$parent" >&2
+            return 1
+        fi
+    elif [[ "$parent" != "${CODEX_HOME:-"$HOME/.codex"}" ]]; then
+        printf 'config.toml 的父目录不存在且无法安全创建：%s\n' "$parent" >&2
         return 1
     fi
     if [[ -e "$gpteasy__config_target" ]]; then
@@ -625,17 +721,17 @@ gpteasy__prune_restore_points() {
 }
 
 gpteasy__private_file_is_safe() {
-    local file=$1 mode links kind
+    local file=$1 mode links kind owner
     [[ -f "$file" && ! -L "$file" ]] || return 1
-    read -r mode links kind < <(stat -c '%a %h %F' -- "$file") || return 1
-    [[ -r "$file" && -w "$file" && "${mode: -2}" == '00' && "$links" == 1 && "$kind" == 'regular file' ]]
+    read -r owner mode links kind < <(stat -c '%u %a %h %F' -- "$file") || return 1
+    [[ -r "$file" && -w "$file" && "$owner" == "$(gpteasy__current_uid)" && "$links" == 1 && "$kind" == 'regular file' ]]
 }
 
 gpteasy__owned_regular_file_is_safe() {
-    local file=$1 links kind
+    local file=$1 links kind owner
     [[ -f "$file" && ! -L "$file" ]] || return 1
-    read -r links kind < <(stat -c '%h %F' -- "$file") || return 1
-    [[ -r "$file" && -w "$file" && "$links" == 1 && "$kind" == 'regular file' ]]
+    read -r owner links kind < <(stat -c '%u %h %F' -- "$file") || return 1
+    [[ -r "$file" && -w "$file" && "$owner" == "$(gpteasy__current_uid)" && "$links" == 1 && "$kind" == 'regular file' ]]
 }
 
 gpteasy__install_credential() {
@@ -813,12 +909,26 @@ gpteasy__apply_provider_locked() {
     fi
     gpteasy__prune_restore_points || return
     gpteasy__cleanup_credentials || return
-    printf '已切换到：%s\n' "$(gpteasy__provider_name "$provider_id")"
+    if [[ "${gpteasy__codex_cli_state:-ready}" == missing ]]; then
+        printf '已预先配置：%s。当前未安装 Codex CLI；安装 0.147.0 或更高版本后即可使用。\n' "$(gpteasy__provider_name "$provider_id")"
+    else
+        printf '已切换到：%s\n' "$(gpteasy__provider_name "$provider_id")"
+    fi
+    if [[ "${gpteasy__permission_warning:-0}" -eq 1 ]]; then
+        printf '%s\n' '警告：目标环境中已有文件或目录权限允许其他用户访问，请按需收紧；本次新建的凭据和恢复点仍使用私有权限。' >&2
+    fi
+    if [[ "$(gpteasy__current_uid)" == 0 && -n "${SUDO_USER:-}" && -z "${CODEX_HOME:-}" ]]; then
+        printf '当前正在管理 root 的 Codex 环境：%s。若要配置原用户，请退出 sudo 后运行，或使用 sudo -u <用户> -H。\n' "$HOME/.codex" >&2
+    fi
 }
 
 gpteasy__switch_provider() {
     local provider_id=$1 result
-    gpteasy__require_codex_version || return
+    gpteasy__check_codex_compatibility || return
+    gpteasy__require_codex_home || return
+    gpteasy__resolve_config_target || return
+    gpteasy__inspect_writable_config || return
+    gpteasy__require_existing_private_state_safe || return
     gpteasy__prepare_private_state || return
     gpteasy__acquire_lock switch || return
     gpteasy__apply_provider_locked "$provider_id"
@@ -994,7 +1104,7 @@ gpteasy__restore_locked() {
 
 gpteasy__restore() {
     local result
-    gpteasy__require_codex_version || return
+    gpteasy__require_codex_home || return
     gpteasy__prepare_private_state || return
     gpteasy__acquire_lock restore || return
     gpteasy__restore_locked
@@ -1007,18 +1117,27 @@ gpteasy__restore() {
 }
 
 gpteasy__info() {
+    local codex_home=${CODEX_HOME:-"$HOME/.codex"} config
+    config="$codex_home/config.toml"
+    [[ ! -e "$codex_home" || -L "$codex_home" ]] || gpteasy__warn_if_permissions_are_broad "$codex_home"
+    [[ ! -e "$config" ]] || gpteasy__warn_if_permissions_are_broad "$config"
     printf '目标环境：%s\n' "${CODEX_HOME:-"$HOME/.codex"}"
     printf 'Linux 导出 ID：%s\n' "$gpteasy__export_id"
     printf '%s\n' '管理区块 schema：1'
     printf '%s\n' 'Shell：{{GPTEASY_SHELL_LABEL}}'
     printf '供应商数量：%s\n' "$gpteasy__provider_count"
     printf '%s\n' 'Codex CLI 最低版本：0.147.0'
+    if [[ "${gpteasy__permission_warning:-0}" -eq 1 ]]; then
+        printf '%s\n' '权限风险：是（已有文件或目录允许其他用户访问）'
+    else
+        printf '%s\n' '权限风险：否'
+    fi
 }
 
 gpteasy__unlock() {
     local active owner_file owner token pid process_start operation actual_start choice
     local owner_hash owner_signature
-    gpteasy__require_codex_version || return
+    gpteasy__require_codex_home || return
     gpteasy__prepare_private_state || return
     active="$gpteasy__lock_root/active"
     owner_file="$active/owner"
@@ -1101,6 +1220,7 @@ gpteasy() {
             return
             ;;
     esac
+    gpteasy__permission_warning=0
     gpteasy__require_snapshot_safe || return
     gpteasy__require_existing_private_state_safe || return
     case "$command" in

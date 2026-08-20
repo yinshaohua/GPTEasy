@@ -258,7 +258,7 @@ gpteasy help >/dev/null
 }
 
 #[test]
-fn shell_snapshots_check_codex_before_installing_only_the_selected_provider() {
+fn shell_snapshots_preconfigure_without_codex_and_reject_incompatible_versions() {
     let fixture = ExportFixture::new();
     fixture.insert_provider(
         "11111111-1111-4111-8111-111111111111",
@@ -307,12 +307,22 @@ export PATH="$fake_bin:$PATH"
 export CODEX_HOME="$codex_home"
 # shellcheck disable=SC1090
 source "$script"
+fresh_home="$workspace/fresh codex home"
+export CODEX_HOME="$fresh_home"
+fresh=$(PATH="$fake_bin:/usr/bin:/bin" gpteasy <<<"1" 2>&1)
+[[ "$fresh" == *'已预先配置：Alpha Provider'* ]]
+[[ -f "$fresh_home/config.toml" ]]
+[[ $(stat -c '%a' "$fresh_home") == '700' ]]
+[[ $(find "$fresh_home/.gpteasy-shell/credentials" -type f -name '*.token' | wc -l) -eq 1 ]]
+export CODEX_HOME="$codex_home"
 missing=$(PATH="$fake_bin:/usr/bin:/bin" gpteasy <<<"1" 2>&1 || true)
-[[ "$missing" == *'未找到 Codex CLI，请先安装 0.147.0 或更高版本'* ]]
+[[ "$missing" == *'已预先配置：Alpha Provider'* ]]
+[[ "$missing" == *'当前未安装 Codex CLI'* ]]
 [[ "$missing" != *'版本过低'* ]]
-[[ "$config_before" == "$(sha256sum "$codex_home/config.toml")" ]]
 [[ "$auth_before" == "$(sha256sum "$codex_home/auth.json")" ]]
-[[ ! -e "$codex_home/.gpteasy-shell" ]]
+grep -Fq '# GPTEasy schema-version: 1' "$codex_home/config.toml"
+missing_config=$(sha256sum "$codex_home/config.toml")
+[[ -e "$codex_home/.gpteasy-shell" ]]
 cat >"$fake_bin/codex" <<'OLD_CODEX'
 #!/usr/bin/env bash
 printf '%s\n' 'codex-cli 0.146.0'
@@ -325,9 +335,8 @@ fi
 too_old=$(gpteasy <<<"1" 2>&1 || true)
 [[ "$too_old" == *'Codex CLI 版本过低，请升级到 0.147.0 或更高版本'* ]]
 [[ "$too_old" != *'未找到 Codex CLI'* ]]
-[[ "$config_before" == "$(sha256sum "$codex_home/config.toml")" ]]
+[[ "$missing_config" == "$(sha256sum "$codex_home/config.toml")" ]]
 [[ "$auth_before" == "$(sha256sum "$codex_home/auth.json")" ]]
-[[ ! -e "$codex_home/.gpteasy-shell" ]]
 
 cat >"$fake_bin/codex" <<'SUPPORTED_CODEX'
 #!/usr/bin/env bash
@@ -348,9 +357,28 @@ credential_count=$(find "$codex_home/.gpteasy-shell/credentials" -type f -name '
 credential=$(find "$codex_home/.gpteasy-shell/credentials" -type f -name '*.token' -print -quit)
 [[ $(cat "$credential") == 'alpha-secret-key' ]]
 [[ $(stat -c '%a' "$credential") == '600' ]]
-[[ $(find "$codex_home/.gpteasy-shell/shell-restore" -mindepth 1 -maxdepth 1 -type d | wc -l) -eq 1 ]]
+[[ $(find "$codex_home/.gpteasy-shell/shell-restore" -mindepth 1 -maxdepth 1 -type d | wc -l) -eq 2 ]]
 [[ $(gpteasy current) == *'Alpha Provider'* ]]
 [[ $(gpteasy <<<"q") == *'Alpha Provider (alpha-model) [当前]'* ]]
+restore_without_codex=$(PATH=/usr/bin:/bin gpteasy restore <<<"n" 2>&1 || true)
+[[ "$restore_without_codex" == *'当前状态：Alpha Provider'* ]]
+[[ "$restore_without_codex" != *'未找到 Codex CLI'* ]]
+unlock_without_codex=$(PATH=/usr/bin:/bin gpteasy unlock 2>&1 || true)
+[[ "$unlock_without_codex" == *'当前没有 shell owner 锁'* ]]
+[[ "$unlock_without_codex" != *'未找到 Codex CLI'* ]]
+chmod 755 "$codex_home"
+chmod 644 "$codex_home/config.toml"
+broad_permissions=$(gpteasy <<<"2" 2>&1)
+[[ "$broad_permissions" == *'已切换到：Beta Provider'* ]]
+[[ "$broad_permissions" == *'权限允许其他用户访问'* ]]
+if [[ "$(id -u)" != 0 ]]; then
+    export CODEX_HOME=/usr
+    foreign_owner=$(gpteasy <<<"1" 2>&1 || true)
+    [[ "$foreign_owner" == *'目标环境身份不匹配'* ]]
+    [[ "$foreign_owner" == *'/usr'* ]]
+    [[ "$foreign_owner" == *'sudo -u <用户> -H'* ]]
+    export CODEX_HOME="$codex_home"
+fi
 "#,
         );
     }
@@ -679,12 +707,11 @@ printf '%s\n' 'unsafe_parent = true' >"$unsafe_home/config.toml"
 chmod 777 "$unsafe_home"
 export CODEX_HOME="$unsafe_home"
 unsafe_before=$(sha256sum "$unsafe_home/config.toml")
-if (gpteasy <<<"1" >/dev/null 2>&1); then
-    printf '%s\n' 'group-writable Codex home was accepted' >&2
-    exit 1
-fi
-[[ "$unsafe_before" == "$(sha256sum "$unsafe_home/config.toml")" ]]
-[[ ! -e "$unsafe_home/.gpteasy-shell" ]]
+unsafe_result=$(gpteasy <<<"1" 2>&1)
+[[ "$unsafe_result" == *'已切换到：Alpha Provider'* ]]
+[[ "$unsafe_result" == *'权限允许其他用户访问'* ]]
+[[ "$unsafe_before" != "$(sha256sum "$unsafe_home/config.toml")" ]]
+[[ -e "$unsafe_home/.gpteasy-shell" ]]
 
 hardlink_home="$workspace/hardlink-codex"
 mkdir -p -- "$hardlink_home"
@@ -697,6 +724,15 @@ if (gpteasy <<<"1" >/dev/null 2>&1); then
     exit 1
 fi
 [[ "$hardlink_before" == "$(sha256sum "$hardlink_home/config.toml")" ]]
+
+linked_home_target="$workspace/linked-home-target"
+linked_home="$workspace/linked-home"
+mkdir -m 700 -- "$linked_home_target"
+ln -s -- "$linked_home_target" "$linked_home"
+export CODEX_HOME="$linked_home"
+linked_home_result=$(gpteasy <<<"1" 2>&1 || true)
+[[ "$linked_home_result" == *'CODEX_HOME 不能是符号链接'* ]]
+[[ ! -e "$linked_home_target/.gpteasy-shell" ]]
 "#,
         );
     }
@@ -766,10 +802,8 @@ subshell_owner_pid=$(
 
 credential=$(find "$codex_home/.gpteasy-shell/credentials" -type f -name '*.token')
 chmod 644 "$credential"
-if (gpteasy current >/dev/null 2>&1); then
-    printf '%s\n' 'unsafe credential permissions were accepted' >&2
-    exit 1
-fi
+current_with_broad_credential=$(gpteasy current)
+[[ "$current_with_broad_credential" == *'Alpha Provider'* ]]
 gpteasy help >/dev/null
 chmod 600 "$credential"
 
@@ -1064,7 +1098,8 @@ fn run_shell_black_box_with_canaries(
     }
     assert!(
         output.status.success(),
-        "{label} black-box test failed\nstdout:\n{}\nstderr:\n{}",
+        "{label} black-box test failed ({:?})\nstdout:\n{}\nstderr:\n{}",
+        output.status.code(),
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );

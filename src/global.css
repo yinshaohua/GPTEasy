@@ -1070,6 +1070,32 @@ select:focus-visible {
   border-left: 4px solid var(--danger);
 }
 
+.session-unavailable-note {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 14px;
+  margin-top: 26px;
+  padding: 18px 20px;
+  color: var(--text);
+  background: var(--surface-muted);
+  border-left: 4px solid var(--border-strong);
+}
+
+.session-unavailable-note > svg {
+  color: var(--text-muted);
+}
+
+.session-unavailable-note h2 {
+  margin: 0 0 6px;
+  font-size: 16px;
+}
+
+.session-unavailable-note p {
+  margin: 0;
+  color: var(--text-muted);
+  line-height: 1.55;
+}
+
 .command-button {
   display: inline-flex;
   align-items: center;
@@ -1476,6 +1502,15 @@ select:focus-visible {
   color: #795000;
   background: #fff5d6;
   border: 1px solid #dfc369;
+}
+
+.recommended-badge-link {
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.recommended-badge-link:hover {
+  border-color: #b48d1f;
 }
 
 .pending-badge {

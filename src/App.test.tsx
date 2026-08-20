@@ -779,7 +779,8 @@ describe("逐项供应商验证弹窗", () => {
     });
 
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "验证 Atlas" }));
+    fireEvent.click(await screen.findByRole("button", { name: "修改 Atlas" }));
+    fireEvent.click(screen.getByRole("button", { name: "重新验证" }));
 
     const dialog = await screen.findByRole("dialog", { name: "供应商验证" });
     expect(dialog).toHaveTextContent("验证通过");
@@ -788,6 +789,7 @@ describe("逐项供应商验证弹窗", () => {
     fireEvent.click(screen.getByRole("button", { name: "完成" }));
 
     expect(screen.queryByRole("dialog", { name: "供应商验证" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "返回" }));
     expect(screen.getByText("Atlas 重新验证成功。", { selector: "[role='status']" })).toBeInTheDocument();
     expect(screen.queryByText(/^验证于 /)).not.toBeInTheDocument();
     expect(screen.getByText("已验证")).toBeInTheDocument();
@@ -832,7 +834,8 @@ describe("逐项供应商验证弹窗", () => {
     });
 
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "验证 Atlas" }));
+    fireEvent.click(await screen.findByRole("button", { name: "修改 Atlas" }));
+    fireEvent.click(screen.getByRole("button", { name: "重新验证" }));
     fireEvent.click(await screen.findByRole("button", { name: "完成" }));
 
     expect(screen.getByRole("dialog", { name: "建议修正服务地址" })).toBeInTheDocument();
@@ -874,13 +877,15 @@ describe("逐项供应商验证弹窗", () => {
     });
 
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "验证 Atlas" }));
+    fireEvent.click(await screen.findByRole("button", { name: "修改 Atlas" }));
+    fireEvent.click(screen.getByRole("button", { name: "重新验证" }));
 
     expect(await screen.findByText(
       "API Key 未通过供应商认证。请确认 API Key 有效且账户有可用余额；验证会实际调用模型并产生少量费用。",
     )).toBeInTheDocument();
     expect(screen.getByRole("dialog", { name: "供应商验证" })).toHaveTextContent("验证失败");
     fireEvent.click(screen.getByRole("button", { name: "完成" }));
+    fireEvent.click(screen.getByRole("button", { name: "返回" }));
 
     expect(screen.getByText("Atlas 最近验证失败。", { selector: "[role='status']" })).toBeInTheDocument();
     expect(screen.queryByText(/^验证于 /)).not.toBeInTheDocument();
@@ -942,11 +947,13 @@ describe("验收凭据泄漏门禁", () => {
 
     const screenshotAssist = `${document.body.textContent}\n${document.documentElement.outerHTML}`;
     fireEvent.click(screen.getByRole("button", { name: "返回" }));
-    fireEvent.click(screen.getByRole("button", { name: "验证 Atlas" }));
+    fireEvent.click(screen.getByRole("button", { name: "修改 Atlas" }));
+    fireEvent.click(screen.getByRole("button", { name: "重新验证" }));
     const validationDialog = await screen.findByRole("dialog", { name: "供应商验证" });
     const errorDetails = within(validationDialog).getByText("技术详情").parentElement?.textContent ?? "";
     expect(errorDetails).not.toContain(apiKeyCanary);
     fireEvent.click(within(validationDialog).getByRole("button", { name: "完成" }));
+    fireEvent.click(screen.getByRole("button", { name: "返回" }));
     fireEvent.click(screen.getByRole("button", { name: "删除 Atlas" }));
     expect(notifications).toHaveLength(1);
     expect(screenshotAssist).not.toContain(apiKeyCanary);
@@ -996,7 +1003,7 @@ describe("供应商目录生命周期", () => {
     render(<App />);
 
     expect(await screen.findByText("DayWay", {}, { timeout: 5_000 })).toBeInTheDocument();
-    expect(screen.getByText("推荐")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "访问 DayWay 官网" })).toHaveTextContent("推荐");
     expect(screen.getByText("待配置")).toBeInTheDocument();
     expect(screen.getByRole("img", { name: "DayWay 固定在首位" })).toBeInTheDocument();
     expect(screen.getByText("https://dayway.site/v1")).toBeInTheDocument();
@@ -1023,7 +1030,7 @@ describe("供应商目录生命周期", () => {
       });
     });
     expect(screen.getByText("已验证")).toBeInTheDocument();
-    expect(screen.getByText("推荐")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "访问 DayWay 官网" })).toHaveTextContent("推荐");
     expect(screen.queryByText("待配置")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "拖拽排序 DayWay" })).not.toBeInTheDocument();
 
@@ -1329,10 +1336,12 @@ describe("供应商目录生命周期", () => {
     expect(screen.getByRole("button", { name: "会话管理" })).toBeEnabled();
     expect(await screen.findAllByText("已验证")).toHaveLength(2);
     expect(screen.getByRole("button", { name: "Current Provider 当前使用" })).toBeDisabled();
+    expect(within(screen.getByLabelText("已验证供应商")).getAllByText("当前使用")).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "验证 Atlas" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Atlas" })).not.toBeInTheDocument();
     expect(invoke.mock.calls.some(([command]) => command === "apply_environment_provider")).toBe(false);
 
-    fireEvent.click(screen.getByRole("button", { name: "应用 Atlas" }));
+    fireEvent.click(screen.getByRole("button", { name: "选择使用 Atlas" }));
     const dialog = screen.getByRole("dialog", { name: "确认配置切换" });
     expect(dialog).toHaveTextContent("Atlas");
     expect(dialog).toHaveTextContent("运行中的 ChatGPT/Codex 桌面版或 Codex CLI 可能继续使用旧配置");
@@ -1458,10 +1467,10 @@ describe("供应商目录生命周期", () => {
     });
 
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "应用 Concurrent Provider" }));
+    fireEvent.click(await screen.findByRole("button", { name: "选择使用 Concurrent Provider" }));
     fireEvent.click(screen.getByRole("button", { name: "切换" }));
 
-    const switchingButton = screen.getByRole("button", { name: "应用 Concurrent Provider" });
+    const switchingButton = screen.getByRole("button", { name: "选择使用 Concurrent Provider" });
     const openAiButton = within(openSettingsMenu()).getByRole("menuitem", { name: "返回 OpenAI 登录模式" });
     expect(switchingButton.querySelector(".is-spinning")).toBeInTheDocument();
     expect(openAiButton.querySelector(".is-spinning")).not.toBeInTheDocument();
@@ -1523,7 +1532,7 @@ describe("供应商目录生命周期", () => {
     });
 
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "应用 Target Provider" }));
+    fireEvent.click(await screen.findByRole("button", { name: "选择使用 Target Provider" }));
     fireEvent.click(screen.getByRole("button", { name: "切换" }));
 
     expect(await screen.findByText("无法读取当前用户 Codex 环境。")).toBeInTheDocument();
@@ -1603,10 +1612,13 @@ describe("供应商目录生命周期", () => {
     });
     expect(invoke.mock.calls.some(([command]) => command === "validate_provider_update")).toBe(false);
 
-    fireEvent.click(screen.getByRole("button", { name: "验证 Atlas Renamed" }));
+    fireEvent.click(screen.getByRole("button", { name: "修改 Atlas Renamed" }));
+    fireEvent.click(screen.getByRole("button", { name: "重新验证" }));
     await waitFor(() => {
       expect(invoke.mock.calls.some(([command]) => command === "revalidate_provider")).toBe(true);
     });
+    fireEvent.click(await screen.findByRole("button", { name: "完成" }));
+    fireEvent.click(screen.getByRole("button", { name: "返回" }));
     fireEvent.click(screen.getByRole("button", { name: "删除 Atlas Renamed" }));
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("delete_provider", {
@@ -2011,7 +2023,7 @@ describe("Codex 环境接管", () => {
     });
     render(<App />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "应用 Applied Provider" }));
+    fireEvent.click(await screen.findByRole("button", { name: "选择使用 Applied Provider" }));
 
     const dialog = screen.getByRole("dialog", { name: "确认配置切换" });
     expect(dialog).toHaveTextContent("将切换到“Applied Provider”");
@@ -2020,7 +2032,7 @@ describe("Codex 环境接管", () => {
     expect(dialog).not.toHaveTextContent("auth.json");
     fireEvent.click(screen.getByRole("button", { name: "取消" }));
     expect(invoke.mock.calls.some(([command]) => command === "apply_environment_provider")).toBe(false);
-    fireEvent.click(screen.getByRole("button", { name: "应用 Applied Provider" }));
+    fireEvent.click(screen.getByRole("button", { name: "选择使用 Applied Provider" }));
     fireEvent.click(screen.getByRole("button", { name: "切换" }));
 
     await waitFor(() => {
@@ -2085,7 +2097,7 @@ describe("Codex 环境接管", () => {
       return Promise.resolve(undefined);
     });
     render(<App />);
-    const takeover = await screen.findByRole("button", { name: "应用 Recovery Provider" });
+    const takeover = await screen.findByRole("button", { name: "选择使用 Recovery Provider" });
     expect(takeover).toBeEnabled();
     fireEvent.click(takeover);
     const dialog = screen.getByRole("dialog", { name: "确认配置切换" });
@@ -2141,7 +2153,7 @@ describe("Codex 环境接管", () => {
     });
 
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "应用 Failure Provider" }));
+    fireEvent.click(await screen.findByRole("button", { name: "选择使用 Failure Provider" }));
     fireEvent.click(screen.getByRole("button", { name: "切换" }));
 
     expect(await screen.findByText(/运行中的 Codex 消费者可能继续使用旧配置/))
@@ -2191,7 +2203,7 @@ describe("Codex 环境接管", () => {
     });
 
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "应用 Close Failure Provider" }));
+    fireEvent.click(await screen.findByRole("button", { name: "选择使用 Close Failure Provider" }));
     fireEvent.click(screen.getByRole("button", { name: "切换" }));
 
     expect(await screen.findByRole("alert")).toBeInTheDocument();
@@ -2242,7 +2254,7 @@ describe("Codex 环境接管", () => {
     });
 
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "应用 Force Provider" }));
+    fireEvent.click(await screen.findByRole("button", { name: "选择使用 Force Provider" }));
     fireEvent.click(screen.getByRole("button", { name: "切换" }));
 
     await waitFor(() => {
@@ -2290,7 +2302,7 @@ describe("Codex 环境接管", () => {
     render(<App />);
 
     expect(await screen.findByText("无法安全解析当前配置，不能强制覆盖。")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "应用 Blocked Provider" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "选择使用 Blocked Provider" })).toBeDisabled();
     expect(invoke.mock.calls.some(([command]) => command === "apply_environment_provider")).toBe(false);
   });
 
@@ -2433,7 +2445,7 @@ describe("Codex 环境接管", () => {
     await waitFor(() => expect(openAiButton).toHaveAttribute("title",
       "OpenAI 登录已在外部失效；当前模式保持不变。",
     ));
-    fireEvent.click(screen.getByRole("button", { name: "应用 Return Provider" }));
+    fireEvent.click(screen.getByRole("button", { name: "选择使用 Return Provider" }));
     fireEvent.click(screen.getByRole("button", { name: "切换" }));
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("apply_environment_provider", {
@@ -2529,7 +2541,7 @@ describe("启动状态", () => {
 
     render(<App />);
 
-    const apply = await screen.findByRole("button", { name: "应用 Saved Provider" });
+    const apply = await screen.findByRole("button", { name: "选择使用 Saved Provider" });
     expect(apply).toBeEnabled();
   });
 

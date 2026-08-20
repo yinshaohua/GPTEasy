@@ -51,7 +51,8 @@
 - 点击“导出 Linux 脚本”后选择 Bash 4+ 或 Zsh 5+，一次只生成一种 shell 的独立文件；建议文件名分别为 `gpteasy.sh` 和 `gpteasy.zsh`。
 - 导出前说明文件包含全部已验证供应商的敏感凭据，只能保存到受信任的当前用户位置。保存路径已存在时必须再次确认覆盖，取消或失败不得改动原文件。
 - 导出完成后介绍直接执行脚本、source 到当前会话，以及在 `.bashrc` 或 `.zshrc` 中 source 以便长期使用；GPTEasy 不自动修改任何 shell 启动文件。
-- 用法说明列出 `gpteasy`、`help`、`current`、`restore`、`info` 和 `unlock` 的主要效果，并说明 `gpteasy help`、`gpteasy --help` 与 `gpteasy -h` 等价。
+- 用法说明列出 `gpteasy`、`help`、`current`、`restore`、`info` 和 `unlock` 的主要效果，并说明 `gpteasy help`、`gpteasy --help` 与 `gpteasy -h` 等价。目标 Linux 尚未安装 Codex 时，用户仍可选择供应商并预先创建默认配置；安装 `codex-cli 0.147.0` 或更高版本后即可使用。若已检测到的 CLI 版本过低、无法识别或无法执行，脚本拒绝写入。
+- 导出脚本管理当前执行用户的 `CODEX_HOME`，不根据全局 `codex` 的安装位置推断配置所有权。目标目录、`config.toml` 最终目标或 Linux 私有状态属于其他用户时，脚本显示目标路径和所有者并拒绝写入，建议切换至该用户身份执行；不自动运行 `sudo`、`chown` 或 `chmod`。root 可以正常管理自己的 `/root/.codex`。已有当前用户文件的权限过宽只显示安全警告，不阻断；新建私有状态始终采用私有权限。
 - 直接执行和 source 使用相同的公开入口。source 本身不创建目录、读取或修改 Codex 配置；只有用户调用 `gpteasy` 并明确选择供应商后才写入。
 
 ## WSL2 供应商选择

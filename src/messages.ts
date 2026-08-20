@@ -274,13 +274,12 @@ export const providerMessages = {
   currentProvider: "当前使用",
   editProvider: "修改",
   editProviderAccessibleName: (name: string) => `修改 ${name}`,
-  verify: "验证",
-  verifyProviderAccessibleName: (name: string) => `验证 ${name}`,
   deleteProviderAccessibleName: (name: string) => `删除 ${name}`,
   currentProviderAccessibleName: (name: string) => `${name} 当前使用`,
-  applyProviderAccessibleName: (name: string) => `应用 ${name}`,
+  selectProviderAccessibleName: (name: string) => `选择使用 ${name}`,
   fixedProviderAccessibleName: (name: string) => `${name} 固定在首位`,
   applyProvider: "应用",
+  selectProvider: "选择使用",
   configureDayway: "配置 DayWay",
   visitDaywayWebsite: "访问官网",
   visitDaywayWebsiteAccessibleName: "访问 DayWay 官网",
@@ -308,7 +307,7 @@ export const providerMessages = {
   linuxExportChooseLocation: "选择保存位置",
   linuxExportSuccessTitle: (shell: string) => `${shell} 脚本已导出`,
   linuxExportSuccessMessage: (count: number) =>
-    `已固化 ${count} 个已验证供应商。桌面应用不会修改任何 shell 启动文件。`,
+    `已固化 ${count} 个已验证供应商。目标 Linux 尚未安装 Codex 时仍可预先配置；桌面应用不会修改任何 shell 启动文件。`,
   linuxExportPermissions: "建议保护权限",
   linuxExportDirect: "直接执行",
   linuxExportCurrentSession: "当前会话 source",
@@ -518,7 +517,7 @@ export const sessionMessages = {
   unavailable: {
     codex_missing: {
       title: "未找到兼容的 Codex",
-      body: "请先安装 Codex CLI，再重新检查。GPTEasy 不会自动安装或升级。",
+      body: "请先安装 Codex CLI。GPTEasy 不会自动安装或升级。",
     },
     incompatible: {
       title: "需要升级 Codex",
