@@ -23,8 +23,7 @@ GPTEasy 是一款面向 Windows 用户的 Codex 配置与会话管理工具。�
 Get-FileHash .\GPTEasy_1.1.0_x64-setup.exe -Algorithm SHA256
 ```
 
-> [!WARNING]
-> 安装包目前没有 Authenticode 代码签名，Windows Defender SmartScreen 可能显示“Windows 已保护你的电脑”。请确认安装包来自本仓库的 Release，并且 SHA-256 与 `SHA256SUMS.txt` 一致；确认后可通过“更多信息”选择“仍要运行”。
+安装包目前没有 Authenticode 代码签名，Windows Defender SmartScreen 可能显示“Windows 已保护你的电脑”。请确认安装包来自本仓库的 Release，并且 SHA-256 与 `SHA256SUMS.txt` 一致；确认后可通过“更多信息”选择“仍要运行”。
 
 ## 推荐供应商
 
