@@ -28,16 +28,19 @@ Get-FileHash .\GPTEasy_1.1.0_x64-setup.exe -Algorithm SHA256
 
 ## 推荐供应商
 
-<div align="center">
-  <a href="https://dayway.site/">
-    <img src="https://raw.githubusercontent.com/yinshaohua/GPTEasy/main/images/dayway-512x512.png" alt="DayWay" width="180">
-  </a>
-  <h3><a href="https://dayway.site/">DayWay：GPTEasy 唯一赞助商</a></h3>
-</div>
-
-> **DayWay 提供 GPT 模型，便宜，稳定，有独立生图台，能开国内发票。**
-
-立即访问 [DayWay 官网](https://dayway.site/) 了解服务详情。
+<table>
+  <tr>
+    <td width="180" align="center" valign="middle">
+      <a href="https://dayway.site/">
+        <img src="https://raw.githubusercontent.com/yinshaohua/GPTEasy/main/images/dayway-512x512.png" alt="DayWay" width="150">
+      </a>
+    </td>
+    <td valign="middle">
+      <strong><a href="https://dayway.site/">DayWay：GPTEasy 唯一赞助商</a></strong><br>
+      提供 GPT 模型，便宜，稳定，有独立生图台，能开国内发票。
+    </td>
+  </tr>
+</table>
 
 ## 主要功能
 
