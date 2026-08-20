@@ -10,6 +10,9 @@ const workspace = await mkdtemp(path.join(os.tmpdir(), "gpteasy-gitcode-sync-"))
 try {
   const release = await githubRequest(`/repos/${configuration.githubRepository}/releases/tags/${encodeURIComponent(configuration.tag)}`);
   validateRelease(release, configuration.tag);
+  // GitHub API preserves a body accidentally submitted as literal "\\n" text.
+  // Normalize it before copying release notes to GitCode and the updater manifest.
+  release.body = normalizeReleaseBody(release.body);
   const currentManifest = await readCurrentManifest();
   if (!currentManifest) await verifyRawBaseline();
   if (currentManifest && compareVersions(release.tag_name.slice(1), currentManifest.manifest.version) < 0) {
@@ -188,6 +191,13 @@ function validateRelease(release, tag) {
   if (!release || release.draft || release.prerelease || release.tag_name !== tag || !isRfc3339(release.published_at)) {
     throw new Error("GitHub release must be a published stable release");
   }
+}
+
+function normalizeReleaseBody(body) {
+  return String(body ?? "")
+    .replaceAll("\\r\\n", "\n")
+    .replaceAll("\\n", "\n")
+    .replaceAll("\\r", "\r");
 }
 
 async function readCurrentManifest() {

@@ -34,6 +34,21 @@ test("首次同步验证所有附件后最后推进正式清单", async () => {
   }
 });
 
+test("Release 正文中的字面量转义换行会规范化为 Markdown 换行", async () => {
+  const adapter = await startAdapter({
+    releasePatch: { body: "第一行\\n\\n### 更新\\n- 第二行" },
+  });
+  try {
+    const result = await runSync(adapter.baseUrl);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(adapter.state.manifests[0].notes, "第一行\n\n### 更新\n- 第二行");
+    const releaseCreate = adapter.state.records.find((record) => record.operation === "release-create");
+    assert.equal(JSON.parse(releaseCreate.body).body, "第一行\n\n### 更新\n- 第二行");
+  } finally {
+    await adapter.close();
+  }
+});
+
 test("部分上传后重跑会复用匹配附件并补传缺失附件", async () => {
   const adapter = await startAdapter({
     releaseExists: true,
@@ -276,7 +291,7 @@ async function startAdapter(options = {}) {
     }
     if (request.method === "POST" && url.pathname.endsWith("/releases")) {
       state.releaseExists = true;
-      state.records.push({ ...record, operation: "release-create" });
+      state.records.push({ ...record, body: body.toString("utf8"), operation: "release-create" });
       return json(response, 201, releaseResponse(state, server));
     }
     if (request.method === "GET" && url.pathname.endsWith("/upload_url")) {
