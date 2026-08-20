@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -1439,7 +1439,22 @@ fn discover_codex() -> Result<LaunchCommand, SessionFailure> {
         }
     }
     let path = std::env::var_os("PATH").unwrap_or_default();
-    for directory in std::env::split_paths(&path) {
+    #[cfg(windows)]
+    let current_user_path = read_current_user_path();
+    #[cfg(not(windows))]
+    let current_user_path: Option<OsString> = None;
+    discover_codex_in_paths(&path, current_user_path.as_deref())
+}
+
+fn discover_codex_in_paths(
+    process_path: &OsStr,
+    current_user_path: Option<&OsStr>,
+) -> Result<LaunchCommand, SessionFailure> {
+    let mut directories = std::env::split_paths(process_path).collect::<Vec<_>>();
+    if let Some(current_user_path) = current_user_path {
+        directories.extend(std::env::split_paths(current_user_path));
+    }
+    for directory in directories {
         for name in candidate_names() {
             let candidate = directory.join(name);
             if !candidate.is_file() {
@@ -1479,6 +1494,18 @@ fn discover_codex() -> Result<LaunchCommand, SessionFailure> {
         SessionFailureCategory::CodexMissing,
         "session.codex_missing",
     ))
+}
+
+#[cfg(windows)]
+fn read_current_user_path() -> Option<OsString> {
+    use winreg::RegKey;
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
+
+    RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey_with_flags("Environment", KEY_READ)
+        .ok()?
+        .get_value::<OsString, _>("Path")
+        .ok()
 }
 
 #[cfg(windows)]
@@ -1681,6 +1708,48 @@ impl Drop for ProcessTreeJob {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn codex_installed_after_process_start_is_discovered_from_current_user_path() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let stale_directory = temp.path().join("stale-path");
+        let npm_directory = temp.path().join("npm");
+        std::fs::create_dir_all(&stale_directory).expect("create stale path");
+        std::fs::create_dir_all(&npm_directory).expect("create npm path");
+        std::fs::write(npm_directory.join("codex.cmd"), "@echo off\r\n").expect("create npm shim");
+        let native = npm_directory
+            .join("node_modules")
+            .join("@openai")
+            .join("codex")
+            .join("node_modules")
+            .join("@openai")
+            .join(if cfg!(target_arch = "aarch64") {
+                "codex-win32-arm64"
+            } else {
+                "codex-win32-x64"
+            })
+            .join("vendor")
+            .join(if cfg!(target_arch = "aarch64") {
+                "aarch64-pc-windows-msvc"
+            } else {
+                "x86_64-pc-windows-msvc"
+            })
+            .join("bin")
+            .join("codex.exe");
+        std::fs::create_dir_all(native.parent().expect("native parent"))
+            .expect("create native directory");
+        std::fs::write(&native, []).expect("create native executable");
+        let stale_path = std::env::join_paths([stale_directory]).expect("stale process path");
+        let current_user_path = std::env::join_paths([npm_directory]).expect("current user path");
+
+        let launch = discover_codex_in_paths(&stale_path, Some(&current_user_path))
+            .expect("newly installed Codex must be discovered without restarting GPTEasy");
+
+        assert_eq!(launch.identity, native);
+        assert_eq!(launch.program, native);
+        assert!(launch.args_prefix.is_empty());
+    }
 
     #[test]
     fn custom_interactive_sources_are_preserved_but_internal_sources_are_filtered() {
