@@ -1,6 +1,6 @@
 [package]
 name = "gpteasy"
-version = "1.2.0"
+version = "1.2.1"
 description = "安全管理当前用户 Codex 环境"
 authors = ["GPTEasy contributors"]
 edition = "2024"
