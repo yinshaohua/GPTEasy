@@ -31,6 +31,15 @@ impl CodexInspector {
         self.inspect_with_credentials(true)
     }
 
+    pub(crate) fn config_matches_fingerprint(&self, expected: &str) -> bool {
+        let config_path = self.codex_home.join("config.toml");
+        let Ok(bytes) = fs::read(config_path) else {
+            return false;
+        };
+        sha256_hex(&bytes) == expected
+            || crate::environment::managed_config_matches_applied_evidence(&bytes, Some(expected))
+    }
+
     fn inspect_with_credentials(&self, inspect_file_content: bool) -> CodexSnapshot {
         let (config_status, config_fingerprint, credential_store, recovered_desktop_rewrite) =
             self.inspect_config();

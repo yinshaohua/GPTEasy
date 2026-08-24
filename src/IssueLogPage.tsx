@@ -6,6 +6,7 @@ import {
   copyIssueLogs,
   exportIssueLogs,
   exportAllIssueLogs,
+  getIssueLogPath,
   listIssueLogs,
   type IssueLogFilter,
   type IssueLogLevel,
@@ -21,6 +22,7 @@ export default function IssueLogPage({ active = true }: { active?: boolean }) {
   const [records, setRecords] = useState<IssueLogRecord[]>([]);
   const [loading, setLoading] = useState(false);
   const [feedback, setFeedback] = useState("");
+  const [logPath, setLogPath] = useState<string | null>(null);
 
   const filter = useMemo<IssueLogFilter>(() => ({
     sinceEpochSeconds: Math.floor(Date.now() / 1000) - Number(days) * DAY_SECONDS,
@@ -43,6 +45,11 @@ export default function IssueLogPage({ active = true }: { active?: boolean }) {
   useEffect(() => {
     if (active) void refresh();
   }, [active, refresh]);
+
+  useEffect(() => {
+    if (!active) return;
+    void getIssueLogPath().then(setLogPath).catch(() => setLogPath(null));
+  }, [active]);
 
   async function copy() {
     try {
@@ -106,7 +113,12 @@ export default function IssueLogPage({ active = true }: { active?: boolean }) {
       {feedback && <p className="inline-feedback" role="status">{feedback}</p>}
       <section className="issue-log-list" aria-live="polite">
         {loading && <p className="pane-note">正在读取问题日志...</p>}
-        {!loading && records.length === 0 && <p className="pane-note">当前筛选范围没有日志。</p>}
+        {!loading && records.length === 0 && (
+          <div className="issue-log-empty">
+            <p className="pane-note">当前筛选范围没有日志。</p>
+            {logPath && <p className="secondary-note">日志文件：<code>{logPath}</code></p>}
+          </div>
+        )}
         {!loading && records.map((record, index) => (
           <article className={`issue-log-entry is-${record.level}`} key={`${record.timestampEpochSeconds}-${index}`}>
             <div className="issue-log-entry-meta"><time dateTime={new Date(record.timestampEpochSeconds * 1000).toISOString()}>{new Date(record.timestampEpochSeconds * 1000).toLocaleString("zh-CN")}</time><span>{record.level === "error" ? "错误" : record.level === "warn" ? "警告" : "信息"}</span><code>{record.event}</code></div>

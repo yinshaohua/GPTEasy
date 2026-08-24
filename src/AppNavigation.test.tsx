@@ -98,3 +98,47 @@ it("从左侧导航进入真实会话历史列表", async () => {
   expect(sessionOpenAi).toBeDisabled();
   expect(screen.queryByText(/即将支持/)).not.toBeInTheDocument();
 });
+
+it("启动被阻断时仍可从设置进入问题日志", async () => {
+  listen.mockResolvedValue(() => undefined);
+  invoke.mockImplementation((command: string) => {
+    if (command === "get_startup_snapshot") {
+      return Promise.resolve({
+        mode: "blocked",
+        messageId: "startup.managed_config_conflict",
+        blockReason: "managed_config_conflict",
+        pendingOperationResolution: null,
+        database: {
+          status: "ready",
+          schemaVersion: 8,
+          reason: null,
+          contents: {
+            providerCount: 1,
+            hasLastAppliedState: true,
+            hasPendingConfigOperation: false,
+            pendingRestart: false,
+            pendingConfigOperation: null,
+          },
+        },
+        codex: {
+          configStatus: "valid",
+          configFingerprint: "fixture",
+          credentialStore: "file",
+          credentialFileStatus: "present",
+          loginStatus: "logged_in",
+        },
+      });
+    }
+    if (command === "list_issue_logs") return Promise.resolve([]);
+    if (command === "get_issue_log_path") return Promise.resolve("C:\\state\\issue-log.jsonl");
+    return Promise.resolve(undefined);
+  });
+
+  render(<App />);
+  await screen.findByRole("heading", { name: "无法安全打开本地状态" });
+  fireEvent.click(screen.getByRole("button", { name: "设置" }));
+  fireEvent.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: "问题日志" }));
+
+  expect(await screen.findByRole("heading", { name: "问题日志" })).toBeInTheDocument();
+  expect(screen.getByText("C:\\state\\issue-log.jsonl")).toBeInTheDocument();
+});

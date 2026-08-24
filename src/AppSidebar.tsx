@@ -212,10 +212,7 @@ function SidebarUpdateIndicator({ update }: { update: UpdateSidebarState }) {
           </>
         )}
         {kind === "failed" && (
-          <>
-            <TriangleAlert size={18} aria-hidden="true" />
-            <span className="sidebar-update-label">更新失败</span>
-          </>
+          <TriangleAlert size={18} aria-hidden="true" />
         )}
         {kind === "installing" && (
           <>

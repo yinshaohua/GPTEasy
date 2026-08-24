@@ -25,8 +25,8 @@ use crate::session::{
 use crate::startup::{StartupCoordinator, StartupSnapshot};
 use crate::tray;
 use crate::update::{
-    UpdateActivityGate, UpdateCoordinator, UpdateInstallFailure, UpdateInstallFailureCategory,
-    UpdateSnapshot, UpdateState,
+    UpdateActivityGate, UpdateCoordinator, UpdateFailureCategory, UpdateInstallFailure,
+    UpdateInstallFailureCategory, UpdateSnapshot, UpdateState,
 };
 use crate::wsl::{
     WslApplication, WslApplyResult, WslDeletionAuditError, WslEnvironmentSummary, WslFailure,
@@ -193,8 +193,11 @@ pub(crate) struct CommandFailure {
 #[tauri::command]
 pub(crate) fn get_startup_snapshot(
     state: State<'_, StartupRuntime>,
+    logs: State<'_, IssueLogRuntime>,
 ) -> Result<StartupSnapshot, CommandFailure> {
-    state.inspect()
+    let result = state.inspect();
+    log_startup_inspection(&logs.store, &result);
+    result
 }
 
 #[tauri::command]
@@ -206,14 +209,23 @@ pub(crate) fn get_update_snapshot(state: State<'_, UpdateRuntime>) -> UpdateSnap
 pub(crate) fn install_update(
     app: AppHandle,
     state: State<'_, UpdateRuntime>,
+    logs: State<'_, IssueLogRuntime>,
 ) -> Result<UpdateSnapshot, UpdateInstallFailure> {
     let Some(guard) = state.activity.try_begin_install() else {
-        return Err(UpdateInstallFailure {
+        let failure = UpdateInstallFailure {
             category: UpdateInstallFailureCategory::Busy,
             message_id: "update.busy",
-        });
+        };
+        log_update_install_failure(&logs.store, &failure, &state.coordinator.snapshot());
+        return Err(failure);
     };
-    let snapshot = state.coordinator.confirm_install()?;
+    let snapshot = match state.coordinator.confirm_install() {
+        Ok(snapshot) => snapshot,
+        Err(failure) => {
+            log_update_install_failure(&logs.store, &failure, &state.coordinator.snapshot());
+            return Err(failure);
+        }
+    };
     guard.commit_install();
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     {
@@ -241,6 +253,7 @@ pub(crate) async fn perform_update_check(
     } else {
         coordinator.scheduled_check_and_download(progress).await
     };
+    log_update_check_failure(&app.state::<IssueLogRuntime>().store, &snapshot);
     runtime.notify_if_hidden(app, &snapshot);
     let _ = app.emit("update-progress", snapshot.clone());
     snapshot
@@ -257,6 +270,58 @@ pub(crate) async fn perform_update_check(
 #[tauri::command]
 pub(crate) async fn check_for_updates(app: AppHandle) -> UpdateSnapshot {
     perform_update_check(&app, true).await
+}
+
+fn log_update_check_failure(store: &IssueLogStore, snapshot: &UpdateSnapshot) {
+    let Some(category) = snapshot.failure_category else {
+        return;
+    };
+    store.append(
+        IssueLogLevel::Error,
+        "update.check",
+        "应用更新检查失败",
+        Some(format!(
+            "category={} target_version={}",
+            update_failure_category_name(category),
+            snapshot.available_version.as_deref().unwrap_or("none"),
+        )),
+    );
+}
+
+fn log_update_install_failure(
+    store: &IssueLogStore,
+    failure: &UpdateInstallFailure,
+    snapshot: &UpdateSnapshot,
+) {
+    store.append(
+        IssueLogLevel::Error,
+        "update.install",
+        failure.message_id,
+        Some(format!(
+            "category={} target_version={}",
+            update_install_failure_category_name(&failure.category),
+            snapshot.available_version.as_deref().unwrap_or("none"),
+        )),
+    );
+}
+
+fn update_failure_category_name(category: UpdateFailureCategory) -> &'static str {
+    match category {
+        UpdateFailureCategory::CheckFailed => "check_failed",
+        UpdateFailureCategory::ManifestInvalid => "manifest_invalid",
+        UpdateFailureCategory::DownloadFailed => "download_failed",
+        UpdateFailureCategory::SignatureInvalid => "signature_invalid",
+    }
+}
+
+fn update_install_failure_category_name(category: &UpdateInstallFailureCategory) -> &'static str {
+    match category {
+        UpdateInstallFailureCategory::NoPendingUpdate => "no_pending_update",
+        UpdateInstallFailureCategory::Busy => "busy",
+        UpdateInstallFailureCategory::UnsupportedPlatform => "unsupported_platform",
+        UpdateInstallFailureCategory::StateUnavailable => "state_unavailable",
+        UpdateInstallFailureCategory::LaunchFailed => "launch_failed",
+    }
 }
 
 #[tauri::command]
@@ -325,8 +390,32 @@ fn open_external_url(url: &str) -> Result<(), CommandFailure> {
 #[tauri::command]
 pub(crate) fn refresh_startup_snapshot(
     state: State<'_, StartupRuntime>,
+    logs: State<'_, IssueLogRuntime>,
 ) -> Result<StartupSnapshot, CommandFailure> {
-    state.inspect()
+    let result = state.inspect();
+    log_startup_inspection(&logs.store, &result);
+    result
+}
+
+fn log_startup_inspection(store: &IssueLogStore, result: &Result<StartupSnapshot, CommandFailure>) {
+    match result {
+        Ok(snapshot) if snapshot.mode == crate::startup::ApplicationMode::Blocked => store.append(
+            IssueLogLevel::Error,
+            "startup.inspect",
+            snapshot.message_id,
+            Some(format!(
+                "block_reason={:?}; database_status={:?}; config_status={:?}",
+                snapshot.block_reason, snapshot.database.status, snapshot.codex.config_status
+            )),
+        ),
+        Err(failure) => store.append(
+            IssueLogLevel::Error,
+            "startup.inspect",
+            failure.message_id,
+            None,
+        ),
+        _ => {}
+    }
 }
 
 #[tauri::command]
@@ -552,11 +641,30 @@ pub(crate) fn export_linux_script(
 #[tauri::command]
 pub(crate) async fn get_environment_snapshot(
     state: State<'_, EnvironmentRuntime>,
+    logs: State<'_, IssueLogRuntime>,
 ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
     let application = state.application.clone();
-    tauri::async_runtime::spawn_blocking(move || application.inspect())
+    let result = tauri::async_runtime::spawn_blocking(move || application.inspect())
         .await
-        .map_err(|_| environment_task_failed())?
+        .map_err(|_| environment_task_failed())?;
+    if let Ok(snapshot) = &result {
+        if snapshot.state == crate::environment::EnvironmentState::Conflict {
+            logs.store.append(
+                IssueLogLevel::Error,
+                "environment.inspect",
+                snapshot.message_id,
+                Some("state=conflict".to_owned()),
+            );
+        }
+    } else if let Err(failure) = &result {
+        logs.store.append(
+            IssueLogLevel::Error,
+            "environment.inspect",
+            failure.message_id,
+            Some(format!("category={:?}", failure.category)),
+        );
+    }
+    result
 }
 
 #[tauri::command]
@@ -569,6 +677,11 @@ pub(crate) fn list_issue_logs(
     state
         .store
         .list(since_epoch_seconds, level, query.as_deref())
+}
+
+#[tauri::command]
+pub(crate) fn get_issue_log_path(state: State<'_, IssueLogRuntime>) -> String {
+    state.store.path().to_string_lossy().into_owned()
 }
 
 #[tauri::command]
@@ -774,6 +887,7 @@ pub(crate) async fn apply_environment_provider(
 pub(crate) async fn restore_last_environment_config(
     app: AppHandle,
     state: State<'_, EnvironmentRuntime>,
+    logs: State<'_, IssueLogRuntime>,
     confirm_restore: bool,
     expected_revision: String,
 ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
@@ -789,6 +903,14 @@ pub(crate) async fn restore_last_environment_config(
     })
     .await
     .map_err(|_| environment_task_failed())?;
+    if let Err(failure) = &result {
+        logs.store.append(
+            IssueLogLevel::Error,
+            "environment.restore",
+            failure.message_id,
+            Some(format!("category={:?}", failure.category)),
+        );
+    }
     refresh_environment_tray_after(&app, result)
 }
 
@@ -796,6 +918,7 @@ pub(crate) async fn restore_last_environment_config(
 pub(crate) async fn switch_to_openai_login(
     app: AppHandle,
     state: State<'_, EnvironmentRuntime>,
+    logs: State<'_, IssueLogRuntime>,
     expected_revision: String,
 ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
     let Some(_activity) = app.state::<UpdateRuntime>().activity.try_begin("配置写入") else {
@@ -810,6 +933,20 @@ pub(crate) async fn switch_to_openai_login(
     })
     .await
     .map_err(|_| environment_task_failed())?;
+    match &result {
+        Ok(snapshot) => logs.store.append(
+            IssueLogLevel::Info,
+            "environment.switch_to_openai_login",
+            "已切换到 OpenAI 登录模式",
+            Some(format!("state={:?}", snapshot.state)),
+        ),
+        Err(failure) => logs.store.append(
+            IssueLogLevel::Error,
+            "environment.switch_to_openai_login",
+            failure.message_id,
+            Some(format!("category={:?}", failure.category)),
+        ),
+    }
     refresh_environment_tray_after(&app, result)
 }
 
@@ -1260,4 +1397,77 @@ fn environment_task_failed() -> EnvironmentFailure {
         EnvironmentFailureCategory::StateUnavailable,
         "environment.state_unavailable",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        IssueLogLevel, IssueLogStore, UpdateFailureCategory, UpdateInstallFailure,
+        UpdateInstallFailureCategory, UpdateSnapshot, UpdateState, log_update_check_failure,
+        log_update_install_failure,
+    };
+    use tempfile::tempdir;
+
+    fn failed_update_snapshot(category: UpdateFailureCategory) -> UpdateSnapshot {
+        UpdateSnapshot {
+            current_version: "1.0.0".to_owned(),
+            state: UpdateState::Failed,
+            available_version: Some("1.1.0".to_owned()),
+            notes: None,
+            published_at: None,
+            checked_at_epoch_seconds: Some(1),
+            downloaded_bytes: 0,
+            total_bytes: None,
+            progress_percent: None,
+            failure_category: Some(category),
+            error_message: None,
+            manual_download_url: "https://example.invalid/download".to_owned(),
+            release_notes_url: None,
+        }
+    }
+
+    #[test]
+    fn final_update_check_failure_is_written_to_issue_log_without_network_details() {
+        let directory = tempdir().expect("issue log directory");
+        let store = IssueLogStore::new(directory.path());
+        let snapshot = failed_update_snapshot(UpdateFailureCategory::DownloadFailed);
+
+        log_update_check_failure(&store, &snapshot);
+
+        let records = store.list(0, Some(IssueLogLevel::Error), Some("update.check"));
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].event, "update.check");
+        assert_eq!(
+            records[0].details.as_deref(),
+            Some("category=download_failed target_version=1.1.0")
+        );
+        assert!(
+            !records[0]
+                .details
+                .as_deref()
+                .unwrap_or_default()
+                .contains("example.invalid")
+        );
+    }
+
+    #[test]
+    fn update_install_failure_is_written_to_issue_log() {
+        let directory = tempdir().expect("issue log directory");
+        let store = IssueLogStore::new(directory.path());
+        let snapshot = failed_update_snapshot(UpdateFailureCategory::CheckFailed);
+        let failure = UpdateInstallFailure {
+            category: UpdateInstallFailureCategory::LaunchFailed,
+            message_id: "update.install_launch_failed",
+        };
+
+        log_update_install_failure(&store, &failure, &snapshot);
+
+        let records = store.list(0, Some(IssueLogLevel::Error), Some("update.install"));
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].message, "update.install_launch_failed");
+        assert_eq!(
+            records[0].details.as_deref(),
+            Some("category=launch_failed target_version=1.1.0")
+        );
+    }
 }

@@ -18,6 +18,11 @@ export interface IssueLogFilter {
   query: string;
 }
 
+export function getIssueLogPath(): Promise<string> {
+  if (isBrowserPreview()) return Promise.resolve("issue-log.jsonl");
+  return invoke<string>("get_issue_log_path");
+}
+
 export function listIssueLogs(filter: IssueLogFilter): Promise<IssueLogRecord[]> {
   if (isBrowserPreview()) return Promise.resolve([]);
   return invoke<IssueLogRecord[]>("list_issue_logs", {

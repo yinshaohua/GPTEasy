@@ -988,8 +988,7 @@ export default function ProviderPage({
   const openAiDisabled = busy
     || wslBusy
     || switchingMode
-    || !environment
-    || environment.loginStatus !== "logged_in";
+    || !environment;
 
   useEffect(() => {
     onOpenAiActionChange?.({
@@ -998,7 +997,7 @@ export default function ProviderPage({
       description: openAiReason,
       disabled: openAiDisabled,
       onSelect: () => {
-        if (!environment || environment.loginStatus !== "logged_in" || openAiCurrent) return;
+        if (!environment || openAiCurrent) return;
         setConfigChangeRequest({ kind: "openai" });
       },
     });

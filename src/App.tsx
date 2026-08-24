@@ -206,7 +206,9 @@ function Shell({
         currentProviderName={currentProviderName}
         update={update}
       />
-      <main className="main-content">{children}</main>
+      <main className="main-content">
+        {page === "logs" ? <IssueLogPage active /> : children}
+      </main>
     </div>
   );
 }

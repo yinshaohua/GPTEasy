@@ -234,9 +234,7 @@ select {
 .sidebar-update-indicator.is-pending:hover,
 .sidebar-update-indicator.is-pending:focus-visible,
 .sidebar-update-indicator.is-incomplete:hover,
-.sidebar-update-indicator.is-incomplete:focus-visible,
-.sidebar-update-indicator.is-failed:hover,
-.sidebar-update-indicator.is-failed:focus-visible {
+.sidebar-update-indicator.is-incomplete:focus-visible {
   width: 100%;
 }
 
@@ -2620,6 +2618,16 @@ select:focus-visible {
   display: grid;
   gap: 8px;
   padding-top: 16px;
+}
+
+.issue-log-empty {
+  display: grid;
+  gap: 6px;
+}
+
+.issue-log-empty .secondary-note {
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 
 .issue-log-entry {

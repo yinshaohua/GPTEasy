@@ -2363,44 +2363,44 @@ describe("Codex 环境接管", () => {
     expect(activeOpenAi).toHaveAttribute("title", "当前已是 OpenAI 登录模式。");
   });
 
-  it("登录缺失或不可判断时解释原因且不发起 OpenAI 模式写入", async () => {
-    for (const [loginStatus, message] of [
-      ["not_logged_in", "请先在 Codex 中完成 OpenAI 登录。"],
-      ["unavailable", "无法确认 Codex 登录状态，已阻止切换。"],
-    ] as const) {
-      cleanup();
-      invoke.mockClear();
-      invoke.mockImplementation((command: string) => {
-        if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
-        if (command === "list_providers") return Promise.resolve([]);
-        if (command === "get_environment_snapshot") {
-          return Promise.resolve({
-            state: "external",
-            mode: null,
-            messageId: "environment.external",
-            revision: `blocked-${loginStatus}`,
-            requiresTakeoverConfirmation: true,
-            restoreAvailability: "no_backup",
-            loginStatus,
-            pendingRestart: false,
-            consumers: { desktop: "unknown", cli: "unknown" },
-            impacts: [],
-            currentProvider: null,
-          });
-        }
-        return Promise.resolve(undefined);
-      });
+  it("登录状态缺失时仍可发起 OpenAI 模式切换，并由后端拒绝写入", async () => {
+    const environment = {
+      state: "external",
+      mode: null,
+      messageId: "environment.external",
+      revision: "blocked-not-logged-in",
+      requiresTakeoverConfirmation: true,
+      restoreAvailability: "no_backup",
+      loginStatus: "not_logged_in" as const,
+      pendingRestart: false,
+      consumers: { desktop: "unknown" as const, cli: "unknown" as const },
+      impacts: [],
+      currentProvider: null,
+    };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([]);
+      if (command === "list_wsl_environments") return Promise.resolve([]);
+      if (command === "get_environment_snapshot") return Promise.resolve(environment);
+      if (command === "switch_to_openai_login") {
+        return Promise.reject({ category: "openai_login_required", messageId: "environment.openai_login_required" });
+      }
+      return Promise.resolve(undefined);
+    });
 
-      render(<App />);
+    render(<App />);
 
-      await screen.findByRole("heading", { name: "供应商管理" });
-      const openAiButton = within(openSettingsMenu()).getByRole("menuitem", { name: "返回 OpenAI 登录模式" });
-      await waitFor(() => expect(openAiButton).toHaveAttribute("title", message));
-      expect(openAiButton).toBeDisabled();
-      expect(invoke.mock.calls.some(([command]) => command === "switch_to_openai_login")).toBe(
-        false,
-      );
-    }
+    await screen.findByRole("heading", { name: "供应商管理" });
+    const openAiButton = within(openSettingsMenu()).getByRole("menuitem", { name: "返回 OpenAI 登录模式" });
+    await waitFor(() => expect(openAiButton).toHaveAttribute("title", "请先在 Codex 中完成 OpenAI 登录。"));
+    expect(openAiButton).toBeEnabled();
+    fireEvent.click(openAiButton);
+    fireEvent.click(screen.getByRole("button", { name: "切换" }));
+
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("switch_to_openai_login", {
+      expectedRevision: "blocked-not-logged-in",
+    }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("请先在 Codex 中完成 OpenAI 登录。");
   });
 
   it("外部注销后保留 OpenAI 模式，并在确认后返回已验证供应商", async () => {

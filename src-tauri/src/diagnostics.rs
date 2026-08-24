@@ -41,6 +41,10 @@ impl IssueLogStore {
         }
     }
 
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     pub fn append(
         &self,
         level: IssueLogLevel,

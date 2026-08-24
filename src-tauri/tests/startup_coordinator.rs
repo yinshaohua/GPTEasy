@@ -513,6 +513,49 @@ fn provider_startup_accepts_outside_edits_but_blocks_managed_block_drift() {
 }
 
 #[test]
+fn provider_startup_accepts_an_equivalent_historical_provider_alias() {
+    let app_data = TempDir::new().expect("app data");
+    let codex_home = TempDir::new().expect("codex home");
+    let store = StateStore::new(StatePaths::from_root(app_data.path()));
+    assert!(store.bootstrap().is_ready());
+    let provider_id = "9f319739-f219-48ee-be35-22e08d5402d7";
+    let historical_id = "63b3934d-36d2-44fa-ab24-b70f93b45418";
+    let connection = rusqlite::Connection::open(store.paths().database()).expect("open state");
+    connection
+        .execute(
+            "INSERT INTO providers (id, name, base_url, api_key, default_model, verified_at, verification_fingerprint) \
+             VALUES (?1, 'Provider', 'https://provider.example/v1', 'test-key', 'model', '1775606400', 'verification')",
+            [provider_id],
+        )
+        .expect("insert provider evidence");
+    EnvironmentApplication::new(store.clone(), codex_home.path())
+        .apply_provider(provider_id, true)
+        .expect("establish managed environment");
+    let config_path = codex_home.path().join("config.toml");
+    let original = fs::read_to_string(&config_path).expect("read managed config");
+    let alias = format!(
+        "model_providers.{historical_id}.name = \"Provider\"\n\
+model_providers.{historical_id}.base_url = \"https://provider.example/v1\"\n\
+model_providers.{historical_id}.wire_api = \"responses\"\n\
+model_providers.{historical_id}.requires_openai_auth = true\n"
+    );
+    let rewritten = original.replace(
+        "# <<< GPTEasy managed provider <<<\n",
+        &format!("{alias}# <<< GPTEasy managed provider <<<\n"),
+    );
+    fs::write(&config_path, rewritten).expect("add equivalent historical alias");
+
+    let coordinator = StartupCoordinator::new(
+        store,
+        CodexInspector::new(codex_home.path(), login_command(0)),
+    );
+    let snapshot = coordinator.inspect();
+
+    assert_eq!(snapshot.mode, ApplicationMode::Ready);
+    assert_eq!(snapshot.block_reason, None);
+}
+
+#[test]
 fn provider_startup_accepts_desktop_rewrite_that_drops_only_the_end_marker() {
     let app_data = TempDir::new().expect("app data");
     let codex_home = TempDir::new().expect("codex home");

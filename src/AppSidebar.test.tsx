@@ -89,7 +89,10 @@ describe("侧栏应用更新入口", () => {
       errorMessage: "应用更新下载失败，请重试。",
     });
     rerender(<AppSidebar update={failed} />);
-    fireEvent.click(screen.getByRole("button", { name: "更新失败" }));
+    const failedIndicator = screen.getByRole("button", { name: "更新失败" });
+    expect(failedIndicator).not.toHaveTextContent("更新失败");
+    expect(failedIndicator.querySelector(".lucide-triangle-alert")).toBeInTheDocument();
+    fireEvent.click(failedIndicator);
     expect(failed.onOpen).toHaveBeenCalledOnce();
   });
 

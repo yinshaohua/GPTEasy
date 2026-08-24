@@ -800,7 +800,9 @@ impl EnvironmentApplication {
             ));
         }
 
-        let prepared = PreparedSwitch::prepare(&self.codex_home, provider, update_guard)?;
+        let provider_alias_ids = known_provider_ids(connection)?;
+        let prepared =
+            PreparedSwitch::prepare(&self.codex_home, provider, provider_alias_ids, update_guard)?;
         if expected_revision.is_some_and(|expected| prepared.old_revision() != expected) {
             return Err(concurrent_modification());
         }
@@ -1075,6 +1077,23 @@ fn load_provider(
                 "environment.provider_not_found",
             )
         })
+}
+
+fn known_provider_ids(connection: &Connection) -> Result<Vec<String>, EnvironmentFailure> {
+    let mut statement = connection
+        .prepare("SELECT id FROM providers")
+        .map_err(|_| state_unavailable())?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|_| state_unavailable())?;
+    let mut provider_ids = Vec::new();
+    for id in rows {
+        let id = id.map_err(|_| state_unavailable())?;
+        if Uuid::parse_str(&id).is_ok() {
+            provider_ids.push(id);
+        }
+    }
+    Ok(provider_ids)
 }
 
 fn has_pending_operation(connection: &Connection) -> Result<bool, EnvironmentFailure> {
@@ -1443,7 +1462,8 @@ fn inspect_environment(
             pending_restart,
         ));
     };
-    if applied_provider != provider.id || applied_config != managed_config_fingerprint(config_bytes)
+    if applied_provider != provider.id
+        || !managed_config_matches_applied_evidence(config_bytes, applied_config.as_deref())
     {
         return Ok(conflict_snapshot(
             impacts,
@@ -1733,6 +1753,7 @@ impl PreparedSwitch {
     fn prepare(
         codex_home: &Path,
         provider: ProviderTarget,
+        mut provider_alias_ids: Vec<String>,
         update_guard: Option<UpdateGuard>,
     ) -> Result<Self, EnvironmentFailure> {
         if Uuid::parse_str(&provider.id).is_err() {
@@ -1745,7 +1766,9 @@ impl PreparedSwitch {
         let credentials_path = codex_home.join("auth.json");
         let config = read_artifact(&config_path)?;
         ensure_file_credential_store(config.bytes.as_deref())?;
-        let rendered_config = render_config(config.bytes.as_deref(), &provider)?;
+        provider_alias_ids.extend(historical_managed_provider_ids(codex_home));
+        let rendered_config =
+            render_config(config.bytes.as_deref(), &provider, &provider_alias_ids)?;
         let credentials = read_artifact(&credentials_path)?;
         let rendered_credentials =
             render_credentials(credentials.bytes.as_deref(), &provider.api_key)?;
@@ -3077,6 +3100,51 @@ fn latest_completed_backup(
         .transpose()
 }
 
+fn historical_managed_provider_ids(codex_home: &Path) -> Vec<String> {
+    let root = codex_home.join(".gpteasy-backups");
+    let Ok(entries) = fs::read_dir(&root) else {
+        return Vec::new();
+    };
+    let mut provider_ids = Vec::new();
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        let path = entry.path();
+        if !file_type.is_dir()
+            || !path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("operation-"))
+        {
+            continue;
+        }
+        let marker = path.join(BACKUP_COMPLETION_FILE);
+        let completed = fs::symlink_metadata(&marker)
+            .ok()
+            .is_some_and(|metadata| metadata.file_type().is_file())
+            && fs::read(&marker).ok().as_deref() == Some(BACKUP_COMPLETION_CONTENT);
+        if !completed {
+            continue;
+        }
+        let Ok(backup) = load_completed_backup(path) else {
+            continue;
+        };
+        let Some(config) = backup.config.bytes else {
+            continue;
+        };
+        let Ok(config) = std::str::from_utf8(&config) else {
+            continue;
+        };
+        if let ManagedBlock::Valid(managed) = managed_block(config) {
+            provider_ids.push(managed.provider_id);
+        }
+    }
+    provider_ids.sort();
+    provider_ids.dedup();
+    provider_ids
+}
+
 fn pending_backup_path(codex_home: &Path, backup: &Path) -> Result<PathBuf, EnvironmentFailure> {
     let root = codex_home.join(".gpteasy-backups");
     if backup.parent() != Some(root.as_path())
@@ -3229,13 +3297,22 @@ fn prune_backups(root: &Path) -> Result<(), EnvironmentFailure> {
 fn render_config(
     original: Option<&[u8]>,
     provider: &ProviderTarget,
+    provider_alias_ids: &[String],
 ) -> Result<Vec<u8>, EnvironmentFailure> {
     let original = original.unwrap_or_default();
     let text = std::str::from_utf8(original).map_err(|_| invalid_config())?;
     let document = text.parse::<DocumentMut>().map_err(|_| invalid_config())?;
     let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
-    let block = render_managed_block(provider, newline);
-    let rendered = match managed_block(text) {
+    let managed = managed_block(text);
+    let mut aliases = provider_alias_ids.to_vec();
+    if let ManagedBlock::Valid(existing) = &managed {
+        aliases.push(existing.provider_id.clone());
+    }
+    aliases.sort();
+    aliases.dedup();
+    aliases.retain(|id| id != &provider.id && Uuid::parse_str(id).is_ok());
+    let block = render_managed_block(provider, &aliases, newline);
+    let rendered = match managed {
         ManagedBlock::None => {
             let body = migrate_external_config(text, &provider.id, newline)?;
             format!("{block}{body}")
@@ -3248,6 +3325,7 @@ fn render_config(
         }
         ManagedBlock::Conflict => return Err(managed_conflict()),
     };
+    let rendered = migrate_legacy_custom_provider(&rendered, provider, newline)?;
     rendered
         .parse::<DocumentMut>()
         .map_err(|_| invalid_config())?;
@@ -3311,22 +3389,60 @@ fn migrate_external_config(
     Ok(normalize_newlines(&document.to_string(), newline))
 }
 
-fn render_managed_block(provider: &ProviderTarget, newline: &str) -> String {
+fn migrate_legacy_custom_provider(
+    original: &str,
+    provider: &ProviderTarget,
+    newline: &str,
+) -> Result<String, EnvironmentFailure> {
+    let mut document = original
+        .parse::<DocumentMut>()
+        .map_err(|_| invalid_config())?;
+    let Some(providers) = document
+        .get_mut("model_providers")
+        .and_then(|item| item.as_table_mut())
+    else {
+        return Ok(original.to_owned());
+    };
+    let Some(custom) = providers
+        .get_mut("custom")
+        .and_then(|item| item.as_table_mut())
+    else {
+        return Ok(original.to_owned());
+    };
+    let is_legacy_dayway = custom.get("name").and_then(|item| item.as_str()) == Some("custom")
+        && custom.get("base_url").and_then(|item| item.as_str()) == Some(&provider.base_url)
+        && custom.get("wire_api").and_then(|item| item.as_str()) == Some("responses");
+    if !is_legacy_dayway
+        || custom
+            .get("requires_openai_auth")
+            .and_then(|item| item.as_bool())
+            == Some(true)
+    {
+        return Ok(original.to_owned());
+    }
+    custom["requires_openai_auth"] = toml_edit::value(true);
+    Ok(normalize_newlines(&document.to_string(), newline))
+}
+
+fn render_managed_block(provider: &ProviderTarget, aliases: &[String], newline: &str) -> String {
     let string = |value: &str| toml_edit::Value::from(value).to_string();
-    let table = format!("model_providers.{}", provider.id);
-    [
+    let mut lines = vec![
         MANAGED_START.to_owned(),
         format!("{PROVIDER_ID_PREFIX} {}", provider.id),
         format!("model = {}", string(&provider.default_model)),
         format!("model_provider = {}", string(&provider.id)),
-        format!("{table}.name = {}", string(&provider.name)),
-        format!("{table}.base_url = {}", string(&provider.base_url)),
-        format!("{table}.wire_api = \"responses\""),
-        format!("{table}.requires_openai_auth = true"),
-        MANAGED_END.to_owned(),
-        String::new(),
-    ]
-    .join(newline)
+    ];
+    for id in std::iter::once(&provider.id).chain(aliases.iter()) {
+        let table = format!("model_providers.{id}");
+        lines.extend([
+            format!("{table}.name = {}", string(&provider.name)),
+            format!("{table}.base_url = {}", string(&provider.base_url)),
+            format!("{table}.wire_api = \"responses\""),
+            format!("{table}.requires_openai_auth = true"),
+        ]);
+    }
+    lines.extend([MANAGED_END.to_owned(), String::new()]);
+    lines.join(newline)
 }
 
 fn render_credentials(
@@ -3494,29 +3610,46 @@ fn recover_desktop_managed_block(
     relocated_end_marker: Option<(usize, usize)>,
 ) -> Option<ManagedBlockRange> {
     let mut end = start_line_end;
-    let mut remaining_lines = 7;
-    for line in text.get(start_line_end..)?.split_inclusive('\n') {
+    for line in text.get(start_line_end..)?.split_inclusive('\n').take(7) {
         end += line.len();
-        remaining_lines -= 1;
-        if remaining_lines == 0 {
+    }
+    let mut block = reconstructed_managed_block(text.as_bytes().get(start..end)?)?;
+    if validated_provider_id(std::str::from_utf8(&block).ok()?).is_none() {
+        return None;
+    }
+    loop {
+        let group_start = end;
+        let mut group_end = end;
+        let mut group_lines = text.get(end..)?.split_inclusive('\n');
+        for _ in 0..4 {
+            let Some(line) = group_lines.next() else {
+                break;
+            };
+            group_end += line.len();
+        }
+        if group_end == group_start {
             break;
         }
-    }
-    if remaining_lines != 0 {
-        return None;
+        let Some(candidate) = reconstructed_managed_block(text.as_bytes().get(start..group_end)?)
+        else {
+            break;
+        };
+        if validated_provider_id(std::str::from_utf8(&candidate).ok()?).is_none() {
+            break;
+        }
+        end = group_end;
+        block = candidate;
     }
     if let Some((marker_start, marker_end)) = relocated_end_marker {
         if marker_start < end
             || !text.get(marker_end..)?.trim().is_empty()
-            || text
-                .get(end..marker_start)?
-                .lines()
-                .any(|line| line.starts_with(PROVIDER_ID_PREFIX))
+            || text.get(end..marker_start)?.lines().any(|line| {
+                line.starts_with(PROVIDER_ID_PREFIX) || line.starts_with("model_providers.")
+            })
         {
             return None;
         }
     }
-    let block = reconstructed_managed_block(text.as_bytes().get(start..end)?)?;
     let provider_id = validated_provider_id(std::str::from_utf8(&block).ok()?)?;
     Some(ManagedBlockRange {
         start,
@@ -3579,13 +3712,19 @@ fn managed_block_has_expected_shape(block: &str, provider_id: &str) -> bool {
     else {
         return false;
     };
-    if providers.len() != 1 {
-        return false;
-    }
     let Some(provider) = providers.get(provider_id).and_then(|item| item.as_table()) else {
         return false;
     };
-    managed_provider_fields(provider).is_some()
+    let Some(fields) = managed_provider_fields(provider) else {
+        return false;
+    };
+    providers.iter().all(|(id, item)| {
+        Uuid::parse_str(id).is_ok()
+            && item
+                .as_table()
+                .and_then(managed_provider_fields)
+                .is_some_and(|candidate| candidate == fields)
+    })
 }
 
 fn managed_block_is_root_scoped(
@@ -3668,6 +3807,69 @@ pub(crate) fn managed_config_evidence(bytes: &[u8]) -> Option<ManagedConfigEvide
 
 pub(crate) fn managed_config_fingerprint(bytes: &[u8]) -> Option<String> {
     managed_config_evidence(bytes).map(|evidence| evidence.fingerprint)
+}
+
+pub(crate) fn managed_config_matches_applied_evidence(
+    bytes: &[u8],
+    applied_fingerprint: Option<&str>,
+) -> bool {
+    let Some(applied_fingerprint) = applied_fingerprint else {
+        return false;
+    };
+    if managed_config_fingerprint(bytes).as_deref() == Some(applied_fingerprint) {
+        return true;
+    }
+    historical_alias_free_fingerprint(bytes).as_deref() == Some(applied_fingerprint)
+}
+
+fn historical_alias_free_fingerprint(bytes: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let ManagedBlock::Valid(managed) = managed_block(text) else {
+        return None;
+    };
+    if managed.recovered_desktop_rewrite {
+        return None;
+    }
+    let block = text.get(managed.start..managed.end)?;
+    let document = block.parse::<DocumentMut>().ok()?;
+    let providers = document.get("model_providers")?.as_table()?;
+    if providers.len() < 2 {
+        return None;
+    }
+    let fields = managed_provider_fields(providers.get(&managed.provider_id)?.as_table()?)?;
+    if !providers.iter().all(|(id, item)| {
+        id == managed.provider_id
+            || (Uuid::parse_str(id).is_ok()
+                && item
+                    .as_table()
+                    .and_then(managed_provider_fields)
+                    .is_some_and(|candidate| candidate == fields))
+    }) {
+        return None;
+    }
+    let newline = if block.contains("\r\n") { "\r\n" } else { "\n" };
+    let table = format!("model_providers.{}", managed.provider_id);
+    let string = |value: &str| toml_edit::Value::from(value).to_string();
+    let primary_block = [
+        MANAGED_START.to_owned(),
+        format!("{PROVIDER_ID_PREFIX} {}", managed.provider_id),
+        format!("model = {}", string(document.get("model")?.as_str()?)),
+        format!("model_provider = {}", string(&managed.provider_id)),
+        format!("{table}.name = {}", string(fields.name)),
+        format!("{table}.base_url = {}", string(fields.base_url)),
+        format!("{table}.wire_api = {}", string(fields.wire_api)),
+        format!(
+            "{table}.requires_openai_auth = {}",
+            fields.requires_openai_auth
+        ),
+        MANAGED_END.to_owned(),
+        String::new(),
+    ]
+    .join(newline);
+    Some(artifact_hash(
+        ArtifactKind::Config,
+        primary_block.as_bytes(),
+    ))
 }
 
 fn is_inside_multiline_string(text: &str, target: usize) -> bool {

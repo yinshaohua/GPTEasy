@@ -426,6 +426,186 @@ fn confirmed_takeover_preserves_external_fields_and_records_the_applied_provider
 }
 
 #[test]
+fn switching_provider_keeps_prior_managed_provider_id_as_current_provider_alias() {
+    const PREVIOUS_PROVIDER_ID: &str = "63b3934d-36d2-44fa-ab24-b70f93b45418";
+    let (temp, store, application) = fixture();
+    insert_provider_values(
+        &store,
+        PREVIOUS_PROVIDER_ID,
+        "Previous Provider",
+        "https://previous.example/v1",
+        "previous-key",
+        "previous-model",
+        "previous-fingerprint",
+    );
+    let codex_home = temp.path().join(".codex");
+
+    application
+        .apply_provider(PREVIOUS_PROVIDER_ID, true)
+        .expect("apply previous provider");
+    application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("switch to current provider");
+
+    let config = fs::read_to_string(codex_home.join("config.toml")).expect("read config");
+    let document = config
+        .parse::<toml_edit::DocumentMut>()
+        .expect("applied config is TOML");
+    let alias = &document["model_providers"][PREVIOUS_PROVIDER_ID];
+    assert_eq!(alias["name"].as_str(), Some("Fixture Provider"));
+    assert_eq!(
+        alias["base_url"].as_str(),
+        Some("https://fixture.example/v1")
+    );
+    assert_eq!(alias["wire_api"].as_str(), Some("responses"));
+    assert_eq!(alias["requires_openai_auth"].as_bool(), Some(true));
+    assert_eq!(document["model_provider"].as_str(), Some(PROVIDER_ID));
+}
+
+#[test]
+fn managed_environment_accepts_an_equivalent_historical_provider_alias() {
+    const HISTORICAL_PROVIDER_ID: &str = "63b3934d-36d2-44fa-ab24-b70f93b45418";
+    let (temp, _, application) = fixture();
+    let codex_home = temp.path().join(".codex");
+    application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("establish managed environment");
+
+    let config_path = codex_home.join("config.toml");
+    let original = fs::read_to_string(&config_path).expect("read managed config");
+    let alias = format!(
+        "model_providers.{HISTORICAL_PROVIDER_ID}.name = \"Fixture Provider\"\n\
+model_providers.{HISTORICAL_PROVIDER_ID}.base_url = \"https://fixture.example/v1\"\n\
+model_providers.{HISTORICAL_PROVIDER_ID}.wire_api = \"responses\"\n\
+model_providers.{HISTORICAL_PROVIDER_ID}.requires_openai_auth = true\n"
+    );
+    let rewritten = original.replace(
+        "# <<< GPTEasy managed provider <<<\n",
+        &format!("{alias}# <<< GPTEasy managed provider <<<\n"),
+    );
+    fs::write(&config_path, rewritten).expect("add equivalent historical alias");
+
+    let snapshot = application
+        .inspect()
+        .expect("inspect equivalent historical alias");
+
+    assert_eq!(snapshot.state, EnvironmentState::Managed);
+}
+
+#[test]
+fn managed_environment_rejects_a_historical_provider_alias_with_different_fields() {
+    const HISTORICAL_PROVIDER_ID: &str = "63b3934d-36d2-44fa-ab24-b70f93b45418";
+    let (temp, _, application) = fixture();
+    let codex_home = temp.path().join(".codex");
+    application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("establish managed environment");
+
+    let config_path = codex_home.join("config.toml");
+    let original = fs::read_to_string(&config_path).expect("read managed config");
+    let alias = format!(
+        "model_providers.{HISTORICAL_PROVIDER_ID}.name = \"Fixture Provider\"\n\
+model_providers.{HISTORICAL_PROVIDER_ID}.base_url = \"https://unexpected.example/v1\"\n\
+model_providers.{HISTORICAL_PROVIDER_ID}.wire_api = \"responses\"\n\
+model_providers.{HISTORICAL_PROVIDER_ID}.requires_openai_auth = true\n"
+    );
+    let rewritten = original.replace(
+        "# <<< GPTEasy managed provider <<<\n",
+        &format!("{alias}# <<< GPTEasy managed provider <<<\n"),
+    );
+    fs::write(&config_path, &rewritten).expect("add drifted historical alias");
+
+    let snapshot = application
+        .inspect()
+        .expect("inspect drifted historical alias");
+    assert_eq!(snapshot.state, EnvironmentState::Conflict);
+}
+
+#[test]
+fn applying_provider_keeps_older_managed_provider_ids_from_completed_backups() {
+    const HISTORICAL_PROVIDER_ID: &str = "63b3934d-36d2-44fa-ab24-b70f93b45418";
+    const INTERMEDIATE_PROVIDER_ID: &str = "6cde0dd7-9725-462a-ac79-864f5cf63f76";
+    let (temp, store, application) = fixture();
+    let codex_home = temp.path().join(".codex");
+    insert_provider_values(
+        &store,
+        HISTORICAL_PROVIDER_ID,
+        "Historical Provider",
+        "https://historical.example/v1",
+        "historical-key",
+        "historical-model",
+        "historical-fingerprint",
+    );
+    insert_provider_values(
+        &store,
+        INTERMEDIATE_PROVIDER_ID,
+        "Intermediate Provider",
+        "https://intermediate.example/v1",
+        "intermediate-key",
+        "intermediate-model",
+        "intermediate-fingerprint",
+    );
+
+    application
+        .apply_provider(HISTORICAL_PROVIDER_ID, true)
+        .expect("apply historical provider");
+    application
+        .apply_provider(INTERMEDIATE_PROVIDER_ID, true)
+        .expect("create completed backup of historical provider");
+    Connection::open(store.paths().database())
+        .expect("open state database")
+        .execute(
+            "DELETE FROM providers WHERE id = ?1",
+            [HISTORICAL_PROVIDER_ID],
+        )
+        .expect("delete historical provider from catalog");
+    fs::write(codex_home.join("config.toml"), "custom_flag = true\n")
+        .expect("replace current config with external fixture");
+
+    application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("apply current provider");
+
+    let config = fs::read_to_string(codex_home.join("config.toml")).expect("read config");
+    let document = config
+        .parse::<toml_edit::DocumentMut>()
+        .expect("applied config is TOML");
+    let alias = &document["model_providers"][HISTORICAL_PROVIDER_ID];
+    assert_eq!(alias["name"].as_str(), Some("Fixture Provider"));
+    assert_eq!(
+        alias["base_url"].as_str(),
+        Some("https://fixture.example/v1")
+    );
+    assert_eq!(alias["wire_api"].as_str(), Some("responses"));
+    assert_eq!(alias["requires_openai_auth"].as_bool(), Some(true));
+}
+
+#[test]
+fn applying_provider_migrates_matching_legacy_custom_provider_to_openai_auth() {
+    let (temp, _, application) = fixture();
+    let codex_home = temp.path().join(".codex");
+    fs::create_dir_all(&codex_home).expect("create Codex fixture");
+    fs::write(
+        codex_home.join("config.toml"),
+        "model_provider = \"custom\"\n[model_providers.custom]\nname = \"custom\"\nbase_url = \"https://fixture.example/v1\"\nwire_api = \"responses\"\n",
+    )
+    .expect("write legacy custom config");
+
+    application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("apply current provider");
+
+    let config = fs::read_to_string(codex_home.join("config.toml")).expect("read config");
+    let document = config
+        .parse::<toml_edit::DocumentMut>()
+        .expect("applied config is TOML");
+    assert_eq!(
+        document["model_providers"]["custom"]["requires_openai_auth"].as_bool(),
+        Some(true)
+    );
+}
+
+#[test]
 fn managed_environment_accepts_and_preserves_changes_outside_the_managed_block() {
     let (temp, _, application) = fixture();
     let codex_home = temp.path().join(".codex");

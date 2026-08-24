@@ -41,7 +41,13 @@ impl StartupCoordinator {
             .as_ref()
             .and_then(|contents| contents.pending_config_operation.as_ref())
             .map(|operation| pending_operation_resolution(operation, &codex));
-        let block_reason = startup_block_reason(&database, &codex);
+        let config_matches_applied = database
+            .contents
+            .as_ref()
+            .and_then(|contents| contents.last_applied_config_fingerprint.as_ref())
+            .and_then(|expected| expected.as_deref())
+            .is_some_and(|expected| self.codex_inspector.config_matches_fingerprint(expected));
+        let block_reason = startup_block_reason(&database, &codex, config_matches_applied);
         let mode = if block_reason.is_some() {
             ApplicationMode::Blocked
         } else {
@@ -100,6 +106,7 @@ pub struct StartupSnapshot {
 fn startup_block_reason(
     database: &DatabaseSnapshot,
     codex: &CodexSnapshot,
+    config_matches_applied: bool,
 ) -> Option<StartupBlockReason> {
     if !database.is_ready() {
         return Some(StartupBlockReason::DatabaseUnavailable);
@@ -130,13 +137,12 @@ fn startup_block_reason(
         return None;
     }
     if codex.recovered_desktop_rewrite
-        && (contents.last_applied_mode != Some(AppliedMode::Provider)
-            || contents.last_applied_config_fingerprint.as_ref() != Some(&codex.config_fingerprint))
+        && (contents.last_applied_mode != Some(AppliedMode::Provider) || !config_matches_applied)
     {
         return Some(StartupBlockReason::ManagedConfigConflict);
     }
-    if let Some(Some(expected)) = &contents.last_applied_config_fingerprint {
-        if codex.config_fingerprint.as_ref() != Some(expected) {
+    if let Some(Some(_)) = &contents.last_applied_config_fingerprint {
+        if !config_matches_applied {
             return Some(StartupBlockReason::ManagedConfigConflict);
         }
     }
