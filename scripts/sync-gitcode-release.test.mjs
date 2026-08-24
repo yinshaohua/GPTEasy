@@ -182,7 +182,7 @@ test("首次发布的 Raw 匿名读取不可用时不推进分发", async () => 
   }
 });
 
-test("已有清单的 Raw 临时返回 418 时会重试并继续同步", async () => {
+test("固定分支 Raw 被 418 拦截时会回退到 API blob 并继续同步", async () => {
   const adapter = await startAdapter({
     currentManifest: {
       version: "1.1.1",
@@ -197,12 +197,14 @@ test("已有清单的 Raw 临时返回 418 时会重试并继续同步", async (
         },
       },
     },
+    failRawManifestBranch: true,
     transientRawManifestFailures: 2,
   });
   try {
     const result = await runSync(adapter.baseUrl);
     assert.equal(result.code, 0, result.stderr);
     assert.equal(adapter.state.rawManifestAttempts, 3);
+    assert.equal(adapter.state.rawManifestBranchAttempts, 3);
     assert.equal(adapter.state.manifests.length, 1);
   } finally {
     await adapter.close();
@@ -222,6 +224,7 @@ async function runSync(baseUrl) {
       GITCODE_DEFAULT_BRANCH: "main",
       GITHUB_API_URL: `${baseUrl}/github`,
       GITCODE_API_BASE_URL: `${baseUrl}/gitcode`,
+      GITCODE_RAW_BASE_URL: baseUrl,
       GITCODE_SYNC_TEST_MODE: "1",
       GITCODE_SYNC_ANONYMOUS_ATTEMPTS: "3",
       GITCODE_SYNC_RETRY_DELAY_MS: "0",
@@ -246,8 +249,10 @@ async function startAdapter(options = {}) {
     releasePatch: options.releasePatch ?? {},
     releaseAssets: options.releaseAssets,
     failRawBaseline: options.failRawBaseline ?? false,
+    failRawManifestBranch: options.failRawManifestBranch ?? false,
     transientRawManifestFailures: options.transientRawManifestFailures ?? 0,
     rawManifestAttempts: 0,
+    rawManifestBranchAttempts: 0,
     records: [],
     manifests: [],
   };
@@ -300,7 +305,7 @@ async function startAdapter(options = {}) {
     }
     if (request.method === "GET" && url.pathname.endsWith("/contents/latest.md")) {
       if (!state.currentManifest) return json(response, 404, { message: "not found" });
-      return json(response, 200, { sha: "manifest-sha", download_url: `${origin(server)}/raw/latest.md` });
+      return json(response, 200, { sha: "manifest-sha", download_url: `${origin(server)}/raw/blob/latest.md` });
     }
     if (request.method === "GET" && url.pathname.endsWith("/contents/README.md")) {
       return json(response, 200, { download_url: `${origin(server)}/raw/README.md` });
@@ -320,10 +325,16 @@ async function startAdapter(options = {}) {
       if (state.failAnonymousName === name) return bytes(response, 403, Buffer.from("forbidden"));
       return bytes(response, state.uploads.has(name) ? 200 : 404, state.uploads.get(name) ?? Buffer.from("missing"));
     }
-    if (request.method === "GET" && url.pathname === "/raw/latest.md") {
+    if (request.method === "GET" && ["/raw/latest.md", "/raw/blob/latest.md"].includes(url.pathname)) {
       assert.equal(authorization, undefined);
       state.rawManifestAttempts += 1;
       if (state.rawManifestAttempts <= state.transientRawManifestFailures) return bytes(response, 418, Buffer.from("warming up"));
+      return json(response, 200, state.currentManifest);
+    }
+    if (request.method === "GET" && url.pathname === "/dist/releases/raw/main/latest.md") {
+      assert.equal(authorization, undefined);
+      state.rawManifestBranchAttempts += 1;
+      if (state.failRawManifestBranch) return bytes(response, 418, Buffer.from("blocked"));
       return json(response, 200, state.currentManifest);
     }
     if (request.method === "GET" && url.pathname === "/raw/README.md") {

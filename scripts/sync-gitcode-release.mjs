@@ -209,7 +209,11 @@ async function readCurrentManifest() {
   const validOrigin = url.origin === new URL(configuration.gitcodeRawBase).origin;
   const validTestUrl = configuration.testMode && url.protocol === "http:" && url.hostname === "127.0.0.1";
   if (!validOrigin && !validTestUrl) throw new Error("GitCode returned an unexpected manifest download URL");
-  const response = await fetchAnonymousWithRetry(url, "Anonymous current manifest download");
+  const branchUrl = branchRawUrl(configuration.formalManifestPath);
+  const response = await fetchAnonymousFromCandidates(
+    [branchUrl, url],
+    "Anonymous current manifest download",
+  );
   let manifest;
   try { manifest = JSON.parse(await response.text()); } catch { throw new Error("current manifest is not valid JSON"); }
   validateManifest(manifest);
@@ -226,7 +230,11 @@ async function verifyRawBaseline() {
   const validOrigin = url.origin === new URL(configuration.gitcodeRawBase).origin;
   const validTestUrl = configuration.testMode && url.protocol === "http:" && url.hostname === "127.0.0.1";
   if (!validOrigin && !validTestUrl) throw new Error("GitCode returned an unexpected README download URL");
-  const response = await fetchAnonymousWithRetry(url, "Anonymous GitCode Raw baseline download");
+  const branchUrl = branchRawUrl("README.md");
+  const response = await fetchAnonymousFromCandidates(
+    [branchUrl, url],
+    "Anonymous GitCode Raw baseline download",
+  );
   if (!(await response.text()).trim()) throw new Error("Anonymous GitCode Raw baseline download returned an empty response");
 }
 
@@ -315,22 +323,53 @@ async function verifyAnonymous(url, asset) {
   throw new Error(`Anonymous download failed for ${asset.name} with HTTP ${lastStatus}`);
 }
 
-async function fetchAnonymousWithRetry(url, description) {
+async function fetchAnonymousFromCandidates(urls, description) {
+  const candidates = urls.filter((candidate, index) => candidate && urls.indexOf(candidate) === index);
+  let lastError;
+  for (const [index, url] of candidates.entries()) {
+    try {
+      // The stable branch Raw endpoint is the fast path. If GitCode's WAF
+      // blocks it, give the API-provided immutable blob URL a full retry budget.
+      return await fetchAnonymousWithAttempts(
+        url,
+        description,
+        index === 0 ? Math.min(3, configuration.anonymousAttempts) : configuration.anonymousAttempts,
+      );
+    } catch (error) {
+      lastError = error;
+      if (index < candidates.length - 1) {
+        process.stderr.write(`${description} primary URL failed; trying GitCode fallback (${error.message})\n`);
+      }
+    }
+  }
+  throw lastError;
+}
+
+async function fetchAnonymousWithAttempts(url, description, attempts) {
   let lastStatus = 0;
-  for (let attempt = 1; attempt <= configuration.anonymousAttempts; attempt += 1) {
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
     const response = await fetch(url, {
       redirect: "follow",
       headers: { "user-agent": "Mozilla/5.0 (compatible; GPTEasy release sync)" },
     });
     lastStatus = response.status;
     if (response.ok) return response;
-    if (attempt < configuration.anonymousAttempts && isRetryableAnonymousStatus(response.status)) {
+    if (attempt < attempts && isRetryableAnonymousStatus(response.status)) {
       await new Promise((resolve) => setTimeout(resolve, configuration.anonymousDelayMs));
       continue;
     }
     break;
   }
   throw new Error(`${description} failed with HTTP ${lastStatus}`);
+}
+
+function branchRawUrl(filePath) {
+  const repository = configuration.gitcodeRepository
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+  const path = filePath.split("/").map((segment) => encodeURIComponent(segment)).join("/");
+  return `${configuration.gitcodeRawBase}/${repository}/raw/${encodeURIComponent(configuration.gitcodeBranch)}/${path}`;
 }
 
 function isRetryableAnonymousStatus(status) {
