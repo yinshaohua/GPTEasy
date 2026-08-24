@@ -204,6 +204,12 @@ async function readCurrentManifest() {
   const endpoint = `/repos/${configuration.gitcodeRepository}/contents/${configuration.formalManifestPath}?ref=${encodeURIComponent(configuration.gitcodeBranch)}`;
   const metadata = await gitcodeRequest(endpoint);
   if (!metadata) return null;
+  const embedded = decodeApiContent(metadata);
+  if (embedded !== null) {
+    const manifest = parseManifest(embedded);
+    validateManifest(manifest);
+    return { manifest, sha: typeof metadata.sha === "string" ? metadata.sha : undefined };
+  }
   if (typeof metadata.download_url !== "string") throw new Error("GitCode manifest metadata is missing its anonymous download URL");
   const url = new URL(metadata.download_url);
   const validOrigin = url.origin === new URL(configuration.gitcodeRawBase).origin;
@@ -214,10 +220,25 @@ async function readCurrentManifest() {
     [branchUrl, url],
     "Anonymous current manifest download",
   );
-  let manifest;
-  try { manifest = JSON.parse(await response.text()); } catch { throw new Error("current manifest is not valid JSON"); }
+  const manifest = parseManifest(await response.text());
   validateManifest(manifest);
   return { manifest, sha: typeof metadata.sha === "string" ? metadata.sha : undefined };
+}
+
+function decodeApiContent(metadata) {
+  if (typeof metadata?.content !== "string") return null;
+  if (metadata.encoding && metadata.encoding !== "base64") {
+    throw new Error(`GitCode manifest content uses unsupported encoding ${metadata.encoding}`);
+  }
+  try {
+    return Buffer.from(metadata.content.replace(/\s/g, ""), "base64").toString("utf8");
+  } catch {
+    throw new Error("GitCode manifest API content is not valid Base64");
+  }
+}
+
+function parseManifest(content) {
+  try { return JSON.parse(content); } catch { throw new Error("current manifest is not valid JSON"); }
 }
 
 async function verifyRawBaseline() {

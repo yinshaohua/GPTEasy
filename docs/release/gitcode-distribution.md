@@ -54,7 +54,7 @@ bash scripts/setup-gitcode-distribution.sh
 
 `.github/workflows/gitcode-sync.yml` 由 GitHub Release `published` 事件触发，也允许维护者输入同一 Tag 人工重试。工作流只调用 `scripts/sync-gitcode-release.mjs` 下载 Release 附件，不运行应用构建。同步器执行以下顺序：
 
-1. 拒绝草稿、预发布和非稳定 SemVer Release；匿名读取当前正式清单以阻止版本降级，首次发布则验证分发仓库 README 的 Raw 可读性。匿名读取优先使用固定分支 Raw 地址，GitCode 返回的不可变 blob 地址作为备用；遇到 418 等临时风控响应时快速重试并自动回退，避免单一下载路径阻塞同步；
+1. 拒绝草稿、预发布和非稳定 SemVer Release；读取当前正式清单以阻止版本降级，首次发布则验证分发仓库 README 的 Raw 可读性。当前清单优先使用 GitCode API 返回的 Base64 正文；没有内嵌正文时再使用固定分支 Raw 地址和 API 返回的不可变 blob 地址，并在遇到 418 等临时风控响应时重试和回退，避免单一下载路径阻塞同步；
 2. 下载 GitHub Release 中的 Windows x64 NSIS 安装包及其 `.sig`，计算大小和 SHA-256，并生成 `SHA256SUMS.txt`；
 3. 创建或复用同 Tag GitCode Release，正文直接采用 GitHub 中文发布说明；
 4. 已存在的同名附件必须经匿名下载证明大小和 SHA-256 相同，缺失附件才上传；冲突立即停止；

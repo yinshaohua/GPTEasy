@@ -211,6 +211,35 @@ test("固定分支 Raw 被 418 拦截时会回退到 API blob 并继续同步", 
   }
 });
 
+test("GitCode API 提供内嵌清单时不依赖匿名 Raw", async () => {
+  const adapter = await startAdapter({
+    currentManifest: {
+      version: "1.1.1",
+      notes: "previous",
+      pub_date: "2026-08-18T08:00:00Z",
+      platforms: {
+        "windows-x86_64": {
+          url: "http://127.0.0.1:1/installer.exe",
+          signature: SIGNATURE_TEXT,
+          sha256: "a".repeat(64),
+          size: 1,
+        },
+      },
+    },
+    embeddedManifest: true,
+    failRawManifestBranch: true,
+  });
+  try {
+    const result = await runSync(adapter.baseUrl);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(adapter.state.rawManifestAttempts, 0);
+    assert.equal(adapter.state.rawManifestBranchAttempts, 0);
+    assert.equal(adapter.state.manifests.length, 1);
+  } finally {
+    await adapter.close();
+  }
+});
+
 async function runSync(baseUrl) {
   const child = spawn(process.execPath, ["scripts/sync-gitcode-release.mjs"], {
     cwd: process.cwd(),
@@ -250,6 +279,7 @@ async function startAdapter(options = {}) {
     releaseAssets: options.releaseAssets,
     failRawBaseline: options.failRawBaseline ?? false,
     failRawManifestBranch: options.failRawManifestBranch ?? false,
+    embeddedManifest: options.embeddedManifest ?? false,
     transientRawManifestFailures: options.transientRawManifestFailures ?? 0,
     rawManifestAttempts: 0,
     rawManifestBranchAttempts: 0,
@@ -305,6 +335,10 @@ async function startAdapter(options = {}) {
     }
     if (request.method === "GET" && url.pathname.endsWith("/contents/latest.md")) {
       if (!state.currentManifest) return json(response, 404, { message: "not found" });
+      if (state.embeddedManifest) {
+        const content = Buffer.from(`${JSON.stringify(state.currentManifest)}\n`).toString("base64");
+        return json(response, 200, { sha: "manifest-sha", content, encoding: "base64" });
+      }
       return json(response, 200, { sha: "manifest-sha", download_url: `${origin(server)}/raw/blob/latest.md` });
     }
     if (request.method === "GET" && url.pathname.endsWith("/contents/README.md")) {
