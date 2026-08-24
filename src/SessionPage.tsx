@@ -1160,8 +1160,11 @@ function DeleteSessionDialog({
 function UnavailableState({ availability, onRetry }: { availability: SessionAvailability; onRetry: () => void }) {
   const codexMissing = availability.status === "codex_missing"
     || availability.messageId === "session.codex_missing";
-  const copy = codexMissing
-    ? sessionMessages.unavailable.codex_missing
+  const desktopUnavailable = availability.messageId === "session.desktop_app_server_unavailable";
+  const copy = desktopUnavailable
+    ? sessionMessages.unavailable.desktop_app_server_unavailable
+    : codexMissing
+      ? sessionMessages.unavailable.codex_missing
     : sessionMessages.unavailable[availability.status as Exclude<SessionAvailabilityStatus, "available">];
   return (
     <section className={codexMissing ? "session-unavailable-note" : "blocked-state"} role={codexMissing ? "status" : "alert"}>

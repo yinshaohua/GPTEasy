@@ -9,6 +9,7 @@ import {
 import AppSidebar, { type OpenAiSidebarAction, type UpdateSidebarState } from "./AppSidebar";
 import ProviderPage from "./ProviderPage";
 import SessionPage from "./SessionPage";
+import IssueLogPage from "./IssueLogPage";
 import {
   getStartupSnapshot,
   refreshStartupSnapshot,
@@ -38,7 +39,7 @@ type ViewState =
 
 export default function App() {
   const [state, setState] = useState<ViewState>({ kind: "loading" });
-  const [page, setPage] = useState<"providers" | "sessions">("providers");
+  const [page, setPage] = useState<"providers" | "sessions" | "logs">("providers");
   const [sessionVisited, setSessionVisited] = useState(false);
   const [openAiAction, setOpenAiAction] = useState<OpenAiSidebarAction>();
   const [update, setUpdate] = useState<UpdateSnapshot>(initialUpdateSnapshot);
@@ -112,6 +113,7 @@ export default function App() {
           setSessionVisited(true);
           setPage("sessions");
         }}
+        onOpenLogs={() => setPage("logs")}
         openAiAction={openAiAction}
         currentProviderName={currentProviderName}
         update={updateSidebar}
@@ -134,6 +136,7 @@ export default function App() {
           setSessionVisited(true);
           setPage("sessions");
         }}
+        onOpenLogs={() => setPage("logs")}
         openAiAction={openAiAction}
         currentProviderName={currentProviderName}
         update={updateSidebar}
@@ -151,6 +154,9 @@ export default function App() {
           />
         </div>
       )}
+      <div className="app-view" hidden={page !== "logs"}>
+        <IssueLogPage active={page === "logs"} />
+      </div>
       {updateDialogOpen && (
         <UpdateDialog
           snapshot={update}
@@ -175,14 +181,16 @@ function Shell({
   page,
   onOpenProviders,
   onOpenSessions,
+  onOpenLogs,
   openAiAction,
   currentProviderName,
   update,
 }: {
   children: React.ReactNode;
-  page: "providers" | "sessions";
+  page: "providers" | "sessions" | "logs";
   onOpenProviders: () => void;
   onOpenSessions: () => void;
+  onOpenLogs: () => void;
   openAiAction?: OpenAiSidebarAction;
   currentProviderName?: string | null;
   update?: UpdateSidebarState;
@@ -193,6 +201,7 @@ function Shell({
         activeView={page}
         onOpenProviders={onOpenProviders}
         onOpenSessions={onOpenSessions}
+        onOpenLogs={onOpenLogs}
         openAiAction={openAiAction}
         currentProviderName={currentProviderName}
         update={update}

@@ -7,6 +7,7 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_notification::NotificationExt;
 
+use crate::diagnostics::{IssueLogLevel, IssueLogRecord, IssueLogStore};
 use crate::environment::{
     EnvironmentApplication, EnvironmentFailure, EnvironmentFailureCategory, EnvironmentSnapshot,
 };
@@ -50,6 +51,16 @@ pub(crate) struct WslRuntime {
 
 pub(crate) struct SessionRuntime {
     application: SessionApplication,
+}
+
+pub(crate) struct IssueLogRuntime {
+    pub(crate) store: IssueLogStore,
+}
+
+impl IssueLogRuntime {
+    pub(crate) fn new(store: IssueLogStore) -> Self {
+        Self { store }
+    }
 }
 
 pub(crate) struct UpdateRuntime {
@@ -327,10 +338,23 @@ pub(crate) fn list_providers(
 
 #[tauri::command]
 pub(crate) async fn enter_session_management(
+    logs: State<'_, IssueLogRuntime>,
     state: State<'_, SessionRuntime>,
     lease_id: String,
 ) -> Result<SessionAvailability, CommandFailure> {
-    Ok(state.application.enter(&lease_id).await)
+    let availability = state.application.enter(&lease_id).await;
+    if availability.status != crate::session::SessionAvailabilityStatus::Available {
+        logs.store.append(
+            IssueLogLevel::Error,
+            "session.enter",
+            &availability.message_id,
+            Some(format!(
+                "status={:?}; version={:?}",
+                availability.status, availability.codex_version
+            )),
+        );
+    }
+    Ok(availability)
 }
 
 #[tauri::command]
@@ -536,6 +560,87 @@ pub(crate) async fn get_environment_snapshot(
 }
 
 #[tauri::command]
+pub(crate) fn list_issue_logs(
+    state: State<'_, IssueLogRuntime>,
+    since_epoch_seconds: i64,
+    level: Option<IssueLogLevel>,
+    query: Option<String>,
+) -> Vec<IssueLogRecord> {
+    state
+        .store
+        .list(since_epoch_seconds, level, query.as_deref())
+}
+
+#[tauri::command]
+pub(crate) fn copy_issue_logs(
+    app: AppHandle,
+    state: State<'_, IssueLogRuntime>,
+    since_epoch_seconds: i64,
+    level: Option<IssueLogLevel>,
+    query: Option<String>,
+) -> Result<usize, CommandFailure> {
+    let records = state
+        .store
+        .list(since_epoch_seconds, level, query.as_deref());
+    app.clipboard()
+        .write_text(IssueLogStore::format(&records))
+        .map_err(|_| CommandFailure {
+            message_id: "diagnostics.copy_failed",
+        })?;
+    Ok(records.len())
+}
+
+#[tauri::command]
+pub(crate) fn choose_issue_log_export_destination(
+    app: AppHandle,
+) -> Result<Option<String>, CommandFailure> {
+    let selected = app
+        .dialog()
+        .file()
+        .set_file_name("gpteasy-issue-log.jsonl")
+        .add_filter("JSON Lines", &["jsonl", "log"])
+        .blocking_save_file();
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    selected
+        .into_path()
+        .map(|path| Some(path.to_string_lossy().into_owned()))
+        .map_err(|_| CommandFailure {
+            message_id: "diagnostics.export_destination_invalid",
+        })
+}
+
+#[tauri::command]
+pub(crate) fn export_issue_logs(
+    state: State<'_, IssueLogRuntime>,
+    since_epoch_seconds: i64,
+    level: Option<IssueLogLevel>,
+    query: Option<String>,
+    destination: String,
+) -> Result<usize, CommandFailure> {
+    let records = state
+        .store
+        .list(since_epoch_seconds, level, query.as_deref());
+    std::fs::write(destination, IssueLogStore::format(&records)).map_err(|_| CommandFailure {
+        message_id: "diagnostics.export_failed",
+    })?;
+    Ok(records.len())
+}
+
+#[tauri::command]
+pub(crate) fn export_all_issue_logs(
+    state: State<'_, IssueLogRuntime>,
+    destination: String,
+) -> Result<usize, CommandFailure> {
+    let records = state.store.list_all(0, None, None);
+    std::fs::write(destination, IssueLogStore::format(&records)).map_err(|_| CommandFailure {
+        message_id: "diagnostics.export_failed",
+    })?;
+    Ok(records.len())
+}
+
+#[tauri::command]
 pub(crate) async fn list_wsl_environments(
     state: State<'_, WslRuntime>,
 ) -> Result<Vec<WslEnvironmentSummary>, WslFailure> {
@@ -613,6 +718,7 @@ pub(crate) async fn refresh_wsl_environment(
 pub(crate) async fn apply_environment_provider(
     app: AppHandle,
     state: State<'_, EnvironmentRuntime>,
+    logs: State<'_, IssueLogRuntime>,
     provider_id: String,
     expected_revision: String,
 ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
@@ -623,11 +729,44 @@ pub(crate) async fn apply_environment_provider(
         ));
     };
     let application = state.application.clone();
+    let requested_provider = provider_id.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        application.apply_provider_at_revision(&provider_id, true, &expected_revision)
+        match application.apply_provider_at_revision(&provider_id, true, &expected_revision) {
+            Err(failure)
+                if failure.category == EnvironmentFailureCategory::ConcurrentModification =>
+            {
+                let latest = application.inspect()?;
+                if latest.state == crate::environment::EnvironmentState::Managed {
+                    application.apply_provider_at_revision(&provider_id, true, &latest.revision)
+                } else {
+                    Err(failure)
+                }
+            }
+            result => result,
+        }
     })
     .await
     .map_err(|_| environment_task_failed())?;
+    match &result {
+        Ok(snapshot) => logs.store.append(
+            IssueLogLevel::Info,
+            "environment.apply_provider",
+            "供应商配置已写入",
+            Some(format!(
+                "provider_id={requested_provider}; pending_restart={}",
+                snapshot.pending_restart
+            )),
+        ),
+        Err(failure) => logs.store.append(
+            IssueLogLevel::Error,
+            "environment.apply_provider",
+            failure.message_id,
+            Some(format!(
+                "provider_id={requested_provider}; category={:?}",
+                failure.category
+            )),
+        ),
+    }
     refresh_environment_tray_after(&app, result)
 }
 

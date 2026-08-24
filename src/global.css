@@ -2566,3 +2566,73 @@ select:focus-visible {
     border: 1px solid CanvasText;
   }
 }
+.issue-log-page {
+  min-width: 0;
+}
+
+.issue-log-toolbar {
+  display: flex;
+  gap: 12px;
+  align-items: end;
+  flex-wrap: wrap;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--border, #dfe3e8);
+}
+
+.issue-log-toolbar label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted, #667085);
+  font-size: 12px;
+}
+
+.issue-log-toolbar select,
+.issue-log-toolbar input {
+  min-height: 34px;
+  border: 1px solid var(--border, #dfe3e8);
+  border-radius: 6px;
+  padding: 0 9px;
+  background: var(--surface, #fff);
+  color: inherit;
+}
+
+.issue-log-search {
+  min-width: 240px;
+}
+
+.input-with-icon {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border, #dfe3e8);
+  border-radius: 6px;
+  padding: 0 9px;
+  background: var(--surface, #fff);
+}
+
+.input-with-icon input {
+  border: 0;
+  outline: 0;
+  padding-left: 0;
+}
+
+.issue-log-list {
+  display: grid;
+  gap: 8px;
+  padding-top: 16px;
+}
+
+.issue-log-entry {
+  border-left: 3px solid #98a2b3;
+  padding: 10px 12px;
+  background: var(--surface, #fff);
+  box-shadow: 0 1px 2px rgb(16 24 40 / 6%);
+}
+
+.issue-log-entry.is-error { border-left-color: #d92d20; }
+.issue-log-entry.is-warn { border-left-color: #dc6803; }
+.issue-log-entry-meta { display: flex; gap: 10px; align-items: center; color: var(--muted, #667085); font-size: 12px; }
+.issue-log-entry-meta code { color: inherit; }
+.issue-log-entry strong { display: block; margin-top: 6px; }
+.issue-log-entry pre { margin: 8px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted, #667085); font: inherit; font-size: 12px; }
+.inline-feedback { color: var(--success, #027a48); }

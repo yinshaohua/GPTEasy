@@ -361,7 +361,7 @@ export const providerMessages = {
   configChangeConsumerRisk:
     "运行中的 ChatGPT/Codex 桌面版或 Codex CLI 可能继续使用旧配置，直到它们自然退出。",
   configChangePendingRestart:
-    "配置已更新。运行中的 Codex 消费者可能继续使用旧配置。",
+    "配置已保存并成为当前使用目标。运行中的 Codex 消费者可能继续使用旧配置，请重启 Codex 桌面版或 CLI 后读取新配置。",
   configChangeOpenAiTarget: "将切换到 OpenAI 登录模式。",
   configChangeProviderTarget: (name: string) => `将切换到“${name}”。`,
   configChangeProviderUpdateTarget: (name: string) =>
@@ -519,7 +519,11 @@ export const sessionMessages = {
   unavailable: {
     codex_missing: {
       title: "未找到兼容的 Codex",
-      body: "请先安装 Codex CLI。GPTEasy 不会自动安装或升级。",
+      body: "请先安装 Codex CLI。GPTEasy 不会自动安装或升级。未发现可启动会话服务的 Codex CLI 或桌面版内置入口。",
+    },
+    desktop_app_server_unavailable: {
+      title: "已检测到 Codex 桌面版",
+      body: "当前桌面版没有提供 GPTEasy 会话管理所需的 App Server 接口。桌面版仍可正常使用；如需在 GPTEasy 中管理会话，请安装兼容的 Codex CLI。",
     },
     incompatible: {
       title: "需要升级 Codex",

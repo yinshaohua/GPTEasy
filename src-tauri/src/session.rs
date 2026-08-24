@@ -717,9 +717,19 @@ impl AppServerGateway {
         }
         let launch = match &self.launch {
             Some(launch) => launch.clone(),
-            None => discover_codex()?,
+            None => discover_codex(Some(&self.state_store))?,
         };
-        let connection = spawn_connection(&launch, &self.state_store).await?;
+        let connection = match spawn_connection(&launch, &self.state_store).await {
+            Ok(connection) => connection,
+            Err(failure) if self.launch.is_none() => {
+                let fallback = discover_codex(None)?;
+                if fallback.identity == launch.identity {
+                    return Err(failure);
+                }
+                spawn_connection(&fallback, &self.state_store).await?
+            }
+            Err(failure) => return Err(failure),
+        };
         let capability = connection.capability.clone();
         *inner = Some(connection);
         Ok(capability)
@@ -1427,23 +1437,60 @@ fn unexpected_exit() -> SessionFailure {
     )
 }
 
-fn discover_codex() -> Result<LaunchCommand, SessionFailure> {
+fn discover_codex(state_store: Option<&StateStore>) -> Result<LaunchCommand, SessionFailure> {
     if let Some(override_path) = std::env::var_os("GPTEASY_CODEX_EXECUTABLE") {
         let path = PathBuf::from(override_path);
         if path.is_file() {
-            return Ok(LaunchCommand {
-                identity: path.clone(),
-                program: path,
-                args_prefix: Vec::new(),
-            });
+            return Ok(launch_from_path(path));
         }
+    }
+    if let Some(preferred) = state_store
+        .and_then(StateStore::preferred_session_executable)
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
+    {
+        return Ok(launch_from_path(preferred));
     }
     let path = std::env::var_os("PATH").unwrap_or_default();
     #[cfg(windows)]
     let current_user_path = read_current_user_path();
     #[cfg(not(windows))]
     let current_user_path: Option<OsString> = None;
-    discover_codex_in_paths(&path, current_user_path.as_deref())
+    match discover_codex_in_paths(&path, current_user_path.as_deref()) {
+        Ok(launch) => Ok(launch),
+        Err(_) => {
+            #[cfg(windows)]
+            if desktop_app_detected() {
+                return Err(SessionFailure::new(
+                    SessionFailureCategory::CodexMissing,
+                    "session.desktop_app_server_unavailable",
+                ));
+            }
+            Err(SessionFailure::new(
+                SessionFailureCategory::CodexMissing,
+                "session.codex_missing",
+            ))
+        }
+    }
+}
+
+fn launch_from_path(path: PathBuf) -> LaunchCommand {
+    #[cfg(windows)]
+    if path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("cmd"))
+    {
+        return LaunchCommand {
+            identity: path.clone(),
+            program: PathBuf::from("cmd.exe"),
+            args_prefix: vec!["/D".into(), "/S".into(), "/C".into(), path.into_os_string()],
+        };
+    }
+    LaunchCommand {
+        identity: path.clone(),
+        program: path,
+        args_prefix: Vec::new(),
+    }
 }
 
 fn discover_codex_in_paths(
@@ -1454,6 +1501,8 @@ fn discover_codex_in_paths(
     if let Some(current_user_path) = current_user_path {
         directories.extend(std::env::split_paths(current_user_path));
     }
+    #[cfg(windows)]
+    directories.extend(desktop_codex_directories());
     for directory in directories {
         for name in candidate_names() {
             let candidate = directory.join(name);
@@ -1494,6 +1543,77 @@ fn discover_codex_in_paths(
         SessionFailureCategory::CodexMissing,
         "session.codex_missing",
     ))
+}
+
+#[cfg(windows)]
+fn desktop_codex_directories() -> Vec<PathBuf> {
+    let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") else {
+        return Vec::new();
+    };
+    let packages = PathBuf::from(local_app_data).join("Packages");
+    let Ok(entries) = std::fs::read_dir(packages) else {
+        return Vec::new();
+    };
+    let mut directories = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+        if !name.starts_with("openai.codex_") && !name.starts_with("openai.chatgpt_") {
+            continue;
+        }
+        let root = entry.path();
+        collect_desktop_codex_dirs(&root, 0, &mut directories);
+        for relative in [
+            "LocalCache/Local/codex",
+            "LocalCache/Local/resources/codex",
+            "LocalCache/Local/resources/codex/bin",
+            "LocalCache/Local/Programs/codex",
+            "LocalCache/Local/Programs/codex/bin",
+            "LocalCache/Local/Programs/resources/codex",
+        ] {
+            directories.push(root.join(relative));
+        }
+    }
+    directories
+}
+
+#[cfg(windows)]
+fn collect_desktop_codex_dirs(root: &Path, depth: usize, directories: &mut Vec<PathBuf>) {
+    if depth > 6 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_desktop_codex_dirs(&path, depth + 1, directories);
+        } else if path
+            .file_name()
+            .is_some_and(|name| name.eq_ignore_ascii_case("codex.exe"))
+        {
+            if let Some(parent) = path.parent() {
+                directories.push(parent.to_owned());
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn desktop_app_detected() -> bool {
+    let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") else {
+        return false;
+    };
+    let packages = PathBuf::from(local_app_data).join("Packages");
+    std::fs::read_dir(packages)
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|entry| {
+            let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+            name.starts_with("openai.codex_") || name.starts_with("openai.chatgpt_")
+        })
 }
 
 #[cfg(windows)]

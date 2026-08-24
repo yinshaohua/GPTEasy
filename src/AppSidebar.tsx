@@ -6,6 +6,7 @@ import {
   RefreshCw,
   Server,
   Settings,
+  ScrollText,
   TriangleAlert,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -31,13 +32,15 @@ export default function AppSidebar({
   activeView = "providers",
   onOpenProviders,
   onOpenSessions,
+  onOpenLogs,
   openAiAction,
   update,
   currentProviderName,
 }: {
-  activeView?: "providers" | "sessions";
+  activeView?: "providers" | "sessions" | "logs";
   onOpenProviders?: () => void;
   onOpenSessions?: () => void;
+  onOpenLogs?: () => void;
   openAiAction?: OpenAiSidebarAction;
   update?: UpdateSidebarState;
   currentProviderName?: string | null;
@@ -65,7 +68,7 @@ export default function AppSidebar({
           <span>会话管理</span>
         </button>
       </nav>
-      <SidebarFooter currentProviderName={currentProviderName} openAiAction={openAiAction} update={update} />
+      <SidebarFooter currentProviderName={currentProviderName} openAiAction={openAiAction} update={update} onOpenLogs={onOpenLogs} />
     </aside>
   );
 }
@@ -74,10 +77,12 @@ function SidebarFooter({
   currentProviderName,
   openAiAction,
   update,
+  onOpenLogs,
 }: {
   currentProviderName?: string | null;
   openAiAction?: OpenAiSidebarAction;
   update?: UpdateSidebarState;
+  onOpenLogs?: () => void;
 }) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const settingsWrapRef = useRef<HTMLDivElement>(null);
@@ -133,6 +138,10 @@ function SidebarFooter({
                   检查更新...
                 </button>
               )}
+              <button type="button" role="menuitem" onClick={() => { setSettingsOpen(false); onOpenLogs?.(); }}>
+                <ScrollText size={15} aria-hidden="true" />
+                问题日志
+              </button>
             </div>
           )}
         </div>

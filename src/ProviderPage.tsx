@@ -1104,6 +1104,7 @@ export default function ProviderPage({
                       <RecommendedBadge onVisit={visitDaywayWebsite} />
                     )}
                     {provider.hasRecommendationUpdate && <span className="pending-badge">推荐地址已更新</span>}
+                    {provider.isCurrent && environment?.pendingRestart && <span className="pending-badge">待重启</span>}
                     <span className="verified-badge">{providerMessages.verified}</span>
                   </div>
                   <span className="provider-row-url" title={provider.baseUrl}>{provider.baseUrl}</span>

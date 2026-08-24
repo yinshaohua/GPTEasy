@@ -1,6 +1,7 @@
 pub mod codex;
 mod commands;
 pub mod consumer;
+pub mod diagnostics;
 pub mod environment;
 pub mod provider;
 pub mod session;
@@ -14,21 +15,24 @@ pub mod wsl;
 
 use codex::{CodexInspector, LoginStatusCommand};
 use commands::{
-    EnvironmentRuntime, ProviderRuntime, SessionRuntime, StartupRuntime, UpdateRuntime, WslRuntime,
-    apply_environment_provider, apply_wsl_provider, archive_sessions, cancel_provider_request,
-    cancel_session_request, check_for_updates, choose_linux_export_destination,
-    choose_session_export_destination, confirm_provider_validation_base_url, copy_provider_api_key,
-    delete_provider, delete_session, discard_provider_validation, discover_provider_models,
-    discover_provider_models_for_update, enter_session_management, export_linux_script,
-    export_session_markdown, get_environment_snapshot, get_startup_snapshot, get_update_snapshot,
-    install_update, leave_session_management, list_providers, list_sessions, list_wsl_environments,
-    open_dayway_website, open_update_manual_download, open_update_release_notes,
-    perform_update_check, read_session, refresh_startup_snapshot, refresh_wsl_environment,
-    rename_provider, reorder_providers, restore_last_environment_config, revalidate_provider,
-    reveal_provider_api_key, save_and_apply_provider_update, save_dayway_provider,
-    save_provider_update, save_verified_provider, switch_to_openai_login, unarchive_sessions,
-    validate_provider, validate_provider_update,
+    EnvironmentRuntime, IssueLogRuntime, ProviderRuntime, SessionRuntime, StartupRuntime,
+    UpdateRuntime, WslRuntime, apply_environment_provider, apply_wsl_provider, archive_sessions,
+    cancel_provider_request, cancel_session_request, check_for_updates,
+    choose_issue_log_export_destination, choose_linux_export_destination,
+    choose_session_export_destination, confirm_provider_validation_base_url, copy_issue_logs,
+    copy_provider_api_key, delete_provider, delete_session, discard_provider_validation,
+    discover_provider_models, discover_provider_models_for_update, enter_session_management,
+    export_all_issue_logs, export_issue_logs, export_linux_script, export_session_markdown,
+    get_environment_snapshot, get_startup_snapshot, get_update_snapshot, install_update,
+    leave_session_management, list_issue_logs, list_providers, list_sessions,
+    list_wsl_environments, open_dayway_website, open_update_manual_download,
+    open_update_release_notes, perform_update_check, read_session, refresh_startup_snapshot,
+    refresh_wsl_environment, rename_provider, reorder_providers, restore_last_environment_config,
+    revalidate_provider, reveal_provider_api_key, save_and_apply_provider_update,
+    save_dayway_provider, save_provider_update, save_verified_provider, switch_to_openai_login,
+    unarchive_sessions, validate_provider, validate_provider_update,
 };
+use diagnostics::IssueLogStore;
 use environment::EnvironmentApplication;
 use provider::{ProviderApplication, ProviderValidator, ValidationTimeouts};
 use session::SessionApplication;
@@ -59,6 +63,9 @@ pub fn run() {
             let state_root = app.path().app_local_data_dir()?;
             let home = app.path().home_dir()?;
             let state_store = StateStore::new(StatePaths::from_root(state_root));
+            app.manage(IssueLogRuntime::new(IssueLogStore::new(
+                state_store.paths().root(),
+            )));
             app.manage(LifecycleRuntime::new(state_store.clone()));
             app.manage(UpdateRuntime::new(UpdateCoordinator::with_state_path(
                 env!("CARGO_PKG_VERSION"),
@@ -113,6 +120,11 @@ pub fn run() {
             open_update_manual_download,
             open_update_release_notes,
             get_environment_snapshot,
+            list_issue_logs,
+            copy_issue_logs,
+            choose_issue_log_export_destination,
+            export_issue_logs,
+            export_all_issue_logs,
             enter_session_management,
             leave_session_management,
             list_sessions,

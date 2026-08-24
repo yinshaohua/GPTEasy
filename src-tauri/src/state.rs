@@ -313,6 +313,18 @@ impl StateStore {
             .is_ok()
     }
 
+    pub fn preferred_session_executable(&self) -> Option<String> {
+        let connection = self.open_existing_database()?;
+        connection
+            .query_row(
+                "SELECT executable_path FROM session_capability
+                 WHERE singleton = 1 AND status = 'available'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+    }
+
     pub fn record_session_process_ownership(
         &self,
         pid: u32,
