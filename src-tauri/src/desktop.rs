@@ -372,7 +372,9 @@ impl DesktopActivator for WindowsDesktopActivator {
     fn activate(&self, aumid: &str) -> Result<(), DesktopBoundaryError> {
         #[cfg(windows)]
         {
-            Command::new("explorer.exe")
+            let system_root = std::env::var_os("SystemRoot").ok_or(DesktopBoundaryError)?;
+            let explorer = PathBuf::from(system_root).join("explorer.exe");
+            Command::new(explorer)
                 .arg(format!(r"shell:AppsFolder\{aumid}"))
                 .spawn()
                 .map(|_| ())

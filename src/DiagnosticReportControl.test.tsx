@@ -215,6 +215,35 @@ describe("DiagnosticReportControl", () => {
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("repair_diagnostic_custom_provider", { previewId: "preview-0" }));
   });
 
+  it("prefers the current provider when providers arrive after the report", async () => {
+    const providersRequest = deferred<Array<{
+      id: string;
+      name: string;
+      baseUrl: string;
+      defaultModel: string;
+      verifiedAtEpochSeconds: number;
+      isCurrent: boolean;
+      recommendationId: null;
+      hasRecommendationUpdate: boolean;
+    }>>();
+    const backup = { id: "backup-provider", name: "备用供应商", baseUrl: "https://backup.example/v1", defaultModel: "model", verifiedAtEpochSeconds: 1, isCurrent: false, recommendationId: null, hasRecommendationUpdate: false };
+    const current = { ...backup, id: "current-provider", name: "当前供应商", isCurrent: true };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_diagnostic_report") return Promise.resolve(report);
+      if (command === "list_providers") return providersRequest.promise;
+      return Promise.reject(new Error(`unexpected command: ${command}`));
+    });
+
+    render(<DiagnosticReportControl />);
+    fireEvent.click(screen.getByRole("button", { name: "帮我排查" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("list_providers"));
+
+    providersRequest.resolve([backup, current]);
+
+    await screen.findByText("诊断完成");
+    expect(await screen.findByLabelText("分析供应商")).toHaveValue("current-provider");
+  });
+
   it("keeps the local report exportable when AI analysis fails", async () => {
     const provider = { id: "provider-1", name: "已验证供应商", baseUrl: "https://provider.example/v1", defaultModel: "model", verifiedAtEpochSeconds: 1, isCurrent: true, recommendationId: null, hasRecommendationUpdate: false };
     invoke.mockImplementation((command: string) => {

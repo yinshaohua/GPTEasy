@@ -2709,6 +2709,42 @@ describe("Codex 桌面版受控启动与重启", () => {
     expect(screen.queryByText("Codex 已重新启动。")).not.toBeInTheDocument();
   });
 
+  it("重新聚焦窗口时刷新被动状态并展示不可用的具体原因", async () => {
+    let desktopChecks = 0;
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([]);
+      if (command === "get_desktop_snapshot") {
+        desktopChecks += 1;
+        if (desktopChecks === 1) {
+          return Promise.resolve({
+            status: "unknown",
+            action: "unavailable",
+            messageId: "desktop.identity_untrusted",
+            roots: [],
+          });
+        }
+        return Promise.resolve({
+          status: "running",
+          action: "restart",
+          messageId: "desktop.ready_to_restart",
+          roots: [{ role: "desktop", pid: 421, startedAtEpochMillis: 9_100 }],
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText("无法验证 Codex 桌面版进程身份。")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "启动 Codex" })).toBeDisabled();
+
+    fireEvent(window, new Event("focus"));
+
+    expect(await screen.findByText("Codex 桌面版运行中")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "重启 Codex" })).toBeEnabled();
+  });
+
   it("添加供应商与供应商目录标题保持同一行", async () => {
     invoke.mockImplementation((command: string) => {
       if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);

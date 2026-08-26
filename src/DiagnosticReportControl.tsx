@@ -166,7 +166,11 @@ function DiagnosticReportResult({
   const [approvedPlanIds, setApprovedPlanIds] = useState<string[]>([]);
 
   useEffect(() => {
-    if (!assistantProviderId && providers[0]) setAssistantProviderId(providers[0].id);
+    if (!assistantProviderId && providers[0]) {
+      setAssistantProviderId(
+        providers.find((provider) => provider.isCurrent)?.id ?? providers[0].id,
+      );
+    }
   }, [assistantProviderId, providers]);
 
   const handleAssistant = () => {

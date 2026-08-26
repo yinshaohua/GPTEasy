@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { LoaderCircle, Play, RotateCw } from "lucide-react";
 
 import {
@@ -19,18 +19,25 @@ export default function DesktopControl() {
   const [state, setState] = useState<DesktopState>({ kind: "loading" });
   const [confirmingRestart, setConfirmingRestart] = useState(false);
   const [feedback, setFeedback] = useState<string | null>(null);
+  const operationInFlight = useRef(false);
 
   useEffect(() => {
     let current = true;
-    void getDesktopSnapshot()
-      .then((snapshot) => {
-        if (current) setState({ kind: "loaded", snapshot });
-      })
-      .catch((error: unknown) => {
-        if (current) setState({ kind: "error", messageId: asDesktopFailure(error).messageId });
-      });
+    const refresh = () => {
+      if (operationInFlight.current) return;
+      void getDesktopSnapshot()
+        .then((snapshot) => {
+          if (current) setState({ kind: "loaded", snapshot });
+        })
+        .catch((error: unknown) => {
+          if (current) setState({ kind: "error", messageId: asDesktopFailure(error).messageId });
+        });
+    };
+    refresh();
+    window.addEventListener("focus", refresh);
     return () => {
       current = false;
+      window.removeEventListener("focus", refresh);
     };
   }, []);
 
@@ -46,6 +53,7 @@ export default function DesktopControl() {
 
   const start = async () => {
     if (action !== "start") return;
+    operationInFlight.current = true;
     setFeedback(null);
     setState({ kind: "loading" });
     try {
@@ -55,11 +63,14 @@ export default function DesktopControl() {
       const failure = asDesktopFailure(error);
       setState({ kind: "error", messageId: failure.messageId });
       setFeedback(desktopFailureMessage(failure.messageId));
+    } finally {
+      operationInFlight.current = false;
     }
   };
 
   const restart = async () => {
     if (!snapshot || snapshot.action !== "restart") return;
+    operationInFlight.current = true;
     setConfirmingRestart(false);
     setFeedback(null);
     setState({ kind: "loading" });
@@ -73,6 +84,8 @@ export default function DesktopControl() {
       const failure = asDesktopFailure(error);
       setState({ kind: "error", messageId: failure.messageId });
       setFeedback(desktopFailureMessage(failure.messageId));
+    } finally {
+      operationInFlight.current = false;
     }
   };
 
@@ -129,11 +142,9 @@ export default function DesktopControl() {
 
 function desktopStatusMessage(snapshot: DesktopSnapshot): string {
   if (snapshot.status === "running") return desktopMessages.running;
-  if (snapshot.status === "stopped" && snapshot.messageId === "desktop.not_installed") {
-    return desktopMessages.notInstalled;
-  }
+  if (snapshot.messageId === "desktop.not_installed") return desktopMessages.notInstalled;
   if (snapshot.status === "stopped") return desktopMessages.stopped;
-  return desktopMessages.unavailable;
+  return desktopFailureMessage(snapshot.messageId);
 }
 
 function desktopFailureMessage(messageId: string): string {

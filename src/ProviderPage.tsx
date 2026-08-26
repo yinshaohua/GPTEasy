@@ -78,6 +78,8 @@ import {
   type WslLifecycleResult,
 } from "./contracts/environment";
 import {
+  environmentFailureFallback,
+  environmentFailureMessages,
   providerFailureMessages,
   providerMessages,
   wslAvailabilityMessages,
@@ -1884,19 +1886,9 @@ function canApplyProvider(snapshot: EnvironmentSnapshot): boolean {
 }
 
 function environmentFailureMessage(messageId: string): string {
-  const messages: Record<string, string> = {
-    "environment.state_unavailable": "无法读取 Codex 环境状态。",
-    "environment.provider_not_found": "所选供应商已不存在，请刷新后重试。",
-    "environment.managed_conflict": "管理区块已被外部修改，当前操作已停止。",
-    "environment.config_invalid": "config.toml 无法安全迁移。",
-    "environment.credentials_invalid": "auth.json 无法安全保留字段。",
-    "environment.restore_unavailable": "当前没有可安全恢复的最近配置。",
-    "environment.restore_conflict": "受管工件已发生外部变化，恢复已停止。",
-    "environment.backup_invalid": "最近一次配置备份不完整，无法安全恢复。",
-    "environment.openai_login_required": "请先在 Codex 中完成 ChatGPT 账户登录。",
-    "environment.openai_login_unavailable": "无法确认 Codex 登录状态，已阻止切换。",
-  };
-  return messages[messageId] ?? providerFailureMessages[messageId] ?? "Codex 环境未发生变化，请重试。";
+  return environmentFailureMessages[messageId]
+    ?? providerFailureMessages[messageId]
+    ?? environmentFailureFallback;
 }
 
 function providerDeletionFailureMessage(messageId: string): string {
