@@ -124,48 +124,56 @@ fn config_changes_are_independent_from_desktop_lifecycle_contracts() {
 }
 
 #[test]
-fn production_has_no_active_desktop_control_capability() {
+fn production_exposes_only_trusted_desktop_start_and_graceful_restart() {
     let root = repository_root();
     let commands =
         fs::read_to_string(root.join("src-tauri/src/commands.rs")).expect("read Tauri commands");
     let assembly =
         fs::read_to_string(root.join("src-tauri/src/lib.rs")).expect("read Tauri assembly");
-    let consumer =
-        fs::read_to_string(root.join("src-tauri/src/consumer.rs")).expect("read consumer module");
+    let desktop =
+        fs::read_to_string(root.join("src-tauri/src/desktop.rs")).expect("read desktop module");
+    let contract = fs::read_to_string(root.join("src/contracts/desktop.ts"))
+        .expect("read frontend desktop contract");
 
-    for forbidden_command in [
+    for allowed_command in [
         "get_desktop_snapshot",
         "start_desktop_application",
         "restart_desktop_application",
-        "force_restart_desktop_application",
     ] {
         assert!(
-            !commands.contains(forbidden_command),
-            "Tauri commands still expose {forbidden_command}"
+            commands.contains(allowed_command),
+            "Tauri commands do not expose {allowed_command}"
         );
         assert!(
-            !assembly.contains(forbidden_command),
-            "Tauri assembly still registers {forbidden_command}"
+            assembly.contains(allowed_command),
+            "Tauri assembly does not register {allowed_command}"
+        );
+        assert!(
+            contract.contains(allowed_command),
+            "frontend contract does not call {allowed_command}"
         );
     }
 
-    assert!(
-        !root.join("src/contracts/desktop.ts").exists(),
-        "frontend desktop-control contract still exists"
-    );
-    for forbidden_capability in [
-        "DesktopApplication",
-        "DesktopActivator",
-        "DesktopProcessController",
+    for required_boundary in [
+        "OPENAI_WINDOWS_PUBLISHER_ID",
+        "scan_for_install_locations",
         "request_windows_close",
-        "force_terminate_windows_processes",
-        "TerminateProcess",
         "WM_CLOSE",
         "shell:AppsFolder",
     ] {
         assert!(
-            !consumer.contains(forbidden_capability),
-            "consumer production code still contains {forbidden_capability}"
+            desktop.contains(required_boundary),
+            "trusted desktop boundary is missing {required_boundary}"
         );
+    }
+    for forbidden_capability in [
+        "force_restart_desktop_application",
+        "force_terminate",
+        "TerminateProcess",
+    ] {
+        assert!(!commands.contains(forbidden_capability));
+        assert!(!assembly.contains(forbidden_capability));
+        assert!(!desktop.contains(forbidden_capability));
+        assert!(!contract.contains(forbidden_capability));
     }
 }

@@ -207,6 +207,18 @@ export function exportDiagnosticReport(
   return invoke<void>("export_diagnostic_report", { format, destination });
 }
 
+export type FrontendFailureEvent =
+  | "update_progress_listener"
+  | "provider_switch_listener"
+  | "provider_validation_progress_listener"
+  | "unhandled_error"
+  | "unhandled_rejection";
+
+export function recordFrontendFailure(event: FrontendFailureEvent): Promise<void> {
+  if (isBrowserPreview()) return Promise.resolve();
+  return invoke<void>("record_frontend_failure", { event });
+}
+
 export function getIssueLogPath(): Promise<string> {
   if (isBrowserPreview()) return Promise.resolve("issue-log.jsonl");
   return invoke<string>("get_issue_log_path");

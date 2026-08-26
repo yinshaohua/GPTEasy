@@ -31,6 +31,7 @@ import {
   type UpdateSnapshot,
 } from "./contracts/update";
 import { listen } from "@tauri-apps/api/event";
+import { recordFrontendFailure } from "./contracts/diagnostics";
 
 type ViewState =
   | { kind: "loading" }
@@ -90,6 +91,8 @@ export default function App() {
       if (event.payload) setUpdate(event.payload);
     }).then((dispose) => {
       unlisten = dispose;
+    }).catch(() => {
+      void recordFrontendFailure("update_progress_listener").catch(() => undefined);
     });
     void getUpdateSnapshot().then((snapshot) => {
       if (snapshot) setUpdate(snapshot);

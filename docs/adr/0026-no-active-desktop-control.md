@@ -1,6 +1,8 @@
-# 移除所有主动桌面控制入口
+---
+status: superseded by ADR-0041
+---
 
-<!-- release-contract: desktop-consumer-control=prohibited -->
+# 移除所有主动桌面控制入口（历史决定）
 
 ## 状态
 

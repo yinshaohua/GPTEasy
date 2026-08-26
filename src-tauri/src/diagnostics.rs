@@ -1,5 +1,6 @@
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
+use std::panic;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -180,6 +181,46 @@ impl IssueLogStore {
     }
 }
 
+pub fn install_panic_issue_logging(root: impl AsRef<Path>) {
+    let root = root.as_ref().to_owned();
+    let previous = panic::take_hook();
+    panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        let location = info.location();
+        let details = panic_diagnostic_details(
+            thread.name(),
+            location.map(|value| value.file()),
+            location.map(|value| value.line()),
+            location.map(|value| value.column()),
+        );
+        IssueLogStore::new(&root).append(
+            IssueLogLevel::Error,
+            "runtime.panic",
+            "runtime.unhandled_panic",
+            Some(details),
+        );
+        previous(info);
+    }));
+}
+
+fn panic_diagnostic_details(
+    thread: Option<&str>,
+    file: Option<&str>,
+    line: Option<u32>,
+    column: Option<u32>,
+) -> String {
+    let source = file
+        .and_then(|value| Path::new(value).file_name())
+        .and_then(|value| value.to_str())
+        .unwrap_or("unknown");
+    format!(
+        "thread={}; source={source}; line={}; column={}",
+        thread.unwrap_or("unnamed"),
+        line.map_or_else(|| "unknown".to_owned(), |value| value.to_string()),
+        column.map_or_else(|| "unknown".to_owned(), |value| value.to_string()),
+    )
+}
+
 fn sanitize(value: &str) -> String {
     let mut output = value.to_owned();
     for key in [
@@ -218,7 +259,7 @@ fn now_epoch_seconds() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{IssueLogLevel, IssueLogStore};
+    use super::{IssueLogLevel, IssueLogStore, panic_diagnostic_details};
     use tempfile::tempdir;
 
     #[test]
@@ -239,6 +280,19 @@ mod tests {
                 .as_deref()
                 .unwrap()
                 .contains("super-secret")
+        );
+    }
+
+    #[test]
+    fn panic_diagnostics_include_only_the_source_location_and_thread() {
+        assert_eq!(
+            panic_diagnostic_details(
+                Some("tokio-rt-worker"),
+                Some(r"C:\src\GPTEasy\src-tauri\src\environment.rs"),
+                Some(4285),
+                Some(53),
+            ),
+            "thread=tokio-rt-worker; source=environment.rs; line=4285; column=53"
         );
     }
 }

@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use toml_edit::DocumentMut;
 use uuid::Uuid;
 
-use crate::codex::{LoginStatus, LoginStatusCommand};
+use crate::codex::{LoginInspection, LoginMethod, LoginStatus, LoginStatusCommand};
 pub use crate::consumer::ConsumerStatus;
 use crate::consumer::{ConsumerIdentity, ConsumerScan, ConsumerScanner, WindowsConsumerScanner};
 use crate::provider::{ProviderSummary, combination_fingerprint};
@@ -24,6 +24,7 @@ const BACKUP_LIMIT: usize = 5;
 const BACKUP_FORMAT_VERSION: u8 = 1;
 const BACKUP_COMPLETION_FILE: &str = "completed";
 const BACKUP_COMPLETION_CONTENT: &[u8] = b"gpteasy-config-backup-v1\n";
+const OPENAI_CREDENTIAL_RECOVERY_FILE: &str = ".gpteasy-openai-login.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -222,12 +223,12 @@ pub trait EnvironmentFaultInjector: Send + Sync {
 }
 
 pub trait OpenAiLoginProbe: Send + Sync {
-    fn status(&self) -> LoginStatus;
+    fn inspect(&self) -> LoginInspection;
 }
 
 impl OpenAiLoginProbe for LoginStatusCommand {
-    fn status(&self) -> LoginStatus {
-        self.status()
+    fn inspect(&self) -> LoginInspection {
+        self.inspect()
     }
 }
 
@@ -734,15 +735,42 @@ impl EnvironmentApplication {
                 "environment.mode_switch_confirmation_required",
             ));
         }
-        match self.login_probe.status() {
-            LoginStatus::LoggedIn => {}
-            LoginStatus::NotLoggedIn => {
+        let login = self.login_probe.inspect();
+        let restorable_chatgpt = has_restorable_chatgpt_credentials(&self.codex_home)?;
+        match login {
+            LoginInspection {
+                status: LoginStatus::LoggedIn,
+                method: LoginMethod::ChatGpt,
+            } => {}
+            LoginInspection {
+                status: LoginStatus::LoggedIn,
+                method: LoginMethod::ApiKey,
+            }
+            | LoginInspection {
+                status: LoginStatus::LoggedIn,
+                method: LoginMethod::Unknown,
+            } if restorable_chatgpt => {}
+            LoginInspection {
+                status: LoginStatus::LoggedIn,
+                method: LoginMethod::ApiKey,
+            }
+            | LoginInspection {
+                status: LoginStatus::NotLoggedIn,
+                ..
+            } => {
                 return Err(EnvironmentFailure::new(
                     EnvironmentFailureCategory::OpenAiLoginRequired,
                     "environment.openai_login_required",
                 ));
             }
-            LoginStatus::Unavailable => {
+            LoginInspection {
+                status: LoginStatus::Unavailable,
+                ..
+            }
+            | LoginInspection {
+                status: LoginStatus::LoggedIn,
+                method: LoginMethod::Unknown,
+            } => {
                 return Err(EnvironmentFailure::new(
                     EnvironmentFailureCategory::OpenAiLoginUnavailable,
                     "environment.openai_login_unavailable",
@@ -755,21 +783,6 @@ impl EnvironmentApplication {
             .map_err(|_| state_unavailable())?;
         let mut connection = self.open_state()?;
         let before = self.inspect_environment(&connection)?;
-        match before.login_status {
-            LoginStatus::LoggedIn => {}
-            LoginStatus::NotLoggedIn => {
-                return Err(EnvironmentFailure::new(
-                    EnvironmentFailureCategory::OpenAiLoginRequired,
-                    "environment.openai_login_required",
-                ));
-            }
-            LoginStatus::Unavailable => {
-                return Err(EnvironmentFailure::new(
-                    EnvironmentFailureCategory::OpenAiLoginUnavailable,
-                    "environment.openai_login_unavailable",
-                ));
-            }
-        }
         if before.revision != expected_revision {
             return Err(concurrent_modification());
         }
@@ -790,6 +803,8 @@ impl EnvironmentApplication {
         self.check_interruption(EnvironmentFailurePoint::AfterPendingRegistered)?;
 
         let mut config_applied = false;
+        let mut credentials_applied = false;
+        let mut recovery_removed = false;
         let mut interrupted = false;
         let mut backup_completed = false;
         let result = (|| {
@@ -801,7 +816,16 @@ impl EnvironmentApplication {
                 .inspect_err(|_| {
                     interrupted = true;
                 })?;
-            prepared.config.verify_target()?;
+            if let Some(credentials) = &prepared.credentials {
+                self.check_fault(EnvironmentFailurePoint::BeforeCredentialsReplace)?;
+                credentials.commit()?;
+                credentials_applied = true;
+            }
+            if let Some(recovery) = &prepared.openai_credentials_recovery {
+                recovery.commit()?;
+                recovery_removed = true;
+            }
+            prepared.verify_committed()?;
             update_pending_stage(&connection, &prepared.operation_id, "artifacts_replaced")?;
             consumer_scan = self.consumer_scanner.scan();
             finalize_restart_context(
@@ -837,7 +861,13 @@ impl EnvironmentApplication {
                 unmark_backup_completed(&backup)?;
             }
             if self.faults.fails_rollback()
-                || (config_applied && prepared.config.rollback().is_err())
+                || rollback_openai_switch(
+                    &prepared,
+                    config_applied,
+                    credentials_applied,
+                    recovery_removed,
+                )
+                .is_err()
             {
                 return Err(EnvironmentFailure::new(
                     EnvironmentFailureCategory::RollbackFailed,
@@ -964,9 +994,14 @@ impl EnvironmentApplication {
 
         let mut config_applied = false;
         let mut credentials_applied = false;
+        let mut recovery_applied = false;
         let mut interrupted = false;
         let mut backup_completed = false;
         let result = (|| {
+            if let Some(recovery) = &prepared.openai_credentials_recovery {
+                recovery.commit()?;
+                recovery_applied = true;
+            }
             self.check_fault(EnvironmentFailurePoint::BeforeConfigReplace)?;
             prepared.config.commit()?;
             config_applied = true;
@@ -1014,7 +1049,13 @@ impl EnvironmentApplication {
                 unmark_backup_completed(&backup)?;
             }
             if self.faults.fails_rollback()
-                || rollback_switch(&prepared, config_applied, credentials_applied).is_err()
+                || rollback_switch(
+                    &prepared,
+                    config_applied,
+                    credentials_applied,
+                    recovery_applied,
+                )
+                .is_err()
             {
                 return Err(EnvironmentFailure::new(
                     EnvironmentFailureCategory::RollbackFailed,
@@ -1050,8 +1091,9 @@ impl EnvironmentApplication {
         connection: &Connection,
         scan: &ConsumerScan,
     ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
-        let mut snapshot =
-            inspect_environment(connection, &self.codex_home, self.login_probe.status())?;
+        let login_status =
+            effective_openai_login_status(&self.codex_home, self.login_probe.inspect())?;
+        let mut snapshot = inspect_environment(connection, &self.codex_home, login_status)?;
         snapshot.requires_consumer_confirmation = requires_consumer_confirmation(scan);
         snapshot.consumers = consumer_statuses(scan);
         Ok(snapshot)
@@ -1863,6 +1905,7 @@ struct PreparedSwitch {
     provider: ProviderTarget,
     config: PreparedArtifact,
     credentials: PreparedArtifact,
+    openai_credentials_recovery: Option<PreparedArtifact>,
     update_guard: Option<UpdateGuard>,
 }
 
@@ -1870,6 +1913,8 @@ struct PreparedSwitch {
 struct PreparedOpenAiSwitch {
     operation_id: String,
     config: PreparedRestoreArtifact,
+    credentials: Option<PreparedRestoreArtifact>,
+    openai_credentials_recovery: Option<PreparedRestoreArtifact>,
 }
 
 #[derive(Debug, Clone)]
@@ -2223,6 +2268,14 @@ impl PreparedOpenAiSwitch {
         let target = ArtifactBytes {
             bytes: render_openai_config(current.bytes.as_deref())?,
         };
+        let credentials_path = codex_home.join("auth.json");
+        let credentials = read_artifact(&credentials_path)?;
+        let recovery_path = codex_home.join(OPENAI_CREDENTIAL_RECOVERY_FILE);
+        let recovery = read_artifact(&recovery_path)?;
+        let credential_source = restorable_chatgpt_credentials(&credentials, &recovery)?;
+        let credential_target = ArtifactBytes {
+            bytes: render_openai_credentials(credential_source.bytes.as_deref())?,
+        };
         Ok(Self {
             operation_id: Uuid::new_v4().to_string(),
             config: PreparedRestoreArtifact::new(
@@ -2231,7 +2284,34 @@ impl PreparedOpenAiSwitch {
                 target,
                 ArtifactKind::Config,
             ),
+            credentials: (credentials.bytes != credential_target.bytes).then(|| {
+                PreparedRestoreArtifact::new(
+                    credentials_path,
+                    credentials,
+                    credential_target,
+                    ArtifactKind::Credentials,
+                )
+            }),
+            openai_credentials_recovery: recovery.bytes.is_some().then(|| {
+                PreparedRestoreArtifact::new(
+                    recovery_path,
+                    recovery,
+                    ArtifactBytes { bytes: None },
+                    ArtifactKind::Credentials,
+                )
+            }),
         })
+    }
+
+    fn verify_committed(&self) -> Result<(), EnvironmentFailure> {
+        self.config.verify_target()?;
+        if let Some(credentials) = &self.credentials {
+            credentials.verify_target()?;
+        }
+        if let Some(recovery) = &self.openai_credentials_recovery {
+            recovery.verify_target()?;
+        }
+        Ok(())
     }
 }
 
@@ -2264,6 +2344,18 @@ impl PreparedSwitch {
         let credentials = read_artifact(&credentials_path)?;
         let rendered_credentials =
             render_credentials(credentials.bytes.as_deref(), &provider.api_key)?;
+        let openai_credentials_recovery = has_chatgpt_tokens(&credentials)?
+            .then(|| {
+                let path = codex_home.join(OPENAI_CREDENTIAL_RECOVERY_FILE);
+                let old = read_artifact(&path)?;
+                Ok(PreparedArtifact::new(
+                    path,
+                    old,
+                    credentials.bytes.clone().ok_or_else(invalid_credentials)?,
+                    ArtifactKind::Credentials,
+                ))
+            })
+            .transpose()?;
         Ok(Self {
             operation_id: Uuid::new_v4().to_string(),
             provider,
@@ -2279,13 +2371,18 @@ impl PreparedSwitch {
                 rendered_credentials,
                 ArtifactKind::Credentials,
             ),
+            openai_credentials_recovery,
             update_guard,
         })
     }
 
     fn verify_committed(&self) -> Result<(), EnvironmentFailure> {
         self.config.verify_new()?;
-        self.credentials.verify_new()
+        self.credentials.verify_new()?;
+        if let Some(recovery) = &self.openai_credentials_recovery {
+            recovery.verify_new()?;
+        }
+        Ok(())
     }
 
     fn old_revision(&self) -> String {
@@ -2311,6 +2408,7 @@ struct PreparedArtifact {
     path: PathBuf,
     old: ArtifactBytes,
     new_bytes: Vec<u8>,
+    kind: ArtifactKind,
     old_fingerprint: Option<String>,
     new_fingerprint: String,
 }
@@ -2323,6 +2421,7 @@ impl PreparedArtifact {
             path,
             old,
             new_bytes,
+            kind,
             old_fingerprint,
             new_fingerprint,
         }
@@ -2342,12 +2441,7 @@ impl PreparedArtifact {
 
     fn verify_new(&self) -> Result<(), EnvironmentFailure> {
         let bytes = fs::read(&self.path).map_err(|_| artifact_write_failed())?;
-        let kind = if self.path.file_name().and_then(|name| name.to_str()) == Some("auth.json") {
-            ArtifactKind::Credentials
-        } else {
-            ArtifactKind::Config
-        };
-        if artifact_hash(kind, &bytes) == self.new_fingerprint {
+        if artifact_hash(self.kind, &bytes) == self.new_fingerprint {
             Ok(())
         } else {
             Err(artifact_write_failed())
@@ -2365,12 +2459,7 @@ impl PreparedArtifact {
                 artifact_write_failed()
             }
         })?;
-        let kind = if self.path.file_name().and_then(|name| name.to_str()) == Some("auth.json") {
-            ArtifactKind::Credentials
-        } else {
-            ArtifactKind::Config
-        };
-        if artifact_hash(kind, &current) != self.new_fingerprint {
+        if artifact_hash(self.kind, &current) != self.new_fingerprint {
             return Err(concurrent_modification());
         }
         match self.old.bytes.as_deref() {
@@ -2692,12 +2781,20 @@ fn rollback_switch(
     prepared: &PreparedSwitch,
     config_applied: bool,
     credentials_applied: bool,
+    recovery_applied: bool,
 ) -> Result<(), EnvironmentFailure> {
     if credentials_applied {
         prepared.credentials.restore()?;
     }
     if config_applied {
         prepared.config.restore()?;
+    }
+    if recovery_applied {
+        prepared
+            .openai_credentials_recovery
+            .as_ref()
+            .ok_or_else(state_unavailable)?
+            .restore()?;
     }
     Ok(())
 }
@@ -2716,6 +2813,32 @@ fn rollback_restore(
     }
     if config_applied {
         prepared.config.rollback()?;
+    }
+    Ok(())
+}
+
+fn rollback_openai_switch(
+    prepared: &PreparedOpenAiSwitch,
+    config_applied: bool,
+    credentials_applied: bool,
+    recovery_removed: bool,
+) -> Result<(), EnvironmentFailure> {
+    if credentials_applied {
+        prepared
+            .credentials
+            .as_ref()
+            .ok_or_else(state_unavailable)?
+            .rollback()?;
+    }
+    if config_applied {
+        prepared.config.rollback()?;
+    }
+    if recovery_removed {
+        prepared
+            .openai_credentials_recovery
+            .as_ref()
+            .ok_or_else(state_unavailable)?
+            .rollback()?;
     }
     Ok(())
 }
@@ -2804,11 +2927,19 @@ fn persist_pending_openai(
                 old_credentials_fingerprint, new_credentials_fingerprint,
                 backup_reference, target_snapshot_json, started_at, restart_context
              ) VALUES (1, ?1, 'switch_openai_login', 'prepared', ?2, ?3,
-                       NULL, NULL, ?4, '{}', ?5, ?6)",
+                       ?4, ?5, ?6, '{}', ?7, ?8)",
             params![
                 prepared.operation_id,
                 prepared.config.current_fingerprint,
                 prepared.config.target_fingerprint,
+                prepared
+                    .credentials
+                    .as_ref()
+                    .and_then(|credentials| credentials.current_fingerprint.clone()),
+                prepared
+                    .credentials
+                    .as_ref()
+                    .and_then(|credentials| credentials.target_fingerprint.clone()),
                 backup.to_string_lossy(),
                 epoch_seconds().to_string(),
                 restart_context,
@@ -3530,19 +3661,34 @@ fn create_openai_backup(
         if let Some(bytes) = prepared.config.current.bytes.as_deref() {
             write_new_synced(&operation.join("config.toml"), bytes).map_err(|_| backup_failed())?;
         }
+        let credential_fields = prepared
+            .credentials
+            .as_ref()
+            .map(|credentials| credential_fields_backup(&credentials.current))
+            .transpose()?
+            .flatten();
         let manifest = serde_json::to_vec_pretty(&BackupManifest {
             format_version: BACKUP_FORMAT_VERSION,
             operation_id: prepared.operation_id.clone(),
             operation_kind: "switch_openai_login".to_owned(),
             config_affected: true,
-            credentials_affected: false,
+            credentials_affected: prepared.credentials.is_some(),
             config_existed: prepared.config.current.bytes.is_some(),
-            credentials_existed: false,
+            credentials_existed: prepared
+                .credentials
+                .as_ref()
+                .is_some_and(|credentials| credentials.current.bytes.is_some()),
             old_config_fingerprint: prepared.config.current_fingerprint.clone(),
             new_config_fingerprint: prepared.config.target_fingerprint.clone(),
-            old_credentials_fingerprint: None,
-            new_credentials_fingerprint: None,
-            credential_fields: None,
+            old_credentials_fingerprint: prepared
+                .credentials
+                .as_ref()
+                .and_then(|credentials| credentials.current_fingerprint.clone()),
+            new_credentials_fingerprint: prepared
+                .credentials
+                .as_ref()
+                .and_then(|credentials| credentials.target_fingerprint.clone()),
+            credential_fields,
             previous_mode: before.mode,
             previous_provider_id: before
                 .current_provider
@@ -3989,6 +4135,112 @@ fn render_openai_config(original: Option<&[u8]>) -> Result<Option<Vec<u8>>, Envi
     Ok(Some(rendered.into_bytes()))
 }
 
+fn render_openai_credentials(
+    original: Option<&[u8]>,
+) -> Result<Option<Vec<u8>>, EnvironmentFailure> {
+    let Some(original) = original else {
+        return Ok(None);
+    };
+    let mut object = serde_json::from_slice::<Value>(original)
+        .map_err(|_| invalid_credentials())?
+        .as_object()
+        .cloned()
+        .ok_or_else(invalid_credentials)?;
+    if object.get("auth_mode").and_then(Value::as_str) == Some("chatgpt")
+        && !object.contains_key("OPENAI_API_KEY")
+    {
+        return Ok(Some(original.to_vec()));
+    }
+    if !has_chatgpt_tokens_in_object(&object) {
+        return Err(EnvironmentFailure::new(
+            EnvironmentFailureCategory::OpenAiLoginRequired,
+            "environment.openai_login_required",
+        ));
+    }
+    object.insert("auth_mode".to_owned(), Value::String("chatgpt".to_owned()));
+    object.remove("OPENAI_API_KEY");
+    let mut bytes =
+        serde_json::to_vec_pretty(&Value::Object(object)).map_err(|_| invalid_credentials())?;
+    bytes.push(b'\n');
+    Ok(Some(bytes))
+}
+
+fn has_restorable_chatgpt_credentials(codex_home: &Path) -> Result<bool, EnvironmentFailure> {
+    let credentials = read_artifact(&codex_home.join("auth.json"))?;
+    let recovery = read_artifact(&codex_home.join(OPENAI_CREDENTIAL_RECOVERY_FILE))?;
+    Ok(restorable_chatgpt_credentials(&credentials, &recovery)?
+        .bytes
+        .is_some())
+}
+
+fn restorable_chatgpt_credentials(
+    credentials: &ArtifactBytes,
+    recovery: &ArtifactBytes,
+) -> Result<ArtifactBytes, EnvironmentFailure> {
+    if has_chatgpt_tokens(credentials)? {
+        return Ok(credentials.clone());
+    }
+    if has_chatgpt_tokens(recovery)? {
+        return Ok(recovery.clone());
+    }
+    Ok(ArtifactBytes { bytes: None })
+}
+
+fn has_chatgpt_tokens(credentials: &ArtifactBytes) -> Result<bool, EnvironmentFailure> {
+    let Some(bytes) = credentials.bytes.as_deref() else {
+        return Ok(false);
+    };
+    let object = serde_json::from_slice::<Value>(bytes)
+        .map_err(|_| invalid_credentials())?
+        .as_object()
+        .cloned()
+        .ok_or_else(invalid_credentials)?;
+    Ok(has_chatgpt_tokens_in_object(&object))
+}
+
+fn has_chatgpt_tokens_in_object(object: &Map<String, Value>) -> bool {
+    object
+        .get("tokens")
+        .and_then(Value::as_object)
+        .is_some_and(|tokens| !tokens.is_empty())
+}
+
+fn effective_openai_login_status(
+    codex_home: &Path,
+    inspection: LoginInspection,
+) -> Result<LoginStatus, EnvironmentFailure> {
+    match inspection {
+        LoginInspection {
+            status: LoginStatus::LoggedIn,
+            method: LoginMethod::ChatGpt,
+        } => Ok(LoginStatus::LoggedIn),
+        LoginInspection {
+            status: LoginStatus::LoggedIn,
+            method: LoginMethod::ApiKey,
+        } => Ok(if has_restorable_chatgpt_credentials(codex_home)? {
+            LoginStatus::LoggedIn
+        } else {
+            LoginStatus::NotLoggedIn
+        }),
+        LoginInspection {
+            status: LoginStatus::LoggedIn,
+            method: LoginMethod::Unknown,
+        } => Ok(if has_restorable_chatgpt_credentials(codex_home)? {
+            LoginStatus::LoggedIn
+        } else {
+            LoginStatus::Unavailable
+        }),
+        LoginInspection {
+            status: LoginStatus::NotLoggedIn,
+            ..
+        } => Ok(LoginStatus::NotLoggedIn),
+        LoginInspection {
+            status: LoginStatus::Unavailable,
+            ..
+        } => Ok(LoginStatus::Unavailable),
+    }
+}
+
 fn migrate_external_config(
     original: &str,
     target_provider_id: &str,
@@ -4068,6 +4320,7 @@ fn render_managed_block(provider: &ProviderTarget, aliases: &[String], newline: 
             format!("{table}.base_url = {}", string(&provider.base_url)),
             format!("{table}.wire_api = \"responses\""),
             format!("{table}.requires_openai_auth = true"),
+            format!("{table}.supports_websockets = false"),
         ]);
     }
     lines.extend([MANAGED_END.to_owned(), String::new()]);
@@ -4239,7 +4492,20 @@ fn recover_desktop_managed_block(
     relocated_end_marker: Option<(usize, usize)>,
 ) -> Option<ManagedBlockRange> {
     let mut end = start_line_end;
-    for line in text.get(start_line_end..)?.split_inclusive('\n').take(7) {
+    let primary_lines = text
+        .get(start_line_end..)?
+        .split_inclusive('\n')
+        .take(8)
+        .collect::<Vec<_>>();
+    let primary_len = if primary_lines
+        .get(7)
+        .is_some_and(|line| line.contains(".supports_websockets = false"))
+    {
+        8
+    } else {
+        7
+    };
+    for line in primary_lines.into_iter().take(primary_len) {
         end += line.len();
     }
     let mut block = reconstructed_managed_block(text.as_bytes().get(start..end)?)?;
@@ -4249,11 +4515,20 @@ fn recover_desktop_managed_block(
     loop {
         let group_start = end;
         let mut group_end = end;
-        let mut group_lines = text.get(end..)?.split_inclusive('\n');
-        for _ in 0..4 {
-            let Some(line) = group_lines.next() else {
-                break;
-            };
+        let group_lines = text
+            .get(end..)?
+            .split_inclusive('\n')
+            .take(5)
+            .collect::<Vec<_>>();
+        let group_len = if group_lines
+            .get(4)
+            .is_some_and(|line| line.contains(".supports_websockets = false"))
+        {
+            5
+        } else {
+            4
+        };
+        for line in group_lines.into_iter().take(group_len) {
             group_end += line.len();
         }
         if group_end == group_start {
@@ -4352,7 +4627,7 @@ fn managed_block_has_expected_shape(block: &str, provider_id: &str) -> bool {
             && item
                 .as_table()
                 .and_then(managed_provider_fields)
-                .is_some_and(|candidate| candidate == fields)
+                .is_some_and(|candidate| managed_provider_fields_match(candidate, fields))
     })
 }
 
@@ -4382,7 +4657,13 @@ fn managed_block_is_root_scoped(
     ) else {
         return false;
     };
-    managed_provider_fields(actual) == managed_provider_fields(expected)
+    match (
+        managed_provider_fields(actual),
+        managed_provider_fields(expected),
+    ) {
+        (Some(actual), Some(expected)) => managed_provider_fields_match(actual, expected),
+        _ => false,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4391,19 +4672,40 @@ struct ManagedProviderFields<'a> {
     base_url: &'a str,
     wire_api: &'a str,
     requires_openai_auth: bool,
+    supports_websockets: Option<bool>,
 }
 
 fn managed_provider_fields(table: &toml_edit::Table) -> Option<ManagedProviderFields<'_>> {
-    if table.len() != 4 {
+    if !(4..=5).contains(&table.len()) {
         return None;
     }
+    let supports_websockets = match table.get("supports_websockets") {
+        Some(value) => Some(value.as_bool()?),
+        None => None,
+    };
     Some(ManagedProviderFields {
         name: table.get("name")?.as_str()?,
         base_url: table.get("base_url")?.as_str()?,
         wire_api: table.get("wire_api")?.as_str()?,
         requires_openai_auth: table.get("requires_openai_auth")?.as_bool()?,
+        supports_websockets,
     })
-    .filter(|fields| fields.wire_api == "responses" && fields.requires_openai_auth)
+    .filter(|fields| {
+        fields.wire_api == "responses"
+            && fields.requires_openai_auth
+            && fields.supports_websockets.is_none_or(|enabled| !enabled)
+    })
+}
+
+fn managed_provider_fields_match(
+    left: ManagedProviderFields<'_>,
+    right: ManagedProviderFields<'_>,
+) -> bool {
+    left.name == right.name
+        && left.base_url == right.base_url
+        && left.wire_api == right.wire_api
+        && left.requires_openai_auth == right.requires_openai_auth
+        && left.supports_websockets.unwrap_or(false) == right.supports_websockets.unwrap_or(false)
 }
 
 fn managed_provider_table<'a>(
@@ -4420,6 +4722,24 @@ fn managed_provider_table<'a>(
 pub(crate) struct ManagedConfigEvidence {
     pub(crate) fingerprint: String,
     pub(crate) recovered_desktop_rewrite: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ManagedConfigState {
+    Absent,
+    Present,
+    Conflict,
+}
+
+pub(crate) fn managed_config_state(bytes: &[u8]) -> ManagedConfigState {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return ManagedConfigState::Conflict;
+    };
+    match managed_block(text) {
+        ManagedBlock::None => ManagedConfigState::Absent,
+        ManagedBlock::Valid(_) => ManagedConfigState::Present,
+        ManagedBlock::Conflict => ManagedConfigState::Conflict,
+    }
 }
 
 pub(crate) fn managed_config_evidence(bytes: &[u8]) -> Option<ManagedConfigEvidence> {
@@ -4449,6 +4769,32 @@ pub(crate) fn managed_config_matches_applied_evidence(
         return true;
     }
     historical_alias_free_fingerprint(bytes).as_deref() == Some(applied_fingerprint)
+        || websocket_default_compatible_fingerprint(bytes).as_deref() == Some(applied_fingerprint)
+}
+
+fn websocket_default_compatible_fingerprint(bytes: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let ManagedBlock::Valid(managed) = managed_block(text) else {
+        return None;
+    };
+    let block = canonical_managed_block(text, &managed)?;
+    let newline = if block.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut document = block.parse::<DocumentMut>().ok()?;
+    let providers = document.get_mut("model_providers")?.as_table_mut()?;
+    let mut restored_default = false;
+    for (_, item) in providers.iter_mut() {
+        let table = item.as_table_mut()?;
+        let fields = managed_provider_fields(table)?;
+        if fields.supports_websockets.is_none() {
+            table["supports_websockets"] = toml_edit::value(false);
+            restored_default = true;
+        }
+    }
+    if !restored_default {
+        return None;
+    }
+    let compatible = normalize_newlines(&document.to_string(), newline);
+    Some(artifact_hash(ArtifactKind::Config, compatible.as_bytes()))
 }
 
 fn historical_alias_free_fingerprint(bytes: &[u8]) -> Option<String> {
@@ -4472,14 +4818,14 @@ fn historical_alias_free_fingerprint(bytes: &[u8]) -> Option<String> {
                 && item
                     .as_table()
                     .and_then(managed_provider_fields)
-                    .is_some_and(|candidate| candidate == fields))
+                    .is_some_and(|candidate| managed_provider_fields_match(candidate, fields)))
     }) {
         return None;
     }
     let newline = if block.contains("\r\n") { "\r\n" } else { "\n" };
     let table = format!("model_providers.{}", managed.provider_id);
     let string = |value: &str| toml_edit::Value::from(value).to_string();
-    let primary_block = [
+    let mut primary_lines = vec![
         MANAGED_START.to_owned(),
         format!("{PROVIDER_ID_PREFIX} {}", managed.provider_id),
         format!("model = {}", string(document.get("model")?.as_str()?)),
@@ -4491,10 +4837,14 @@ fn historical_alias_free_fingerprint(bytes: &[u8]) -> Option<String> {
             "{table}.requires_openai_auth = {}",
             fields.requires_openai_auth
         ),
-        MANAGED_END.to_owned(),
-        String::new(),
-    ]
-    .join(newline);
+    ];
+    if let Some(supports_websockets) = fields.supports_websockets {
+        primary_lines.push(format!(
+            "{table}.supports_websockets = {supports_websockets}"
+        ));
+    }
+    primary_lines.extend([MANAGED_END.to_owned(), String::new()]);
+    let primary_block = primary_lines.join(newline);
     Some(artifact_hash(
         ArtifactKind::Config,
         primary_block.as_bytes(),
@@ -4578,15 +4928,17 @@ fn is_inside_multiline_string(text: &str, target: usize) -> bool {
 }
 
 fn managed_config_matches(document: &DocumentMut, provider: &ProviderTarget) -> bool {
+    let Some(fields) =
+        managed_provider_table(document, &provider.id).and_then(managed_provider_fields)
+    else {
+        return false;
+    };
     document.get("model").and_then(|item| item.as_str()) == Some(&provider.default_model)
         && document
             .get("model_provider")
             .and_then(|item| item.as_str())
             == Some(&provider.id)
-        && document["model_providers"][&provider.id]["base_url"].as_str()
-            == Some(&provider.base_url)
-        && document["model_providers"][&provider.id]["wire_api"].as_str() == Some("responses")
-        && document["model_providers"][&provider.id]["requires_openai_auth"].as_bool() == Some(true)
+        && fields.base_url == provider.base_url
 }
 
 fn credentials_match(

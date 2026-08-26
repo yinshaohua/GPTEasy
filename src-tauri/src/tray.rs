@@ -7,7 +7,8 @@ use tauri::{App, AppHandle, Emitter, Manager, Window, WindowEvent};
 use tauri_plugin_notification::NotificationExt;
 use tokio_util::sync::CancellationToken;
 
-use crate::commands::{EnvironmentRuntime, ProviderRuntime, SessionRuntime};
+use crate::commands::{EnvironmentRuntime, IssueLogRuntime, ProviderRuntime, SessionRuntime};
+use crate::diagnostics::IssueLogLevel;
 use crate::environment::{AuthenticationMode, EnvironmentSnapshot, EnvironmentState};
 use crate::provider::ProviderSummary;
 use crate::state::StateStore;
@@ -18,6 +19,15 @@ const SETTINGS_ID: &str = "settings";
 const EXIT_ID: &str = "exit";
 const PROVIDER_PREFIX: &str = "provider:";
 const OBSERVATION_INTERVAL: Duration = Duration::from_secs(30);
+
+fn log_error(app: &AppHandle, event: &str, message_id: &str, details: &str) {
+    app.state::<IssueLogRuntime>().store.append(
+        IssueLogLevel::Error,
+        event,
+        message_id,
+        Some(details.to_owned()),
+    );
+}
 
 pub(crate) struct LifecycleRuntime {
     explicit_exit: AtomicBool,
@@ -98,11 +108,30 @@ pub(crate) fn setup(app: &App) -> tauri::Result<()> {
 pub(crate) fn refresh(app: &AppHandle) -> tauri::Result<()> {
     let refresh_handle = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let providers = refresh_handle
-            .state::<ProviderRuntime>()
-            .list()
-            .unwrap_or_default();
-        let snapshot = refresh_handle.state::<EnvironmentRuntime>().inspect().ok();
+        let providers = match refresh_handle.state::<ProviderRuntime>().list() {
+            Ok(providers) => providers,
+            Err(failure) => {
+                log_error(
+                    &refresh_handle,
+                    "tray.provider_list",
+                    failure.message_id,
+                    &format!("category={:?}", failure.category),
+                );
+                Vec::new()
+            }
+        };
+        let snapshot = match refresh_handle.state::<EnvironmentRuntime>().inspect() {
+            Ok(snapshot) => Some(snapshot),
+            Err(failure) => {
+                log_error(
+                    &refresh_handle,
+                    "tray.environment_inspect",
+                    failure.message_id,
+                    &format!("category={:?}", failure.category),
+                );
+                None
+            }
+        };
         install_menu(refresh_handle, providers, snapshot);
     });
     Ok(())
@@ -115,10 +144,18 @@ pub(crate) fn refresh_with_snapshot(
     let refresh_handle = app.clone();
     let snapshot = snapshot.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let providers = refresh_handle
-            .state::<ProviderRuntime>()
-            .list()
-            .unwrap_or_default();
+        let providers = match refresh_handle.state::<ProviderRuntime>().list() {
+            Ok(providers) => providers,
+            Err(failure) => {
+                log_error(
+                    &refresh_handle,
+                    "tray.provider_list",
+                    failure.message_id,
+                    &format!("category={:?}", failure.category),
+                );
+                Vec::new()
+            }
+        };
         install_menu(refresh_handle, providers, Some(snapshot));
     });
     Ok(())
@@ -130,15 +167,47 @@ fn install_menu(
     snapshot: Option<EnvironmentSnapshot>,
 ) {
     let menu_handle = app.clone();
-    let _ = app.run_on_main_thread(move || {
-        let Some(tray) = menu_handle.tray_by_id(TRAY_ID) else {
-            return;
-        };
-        let Ok(menu) = build_menu(&menu_handle, &providers, snapshot.as_ref()) else {
-            return;
-        };
-        let _ = tray.set_menu(Some(menu));
-    });
+    if app
+        .run_on_main_thread(move || {
+            let Some(tray) = menu_handle.tray_by_id(TRAY_ID) else {
+                log_error(
+                    &menu_handle,
+                    "tray.install_menu",
+                    "tray.unavailable",
+                    "category=tray",
+                );
+                return;
+            };
+            let menu = match build_menu(&menu_handle, &providers, snapshot.as_ref()) {
+                Ok(menu) => menu,
+                Err(_) => {
+                    log_error(
+                        &menu_handle,
+                        "tray.build_menu",
+                        "tray.menu_build_failed",
+                        "category=tray",
+                    );
+                    return;
+                }
+            };
+            if tray.set_menu(Some(menu)).is_err() {
+                log_error(
+                    &menu_handle,
+                    "tray.install_menu",
+                    "tray.menu_install_failed",
+                    "category=tray",
+                );
+            }
+        })
+        .is_err()
+    {
+        log_error(
+            &app,
+            "tray.main_thread",
+            "runtime.main_thread_unavailable",
+            "category=runtime",
+        );
+    }
 }
 
 pub(crate) fn handle_window_event(window: &Window, event: &WindowEvent) {
@@ -150,7 +219,14 @@ pub(crate) fn handle_window_event(window: &Window, event: &WindowEvent) {
         return;
     }
     api.prevent_close();
-    let _ = window.hide();
+    if window.hide().is_err() {
+        log_error(
+            window.app_handle(),
+            "window.hide",
+            "window.hide_failed",
+            "category=window",
+        );
+    }
     window.state::<SessionRuntime>().suspend();
     if lifecycle.state_store.should_show_first_close_notice() {
         let shown = window
@@ -160,13 +236,30 @@ pub(crate) fn handle_window_event(window: &Window, event: &WindowEvent) {
             .body("可从系统托盘重新打开设置或退出 GPTEasy。")
             .show()
             .is_ok();
-        mark_close_notice_after_display(&lifecycle.state_store, shown);
+        if !shown {
+            log_error(
+                window.app_handle(),
+                "window.close_notification",
+                "notification.show_failed",
+                "category=notification",
+            );
+        }
+        if !mark_close_notice_after_display(&lifecycle.state_store, shown) {
+            log_error(
+                window.app_handle(),
+                "window.close_notice_state",
+                "state.write_failed",
+                "category=state_unavailable",
+            );
+        }
     }
 }
 
-fn mark_close_notice_after_display(state_store: &StateStore, shown: bool) {
+fn mark_close_notice_after_display(state_store: &StateStore, shown: bool) -> bool {
     if shown {
-        let _ = state_store.mark_first_close_notice_seen();
+        state_store.mark_first_close_notice_seen()
+    } else {
+        true
     }
 }
 
@@ -241,12 +334,33 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
 fn plan_provider_switch(app: &AppHandle, command: TrayCommand) {
     let inspect_handle = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let snapshot = inspect_handle.state::<EnvironmentRuntime>().inspect().ok();
+        let snapshot = match inspect_handle.state::<EnvironmentRuntime>().inspect() {
+            Ok(snapshot) => Some(snapshot),
+            Err(failure) => {
+                log_error(
+                    &inspect_handle,
+                    "tray.provider_switch_inspect",
+                    failure.message_id,
+                    &format!("category={:?}", failure.category),
+                );
+                None
+            }
+        };
         let effect = plan_tray_effect(command, snapshot.as_ref());
         let effect_handle = inspect_handle.clone();
-        let _ = inspect_handle.run_on_main_thread(move || {
-            execute_tray_effect(&effect_handle, effect);
-        });
+        if inspect_handle
+            .run_on_main_thread(move || {
+                execute_tray_effect(&effect_handle, effect);
+            })
+            .is_err()
+        {
+            log_error(
+                &inspect_handle,
+                "tray.main_thread",
+                "runtime.main_thread_unavailable",
+                "category=runtime",
+            );
+        }
     });
 }
 
@@ -255,7 +369,14 @@ fn execute_tray_effect(app: &AppHandle, effect: TrayEffect) {
         TrayEffect::ShowSettings => show_settings(app),
         TrayEffect::OpenProviderSwitchPlan(provider_id) => {
             show_settings(app);
-            let _ = app.emit("provider-switch-requested", provider_id);
+            if app.emit("provider-switch-requested", provider_id).is_err() {
+                log_error(
+                    app,
+                    "tray.provider_switch_event",
+                    "event.emit_failed",
+                    "category=event",
+                );
+            }
         }
         TrayEffect::Exit => {
             app.state::<LifecycleRuntime>().request_exit();
@@ -320,22 +441,75 @@ fn plan_tray_effect(command: TrayCommand, snapshot: Option<&EnvironmentSnapshot>
 
 pub(crate) fn show_settings(app: &AppHandle) {
     let Some(window) = app.get_webview_window("main") else {
+        log_error(
+            app,
+            "window.show_settings",
+            "window.unavailable",
+            "category=window",
+        );
         return;
     };
     app.state::<SessionRuntime>().resume();
-    let _ = window.show();
-    let _ = window.unminimize();
-    let _ = window.set_focus();
+    if window.show().is_err() {
+        log_error(
+            app,
+            "window.show_settings",
+            "window.show_failed",
+            "category=window",
+        );
+    }
+    if window.unminimize().is_err() {
+        log_error(
+            app,
+            "window.unminimize",
+            "window.unminimize_failed",
+            "category=window",
+        );
+    }
+    if window.set_focus().is_err() {
+        log_error(
+            app,
+            "window.focus",
+            "window.focus_failed",
+            "category=window",
+        );
+    }
 
     let inspect_handle = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let Ok(snapshot) = inspect_handle.state::<EnvironmentRuntime>().inspect() else {
-            return;
+        let snapshot = match inspect_handle.state::<EnvironmentRuntime>().inspect() {
+            Ok(snapshot) => snapshot,
+            Err(failure) => {
+                log_error(
+                    &inspect_handle,
+                    "window.environment_inspect",
+                    failure.message_id,
+                    &format!("category={:?}", failure.category),
+                );
+                return;
+            }
         };
         let refresh_handle = inspect_handle.clone();
-        let _ = inspect_handle.run_on_main_thread(move || {
-            let _ = refresh_with_snapshot(&refresh_handle, &snapshot);
-        });
+        if inspect_handle
+            .run_on_main_thread(move || {
+                if refresh_with_snapshot(&refresh_handle, &snapshot).is_err() {
+                    log_error(
+                        &refresh_handle,
+                        "tray.refresh",
+                        "tray.refresh_failed",
+                        "category=tray",
+                    );
+                }
+            })
+            .is_err()
+        {
+            log_error(
+                &inspect_handle,
+                "tray.main_thread",
+                "runtime.main_thread_unavailable",
+                "category=runtime",
+            );
+        }
     });
 }
 
@@ -347,28 +521,63 @@ fn start_pending_observer(app: AppHandle) {
             _ = cancellation.cancelled() => return,
             _ = interval.tick() => {}
         }
+        let mut last_failure = None;
         loop {
             tokio::select! {
                 _ = cancellation.cancelled() => break,
                 _ = interval.tick() => {}
             }
             let inspect_handle = app.clone();
-            let snapshot = tauri::async_runtime::spawn_blocking(move || {
+            let outcome = tauri::async_runtime::spawn_blocking(move || {
                 let runtime = inspect_handle.state::<EnvironmentRuntime>();
-                runtime
-                    .has_pending_restart()
-                    .ok()
-                    .filter(|pending| *pending)
-                    .and_then(|_| runtime.inspect().ok())
+                match runtime.has_pending_restart() {
+                    Ok(false) => Ok(None),
+                    Ok(true) => runtime.inspect().map(Some).map_err(|failure| {
+                        (
+                            failure.message_id,
+                            format!("category={:?}", failure.category),
+                        )
+                    }),
+                    Err(failure) => Err((
+                        failure.message_id,
+                        format!("category={:?}", failure.category),
+                    )),
+                }
             })
-            .await
-            .ok()
-            .flatten();
+            .await;
             if cancellation.is_cancelled() {
                 break;
             }
+            let snapshot = match outcome {
+                Ok(Ok(snapshot)) => {
+                    last_failure = None;
+                    snapshot
+                }
+                Ok(Err((message_id, details))) => {
+                    if last_failure != Some(message_id) {
+                        log_error(&app, "tray.pending_observer", message_id, &details);
+                        last_failure = Some(message_id);
+                    }
+                    None
+                }
+                Err(_) => {
+                    let message_id = "runtime.background_task_failed";
+                    if last_failure != Some(message_id) {
+                        log_error(
+                            &app,
+                            "tray.pending_observer",
+                            message_id,
+                            "category=runtime",
+                        );
+                        last_failure = Some(message_id);
+                    }
+                    None
+                }
+            };
             if let Some(snapshot) = snapshot {
-                let _ = refresh_with_snapshot(&app, &snapshot);
+                if refresh_with_snapshot(&app, &snapshot).is_err() {
+                    log_error(&app, "tray.refresh", "tray.refresh_failed", "category=tray");
+                }
             }
         }
     });

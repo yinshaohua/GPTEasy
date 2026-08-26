@@ -1,6 +1,6 @@
 # GPTEasy v0.1 UI Contract
 
-<!-- release-contract: desktop-consumer-control=prohibited -->
+<!-- release-contract: desktop-consumer-control=trusted-start-confirmed-restart -->
 
 > 本文是已经交付的 v0.1 历史基线。v0.1 之后的当前目标见 [`PROVIDER-MANAGEMENT-SPEC.md`](./PROVIDER-MANAGEMENT-SPEC.md)。
 
@@ -44,7 +44,7 @@
 - 从 OpenAI 登录模式选择供应商时必须确认；若同时存在进程风险，合并为同一个确认框。
 - 外部配置接管、管理冲突重新接管和切换到 OpenAI 登录模式分别使用一次明确确认。
 - 不提供自动重启、立即重启、倒计时或默认自动选择。
-- 不提供启动、关闭、强制终止、激活或重启 ChatGPT/Codex 桌面版的入口；Codex CLI 也不由 GPTEasy 控制。
+- 页面顶部显示 ChatGPT/Codex 桌面版运行状态；停止时提供“启动 Codex”，运行时提供“重启 Codex”。重启先二次确认并优先请求正常退出，失败时显示失败，不提供强制终止。Codex CLI 不由 GPTEasy 控制。
 
 ## Tray
 

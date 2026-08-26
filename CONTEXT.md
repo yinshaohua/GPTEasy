@@ -1,6 +1,6 @@
 # GPTEasy
 
-<!-- release-contract: desktop-consumer-control=prohibited -->
+<!-- release-contract: desktop-consumer-control=trusted-start-confirmed-restart -->
 
 GPTEasy 帮助个人用户管理已验证供应商，并切换当前 Windows 用户默认 Codex 环境使用的 API 服务。
 
@@ -139,7 +139,7 @@ _Avoid_: 在线状态、实时健康度、验证有效期
 _Avoid_: 代理 API 模式、第三方登录
 
 **OpenAI 登录模式**:
-当前用户 Codex 环境使用 Codex 自身已有 OpenAI 账户认证的模式；GPTEasy 不负责登录，也不把它建模为供应商。
+当前用户 Codex 环境使用 Codex 自身已有 ChatGPT 账户凭据的模式；它不是 API Key 登录，也不被 GPTEasy 建模为供应商。GPTEasy 不执行远程登录、刷新或注销；进入供应商模式前会在当前用户的 Codex 目录保留一个临时、私有的 ChatGPT 凭据恢复快照，以便 Codex 重写供应商凭据后仍可返回原账户，返回成功即删除该快照。
 _Avoid_: 原厂登录模式、官方模式、OAuth 模式
 
 **环境实际状态**:
@@ -196,9 +196,9 @@ _Avoid_: OpenAI 登录切换、托盘配置、WSL2 快捷切换
 设置窗口关闭后 GPTEasy 继续在系统托盘中运行，直到用户明确退出或 Windows 会话结束。
 _Avoid_: 登录启动、关闭即退出
 
-**桌面消费者控制（已移除）**:
-GPTEasy 不启动、关闭、终止、激活或重启 ChatGPT/Codex 桌面版。桌面版和 Codex CLI 都只是消费者；配置切换后若旧消费者仍在运行，环境进入被动待重启，用户在原入口自然退出并重新运行后才读取新配置。
-_Avoid_: 主动桌面控制、Codex 重启、消费者重启、CLI 重启
+**受控桌面消费者操作**:
+GPTEasy 对 ChatGPT/Codex 桌面版提供被动运行状态，以及从动态发现并验证的 OpenAI AppX 安装启动、经用户二次确认后优先正常退出并重启的操作。操作后必须重新扫描到新的可信桌面根进程才算成功；无法确认身份、正常退出或重新启动时明确失败。配置切换本身不自动触发这些操作。Codex CLI 永远不由 GPTEasy 启动、关闭、终止或重启。
+_Avoid_: 任意程序启动、静默重启、强制终止、CLI 重启、把激活请求当成启动成功
 
 ## WSL2 与 Linux 环境
 
@@ -219,7 +219,7 @@ GPTEasy 对 WSL2 发行版的探测快照、已应用证据和未完成操作进
 _Avoid_: WSL2 自动修复、环境同步、后台接管
 
 **Linux 脚本导出**:
-把 Linux 供应商快照提供给独立 GNU/Linux 或 WSL2 shell 使用的导出操作；加载导出物本身不修改配置，只有用户显式选择供应商后才修改目标 Linux Codex 环境。
+把 Linux 供应商快照提供给独立 GNU/Linux 或 WSL2 shell 使用的导出操作；加载导出物本身不修改配置，只有用户显式选择供应商后才修改目标 Linux Codex 环境。脚本前部以每行一条、Tab 分隔的供应商目录保存全部供应商数据，允许用户脱离 GPTEasy 维护该快照。
 _Avoid_: Linux 初始化脚本、自动同步、Linux GUI
 
 **WSL2 共同管理**:

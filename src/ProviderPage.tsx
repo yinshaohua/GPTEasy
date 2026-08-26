@@ -23,6 +23,7 @@ import ProviderValidationDialog, {
   type ProviderValidationSession,
   type ProviderValidationSource,
 } from "./ProviderValidationDialog";
+import DesktopControl from "./DesktopControl";
 import type { OpenAiSidebarAction } from "./AppSidebar";
 
 import {
@@ -60,6 +61,7 @@ import {
   type LinuxExportResult,
   type LinuxShell,
 } from "./contracts/provider";
+import { recordFrontendFailure } from "./contracts/diagnostics";
 import {
   applyEnvironmentProvider,
   applyWslProvider,
@@ -274,7 +276,9 @@ export default function ProviderPage({
         if (disposed) stopListening();
         else unlisten = stopListening;
       })
-      .catch(() => undefined);
+      .catch(() => {
+        void recordFrontendFailure("provider_switch_listener").catch(() => undefined);
+      });
     return () => {
       disposed = true;
       unlisten?.();
@@ -302,7 +306,9 @@ export default function ProviderPage({
         if (disposed) stopListening();
         else unlisten = stopListening;
       })
-      .catch(() => undefined);
+      .catch(() => {
+        void recordFrontendFailure("provider_validation_progress_listener").catch(() => undefined);
+      });
     return () => {
       disposed = true;
       unlisten?.();
@@ -676,7 +682,7 @@ export default function ProviderPage({
         : lifecycleOutcomeMessage(failure.lifecycleOutcome);
       setFailure(failure);
       setCatalogFeedback([
-        providerFailureMessages[failure.messageId] ?? providerMessages.validationFallback,
+        providerDeletionFailureMessage(failure.messageId),
         lifecycleFeedback,
       ].filter(Boolean).join(" "));
       setOperation("idle");
@@ -1011,17 +1017,7 @@ export default function ProviderPage({
     <main className="main-content">
       <header className="page-header">
         <h1>{providerMessages.pageTitle}</h1>
-        {view === "catalog" && (
-          <button
-            className="command-button compact"
-            type="button"
-            onClick={() => resetEditor("detail")}
-            disabled={busy}
-          >
-            <Plus size={17} aria-hidden="true" />
-            {providerMessages.newProvider}
-          </button>
-        )}
+        <DesktopControl />
       </header>
 
       {view === "catalog" ? (
@@ -1029,8 +1025,19 @@ export default function ProviderPage({
         <EnvironmentReadNotice state={environmentState} />
         <section className="provider-catalog" aria-labelledby="provider-catalog-heading">
           <div className="catalog-heading">
-            <h2 id="provider-catalog-heading">{providerMessages.catalogTitle}</h2>
-            <span>{providerMessages.catalogCount(providers.length)}</span>
+            <div className="catalog-heading-title">
+              <h2 id="provider-catalog-heading">{providerMessages.catalogTitle}</h2>
+              <span>{providerMessages.catalogCount(providers.length)}</span>
+            </div>
+            <button
+              className="command-button compact"
+              type="button"
+              onClick={() => resetEditor("detail")}
+              disabled={busy}
+            >
+              <Plus size={17} aria-hidden="true" />
+              {providerMessages.newProvider}
+            </button>
           </div>
           {listState === "loading" && <p className="pane-note">{providerMessages.loadingCatalog}</p>}
           {listState === "error" && <p className="inline-error">{providerMessages.catalogUnavailable}</p>}
@@ -1886,10 +1893,16 @@ function environmentFailureMessage(messageId: string): string {
     "environment.restore_unavailable": "当前没有可安全恢复的最近配置。",
     "environment.restore_conflict": "受管工件已发生外部变化，恢复已停止。",
     "environment.backup_invalid": "最近一次配置备份不完整，无法安全恢复。",
-    "environment.openai_login_required": "请先在 Codex 中完成 OpenAI 登录。",
+    "environment.openai_login_required": "请先在 Codex 中完成 ChatGPT 账户登录。",
     "environment.openai_login_unavailable": "无法确认 Codex 登录状态，已阻止切换。",
   };
   return messages[messageId] ?? providerFailureMessages[messageId] ?? "Codex 环境未发生变化，请重试。";
+}
+
+function providerDeletionFailureMessage(messageId: string): string {
+  return providerFailureMessages[messageId]
+    ?? wslFailureMessages[messageId]
+    ?? providerMessages.deleteFailureFallback;
 }
 
 function AddressSuggestionDialog({

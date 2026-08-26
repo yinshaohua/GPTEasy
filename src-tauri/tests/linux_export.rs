@@ -48,6 +48,16 @@ fn bash_export_captures_every_verified_provider_in_catalog_order() {
     assert!(script.contains("alpha-secret-key"));
     assert!(script.contains("beta-secret-key"));
     assert!(script.find("Alpha Provider") < script.find("Beta Provider"));
+    assert!(
+        script.contains(
+            "11111111-1111-4111-8111-111111111111\tAlpha Provider\thttps://alpha.example/v1\talpha-model\talpha-secret-key"
+        ),
+        "each provider must be editable as one top-of-script catalog record"
+    );
+    assert!(
+        script.find("# 供应商目录。可脱离 GPTEasy 手工维护") < script.find("gpteasy__start_marker"),
+        "the editable provider catalog must precede the runtime implementation"
+    );
     assert!(!script.contains("OpenAI 登录模式"));
     assert!(
         script.contains("printf '  %s) %s (%s)%s\\n' \"$index\" \"$name\" \"$model\" \"$marker\"")
@@ -298,6 +308,8 @@ codex_home="$workspace/codex home"
 fake_bin="$workspace/bin"
 cp -- "$1" "$script"
 chmod 600 "$script"
+# The catalog is the sole maintenance point: this provider did not exist when GPTEasy exported the script.
+sed -i '/^GPTEASY_PROVIDER_CATALOG$/i 33333333-3333-4333-8333-333333333333\tManual Provider\thttps://manual.example/v1\tmanual-model\tmanual-secret-key' "$script"
 mkdir -p -- "$codex_home" "$fake_bin"
 printf '%s\n' 'custom_setting = true' >"$codex_home/config.toml"
 printf '%s\n' '{"tokens":{"access_token":"keep-me"}}' >"$codex_home/auth.json"
@@ -309,11 +321,14 @@ export CODEX_HOME="$codex_home"
 source "$script"
 fresh_home="$workspace/fresh codex home"
 export CODEX_HOME="$fresh_home"
-fresh=$(PATH="$fake_bin:/usr/bin:/bin" gpteasy <<<"1" 2>&1)
-[[ "$fresh" == *'已预先配置：Alpha Provider'* ]]
+fresh=$(PATH="$fake_bin:/usr/bin:/bin" gpteasy <<<"3" 2>&1)
+[[ "$fresh" == *'已预先配置：Manual Provider'* ]]
 [[ -f "$fresh_home/config.toml" ]]
 [[ $(stat -c '%a' "$fresh_home") == '700' ]]
 [[ $(find "$fresh_home/.gpteasy-shell/credentials" -type f -name '*.token' | wc -l) -eq 1 ]]
+grep -Fq '# GPTEasy provider-id: 33333333-3333-4333-8333-333333333333' "$fresh_home/config.toml"
+manual_credential=$(find "$fresh_home/.gpteasy-shell/credentials" -type f -name '*.token' -print -quit)
+[[ $(cat "$manual_credential") == 'manual-secret-key' ]]
 export CODEX_HOME="$codex_home"
 missing=$(PATH="$fake_bin:/usr/bin:/bin" gpteasy <<<"1" 2>&1 || true)
 [[ "$missing" == *'已预先配置：Alpha Provider'* ]]
@@ -349,6 +364,7 @@ grep -Fq '# GPTEasy schema-version: 1' "$codex_home/config.toml"
 grep -Fq '# GPTEasy provider-id: 11111111-1111-4111-8111-111111111111' "$codex_home/config.toml"
 grep -Fq '# GPTEasy source-id:' "$codex_home/config.toml"
 grep -Fq 'model_providers.gpteasy.auth.command = "sh"' "$codex_home/config.toml"
+! grep -Fq 'requires_openai_auth' "$codex_home/config.toml"
 grep -Fq 'custom_setting = true' "$codex_home/config.toml"
 ! grep -Fq 'alpha-secret-key' "$codex_home/config.toml"
 [[ "$auth_before" == "$(sha256sum "$codex_home/auth.json")" ]]

@@ -534,7 +534,6 @@ model_providers.gpteasy.name = \"Harness\"\n\
 model_providers.gpteasy.base_url = \"https://provider.example/v1\"\n\
 model_providers.gpteasy.wire_api = \"responses\"\n\
 model_providers.gpteasy.supports_websockets = false\n\
-model_providers.gpteasy.requires_openai_auth = false\n\
 model_providers.gpteasy.auth.command = \"sh\"\n\
  model_providers.gpteasy.auth.args = [\"-c\", '{auth_script}']\n\
 # <<< GPTEasy managed provider <<<\n"

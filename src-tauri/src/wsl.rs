@@ -534,7 +534,7 @@ impl WslApplication {
             }) {
                 Ok(refreshed) => refreshed,
                 Err(failure) => {
-                    let outcome = self.observe_natural_stop(&connection, &probe);
+                    let outcome = self.observe_natural_stop(&connection, &probe)?;
                     return Err(failure.with_lifecycle_outcome(outcome));
                 }
             };
@@ -542,7 +542,7 @@ impl WslApplication {
                 || !same_environment_identity(&refreshed, &probe)
                 || !refreshed.running
             {
-                let outcome = self.observe_natural_stop(&connection, &refreshed);
+                let outcome = self.observe_natural_stop(&connection, &refreshed)?;
                 return Err(WslFailure::new(
                     WslFailureCategory::EnvironmentChanged,
                     "wsl.environment_changed",
@@ -556,13 +556,13 @@ impl WslApplication {
             if failure.category == WslFailureCategory::Interrupted || originally_running {
                 return Err(failure);
             }
-            let outcome = self.observe_natural_stop(&connection, &active_probe);
+            let outcome = self.observe_natural_stop(&connection, &active_probe)?;
             return Err(failure.with_lifecycle_outcome(outcome));
         }
         let lifecycle_outcome = if originally_running {
             WslLifecycleOutcome::UnchangedRunning
         } else {
-            self.observe_natural_stop(&connection, &active_probe)
+            self.observe_natural_stop(&connection, &active_probe)?
         };
         let mut final_probe = active_probe;
         final_probe.running = match lifecycle_outcome {
@@ -784,10 +784,14 @@ impl WslApplication {
                     Some(&environment_id),
                 ));
             }
-            let token = audited[index]
-                .lock_token
-                .as_deref()
-                .expect("delete audit lock token");
+            let Some(token) = audited[index].lock_token.as_deref() else {
+                return Err(self.deletion_verification_failure(
+                    &connection,
+                    &audited,
+                    state_unavailable(),
+                    Some(&environment_id),
+                ));
+            };
             if let Err(failure) = self
                 .runtime
                 .cleanup_credentials(&audited[index].probe, token)
@@ -867,16 +871,19 @@ impl WslApplication {
         }
         let lifecycle_results = audited
             .iter()
-            .map(|environment| WslLifecycleResult {
-                environment_id: environment.probe.environment_id.clone(),
-                display_name: environment.probe.display_name.clone(),
-                outcome: if environment.originally_running {
+            .map(|environment| {
+                let outcome = if environment.originally_running {
                     WslLifecycleOutcome::UnchangedRunning
                 } else {
-                    self.observe_natural_stop(connection, &environment.probe)
-                },
+                    self.observe_natural_stop(connection, &environment.probe)?
+                };
+                Ok(WslLifecycleResult {
+                    environment_id: environment.probe.environment_id.clone(),
+                    display_name: environment.probe.display_name.clone(),
+                    outcome,
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, WslFailure>>()?;
         Ok(lifecycle_results)
     }
 
@@ -980,17 +987,17 @@ impl WslApplication {
             let refreshed = match refreshed {
                 Ok(refreshed) => refreshed,
                 Err(failure) => {
-                    let outcome = self.observe_natural_stop(&connection, &probe);
+                    let outcome = self.observe_natural_stop(&connection, &probe)?;
                     return Err(failure.with_lifecycle_outcome(outcome));
                 }
             };
             if refreshed.availability != WslAvailability::Manageable {
                 let failure = wsl_availability_failure(refreshed.availability);
-                let outcome = self.observe_natural_stop(&connection, &refreshed);
+                let outcome = self.observe_natural_stop(&connection, &refreshed)?;
                 return Err(failure.with_lifecycle_outcome(outcome));
             }
             if !same_environment_identity(&refreshed, &pre_start) || !refreshed.running {
-                let outcome = self.observe_natural_stop(&connection, &refreshed);
+                let outcome = self.observe_natural_stop(&connection, &refreshed)?;
                 return Err(WslFailure::new(
                     WslFailureCategory::EnvironmentChanged,
                     "wsl.environment_changed",
@@ -1011,7 +1018,7 @@ impl WslApplication {
         {
             return result;
         }
-        let lifecycle_outcome = self.observe_natural_stop(&connection, &active_probe);
+        let lifecycle_outcome = self.observe_natural_stop(&connection, &active_probe)?;
         match &mut result {
             Ok(applied) => {
                 let mut final_probe = active_probe.clone();
@@ -1028,17 +1035,16 @@ impl WslApplication {
         &self,
         connection: &Connection,
         probe: &WslProbe,
-    ) -> WslLifecycleOutcome {
+    ) -> Result<WslLifecycleOutcome, WslFailure> {
         let stopped = self
             .runtime
-            .wait_for_natural_stop(probe, self.natural_stop_timeout)
-            .unwrap_or(false);
+            .wait_for_natural_stop(probe, self.natural_stop_timeout)?;
         if stopped {
-            let _ = clear_lifecycle_attention(connection, &probe.environment_id);
-            WslLifecycleOutcome::StoppedNaturally
+            clear_lifecycle_attention(connection, &probe.environment_id)?;
+            Ok(WslLifecycleOutcome::StoppedNaturally)
         } else {
-            let _ = mark_lifecycle_still_running(connection, &probe.environment_id);
-            WslLifecycleOutcome::StillRunning
+            mark_lifecycle_still_running(connection, &probe.environment_id)?;
+            Ok(WslLifecycleOutcome::StillRunning)
         }
     }
 
@@ -1415,7 +1421,7 @@ impl WslApplication {
             )
             .map_err(|_| state_unavailable())?;
         if restore_lifecycle && !pending.originally_running && probe.running {
-            self.observe_natural_stop(connection, probe);
+            self.observe_natural_stop(connection, probe)?;
         }
         Ok(())
     }
@@ -1942,10 +1948,6 @@ fn inspect_actual_managed_state(
             .get("supports_websockets")
             .and_then(|value| value.as_bool())
             != Some(false)
-        || provider
-            .get("requires_openai_auth")
-            .and_then(|value| value.as_bool())
-            != Some(false)
         || auth_args.is_none_or(|args| {
             args.len() != 2
                 || args.get(0).and_then(|value| value.as_str()) != Some("-c")
@@ -1964,11 +1966,10 @@ fn inspect_actual_managed_state(
 }
 
 fn schema_v1_block_has_expected_shape(block: &[&str]) -> bool {
-    const EXACT_LINES: [&str; 5] = [
+    const EXACT_LINES: [&str; 4] = [
         "model_provider = \"gpteasy\"",
         "model_providers.gpteasy.wire_api = \"responses\"",
         "model_providers.gpteasy.supports_websockets = false",
-        "model_providers.gpteasy.requires_openai_auth = false",
         "model_providers.gpteasy.auth.command = \"sh\"",
     ];
     const PREFIXES: [&str; 8] = [
@@ -1982,7 +1983,7 @@ fn schema_v1_block_has_expected_shape(block: &[&str]) -> bool {
         "model_providers.gpteasy.auth.args = ",
     ];
 
-    block.len() == 15
+    block.len() == 14
         && block[1..block.len() - 1].iter().all(|line| {
             EXACT_LINES.contains(line) || PREFIXES.iter().any(|prefix| line.starts_with(prefix))
         })
@@ -2364,7 +2365,6 @@ fn render_config(
         ),
         "model_providers.gpteasy.wire_api = \"responses\"".to_owned(),
         "model_providers.gpteasy.supports_websockets = false".to_owned(),
-        "model_providers.gpteasy.requires_openai_auth = false".to_owned(),
         "model_providers.gpteasy.auth.command = \"sh\"".to_owned(),
         format!(
             "model_providers.gpteasy.auth.args = [\"-c\", {}]",
@@ -2465,6 +2465,13 @@ impl WslRuntime for SystemWslRuntime {
         }
         #[cfg(windows)]
         {
+            let mut registry = read_registry_distributions()?;
+            if let Some(filter) = self.distribution_filter.as_deref() {
+                registry.retain(|item| item.name.eq_ignore_ascii_case(filter));
+            }
+            if registry.is_empty() {
+                return Ok(Vec::new());
+            }
             let _ = run_wsl_with(&self.program, &["--version"], None)?;
             let all =
                 decode_wsl_output(&run_wsl_with(&self.program, &["--list", "--quiet"], None)?)?;
@@ -2483,34 +2490,6 @@ impl WslRuntime for SystemWslRuntime {
                 .map(|line| line.trim().to_ascii_lowercase())
                 .filter(|line| !line.is_empty())
                 .collect::<HashSet<_>>();
-            let mut registry = read_registry_distributions();
-            if let Some(filter) = self.distribution_filter.as_deref() {
-                registry.retain(|item| item.name.eq_ignore_ascii_case(filter));
-            }
-            if registry.is_empty() {
-                return Ok(all
-                    .lines()
-                    .filter(|name| {
-                        self.distribution_filter
-                            .as_deref()
-                            .map(|filter| name.trim().eq_ignore_ascii_case(filter))
-                            .unwrap_or(true)
-                    })
-                    .filter_map(|name| {
-                        let name = name.trim();
-                        (!name.is_empty()).then(|| WslProbe {
-                            environment_id: format!("name:{}", hash_bytes(name.as_bytes())),
-                            display_name: name.to_owned(),
-                            command_name: Some(name.to_owned()),
-                            default_uid: None,
-                            wsl_version: None,
-                            running: running_names.contains(&name.to_ascii_lowercase()),
-                            availability: WslAvailability::Ambiguous,
-                            message_id: Some("wsl.registry_unavailable"),
-                        })
-                    })
-                    .collect());
-            }
             Ok(probes_from_registry(
                 registry,
                 &listed_names,
@@ -3097,23 +3076,36 @@ fn probes_from_registry(
 }
 
 #[cfg(windows)]
-fn read_registry_distributions() -> Vec<RegistryDistro> {
+fn read_registry_distributions() -> Result<Vec<RegistryDistro>, WslFailure> {
+    use std::io::ErrorKind;
     use std::path::Path;
     use winreg::RegKey;
     use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
 
     let current_user = RegKey::predef(HKEY_CURRENT_USER);
-    let Ok(lxss) = current_user.open_subkey_with_flags(WSL_REGISTRY_KEY, KEY_READ) else {
-        return Vec::new();
+    let lxss = match current_user.open_subkey_with_flags(WSL_REGISTRY_KEY, KEY_READ) {
+        Ok(lxss) => lxss,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(_) => {
+            return Err(WslFailure::new(
+                WslFailureCategory::ProbeFailed,
+                "wsl.registry_unavailable",
+            ));
+        }
     };
     let mut result = Vec::new();
-    for id in lxss.enum_keys().filter_map(Result::ok) {
-        let Ok(distribution) = lxss.open_subkey_with_flags(&id, KEY_READ) else {
-            continue;
-        };
-        let Ok(name) = distribution.get_value::<String, _>("DistributionName") else {
-            continue;
-        };
+    for id in lxss.enum_keys() {
+        let id = id.map_err(|_| {
+            WslFailure::new(WslFailureCategory::ProbeFailed, "wsl.registry_unavailable")
+        })?;
+        let distribution = lxss.open_subkey_with_flags(&id, KEY_READ).map_err(|_| {
+            WslFailure::new(WslFailureCategory::ProbeFailed, "wsl.registry_unavailable")
+        })?;
+        let name = distribution
+            .get_value::<String, _>("DistributionName")
+            .map_err(|_| {
+                WslFailure::new(WslFailureCategory::ProbeFailed, "wsl.registry_unavailable")
+            })?;
         let base_path_available = distribution
             .get_value::<String, _>("BasePath")
             .ok()
@@ -3126,7 +3118,7 @@ fn read_registry_distributions() -> Vec<RegistryDistro> {
             base_path_available,
         });
     }
-    result
+    Ok(result)
 }
 
 #[cfg(windows)]
@@ -3531,7 +3523,6 @@ model_providers.gpteasy.name = \"Example\"\n\
 model_providers.gpteasy.base_url = \"https://provider.example/v1\"\n\
 model_providers.gpteasy.wire_api = \"responses\"\n\
 model_providers.gpteasy.supports_websockets = false\n\
-model_providers.gpteasy.requires_openai_auth = false\n\
 model_providers.gpteasy.auth.command = \"sh\"\n\
  model_providers.gpteasy.auth.args = [\"-c\", 'cat -- \"${{CODEX_HOME:-$HOME/.codex}}/.gpteasy-shell/credentials/{source_id}/{provider_id}.token\"']\n\
 # <<< GPTEasy managed provider <<<\n"
@@ -3590,6 +3581,10 @@ model_providers.gpteasy.auth.command = \"sh\"\n\
 
         let artifacts = runtime.artifacts.lock().expect("artifacts").clone();
         assert_eq!(artifacts.credentials.as_deref(), Some(b"secret".as_slice()));
+        assert!(
+            !String::from_utf8_lossy(artifacts.config.as_deref().expect("written config"))
+                .contains("requires_openai_auth")
+        );
         assert!(matches!(
             inspect_actual_managed_state(
                 artifacts.config.as_deref(),
@@ -4205,6 +4200,22 @@ model_providers.{provider_id}.requires_openai_auth = true\n\
         assert_eq!(
             wsl_availability_failure(WslAvailability::UnsupportedVersion).message_id,
             "wsl.wsl2_required"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn no_registered_distribution_does_not_require_a_working_wsl_command() {
+        let runtime = SystemWslRuntime {
+            program: OsString::from("gpteasy-missing-wsl-command.exe"),
+            distribution_filter: Some("GPTEasy missing distribution".to_owned()),
+        };
+
+        assert!(
+            runtime
+                .probe()
+                .expect("no WSL registration is an empty inventory")
+                .is_empty()
         );
     }
 

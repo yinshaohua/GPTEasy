@@ -1,6 +1,7 @@
 pub mod codex;
 mod commands;
 pub mod consumer;
+pub mod desktop;
 pub mod diagnostic_assistant;
 pub mod diagnostic_report;
 pub mod diagnostics;
@@ -17,30 +18,32 @@ pub mod wsl;
 
 use codex::{CodexInspector, LoginStatusCommand};
 use commands::{
-    EnvironmentRuntime, IssueLogRuntime, ProviderRuntime, SessionRuntime, StartupRuntime,
-    UpdateRuntime, WslRuntime, apply_environment_provider, apply_wsl_provider, archive_sessions,
-    cancel_provider_request, cancel_session_request, check_for_updates,
+    DesktopRuntime, EnvironmentRuntime, IssueLogRuntime, ProviderRuntime, SessionRuntime,
+    StartupRuntime, UpdateRuntime, WslRuntime, apply_environment_provider, apply_wsl_provider,
+    archive_sessions, cancel_provider_request, cancel_session_request, check_for_updates,
     choose_issue_log_export_destination, choose_linux_export_destination,
     choose_session_export_destination, confirm_provider_validation_base_url, copy_issue_logs,
     copy_provider_api_key, delete_provider, delete_session, discard_provider_validation,
     discover_provider_models, discover_provider_models_for_update, enter_session_management,
     export_all_issue_logs, export_issue_logs, export_linux_script, export_session_markdown,
-    get_environment_snapshot, get_issue_log_path, get_startup_snapshot, get_update_snapshot,
-    install_update, leave_session_management, list_issue_logs, list_providers, list_sessions,
-    list_wsl_environments, open_dayway_website, open_update_manual_download,
-    open_update_release_notes, perform_update_check, read_session, refresh_startup_snapshot,
-    refresh_wsl_environment, rename_provider, reorder_providers, restore_last_environment_config,
-    revalidate_provider, reveal_provider_api_key, save_and_apply_provider_update,
-    save_dayway_provider, save_provider_update, save_verified_provider, switch_to_openai_login,
-    unarchive_sessions, validate_provider, validate_provider_update,
+    get_desktop_snapshot, get_environment_snapshot, get_issue_log_path, get_startup_snapshot,
+    get_update_snapshot, install_update, leave_session_management, list_issue_logs, list_providers,
+    list_sessions, list_wsl_environments, open_dayway_website, open_update_manual_download,
+    open_update_release_notes, perform_update_check, read_session, record_frontend_failure,
+    refresh_startup_snapshot, refresh_wsl_environment, rename_provider, reorder_providers,
+    restart_desktop_application, restore_last_environment_config, revalidate_provider,
+    reveal_provider_api_key, save_and_apply_provider_update, save_dayway_provider,
+    save_provider_update, save_verified_provider, start_desktop_application,
+    switch_to_openai_login, unarchive_sessions, validate_provider, validate_provider_update,
 };
+use desktop::DesktopApplication;
 use diagnostic_report::{
     DiagnosticApplication, DiagnosticRuntime, analyze_diagnostic_report,
     choose_diagnostic_export_destination, export_diagnostic_report, get_diagnostic_report,
     repair_diagnostic_custom_provider,
 };
-use diagnostics::IssueLogStore;
-use environment::EnvironmentApplication;
+use diagnostics::{IssueLogLevel, IssueLogStore, install_panic_issue_logging};
+use environment::{EnvironmentApplication, EnvironmentRecovery};
 use provider::{ProviderApplication, ProviderValidator, ValidationTimeouts};
 use session::SessionApplication;
 #[cfg(windows)]
@@ -70,6 +73,7 @@ pub fn run() {
             let state_root = app.path().app_local_data_dir()?;
             let home = app.path().home_dir()?;
             let state_store = StateStore::new(StatePaths::from_root(state_root));
+            install_panic_issue_logging(state_store.paths().root());
             app.manage(IssueLogRuntime::new(IssueLogStore::new(
                 state_store.paths().root(),
             )));
@@ -95,10 +99,32 @@ pub fn run() {
                 CodexInspector::new(&codex_home, LoginStatusCommand::codex_default()),
             );
             app.manage(StartupRuntime::new(coordinator));
-            let _ = environment.recover_pending();
+            match environment.recover_pending() {
+                Ok(EnvironmentRecovery::Conflict) => app.state::<IssueLogRuntime>().store.append(
+                    IssueLogLevel::Error,
+                    "startup.environment_recovery",
+                    "environment.recovery_conflict",
+                    Some("category=recovery_conflict".to_owned()),
+                ),
+                Err(failure) => app.state::<IssueLogRuntime>().store.append(
+                    IssueLogLevel::Error,
+                    "startup.environment_recovery",
+                    failure.message_id,
+                    Some(format!("category={:?}", failure.category)),
+                ),
+                _ => {}
+            }
             app.manage(EnvironmentRuntime::new(environment));
+            app.manage(DesktopRuntime::new(DesktopApplication::new()));
             let wsl = WslApplication::new(state_store.clone());
-            let _ = wsl.recover_pending();
+            if let Err(failure) = wsl.recover_pending() {
+                app.state::<IssueLogRuntime>().store.append(
+                    IssueLogLevel::Error,
+                    "startup.wsl_recovery",
+                    failure.message_id,
+                    Some(format!("category={:?}", failure.category)),
+                );
+            }
             app.manage(WslRuntime::new(wsl));
             app.manage(SessionRuntime::new(SessionApplication::new(
                 state_store.clone(),
@@ -114,12 +140,30 @@ pub fn run() {
                 let activation_handle = app.app_handle().clone();
                 app.manage(primary_instance.listen(move || {
                     let main_thread_handle = activation_handle.clone();
-                    let _ = activation_handle.run_on_main_thread(move || {
-                        tray::show_settings(&main_thread_handle);
-                    });
+                    if activation_handle
+                        .run_on_main_thread(move || {
+                            tray::show_settings(&main_thread_handle);
+                        })
+                        .is_err()
+                    {
+                        activation_handle.state::<IssueLogRuntime>().store.append(
+                            IssueLogLevel::Error,
+                            "single_instance.main_thread",
+                            "runtime.main_thread_unavailable",
+                            Some("category=runtime".to_owned()),
+                        );
+                    }
                 })?);
             }
-            tray::setup(app)?;
+            if let Err(error) = tray::setup(app) {
+                app.state::<IssueLogRuntime>().store.append(
+                    IssueLogLevel::Error,
+                    "tray.setup",
+                    "tray.setup_failed",
+                    Some("category=tray".to_owned()),
+                );
+                return Err(error.into());
+            }
             #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
             start_update_monitor(app.app_handle().clone());
             Ok(())
@@ -134,6 +178,9 @@ pub fn run() {
             open_update_manual_download,
             open_update_release_notes,
             get_environment_snapshot,
+            get_desktop_snapshot,
+            start_desktop_application,
+            restart_desktop_application,
             get_diagnostic_report,
             analyze_diagnostic_report,
             repair_diagnostic_custom_provider,
@@ -141,6 +188,7 @@ pub fn run() {
             export_diagnostic_report,
             get_issue_log_path,
             list_issue_logs,
+            record_frontend_failure,
             copy_issue_logs,
             choose_issue_log_export_destination,
             export_issue_logs,

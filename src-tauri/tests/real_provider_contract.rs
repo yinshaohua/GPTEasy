@@ -17,14 +17,15 @@ async fn saved_provider_validation_paths_reuse_its_stored_credential() {
         .map(PathBuf::from)
         .expect("GPTEASY_REAL_STATE_ROOT selects the existing GPTEasy state directory");
     let store = StateStore::new(StatePaths::from_root(state_root));
-    let application = ProviderApplication::new(
-        store,
-        ProviderValidator::new(ValidationTimeouts::default()),
-    );
+    let application =
+        ProviderApplication::new(store, ProviderValidator::new(ValidationTimeouts::default()));
     let providers = application
         .list_providers()
         .expect("read existing provider summaries");
-    assert!(!providers.is_empty(), "the selected state has no saved provider");
+    assert!(
+        !providers.is_empty(),
+        "the selected state has no saved provider"
+    );
     let selected_id = env::var("GPTEASY_REAL_PROVIDER_ID").ok();
     let provider = selected_id
         .as_deref()

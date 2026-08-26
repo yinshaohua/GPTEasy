@@ -178,86 +178,62 @@ fn render(shell: LinuxShell, export_id: &str, providers: &[catalog::ProviderReco
         shell.display_name(),
     );
     script.push_str(&format!(
-        "gpteasy__export_id={}\ngpteasy__provider_count={}\n\n",
-        shell_quote(export_id),
-        providers.len()
+        "gpteasy__export_id={}\n\n",
+        shell_quote(export_id)
     ));
-    script.push_str("gpteasy__provider_id() {\n    case \"$1\" in\n");
-    for (index, provider) in providers.iter().enumerate() {
-        script.push_str(&format!(
-            "        {}) printf '%s\\n' {} ;;\n",
-            index + 1,
-            shell_quote(&provider.summary.id)
-        ));
-    }
-    script.push_str("        *) return 1 ;;\n    esac\n}\n\n");
-    script.push_str("gpteasy__provider_name() {\n    case \"$1\" in\n");
+    script.push_str("# 供应商目录。可脱离 GPTEasy 手工维护：每行依次为供应商 ID、名称、服务地址、默认模型、API Key，并以 Tab 分隔；可使用空行和 # 注释。字段不可包含 Tab 或换行。\n");
+    script.push_str("gpteasy__provider_catalog() {\n    cat <<'GPTEASY_PROVIDER_CATALOG'\n");
     for provider in providers {
         script.push_str(&format!(
-            "        {}) printf '%s\\n' {} ;;\n",
-            shell_pattern(&provider.summary.id),
-            shell_quote(&provider.summary.name)
+            "{}\t{}\t{}\t{}\t{}\n",
+            provider.summary.id,
+            provider.summary.name,
+            provider.summary.base_url,
+            provider.summary.default_model,
+            provider.api_key,
         ));
     }
-    script.push_str("        *) return 1 ;;\n    esac\n}\n\n");
-    script.push_str("gpteasy__provider_model() {\n    case \"$1\" in\n");
-    for provider in providers {
-        script.push_str(&format!(
-            "        {}) printf '%s\\n' {} ;;\n",
-            shell_pattern(&provider.summary.id),
-            shell_quote(&provider.summary.default_model)
-        ));
-    }
-    script.push_str("        *) return 1 ;;\n    esac\n}\n\n");
-    script.push_str("gpteasy__provider_base_url() {\n    case \"$1\" in\n");
-    for provider in providers {
-        script.push_str(&format!(
-            "        {}) printf '%s\\n' {} ;;\n",
-            shell_pattern(&provider.summary.id),
-            shell_quote(&provider.summary.base_url)
-        ));
-    }
-    script.push_str("        *) return 1 ;;\n    esac\n}\n\n");
-    script.push_str("gpteasy__print_credential() {\n    case \"$1\" in\n");
-    for provider in providers {
-        script.push_str(&format!(
-            "        {}) printf '%s' {} ;;\n",
-            shell_pattern(&provider.summary.id),
-            shell_quote(&provider.api_key)
-        ));
-    }
-    script.push_str("        *) return 1 ;;\n    esac\n}\n");
-    script.push_str("\ngpteasy__print_block() {\n    case \"$1\" in\n");
-    for (index, provider) in providers.iter().enumerate() {
-        let credential_relative = format!(
-            ".gpteasy-shell/credentials/{export_id}/{}.token",
-            provider.summary.id
-        );
-        let auth_script = format!("cat -- \"${{CODEX_HOME:-$HOME/.codex}}/{credential_relative}\"");
-        script.push_str(&format!(
-            "        {})\n            cat <<'GPTEASY_BLOCK_{}'\n",
-            shell_pattern(&provider.summary.id),
-            index + 1
-        ));
-        script.push_str("# >>> GPTEasy managed provider >>>\n");
-        script.push_str("# GPTEasy schema-version: 1\n");
-        script.push_str(&format!(
-            "# GPTEasy provider-id: {}\n# GPTEasy source-id: {export_id}\n# GPTEasy credential-file: {credential_relative}\n",
-            provider.summary.id
-        ));
-        script.push_str(&format!(
-            "model = {}\nmodel_provider = \"gpteasy\"\nmodel_providers.gpteasy.name = {}\nmodel_providers.gpteasy.base_url = {}\nmodel_providers.gpteasy.wire_api = \"responses\"\nmodel_providers.gpteasy.supports_websockets = false\nmodel_providers.gpteasy.requires_openai_auth = false\nmodel_providers.gpteasy.auth.command = \"sh\"\nmodel_providers.gpteasy.auth.args = [\"-c\", {}]\n",
-            toml_string(&provider.summary.default_model),
-            toml_string(&provider.summary.name),
-            toml_string(&provider.summary.base_url),
-            toml_string(&auth_script),
-        ));
-        script.push_str(&format!(
-            "# <<< GPTEasy managed provider <<<\nGPTEASY_BLOCK_{}\n            ;;\n",
-            index + 1
-        ));
-    }
-    script.push_str("        *) return 1 ;;\n    esac\n}\n");
+    script.push_str("GPTEASY_PROVIDER_CATALOG\n}\n");
+    script.push_str(
+        "gpteasy__provider_count=$(gpteasy__provider_catalog | awk 'NF && $1 !~ /^#/ { count += 1 } END { print count + 0 }')\n\n",
+    );
+    script.push_str(&format!(
+        r#"
+gpteasy__export_credential_directory='.gpteasy-shell/credentials/{export_id}'
+
+gpteasy__provider_id_is_safe() {{
+    [[ "$1" =~ ^[[:xdigit:]]{{8}}-[[:xdigit:]]{{4}}-[[:xdigit:]]{{4}}-[[:xdigit:]]{{4}}-[[:xdigit:]]{{12}}$ ]]
+}}
+
+gpteasy__toml_string() {{
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/^/"/; s/$/"/'
+}}
+
+gpteasy__print_block() {{
+    local provider_id=$1 name model base_url credential_relative
+    gpteasy__provider_id_is_safe "$provider_id" || return 1
+    name=$(gpteasy__provider_name "$provider_id") || return 1
+    model=$(gpteasy__provider_model "$provider_id") || return 1
+    base_url=$(gpteasy__provider_base_url "$provider_id") || return 1
+    [[ -n "$name" && -n "$model" && -n "$base_url" ]] || return 1
+    credential_relative="$gpteasy__export_credential_directory/$provider_id.token"
+    printf '%s\n' '# >>> GPTEasy managed provider >>>'
+    printf '%s\n' '# GPTEasy schema-version: 1'
+    printf '# GPTEasy provider-id: %s\n' "$provider_id"
+    printf '# GPTEasy source-id: %s\n' "$gpteasy__export_id"
+    printf '# GPTEasy credential-file: %s\n' "$credential_relative"
+    printf 'model = %s\n' "$(gpteasy__toml_string "$model")"
+    printf '%s\n' 'model_provider = "gpteasy"'
+    printf 'model_providers.gpteasy.name = %s\n' "$(gpteasy__toml_string "$name")"
+    printf 'model_providers.gpteasy.base_url = %s\n' "$(gpteasy__toml_string "$base_url")"
+    printf '%s\n' 'model_providers.gpteasy.wire_api = "responses"'
+    printf '%s\n' 'model_providers.gpteasy.supports_websockets = false'
+    printf '%s\n' 'model_providers.gpteasy.auth.command = "sh"'
+    printf 'model_providers.gpteasy.auth.args = ["-c", '\''cat -- "${{CODEX_HOME:-$HOME/.codex}}/%s"'\'']\n' "$credential_relative"
+    printf '%s\n' '# <<< GPTEasy managed provider <<<'
+}}
+"#
+    ));
     script.push_str(&render_runtime(shell));
     script
 }
@@ -279,7 +255,14 @@ fn render_runtime(shell: LinuxShell) -> String {
 fn validate_snapshot(providers: &[catalog::ProviderRecord]) -> Result<(), LinuxExportFailure> {
     let valid = providers.iter().all(|provider| {
         Uuid::parse_str(&provider.summary.id).is_ok()
-            && !provider.api_key.contains(['\0', '\r', '\n'])
+            && [
+                &provider.summary.name,
+                &provider.summary.base_url,
+                &provider.summary.default_model,
+                &provider.api_key,
+            ]
+            .into_iter()
+            .all(|value| !value.contains(['\0', '\r', '\n', '\t']))
     });
     if valid {
         Ok(())
@@ -291,16 +274,8 @@ fn validate_snapshot(providers: &[catalog::ProviderRecord]) -> Result<(), LinuxE
     }
 }
 
-fn toml_string(value: &str) -> String {
-    toml_edit::Value::from(value).to_string()
-}
-
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
-}
-
-fn shell_pattern(value: &str) -> String {
-    shell_quote(value)
 }
 
 fn atomic_write(

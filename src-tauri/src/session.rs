@@ -738,7 +738,7 @@ impl AppServerGateway {
     async fn list(&self, query: &SessionQuery) -> Result<SessionListPage, SessionFailure> {
         self.start().await?;
         let mut inner = self.inner.lock().await;
-        let connection = inner.as_mut().expect("connection started");
+        let connection = inner.as_mut().ok_or_else(unexpected_exit)?;
         let mut params = serde_json::Map::new();
         params.insert("archived".to_owned(), json!(query.archived));
         params.insert("limit".to_owned(), json!(query.limit.clamp(1, 100)));
@@ -786,7 +786,7 @@ impl AppServerGateway {
     async fn read(&self, session_id: &str) -> Result<SessionDetail, SessionFailure> {
         self.start().await?;
         let mut inner = self.inner.lock().await;
-        let connection = inner.as_mut().expect("connection started");
+        let connection = inner.as_mut().ok_or_else(unexpected_exit)?;
         let result = request_with_timeout(
             connection,
             "thread/read",
@@ -800,7 +800,7 @@ impl AppServerGateway {
     async fn mutate(&self, mutation: MutationKind, session_id: &str) -> Result<(), SessionFailure> {
         self.start().await?;
         let mut inner = self.inner.lock().await;
-        let connection = inner.as_mut().expect("connection started");
+        let connection = inner.as_mut().ok_or_else(unexpected_exit)?;
         request_with_timeout(
             connection,
             mutation.method(),
@@ -909,13 +909,21 @@ async fn spawn_connection(
     let process_created_at = process_creation_timestamp(&child).unwrap_or(now);
     let executable_path = launch.program.to_string_lossy();
     let capability_path = launch.identity.to_string_lossy();
-    let _ = state_store.record_session_process_ownership(
+    if !state_store.record_session_process_ownership(
         pid,
         process_created_at,
         &executable_path,
         &ownership_generation,
         now,
-    );
+    ) {
+        stderr_task.abort();
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+        return Err(SessionFailure::new(
+            SessionFailureCategory::InitializationFailed,
+            "session.initialization_failed",
+        ));
+    }
     let mut connection = AppServerConnection {
         child,
         stdin: Some(stdin),
@@ -983,12 +991,18 @@ async fn spawn_connection(
             ),
         });
     }
-    let _ = state_store.record_session_capability(
+    if !state_store.record_session_capability(
         &capability_path,
         &codex_version,
         "available",
         epoch_seconds(),
-    );
+    ) {
+        close_connection(&mut connection, state_store).await;
+        return Err(SessionFailure::new(
+            SessionFailureCategory::InitializationFailed,
+            "session.initialization_failed",
+        ));
+    }
     Ok(connection)
 }
 

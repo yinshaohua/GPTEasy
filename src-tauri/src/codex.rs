@@ -7,7 +7,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use toml_edit::DocumentMut;
 
-use crate::environment::managed_config_evidence;
+use crate::environment::{ManagedConfigState, managed_config_evidence, managed_config_state};
 
 #[derive(Debug, Clone)]
 pub struct CodexInspector {
@@ -41,8 +41,13 @@ impl CodexInspector {
     }
 
     fn inspect_with_credentials(&self, inspect_file_content: bool) -> CodexSnapshot {
-        let (config_status, config_fingerprint, credential_store, recovered_desktop_rewrite) =
-            self.inspect_config();
+        let (
+            config_status,
+            config_fingerprint,
+            credential_store,
+            recovered_desktop_rewrite,
+            managed_config_state,
+        ) = self.inspect_config();
         let credential_file_status = credential_file_status(&self.codex_home, credential_store);
         let login_status = self.login_command.status();
         CodexSnapshot {
@@ -52,6 +57,7 @@ impl CodexInspector {
             credential_store,
             login_status,
             recovered_desktop_rewrite,
+            managed_config_state,
             credential_fingerprint: credential_fingerprint(
                 &self.codex_home,
                 credential_store,
@@ -62,7 +68,15 @@ impl CodexInspector {
         }
     }
 
-    fn inspect_config(&self) -> (CodexConfigStatus, Option<String>, CredentialStore, bool) {
+    fn inspect_config(
+        &self,
+    ) -> (
+        CodexConfigStatus,
+        Option<String>,
+        CredentialStore,
+        bool,
+        ManagedConfigState,
+    ) {
         let config_path = self.codex_home.join("config.toml");
         match fs::metadata(&config_path) {
             Ok(metadata) if metadata.is_file() => {}
@@ -72,6 +86,7 @@ impl CodexInspector {
                     None,
                     CredentialStore::Unknown,
                     false,
+                    ManagedConfigState::Conflict,
                 );
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -80,6 +95,7 @@ impl CodexInspector {
                     None,
                     CredentialStore::Unknown,
                     false,
+                    ManagedConfigState::Absent,
                 );
             }
             Err(_) => {
@@ -88,6 +104,7 @@ impl CodexInspector {
                     None,
                     CredentialStore::Unknown,
                     false,
+                    ManagedConfigState::Conflict,
                 );
             }
         }
@@ -99,9 +116,11 @@ impl CodexInspector {
                     None,
                     CredentialStore::Unknown,
                     false,
+                    ManagedConfigState::Conflict,
                 );
             }
         };
+        let config_management = managed_config_state(&bytes);
         let (fingerprint, recovered_desktop_rewrite) = match managed_config_evidence(&bytes) {
             Some(evidence) => (
                 Some(evidence.fingerprint),
@@ -120,6 +139,7 @@ impl CodexInspector {
                     fingerprint,
                     CredentialStore::Unknown,
                     recovered_desktop_rewrite,
+                    config_management,
                 );
             }
         };
@@ -128,6 +148,7 @@ impl CodexInspector {
             fingerprint,
             credential_store_from_document(&document),
             recovered_desktop_rewrite,
+            config_management,
         )
     }
 }
@@ -173,20 +194,42 @@ impl LoginStatusCommand {
     }
 
     pub(crate) fn status(&self) -> LoginStatus {
+        self.inspect().status
+    }
+
+    pub(crate) fn inspect(&self) -> LoginInspection {
         let mut command = Command::new(&self.program);
         command
             .args(&self.arguments)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
             .stderr(Stdio::null());
         if let Some(codex_home) = self.codex_home.as_ref() {
             command.env("CODEX_HOME", codex_home);
         }
         configure_hidden_process(&mut command);
-        match command.status() {
-            Ok(status) if status.success() => LoginStatus::LoggedIn,
-            Ok(_) => LoginStatus::NotLoggedIn,
-            Err(_) => LoginStatus::Unavailable,
+        match command.output() {
+            Ok(output) if output.status.success() => {
+                let text = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
+                let method = if text.contains("logged in using chatgpt") {
+                    LoginMethod::ChatGpt
+                } else if text.contains("api key") {
+                    LoginMethod::ApiKey
+                } else {
+                    LoginMethod::Unknown
+                };
+                LoginInspection {
+                    status: LoginStatus::LoggedIn,
+                    method,
+                }
+            }
+            Ok(_) => LoginInspection {
+                status: LoginStatus::NotLoggedIn,
+                method: LoginMethod::Unknown,
+            },
+            Err(_) => LoginInspection {
+                status: LoginStatus::Unavailable,
+                method: LoginMethod::Unknown,
+            },
         }
     }
 }
@@ -219,6 +262,19 @@ pub enum LoginStatus {
     Unavailable,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoginMethod {
+    ChatGpt,
+    ApiKey,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoginInspection {
+    pub status: LoginStatus,
+    pub method: LoginMethod,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CredentialStore {
@@ -248,6 +304,8 @@ pub struct CodexSnapshot {
     pub login_status: LoginStatus,
     #[serde(skip)]
     pub(crate) recovered_desktop_rewrite: bool,
+    #[serde(skip)]
+    pub(crate) managed_config_state: ManagedConfigState,
     #[serde(skip)]
     pub(crate) credential_fingerprint: Option<String>,
 }
@@ -328,9 +386,19 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        CredentialFileStatus, CredentialStore, LoginStatus, LoginStatusCommand,
+        CredentialFileStatus, CredentialStore, LoginMethod, LoginStatus, LoginStatusCommand,
         credential_file_status, credential_fingerprint,
     };
+
+    #[cfg(target_os = "windows")]
+    fn scripted_login_probe(script: &str) -> LoginStatusCommand {
+        LoginStatusCommand::new("cmd.exe", ["/D", "/S", "/C", script])
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn scripted_login_probe(script: &str) -> LoginStatusCommand {
+        LoginStatusCommand::new("sh", ["-c", script])
+    }
 
     #[test]
     fn file_credential_fingerprint_uses_content_not_metadata() {
@@ -390,6 +458,43 @@ mod tests {
         .inspect();
 
         assert_eq!(snapshot.credential_fingerprint, None);
+    }
+
+    #[test]
+    fn login_probe_identifies_chatgpt_login() {
+        let inspection = scripted_login_probe("echo Logged in using ChatGPT").inspect();
+
+        assert_eq!(inspection.status, LoginStatus::LoggedIn);
+        assert_eq!(inspection.method, LoginMethod::ChatGpt);
+    }
+
+    #[test]
+    fn login_probe_identifies_api_key_login() {
+        let inspection = scripted_login_probe("echo Logged in using an API key").inspect();
+
+        assert_eq!(inspection.status, LoginStatus::LoggedIn);
+        assert_eq!(inspection.method, LoginMethod::ApiKey);
+    }
+
+    #[test]
+    fn login_probe_keeps_unknown_success_distinct_from_chatgpt() {
+        let inspection = scripted_login_probe("echo Logged in").inspect();
+
+        assert_eq!(inspection.status, LoginStatus::LoggedIn);
+        assert_eq!(inspection.method, LoginMethod::Unknown);
+    }
+
+    #[test]
+    fn login_probe_maps_nonzero_exit_to_not_logged_in() {
+        #[cfg(target_os = "windows")]
+        let command = scripted_login_probe("exit /b 1");
+        #[cfg(not(target_os = "windows"))]
+        let command = scripted_login_probe("exit 1");
+
+        let inspection = command.inspect();
+
+        assert_eq!(inspection.status, LoginStatus::NotLoggedIn);
+        assert_eq!(inspection.method, LoginMethod::Unknown);
     }
 
     #[cfg(target_os = "windows")]

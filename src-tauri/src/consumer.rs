@@ -72,6 +72,10 @@ impl ConsumerScan {
 pub trait ConsumerScanner: Send + Sync {
     fn scan(&self) -> ConsumerScan;
 
+    fn scan_for_install_locations(&self, _install_locations: &[PathBuf]) -> ConsumerScan {
+        self.scan()
+    }
+
     fn scan_excluding(&self, _exclusions: &[ConsumerProcessExclusion]) -> ConsumerScan {
         self.scan()
     }
@@ -106,6 +110,18 @@ impl ConsumerScanner for WindowsConsumerScanner {
         #[cfg(not(windows))]
         {
             let _ = exclusions;
+            ConsumerScan::unknown()
+        }
+    }
+
+    fn scan_for_install_locations(&self, install_locations: &[PathBuf]) -> ConsumerScan {
+        #[cfg(windows)]
+        {
+            scan_windows(Some(install_locations), &[]).unwrap_or_else(|_| ConsumerScan::unknown())
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = install_locations;
             ConsumerScan::unknown()
         }
     }

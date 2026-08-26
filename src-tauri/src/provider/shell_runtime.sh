@@ -5,6 +5,52 @@ gpteasy__provider_id_prefix='# GPTEasy provider-id:'
 gpteasy__schema_prefix='# GPTEasy schema-version:'
 gpteasy__source_id_prefix='# GPTEasy source-id:'
 gpteasy__credential_file_prefix='# GPTEasy credential-file:'
+
+gpteasy__provider_id() {
+    local expected_index=$1 index=1 provider_id name base_url model api_key
+    while IFS='	' read -r provider_id name base_url model api_key; do
+        [[ -n "$provider_id" && "$provider_id" != \#* ]] || continue
+        if [[ "$index" == "$expected_index" ]]; then
+            printf '%s\n' "$provider_id"
+            return 0
+        fi
+        index=$((index + 1))
+    done < <(gpteasy__provider_catalog)
+    return 1
+}
+
+gpteasy__provider_value() {
+    local expected_id=$1 field=$2 provider_id name base_url model api_key
+    while IFS='	' read -r provider_id name base_url model api_key; do
+        [[ -n "$provider_id" && "$provider_id" != \#* ]] || continue
+        [[ "$provider_id" == "$expected_id" ]] || continue
+        case "$field" in
+            name) printf '%s\n' "$name" ;;
+            model) printf '%s\n' "$model" ;;
+            base_url) printf '%s\n' "$base_url" ;;
+            credential) printf '%s' "$api_key" ;;
+            *) return 1 ;;
+        esac
+        return 0
+    done < <(gpteasy__provider_catalog)
+    return 1
+}
+
+gpteasy__provider_name() {
+    gpteasy__provider_value "$1" name
+}
+
+gpteasy__provider_model() {
+    gpteasy__provider_value "$1" model
+}
+
+gpteasy__provider_base_url() {
+    gpteasy__provider_value "$1" base_url
+}
+
+gpteasy__print_credential() {
+    gpteasy__provider_value "$1" credential
+}
 {{GPTEASY_SHELL_SETUP}}
 
 gpteasy__help() {
@@ -454,7 +500,6 @@ gpteasy__schema_v1_is_valid() {
         index(line, "model_providers.gpteasy.base_url = ") == 1 { base_url_count += 1; next }
         line == "model_providers.gpteasy.wire_api = \"responses\"" { wire_count += 1; next }
         line == "model_providers.gpteasy.supports_websockets = false" { websocket_count += 1; next }
-        line == "model_providers.gpteasy.requires_openai_auth = false" { auth_mode_count += 1; next }
         line == "model_providers.gpteasy.auth.command = \"sh\"" { auth_command_count += 1; next }
         index(line, "model_providers.gpteasy.auth.args = ") == 1 { auth_args_count += 1; next }
         { invalid = 1 }
@@ -462,7 +507,7 @@ gpteasy__schema_v1_is_valid() {
             valid = !invalid && schema_count == 1 && provider_count == 1 && source_count == 1 &&
                 credential_count == 1 && model_count == 1 && model_provider_count == 1 &&
                 name_count == 1 && base_url_count == 1 && wire_count == 1 && websocket_count == 1 &&
-                auth_mode_count == 1 && auth_command_count == 1 && auth_args_count == 1
+                auth_command_count == 1 && auth_args_count == 1
             exit valid ? 0 : 1
         }
     ' "$config" || return 1

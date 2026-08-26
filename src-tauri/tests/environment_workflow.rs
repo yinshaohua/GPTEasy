@@ -3,7 +3,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use gpteasy_lib::codex::LoginStatus;
+use gpteasy_lib::codex::{LoginInspection, LoginMethod, LoginStatus};
 use gpteasy_lib::consumer::{
     ConsumerIdentity, ConsumerRole, ConsumerScan, ConsumerScanner, ConsumerStatus,
 };
@@ -362,6 +362,10 @@ fn confirmed_takeover_preserves_external_fields_and_records_the_applied_provider
         document["model_providers"][PROVIDER_ID]["requires_openai_auth"].as_bool(),
         Some(true)
     );
+    assert_eq!(
+        document["model_providers"][PROVIDER_ID]["supports_websockets"].as_bool(),
+        Some(false)
+    );
     assert_eq!(document["custom_flag"].as_bool(), Some(true));
     assert_eq!(
         document["model_providers"]["legacy"]["name"].as_str(),
@@ -625,6 +629,52 @@ fn managed_environment_accepts_and_preserves_changes_outside_the_managed_block()
 
     let reapplied = fs::read_to_string(config_path).expect("read reapplied config");
     assert!(reapplied.ends_with("\n[projects.external]\ntrust_level = \"trusted\"\n"));
+}
+
+#[test]
+fn managed_environment_accepts_legacy_block_without_websocket_default() {
+    let (temp, _, application) = fixture();
+    let codex_home = temp.path().join(".codex");
+    application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("establish managed environment");
+    let config_path = codex_home.join("config.toml");
+    let original = fs::read_to_string(&config_path).expect("read managed config");
+    let legacy = original.replace(
+        &format!("model_providers.{PROVIDER_ID}.supports_websockets = false\n"),
+        "",
+    );
+    assert_ne!(legacy, original);
+    fs::write(&config_path, legacy).expect("write legacy managed config");
+
+    let snapshot = application
+        .inspect()
+        .expect("inspect legacy managed config");
+
+    assert_eq!(snapshot.state, EnvironmentState::Managed);
+}
+
+#[test]
+fn incomplete_managed_provider_table_is_a_conflict_instead_of_a_panic() {
+    let (temp, _, application) = fixture();
+    let codex_home = temp.path().join(".codex");
+    application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("establish managed environment");
+    let config_path = codex_home.join("config.toml");
+    let original = fs::read_to_string(&config_path).expect("read managed config");
+    let incomplete = original.replace(
+        &format!("model_providers.{PROVIDER_ID}.base_url = \"https://fixture.example/v1\"\n"),
+        "",
+    );
+    assert_ne!(incomplete, original);
+    fs::write(&config_path, incomplete).expect("write incomplete managed config");
+
+    let snapshot = application
+        .inspect()
+        .expect("inspect incomplete managed config");
+
+    assert_eq!(snapshot.state, EnvironmentState::Conflict);
 }
 
 #[test]
@@ -1079,7 +1129,7 @@ fn configuration_failure_categories_never_expose_api_keys() {
 }
 
 #[test]
-fn logged_in_user_can_switch_to_openai_without_touching_or_backing_up_tokens() {
+fn logged_in_user_can_switch_to_openai_while_preserving_tokens_and_clearing_api_key() {
     const OPENAI_TOKEN_CANARY: &str = "openai-token-canary-must-stay-private";
     let (temp, store, application) = fixture();
     let codex_home = temp.path().join(".codex");
@@ -1087,7 +1137,7 @@ fn logged_in_user_can_switch_to_openai_without_touching_or_backing_up_tokens() {
         .apply_provider(PROVIDER_ID, true)
         .expect("establish provider mode");
     let login_credentials = format!(
-        r#"{{"auth_mode":"chatgpt","tokens":{{"access_token":"{OPENAI_TOKEN_CANARY}"}},"last_refresh":"private"}}"#,
+        r#"{{"auth_mode":"chatgpt","tokens":{{"access_token":"{OPENAI_TOKEN_CANARY}"}},"OPENAI_API_KEY":"obsolete-provider-key","last_refresh":"private"}}"#,
     );
     fs::write(codex_home.join("auth.json"), login_credentials.as_bytes())
         .expect("simulate Codex-managed OpenAI login");
@@ -1120,10 +1170,14 @@ fn logged_in_user_can_switch_to_openai_without_touching_or_backing_up_tokens() {
     assert_eq!(switched.login_status, LoginStatus::LoggedIn);
     let config = fs::read_to_string(codex_home.join("config.toml")).expect("read config");
     assert!(!config.contains("GPTEasy managed provider"));
-    assert_eq!(
-        fs::read(codex_home.join("auth.json")).expect("read untouched login credentials"),
-        login_credentials.as_bytes()
-    );
+    let credentials: Value = serde_json::from_slice(
+        &fs::read(codex_home.join("auth.json")).expect("read restored login credentials"),
+    )
+    .expect("restored login credentials remain valid JSON");
+    assert_eq!(credentials["auth_mode"], "chatgpt");
+    assert!(credentials.get("OPENAI_API_KEY").is_none());
+    assert_eq!(credentials["tokens"]["access_token"], OPENAI_TOKEN_CANARY);
+    assert_eq!(credentials["last_refresh"], "private");
     let latest_backup = latest_backup_path(&codex_home);
     let backup_contents = fs::read_dir(&latest_backup)
         .expect("read OpenAI switch backup")
@@ -1279,6 +1333,103 @@ fn returning_from_openai_to_a_provider_requires_confirmation_without_backing_up_
         .flatten()
         .collect::<Vec<_>>();
     assert!(!String::from_utf8_lossy(&backup_contents).contains(OPENAI_TOKEN_CANARY));
+}
+
+#[test]
+fn returning_to_openai_reactivates_preserved_chatgpt_credentials() {
+    const OPENAI_TOKEN_CANARY: &str = "reactivated-openai-token-canary";
+    let (temp, store, _) = fixture();
+    let codex_home = temp.path().join(".codex");
+    fs::create_dir_all(&codex_home).expect("create Codex fixture");
+    fs::write(codex_home.join("config.toml"), b"custom_flag = true\n")
+        .expect("write external config");
+    fs::write(
+        codex_home.join("auth.json"),
+        format!(
+            r#"{{"auth_mode":"chatgpt","tokens":{{"access_token":"{OPENAI_TOKEN_CANARY}"}},"last_refresh":"private"}}"#,
+        ),
+    )
+    .expect("write Codex-managed login credentials");
+    let application = EnvironmentApplication::with_login_probe(
+        store.clone(),
+        &codex_home,
+        Arc::new(FixedLoginProbe(LoginStatus::LoggedIn)),
+    );
+    let external = application.inspect().expect("inspect external environment");
+    let openai = application
+        .switch_to_openai_login(true, &external.revision)
+        .expect("establish OpenAI login mode");
+    application
+        .apply_provider_at_revision(PROVIDER_ID, true, &openai.revision)
+        .expect("switch to provider mode");
+    assert!(
+        codex_home.join(".gpteasy-openai-login.json").exists(),
+        "switching away from ChatGPT must retain one local recovery snapshot"
+    );
+    fs::write(
+        codex_home.join("auth.json"),
+        br#"{"auth_mode":"apikey","OPENAI_API_KEY":"provider-key-after-codex-rewrite"}"#,
+    )
+    .expect("simulate Codex rewriting provider credentials without ChatGPT tokens");
+    let application = EnvironmentApplication::with_login_probe(
+        store,
+        &codex_home,
+        Arc::new(MethodLoginProbe(LoginStatus::LoggedIn, LoginMethod::ApiKey)),
+    );
+    let before_return = application
+        .inspect()
+        .expect("inspect after Codex rewrites provider credentials");
+
+    let returned = application
+        .switch_to_openai_login(true, &before_return.revision)
+        .expect("return to OpenAI login mode");
+
+    assert_eq!(returned.mode, Some(AuthenticationMode::OpenaiLogin));
+    let credentials: Value = serde_json::from_slice(
+        &fs::read(codex_home.join("auth.json")).expect("read restored login credentials"),
+    )
+    .expect("restored login credentials remain valid JSON");
+    assert_eq!(credentials["auth_mode"], "chatgpt");
+    assert!(credentials.get("OPENAI_API_KEY").is_none());
+    assert_eq!(credentials["tokens"]["access_token"], OPENAI_TOKEN_CANARY);
+    assert_eq!(credentials["last_refresh"], "private");
+    assert!(
+        !codex_home.join(".gpteasy-openai-login.json").exists(),
+        "the recovery snapshot is consumed after a successful return"
+    );
+}
+
+#[test]
+fn api_key_login_does_not_qualify_as_openai_account_login() {
+    let (temp, store, _) = fixture();
+    let codex_home = temp.path().join(".codex");
+    fs::create_dir_all(&codex_home).expect("create Codex fixture");
+    fs::write(
+        codex_home.join("config.toml"),
+        b"cli_auth_credentials_store = 'keyring'\ncustom_flag = true\n",
+    )
+    .expect("write keyring config");
+    let application = EnvironmentApplication::with_login_probe(
+        store,
+        &codex_home,
+        Arc::new(MethodLoginProbe(LoginStatus::LoggedIn, LoginMethod::ApiKey)),
+    );
+    let before = application.inspect().expect("inspect API key login");
+    assert_eq!(before.login_status, LoginStatus::NotLoggedIn);
+
+    let failure = application
+        .switch_to_openai_login(true, &before.revision)
+        .expect_err("API key login must not satisfy OpenAI account mode");
+
+    assert_eq!(
+        failure.category,
+        EnvironmentFailureCategory::OpenAiLoginRequired
+    );
+    assert_eq!(
+        fs::read(codex_home.join("config.toml")).expect("read unchanged config"),
+        b"cli_auth_credentials_store = 'keyring'\ncustom_flag = true\n"
+    );
+    assert!(!codex_home.join(".gpteasy-backups").exists());
 }
 
 #[test]
@@ -2401,8 +2552,26 @@ impl EnvironmentFaultInjector for FailRollback {
 struct FixedLoginProbe(LoginStatus);
 
 impl OpenAiLoginProbe for FixedLoginProbe {
-    fn status(&self) -> LoginStatus {
-        self.0
+    fn inspect(&self) -> LoginInspection {
+        LoginInspection {
+            status: self.0,
+            method: if self.0 == LoginStatus::LoggedIn {
+                LoginMethod::ChatGpt
+            } else {
+                LoginMethod::Unknown
+            },
+        }
+    }
+}
+
+struct MethodLoginProbe(LoginStatus, LoginMethod);
+
+impl OpenAiLoginProbe for MethodLoginProbe {
+    fn inspect(&self) -> LoginInspection {
+        LoginInspection {
+            status: self.0,
+            method: self.1,
+        }
     }
 }
 

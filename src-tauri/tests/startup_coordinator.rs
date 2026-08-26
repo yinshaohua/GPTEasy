@@ -16,6 +16,13 @@ fn login_command(exit_code: i32) -> LoginStatusCommand {
     LoginStatusCommand::new("cmd.exe", ["/D", "/S", "/C", &format!("exit {exit_code}")])
 }
 
+fn chatgpt_login_command() -> LoginStatusCommand {
+    LoginStatusCommand::new(
+        "cmd.exe",
+        ["/D", "/S", "/C", "echo Logged in using ChatGPT"],
+    )
+}
+
 #[test]
 fn startup_reports_missing_codex_config_without_creating_it() {
     let app_data = TempDir::new().expect("app data");
@@ -306,7 +313,7 @@ fn pending_provider_credentials_are_read_only_hashed_for_recovery() {
 }
 
 #[test]
-fn managed_config_fingerprint_conflict_blocks_startup_coordination() {
+fn openai_login_config_fingerprint_changes_do_not_block_startup_coordination() {
     let app_data = TempDir::new().expect("app data");
     let codex_home = TempDir::new().expect("codex home");
     fs::write(codex_home.path().join("config.toml"), "model = 'gpt-5'\n")
@@ -328,11 +335,8 @@ fn managed_config_fingerprint_conflict_blocks_startup_coordination() {
     );
     let snapshot = coordinator.inspect();
 
-    assert_eq!(snapshot.mode, ApplicationMode::Blocked);
-    assert_eq!(
-        snapshot.block_reason,
-        Some(StartupBlockReason::ManagedConfigConflict)
-    );
+    assert_eq!(snapshot.mode, ApplicationMode::Ready);
+    assert_eq!(snapshot.block_reason, None);
 }
 
 #[test]
@@ -393,6 +397,132 @@ fn openai_login_mode_without_config_evidence_does_not_block_startup() {
 
     assert_eq!(snapshot.mode, ApplicationMode::Ready);
     assert_eq!(snapshot.block_reason, None);
+}
+
+#[test]
+fn openai_login_mode_allows_codex_to_rewrite_owned_artifacts() {
+    let app_data = TempDir::new().expect("app data");
+    let codex_home = TempDir::new().expect("codex home");
+    fs::write(
+        codex_home.path().join("config.toml"),
+        "model = 'gpt-5.4'\nmodel_reasoning_effort = 'high'\n",
+    )
+    .expect("write Codex-owned config");
+    fs::write(
+        codex_home.path().join("auth.json"),
+        br#"{"auth_mode":"chatgpt","tokens":{"access_token":"private"}}"#,
+    )
+    .expect("write Codex-owned credentials");
+    let store = StateStore::new(StatePaths::from_root(app_data.path()));
+    assert!(store.bootstrap().is_ready());
+    let connection = rusqlite::Connection::open(store.paths().database()).expect("open state");
+    connection
+        .execute(
+            "INSERT INTO last_applied_state (
+                singleton, mode, provider_id, config_fingerprint,
+                credentials_fingerprint, applied_at
+             ) VALUES (
+                1, 'openai_login', NULL, 'gpteasy-switch-config-evidence',
+                'gpteasy-switch-credential-evidence', '2026-08-25T00:00:00Z'
+             )",
+            [],
+        )
+        .expect("insert OpenAI login evidence");
+    let original_config =
+        fs::read(codex_home.path().join("config.toml")).expect("read Codex-owned config");
+    let coordinator = StartupCoordinator::new(
+        store.clone(),
+        CodexInspector::new(codex_home.path(), chatgpt_login_command()),
+    );
+
+    let snapshot = coordinator.inspect();
+
+    assert_eq!(snapshot.codex.login_status, LoginStatus::LoggedIn);
+    assert_eq!(snapshot.mode, ApplicationMode::Ready);
+    assert_eq!(snapshot.block_reason, None);
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT mode FROM last_applied_state WHERE singleton = 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("read unchanged last applied mode"),
+        "openai_login"
+    );
+    assert_eq!(
+        fs::read(codex_home.path().join("config.toml")).expect("read unchanged config"),
+        original_config
+    );
+}
+
+#[test]
+fn externally_restored_chatgpt_login_opens_settings_for_reconciliation() {
+    let app_data = TempDir::new().expect("app data");
+    let codex_home = TempDir::new().expect("codex home");
+    fs::write(
+        codex_home.path().join("config.toml"),
+        "model = 'gpt-5.4'\nmodel_reasoning_effort = 'high'\n",
+    )
+    .expect("write externally restored OpenAI config");
+    fs::write(
+        codex_home.path().join("auth.json"),
+        br#"{"auth_mode":"chatgpt","tokens":{"access_token":"private"}}"#,
+    )
+    .expect("write externally restored ChatGPT credentials");
+    let store = StateStore::new(StatePaths::from_root(app_data.path()));
+    assert!(store.bootstrap().is_ready());
+    let connection = rusqlite::Connection::open(store.paths().database()).expect("open state");
+    connection
+        .execute(
+            "INSERT INTO providers (
+                id, name, base_url, api_key, default_model,
+                verified_at, verification_fingerprint
+             ) VALUES (
+                'provider-1', 'Provider', 'https://provider.example/v1',
+                'test-key', 'model', '2026-08-25T00:00:00Z', 'verification'
+             )",
+            [],
+        )
+        .expect("insert provider evidence");
+    connection
+        .execute(
+            "INSERT INTO last_applied_state (
+                singleton, mode, provider_id, config_fingerprint,
+                credentials_fingerprint, applied_at
+             ) VALUES (
+                1, 'provider', 'provider-1', 'gpteasy-provider-config-evidence',
+                'gpteasy-provider-credential-evidence', '2026-08-25T00:00:00Z'
+             )",
+            [],
+        )
+        .expect("insert last applied provider evidence");
+    let original_config =
+        fs::read(codex_home.path().join("config.toml")).expect("read externally restored config");
+    let coordinator = StartupCoordinator::new(
+        store.clone(),
+        CodexInspector::new(codex_home.path(), chatgpt_login_command()),
+    );
+
+    let snapshot = coordinator.inspect();
+
+    assert_eq!(snapshot.codex.login_status, LoginStatus::LoggedIn);
+    assert_eq!(snapshot.mode, ApplicationMode::Ready);
+    assert_eq!(snapshot.block_reason, None);
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT mode FROM last_applied_state WHERE singleton = 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("read unchanged last applied mode"),
+        "provider"
+    );
+    assert_eq!(
+        fs::read(codex_home.path().join("config.toml")).expect("read unchanged config"),
+        original_config
+    );
 }
 
 #[test]
@@ -502,7 +632,17 @@ fn provider_startup_accepts_outside_edits_but_blocks_managed_block_drift() {
     assert_eq!(compatible.mode, ApplicationMode::Ready);
     assert_eq!(compatible.block_reason, None);
 
-    let drifted = outside_edit.replace("https://provider.example/v1", "https://drifted.example/v1");
+    let legacy = outside_edit.replace(
+        &format!("model_providers.{provider_id}.supports_websockets = false\n"),
+        "",
+    );
+    assert_ne!(legacy, outside_edit);
+    fs::write(&config_path, &legacy).expect("write legacy websocket default");
+    let compatible_legacy = coordinator.inspect();
+    assert_eq!(compatible_legacy.mode, ApplicationMode::Ready);
+    assert_eq!(compatible_legacy.block_reason, None);
+
+    let drifted = legacy.replace("https://provider.example/v1", "https://drifted.example/v1");
     fs::write(config_path, drifted).expect("write managed block drift");
     let conflict = coordinator.inspect();
     assert_eq!(conflict.mode, ApplicationMode::Blocked);

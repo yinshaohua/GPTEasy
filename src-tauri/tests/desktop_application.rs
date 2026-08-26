@@ -1,0 +1,317 @@
+use std::collections::VecDeque;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use gpteasy_lib::consumer::{
+    ConsumerIdentity, ConsumerRole, ConsumerScan, ConsumerScanner, ConsumerStatus,
+};
+use gpteasy_lib::desktop::{
+    DesktopAction, DesktopActivator, DesktopApplication, DesktopBoundaryError, DesktopClock,
+    DesktopFailureCategory, DesktopPackage, DesktopPackageDiscovery, DesktopProcessController,
+};
+
+struct FixtureDiscovery(Vec<DesktopPackage>);
+
+impl DesktopPackageDiscovery for FixtureDiscovery {
+    fn discover(&self) -> Result<Vec<DesktopPackage>, DesktopBoundaryError> {
+        Ok(self.0.clone())
+    }
+}
+
+struct FixtureScanner(Mutex<VecDeque<ConsumerScan>>);
+
+impl ConsumerScanner for FixtureScanner {
+    fn scan(&self) -> ConsumerScan {
+        self.0
+            .lock()
+            .expect("scanner fixture lock")
+            .pop_front()
+            .unwrap_or_else(ConsumerScan::unknown)
+    }
+
+    fn scan_for_install_locations(&self, _install_locations: &[PathBuf]) -> ConsumerScan {
+        self.scan()
+    }
+}
+
+#[derive(Default)]
+struct FixtureActivator {
+    aumids: Mutex<Vec<String>>,
+    fail: bool,
+}
+
+impl DesktopActivator for FixtureActivator {
+    fn activate(&self, aumid: &str) -> Result<(), DesktopBoundaryError> {
+        self.aumids
+            .lock()
+            .expect("activator fixture lock")
+            .push(aumid.to_owned());
+        if self.fail {
+            Err(DesktopBoundaryError)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[derive(Default)]
+struct FixtureController {
+    requests: Mutex<Vec<Vec<ConsumerIdentity>>>,
+}
+
+impl DesktopProcessController for FixtureController {
+    fn request_close(&self, roots: &[ConsumerIdentity]) -> Result<(), DesktopBoundaryError> {
+        self.requests
+            .lock()
+            .expect("controller fixture lock")
+            .push(roots.to_vec());
+        Ok(())
+    }
+}
+
+struct FixtureClock(u64);
+
+impl DesktopClock for FixtureClock {
+    fn now_epoch_millis(&self) -> u64 {
+        self.0
+    }
+}
+
+fn package() -> DesktopPackage {
+    DesktopPackage {
+        name: "OpenAI.Codex".to_owned(),
+        family_name: "OpenAI.Codex_2p2nqsd0c76g0".to_owned(),
+        application_id: "App".to_owned(),
+        install_location: PathBuf::from(
+            r"C:\Program Files\WindowsApps\OpenAI.Codex_1.2.3_x64__2p2nqsd0c76g0",
+        ),
+    }
+}
+
+fn identity(role: ConsumerRole, pid: u32, started_at_epoch_millis: u64) -> ConsumerIdentity {
+    ConsumerIdentity {
+        role,
+        pid,
+        started_at_epoch_millis,
+    }
+}
+
+fn scan(status: ConsumerStatus, roots: &[(u32, u64)], cli: Option<(u32, u64)>) -> ConsumerScan {
+    let desktop_roots = roots
+        .iter()
+        .map(|(pid, started)| identity(ConsumerRole::Desktop, *pid, *started))
+        .collect::<Vec<_>>();
+    let mut identities = desktop_roots.clone();
+    if let Some((pid, started)) = cli {
+        identities.push(identity(ConsumerRole::Cli, pid, started));
+    }
+    ConsumerScan {
+        desktop: status,
+        cli: if cli.is_some() {
+            ConsumerStatus::Running
+        } else {
+            ConsumerStatus::Stopped
+        },
+        identities,
+        desktop_roots,
+    }
+}
+
+fn application(
+    packages: Vec<DesktopPackage>,
+    scans: Vec<ConsumerScan>,
+    activation_fails: bool,
+) -> (
+    DesktopApplication,
+    Arc<FixtureActivator>,
+    Arc<FixtureController>,
+) {
+    let activator = Arc::new(FixtureActivator {
+        fail: activation_fails,
+        ..FixtureActivator::default()
+    });
+    let controller = Arc::new(FixtureController::default());
+    (
+        DesktopApplication::with_boundaries(
+            Arc::new(FixtureDiscovery(packages)),
+            Arc::new(FixtureScanner(Mutex::new(scans.into()))),
+            activator.clone(),
+            controller.clone(),
+            Arc::new(FixtureClock(9_000)),
+            3,
+            Duration::ZERO,
+        ),
+        activator,
+        controller,
+    )
+}
+
+#[test]
+fn stopped_trusted_desktop_exposes_start_action() {
+    let (application, _, _) = application(
+        vec![package()],
+        vec![scan(ConsumerStatus::Stopped, &[], None)],
+        false,
+    );
+
+    let snapshot = application.inspect();
+
+    assert_eq!(snapshot.status, ConsumerStatus::Stopped);
+    assert_eq!(snapshot.action, DesktopAction::Start);
+}
+
+#[test]
+fn untrusted_publisher_package_is_rejected() {
+    let mut package = package();
+    package.family_name = "OpenAI.Codex_untrusted".to_owned();
+    let (application, _, _) = application(vec![package], Vec::new(), false);
+
+    let snapshot = application.inspect();
+
+    assert_eq!(snapshot.action, DesktopAction::Unavailable);
+    assert_eq!(snapshot.message_id, "desktop.discovery_failed");
+}
+
+#[test]
+fn start_activates_only_the_discovered_package_and_observes_a_new_root() {
+    let (application, activator, _) = application(
+        vec![package()],
+        vec![
+            scan(ConsumerStatus::Stopped, &[], None),
+            scan(ConsumerStatus::Running, &[(421, 9_100)], None),
+        ],
+        false,
+    );
+
+    let snapshot = application.start().expect("trusted desktop start");
+
+    assert_eq!(snapshot.status, ConsumerStatus::Running);
+    assert_eq!(snapshot.action, DesktopAction::Restart);
+    assert_eq!(
+        *activator.aumids.lock().expect("activator fixture lock"),
+        vec!["OpenAI.Codex_2p2nqsd0c76g0!App"]
+    );
+}
+
+#[test]
+fn failed_activation_never_reports_success() {
+    let (application, _, _) = application(
+        vec![package()],
+        vec![scan(ConsumerStatus::Stopped, &[], None)],
+        true,
+    );
+
+    let failure = application.start().expect_err("activation must fail");
+
+    assert_eq!(failure.category, DesktopFailureCategory::ActivationFailed);
+    assert_eq!(failure.message_id, "desktop.activation_failed");
+}
+
+#[test]
+fn restart_requests_normal_close_then_observes_a_new_root() {
+    let old = scan(ConsumerStatus::Running, &[(420, 8_000)], None);
+    let expected_roots = old.desktop_roots.clone();
+    let (application, activator, controller) = application(
+        vec![package()],
+        vec![
+            old,
+            scan(ConsumerStatus::Stopped, &[], None),
+            scan(ConsumerStatus::Running, &[(421, 9_100)], None),
+        ],
+        false,
+    );
+
+    let snapshot = application
+        .restart(&expected_roots)
+        .expect("graceful desktop restart");
+
+    assert_eq!(snapshot.status, ConsumerStatus::Running);
+    assert_eq!(
+        controller.requests.lock().expect("controller fixture lock")[0],
+        expected_roots
+    );
+    assert_eq!(
+        activator
+            .aumids
+            .lock()
+            .expect("activator fixture lock")
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn restart_timeout_is_a_failure_and_does_not_reactivate() {
+    let old = scan(ConsumerStatus::Running, &[(420, 8_000)], None);
+    let expected_roots = old.desktop_roots.clone();
+    let (application, activator, _) = application(
+        vec![package()],
+        vec![old.clone(), old.clone(), old.clone(), old],
+        false,
+    );
+
+    let failure = application
+        .restart(&expected_roots)
+        .expect_err("close timeout must fail");
+
+    assert_eq!(failure.category, DesktopFailureCategory::CloseTimedOut);
+    assert_eq!(failure.message_id, "desktop.close_timed_out");
+    assert!(
+        activator
+            .aumids
+            .lock()
+            .expect("activator fixture lock")
+            .is_empty()
+    );
+}
+
+#[test]
+fn restart_rejects_identity_changes_before_requesting_close() {
+    let expected_roots = scan(ConsumerStatus::Running, &[(420, 8_000)], None).desktop_roots;
+    let (application, _, controller) = application(
+        vec![package()],
+        vec![scan(ConsumerStatus::Running, &[(420, 8_700)], None)],
+        false,
+    );
+
+    let failure = application
+        .restart(&expected_roots)
+        .expect_err("changed process identity must fail closed");
+
+    assert_eq!(failure.category, DesktopFailureCategory::IdentityChanged);
+    assert!(
+        controller
+            .requests
+            .lock()
+            .expect("controller fixture lock")
+            .is_empty()
+    );
+}
+
+#[test]
+fn restart_never_passes_independent_cli_to_process_controller() {
+    let old = scan(ConsumerStatus::Running, &[(420, 8_000)], Some((900, 7_000)));
+    let expected_roots = old.desktop_roots.clone();
+    let (application, _, controller) = application(
+        vec![package()],
+        vec![
+            old,
+            scan(ConsumerStatus::Stopped, &[], Some((900, 7_000))),
+            scan(ConsumerStatus::Running, &[(421, 9_100)], Some((900, 7_000))),
+        ],
+        false,
+    );
+
+    application
+        .restart(&expected_roots)
+        .expect("desktop restart with independent CLI");
+
+    let requests = controller.requests.lock().expect("controller fixture lock");
+    assert_eq!(requests[0], expected_roots);
+    assert!(
+        requests[0]
+            .iter()
+            .all(|item| item.role == ConsumerRole::Desktop)
+    );
+}

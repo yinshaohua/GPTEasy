@@ -1123,6 +1123,35 @@ describe("供应商目录生命周期", () => {
     expect(screen.getByText(/原本为 Running/)).toBeInTheDocument();
   });
 
+  it("未安装 WSL2 导致删除核验失败时展示实际错误而不是供应商验证提示", async () => {
+    const provider = {
+      id: "68bf9ee2-3ba5-4517-b47e-12a11e038de4",
+      name: "Atlas",
+      baseUrl: "https://atlas.example/v1",
+      defaultModel: "model-a",
+      verifiedAtEpochSeconds: 1_786_140_000,
+      isCurrent: false,
+    };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([provider]);
+      if (command === "list_wsl_environments") {
+        return Promise.reject({ category: "probe_failed", messageId: "wsl.command_failed" });
+      }
+      if (command === "delete_provider") {
+        return Promise.reject({ category: "wsl_verification", messageId: "wsl.command_failed" });
+      }
+      return Promise.resolve(undefined);
+    });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "删除 Atlas" }));
+
+    expect(await screen.findByText("WSL2 命令执行失败。")).toBeInTheDocument();
+    expect(screen.queryByText("验证未完成，请检查输入后重试。")).not.toBeInTheDocument();
+  });
+
   it("已保存 DayWay 只在用户采用推荐地址后进入重新验证流程", async () => {
     const saved = {
       id: "c950b528-4b0a-4ba7-a578-00585d9d9d0a",
@@ -1284,7 +1313,7 @@ describe("供应商目录生命周期", () => {
     expect(screen.queryByText("当前 Windows Codex 环境操作")).not.toBeInTheDocument();
     const openAi = within(openSettingsMenu()).getByRole("menuitem", { name: "返回 OpenAI 登录模式" });
     expect(openAi).toBeEnabled();
-    expect(openAi).toHaveAttribute("title", "使用 Codex 已有的 OpenAI 登录。");
+    expect(openAi).toHaveAttribute("title", "使用或恢复 Codex 已有的 ChatGPT 账户登录。");
     expect(screen.queryByText("当前用户")).not.toBeInTheDocument();
   });
 
@@ -2396,7 +2425,7 @@ describe("Codex 环境接管", () => {
 
     await screen.findByRole("heading", { name: "供应商管理" });
     const openAiButton = within(openSettingsMenu()).getByRole("menuitem", { name: "返回 OpenAI 登录模式" });
-    await waitFor(() => expect(openAiButton).toHaveAttribute("title", "请先在 Codex 中完成 OpenAI 登录。"));
+    await waitFor(() => expect(openAiButton).toHaveAttribute("title", "请先在 Codex 中完成 ChatGPT 账户登录。"));
     expect(openAiButton).toBeEnabled();
     fireEvent.click(openAiButton);
     fireEvent.click(screen.getByRole("button", { name: "切换" }));
@@ -2404,7 +2433,7 @@ describe("Codex 环境接管", () => {
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("switch_to_openai_login", {
       expectedRevision: "blocked-not-logged-in",
     }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("请先在 Codex 中完成 OpenAI 登录。");
+    expect(await screen.findByRole("alert")).toHaveTextContent("请先在 Codex 中完成 ChatGPT 账户登录。");
   });
 
   it("外部注销后保留 OpenAI 模式，并在确认后返回已验证供应商", async () => {
@@ -2504,7 +2533,7 @@ describe("启动状态", () => {
 
     const openAiButton = within(openSettingsMenu()).getByRole("menuitem", { name: "返回 OpenAI 登录模式" });
     await waitFor(() => expect(openAiButton).toHaveAttribute("title",
-      "请先在 Codex 中完成 OpenAI 登录。",
+      "请先在 Codex 中完成 ChatGPT 账户登录。",
     ));
     expect(screen.queryByRole("heading", { name: "外部配置" })).not.toBeInTheDocument();
     expect(invoke).toHaveBeenCalledWith("get_startup_snapshot");
@@ -2574,7 +2603,7 @@ describe("启动状态", () => {
   });
 });
 
-describe("被动桌面消费者状态", () => {
+describe("Codex 桌面版受控启动与重启", () => {
   afterEach(() => {
     cleanup();
   });
@@ -2585,20 +2614,123 @@ describe("被动桌面消费者状态", () => {
     listen.mockResolvedValue(() => undefined);
   });
 
-  it("设置窗口不提供桌面版启动或重启入口，也不请求桌面控制命令", async () => {
+  it("停止时在顶部显示状态并启动已验证桌面版", async () => {
     invoke.mockImplementation((command: string) => {
       if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
       if (command === "list_providers") return Promise.resolve([]);
+      if (command === "get_desktop_snapshot") {
+        return Promise.resolve({
+          status: "stopped",
+          action: "start",
+          messageId: "desktop.ready_to_start",
+          roots: [],
+        });
+      }
+      if (command === "start_desktop_application") {
+        return Promise.resolve({
+          status: "running",
+          action: "restart",
+          messageId: "desktop.running",
+          roots: [{ role: "desktop", pid: 421, startedAtEpochMillis: 9_100 }],
+        });
+      }
       return Promise.resolve(undefined);
     });
 
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "供应商管理" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /启动 ChatGPT|重启 ChatGPT/ })).not.toBeInTheDocument();
-    expect(
-      invoke.mock.calls.some(([command]) => String(command).includes("desktop_application")),
-    ).toBe(false);
+    expect(await screen.findByText("Codex 桌面版未运行")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "启动 Codex" }));
+
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("start_desktop_application"));
+    expect(await screen.findByText("Codex 桌面版运行中")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "重启 Codex" })).toBeEnabled();
+  });
+
+  it("运行时重启先二次确认，取消不会请求关闭进程", async () => {
+    const roots = [{ role: "desktop", pid: 420, startedAtEpochMillis: 8_000 }];
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([]);
+      if (command === "get_desktop_snapshot") {
+        return Promise.resolve({
+          status: "running",
+          action: "restart",
+          messageId: "desktop.ready_to_restart",
+          roots,
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "重启 Codex" }));
+
+    const dialog = screen.getByRole("dialog", { name: "确认重启 Codex" });
+    expect(dialog).toHaveTextContent("Codex CLI 不会被启动、关闭或重启");
+    expect(screen.getByRole("button", { name: "取消" })).toHaveFocus();
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+
+    expect(screen.queryByRole("dialog", { name: "确认重启 Codex" })).not.toBeInTheDocument();
+    expect(invoke.mock.calls.some(([command]) => command === "restart_desktop_application"))
+      .toBe(false);
+  });
+
+  it("确认重启时传递已展示身份并只在后端复核成功后显示成功", async () => {
+    const roots = [{ role: "desktop", pid: 420, startedAtEpochMillis: 8_000 }];
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([]);
+      if (command === "get_desktop_snapshot") {
+        return Promise.resolve({
+          status: "running",
+          action: "restart",
+          messageId: "desktop.ready_to_restart",
+          roots,
+        });
+      }
+      if (command === "restart_desktop_application") {
+        return Promise.reject({
+          category: "close_timed_out",
+          messageId: "desktop.close_timed_out",
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "重启 Codex" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认重启" }));
+
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("restart_desktop_application", {
+      expectedRoots: roots,
+    }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Codex 未能正常退出，未重新启动。");
+    expect(screen.queryByText("Codex 已重新启动。")).not.toBeInTheDocument();
+  });
+
+  it("添加供应商与供应商目录标题保持同一行", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([]);
+      if (command === "get_desktop_snapshot") {
+        return Promise.resolve({
+          status: "unknown",
+          action: "unavailable",
+          messageId: "desktop.not_installed",
+          roots: [],
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+
+    const heading = await screen.findByRole("heading", { name: "供应商目录" });
+    const headingRow = heading.closest(".catalog-heading");
+    expect(headingRow).not.toBeNull();
+    expect(within(headingRow as HTMLElement).getByRole("button", { name: "添加供应商" }))
+      .toBeInTheDocument();
   });
 });
 

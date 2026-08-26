@@ -1,6 +1,7 @@
 use serde::Serialize;
 
 use crate::codex::{CodexConfigStatus, CodexInspector, CodexSnapshot, CredentialStore};
+use crate::environment::ManagedConfigState;
 use crate::state::{
     AppliedMode, DatabaseSnapshot, DatabaseStatus, PendingConfigOperationSnapshot, StateStore,
 };
@@ -136,29 +137,43 @@ fn startup_block_reason(
     if codex.config_status == CodexConfigStatus::Missing {
         return None;
     }
+    if codex.managed_config_state == ManagedConfigState::Conflict {
+        return Some(StartupBlockReason::ManagedConfigConflict);
+    }
+    match contents.last_applied_mode {
+        Some(AppliedMode::OpenaiLogin) => {
+            return (codex.managed_config_state == ManagedConfigState::Present)
+                .then_some(StartupBlockReason::ManagedConfigConflict);
+        }
+        Some(AppliedMode::Provider)
+            if codex.managed_config_state == ManagedConfigState::Absent
+                && !config_matches_applied =>
+        {
+            return None;
+        }
+        _ => {}
+    }
     if codex.recovered_desktop_rewrite
         && (contents.last_applied_mode != Some(AppliedMode::Provider) || !config_matches_applied)
     {
         return Some(StartupBlockReason::ManagedConfigConflict);
     }
-    if let Some(Some(_)) = &contents.last_applied_config_fingerprint {
+    if contents.last_applied_mode == Some(AppliedMode::Provider)
+        && let Some(Some(_)) = &contents.last_applied_config_fingerprint
+    {
         if !config_matches_applied {
             return Some(StartupBlockReason::ManagedConfigConflict);
         }
     }
-    match (
-        &contents.last_applied_credentials_fingerprint,
-        contents.last_applied_mode,
-    ) {
-        (Some(Some(expected)), _) => {
-            if codex.credential_fingerprint.as_ref() != Some(expected) {
-                return Some(StartupBlockReason::ManagedConfigConflict);
+    if contents.last_applied_mode == Some(AppliedMode::Provider) {
+        match &contents.last_applied_credentials_fingerprint {
+            Some(Some(expected)) => {
+                if codex.credential_fingerprint.as_ref() != Some(expected) {
+                    return Some(StartupBlockReason::ManagedConfigConflict);
+                }
             }
+            Some(None) | None => return Some(StartupBlockReason::ManagedConfigConflict),
         }
-        (Some(None), Some(AppliedMode::Provider)) | (None, Some(AppliedMode::Provider)) => {
-            return Some(StartupBlockReason::ManagedConfigConflict);
-        }
-        _ => {}
     }
     None
 }

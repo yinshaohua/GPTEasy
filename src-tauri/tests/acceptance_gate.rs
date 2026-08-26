@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpteasy_lib::codex::LoginStatus;
+use gpteasy_lib::codex::{LoginInspection, LoginMethod, LoginStatus};
 use gpteasy_lib::consumer::{
     ConsumerScan, ConsumerScanner, ConsumerStatus, FixtureProcess, ProcessAccess, classify_fixture,
 };
@@ -1027,8 +1027,15 @@ impl ConsumerScanner for FixedScanner {
 struct FixedLoginProbe(LoginStatus);
 
 impl OpenAiLoginProbe for FixedLoginProbe {
-    fn status(&self) -> LoginStatus {
-        self.0
+    fn inspect(&self) -> LoginInspection {
+        LoginInspection {
+            status: self.0,
+            method: if self.0 == LoginStatus::LoggedIn {
+                LoginMethod::ChatGpt
+            } else {
+                LoginMethod::Unknown
+            },
+        }
     }
 }
 

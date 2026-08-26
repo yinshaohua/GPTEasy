@@ -24,7 +24,7 @@ try {
 if ($null -ne $releaseContract) {
     if ($releaseContract.schemaVersion -ne 1 -or
         $releaseContract.issue -ne 28 -or
-        $releaseContract.desktopConsumerControl -ne 'prohibited') {
+        $releaseContract.desktopConsumerControl -ne 'trusted_start_confirmed_restart') {
         $contradictions.Add('The structured Windows release contract identity is invalid.')
     }
 
@@ -41,9 +41,9 @@ if ($null -ne $releaseContract) {
         if (-not $content.Contains([string]$releaseContract.documentMarker)) {
             $contradictions.Add("$relativePath does not declare the structured desktop consumer control boundary.")
         }
-        foreach ($pattern in @($releaseContract.affirmativeDesktopControlPatterns)) {
+        foreach ($pattern in @($releaseContract.forbiddenDesktopControlPatterns)) {
             if ($content -match [string]$pattern) {
-                $contradictions.Add("$relativePath contains an affirmative desktop consumer control statement.")
+                $contradictions.Add("$relativePath exceeds the trusted desktop consumer control boundary.")
             }
         }
     }

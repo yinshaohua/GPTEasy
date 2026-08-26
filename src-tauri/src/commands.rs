@@ -1,12 +1,13 @@
 use std::process::Command;
 use std::sync::Mutex;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_notification::NotificationExt;
 
+use crate::desktop::{DesktopApplication, DesktopFailure, DesktopFailureCategory, DesktopSnapshot};
 use crate::diagnostics::{IssueLogLevel, IssueLogRecord, IssueLogStore};
 use crate::environment::{
     EnvironmentApplication, EnvironmentFailure, EnvironmentFailureCategory, EnvironmentSnapshot,
@@ -45,6 +46,10 @@ pub(crate) struct EnvironmentRuntime {
     application: EnvironmentApplication,
 }
 
+pub(crate) struct DesktopRuntime {
+    application: DesktopApplication,
+}
+
 pub(crate) struct WslRuntime {
     application: WslApplication,
 }
@@ -61,47 +66,6 @@ impl IssueLogRuntime {
     pub(crate) fn new(store: IssueLogStore) -> Self {
         Self { store }
     }
-}
-
-trait DiagnosticLoggableFailure {
-    fn message_id(&self) -> &str;
-    fn category(&self) -> String;
-}
-
-impl DiagnosticLoggableFailure for ProviderFailure {
-    fn message_id(&self) -> &str {
-        self.message_id
-    }
-
-    fn category(&self) -> String {
-        format!("{:?}", self.category)
-    }
-}
-
-impl DiagnosticLoggableFailure for SessionFailure {
-    fn message_id(&self) -> &str {
-        &self.message_id
-    }
-
-    fn category(&self) -> String {
-        format!("{:?}", self.category)
-    }
-}
-
-fn finish_diagnostic_command<T, E: DiagnosticLoggableFailure>(
-    store: &IssueLogStore,
-    event: &'static str,
-    result: Result<T, E>,
-) -> Result<T, E> {
-    if let Err(failure) = &result {
-        store.append(
-            IssueLogLevel::Error,
-            event,
-            failure.message_id(),
-            Some(format!("category={}", failure.category())),
-        );
-    }
-    result
 }
 
 pub(crate) struct UpdateRuntime {
@@ -126,21 +90,37 @@ impl UpdateRuntime {
         if snapshot.state != UpdateState::Pending {
             return;
         }
-        let hidden = app
-            .get_webview_window("main")
-            .and_then(|window| window.is_visible().ok())
-            .map(|visible| !visible)
-            .unwrap_or(true);
+        let hidden = match app.get_webview_window("main") {
+            Some(window) => match window.is_visible() {
+                Ok(visible) => !visible,
+                Err(_) => {
+                    log_runtime_error(
+                        app,
+                        "update.notification_visibility",
+                        "window.visibility_unavailable",
+                        "category=window",
+                    );
+                    true
+                }
+            },
+            None => true,
+        };
         if !hidden {
             return;
         }
         let Ok(mut notified) = self.notified_version.lock() else {
+            log_runtime_error(
+                app,
+                "update.notification_state",
+                "update.notification_state_unavailable",
+                "category=state_unavailable",
+            );
             return;
         };
         if notified.as_deref() == Some(version) {
             return;
         }
-        if app
+        match app
             .notification()
             .builder()
             .title("GPTEasy 有待安装更新")
@@ -149,9 +129,14 @@ impl UpdateRuntime {
             ))
             .extra("open_settings", true)
             .show()
-            .is_ok()
         {
-            *notified = Some(version.to_owned());
+            Ok(()) => *notified = Some(version.to_owned()),
+            Err(_) => log_runtime_error(
+                app,
+                "update.notification",
+                "notification.show_failed",
+                "category=notification",
+            ),
         }
     }
 }
@@ -188,6 +173,12 @@ impl EnvironmentRuntime {
 
     pub(crate) fn has_pending_restart(&self) -> Result<bool, EnvironmentFailure> {
         self.application.has_pending_restart()
+    }
+}
+
+impl DesktopRuntime {
+    pub(crate) fn new(application: DesktopApplication) -> Self {
+        Self { application }
     }
 }
 
@@ -238,6 +229,114 @@ pub(crate) struct CommandFailure {
     message_id: &'static str,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum FrontendFailureEvent {
+    UpdateProgressListener,
+    ProviderSwitchListener,
+    ProviderValidationProgressListener,
+    UnhandledError,
+    UnhandledRejection,
+}
+
+trait IssueLoggableFailure {
+    fn message_id(&self) -> &str;
+    fn category_name(&self) -> String;
+}
+
+macro_rules! impl_issue_loggable_failure {
+    ($failure:ty) => {
+        impl IssueLoggableFailure for $failure {
+            fn message_id(&self) -> &str {
+                self.message_id.as_ref()
+            }
+
+            fn category_name(&self) -> String {
+                stable_category_name(&self.category)
+            }
+        }
+    };
+}
+
+impl_issue_loggable_failure!(EnvironmentFailure);
+impl_issue_loggable_failure!(DesktopFailure);
+impl_issue_loggable_failure!(LinuxExportFailure);
+impl_issue_loggable_failure!(ProviderFailure);
+impl_issue_loggable_failure!(SessionFailure);
+impl_issue_loggable_failure!(WslFailure);
+
+impl IssueLoggableFailure for CommandFailure {
+    fn message_id(&self) -> &str {
+        self.message_id
+    }
+
+    fn category_name(&self) -> String {
+        "command".to_owned()
+    }
+}
+
+fn stable_category_name(category: &impl std::fmt::Debug) -> String {
+    let mut result = String::new();
+    for character in format!("{category:?}").chars() {
+        if character.is_ascii_uppercase() {
+            if !result.is_empty() {
+                result.push('_');
+            }
+            result.push(character.to_ascii_lowercase());
+        } else {
+            result.push(character);
+        }
+    }
+    result
+}
+
+impl IssueLoggableFailure for DeleteProviderFailure {
+    fn message_id(&self) -> &str {
+        self.message_id
+    }
+
+    fn category_name(&self) -> String {
+        self.category.to_owned()
+    }
+}
+
+fn finish_command<T, E: IssueLoggableFailure>(
+    store: &IssueLogStore,
+    event: &'static str,
+    result: Result<T, E>,
+) -> Result<T, E> {
+    if let Err(failure) = &result {
+        store.append(
+            IssueLogLevel::Error,
+            event,
+            failure.message_id(),
+            Some(format!("category={}", failure.category_name())),
+        );
+    }
+    result
+}
+
+fn log_runtime_error(
+    app: &AppHandle,
+    event: &'static str,
+    message_id: &'static str,
+    details: &'static str,
+) {
+    app.state::<IssueLogRuntime>().store.append(
+        IssueLogLevel::Error,
+        event,
+        message_id,
+        Some(details.to_owned()),
+    );
+}
+
+fn desktop_task_failed() -> DesktopFailure {
+    DesktopFailure {
+        category: DesktopFailureCategory::ActionUnavailable,
+        message_id: "desktop.state_unavailable",
+    }
+}
+
 #[tauri::command]
 pub(crate) fn get_startup_snapshot(
     state: State<'_, StartupRuntime>,
@@ -251,6 +350,43 @@ pub(crate) fn get_startup_snapshot(
 #[tauri::command]
 pub(crate) fn get_update_snapshot(state: State<'_, UpdateRuntime>) -> UpdateSnapshot {
     state.coordinator.snapshot()
+}
+
+#[tauri::command]
+pub(crate) async fn get_desktop_snapshot(
+    state: State<'_, DesktopRuntime>,
+    logs: State<'_, IssueLogRuntime>,
+) -> Result<DesktopSnapshot, DesktopFailure> {
+    let application = state.application.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || application.inspect())
+        .await
+        .map_err(|_| desktop_task_failed());
+    finish_command(&logs.store, "desktop.inspect", result)
+}
+
+#[tauri::command]
+pub(crate) async fn start_desktop_application(
+    state: State<'_, DesktopRuntime>,
+    logs: State<'_, IssueLogRuntime>,
+) -> Result<DesktopSnapshot, DesktopFailure> {
+    let application = state.application.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || application.start())
+        .await
+        .map_err(|_| desktop_task_failed())?;
+    finish_command(&logs.store, "desktop.start", result)
+}
+
+#[tauri::command]
+pub(crate) async fn restart_desktop_application(
+    state: State<'_, DesktopRuntime>,
+    logs: State<'_, IssueLogRuntime>,
+    expected_roots: Vec<crate::consumer::ConsumerIdentity>,
+) -> Result<DesktopSnapshot, DesktopFailure> {
+    let application = state.application.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || application.restart(&expected_roots))
+        .await
+        .map_err(|_| desktop_task_failed())?;
+    finish_command(&logs.store, "desktop.restart", result)
 }
 
 #[tauri::command]
@@ -277,7 +413,17 @@ pub(crate) fn install_update(
     guard.commit_install();
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     {
-        let _ = app.emit("update-install-started", snapshot.clone());
+        if app
+            .emit("update-install-started", snapshot.clone())
+            .is_err()
+        {
+            log_runtime_error(
+                &app,
+                "update.install_started_event",
+                "event.emit_failed",
+                "category=event",
+            );
+        }
         app.exit(0);
     }
     #[cfg(not(all(target_os = "windows", target_arch = "x86_64")))]
@@ -294,7 +440,14 @@ pub(crate) async fn perform_update_check(
     let coordinator = runtime.coordinator.clone();
     let event_app = app.clone();
     let progress = move |snapshot| {
-        let _ = event_app.emit("update-progress", snapshot);
+        if event_app.emit("update-progress", snapshot).is_err() {
+            log_runtime_error(
+                &event_app,
+                "update.progress_event",
+                "event.emit_failed",
+                "category=event",
+            );
+        }
     };
     let snapshot = if retry_incomplete {
         coordinator.check_and_download(progress).await
@@ -303,7 +456,14 @@ pub(crate) async fn perform_update_check(
     };
     log_update_check_failure(&app.state::<IssueLogRuntime>().store, &snapshot);
     runtime.notify_if_hidden(app, &snapshot);
-    let _ = app.emit("update-progress", snapshot.clone());
+    if app.emit("update-progress", snapshot.clone()).is_err() {
+        log_runtime_error(
+            app,
+            "update.progress_event",
+            "event.emit_failed",
+            "category=event",
+        );
+    }
     snapshot
 }
 
@@ -373,18 +533,29 @@ fn update_install_failure_category_name(category: &UpdateInstallFailureCategory)
 }
 
 #[tauri::command]
-pub(crate) fn open_update_manual_download() -> Result<(), CommandFailure> {
-    open_external_url(crate::update::MANUAL_DOWNLOAD_URL)
+pub(crate) fn open_update_manual_download(
+    logs: State<'_, IssueLogRuntime>,
+) -> Result<(), CommandFailure> {
+    finish_command(
+        &logs.store,
+        "update.open_manual_download",
+        open_external_url(crate::update::MANUAL_DOWNLOAD_URL),
+    )
 }
 
 #[tauri::command]
-pub(crate) fn open_update_release_notes(url: String) -> Result<(), CommandFailure> {
-    if !is_valid_update_release_notes_url(&url) {
-        return Err(CommandFailure {
+pub(crate) fn open_update_release_notes(
+    logs: State<'_, IssueLogRuntime>,
+    url: String,
+) -> Result<(), CommandFailure> {
+    let result = if !is_valid_update_release_notes_url(&url) {
+        Err(CommandFailure {
             message_id: "update.release_notes_invalid",
-        });
-    }
-    open_external_url(&url)
+        })
+    } else {
+        open_external_url(&url)
+    };
+    finish_command(&logs.store, "update.open_release_notes", result)
 }
 
 fn is_valid_update_release_notes_url(url: &str) -> bool {
@@ -452,8 +623,18 @@ fn log_startup_inspection(store: &IssueLogStore, result: &Result<StartupSnapshot
             "startup.inspect",
             snapshot.message_id,
             Some(format!(
-                "block_reason={:?}; database_status={:?}; config_status={:?}",
-                snapshot.block_reason, snapshot.database.status, snapshot.codex.config_status
+                "block_reason={:?}; database_status={:?}; config_status={:?}; \
+                 last_applied_mode={:?}; managed_config_state={:?}; login_status={:?}",
+                snapshot.block_reason,
+                snapshot.database.status,
+                snapshot.codex.config_status,
+                snapshot
+                    .database
+                    .contents
+                    .as_ref()
+                    .and_then(|contents| contents.last_applied_mode),
+                snapshot.codex.managed_config_state,
+                snapshot.codex.login_status,
             )),
         ),
         Err(failure) => store.append(
@@ -469,8 +650,13 @@ fn log_startup_inspection(store: &IssueLogStore, result: &Result<StartupSnapshot
 #[tauri::command]
 pub(crate) fn list_providers(
     state: State<'_, ProviderRuntime>,
+    logs: State<'_, IssueLogRuntime>,
 ) -> Result<Vec<ProviderSummary>, ProviderFailure> {
-    state.application.list_providers()
+    finish_command(
+        &logs.store,
+        "provider.list",
+        state.application.list_providers(),
+    )
 }
 
 #[tauri::command]
@@ -497,6 +683,7 @@ pub(crate) async fn enter_session_management(
 #[tauri::command]
 pub(crate) async fn leave_session_management(
     state: State<'_, SessionRuntime>,
+    _logs: State<'_, IssueLogRuntime>,
     lease_id: String,
 ) -> Result<(), CommandFailure> {
     state.application.leave(&lease_id).await;
@@ -509,7 +696,7 @@ pub(crate) async fn list_sessions(
     logs: State<'_, IssueLogRuntime>,
     query: SessionQuery,
 ) -> Result<SessionListPage, SessionFailure> {
-    finish_diagnostic_command(
+    finish_command(
         &logs.store,
         "session.list",
         state.application.list(query).await,
@@ -519,6 +706,7 @@ pub(crate) async fn list_sessions(
 #[tauri::command]
 pub(crate) async fn cancel_session_request(
     state: State<'_, SessionRuntime>,
+    _logs: State<'_, IssueLogRuntime>,
     request_id: String,
 ) -> Result<bool, CommandFailure> {
     Ok(state.application.cancel_list_request(&request_id).await)
@@ -530,7 +718,7 @@ pub(crate) async fn read_session(
     logs: State<'_, IssueLogRuntime>,
     session_id: String,
 ) -> Result<SessionDetail, SessionFailure> {
-    finish_diagnostic_command(
+    finish_command(
         &logs.store,
         "session.read",
         state.application.read(&session_id).await,
@@ -541,47 +729,75 @@ pub(crate) async fn read_session(
 pub(crate) async fn archive_sessions(
     app: AppHandle,
     state: State<'_, SessionRuntime>,
+    logs: State<'_, IssueLogRuntime>,
     session_ids: Vec<String>,
 ) -> Result<Vec<SessionMutationResult>, CommandFailure> {
     let Some(_activity) = app.state::<UpdateRuntime>().activity.try_begin("会话修改") else {
-        return Err(CommandFailure {
-            message_id: "update.installing",
-        });
+        return finish_command(
+            &logs.store,
+            "session.archive",
+            Err(CommandFailure {
+                message_id: "update.installing",
+            }),
+        );
     };
-    Ok(state.application.archive(session_ids).await)
+    finish_command(
+        &logs.store,
+        "session.archive",
+        Ok(state.application.archive(session_ids).await),
+    )
 }
 
 #[tauri::command]
 pub(crate) async fn unarchive_sessions(
     app: AppHandle,
     state: State<'_, SessionRuntime>,
+    logs: State<'_, IssueLogRuntime>,
     session_ids: Vec<String>,
 ) -> Result<Vec<SessionMutationResult>, CommandFailure> {
     let Some(_activity) = app.state::<UpdateRuntime>().activity.try_begin("会话修改") else {
-        return Err(CommandFailure {
-            message_id: "update.installing",
-        });
+        return finish_command(
+            &logs.store,
+            "session.unarchive",
+            Err(CommandFailure {
+                message_id: "update.installing",
+            }),
+        );
     };
-    Ok(state.application.unarchive(session_ids).await)
+    finish_command(
+        &logs.store,
+        "session.unarchive",
+        Ok(state.application.unarchive(session_ids).await),
+    )
 }
 
 #[tauri::command]
 pub(crate) async fn delete_session(
     app: AppHandle,
     state: State<'_, SessionRuntime>,
+    logs: State<'_, IssueLogRuntime>,
     session_id: String,
 ) -> Result<SessionMutationResult, CommandFailure> {
     let Some(_activity) = app.state::<UpdateRuntime>().activity.try_begin("会话修改") else {
-        return Err(CommandFailure {
-            message_id: "update.installing",
-        });
+        return finish_command(
+            &logs.store,
+            "session.delete",
+            Err(CommandFailure {
+                message_id: "update.installing",
+            }),
+        );
     };
-    Ok(state.application.delete(&session_id).await)
+    finish_command(
+        &logs.store,
+        "session.delete",
+        Ok(state.application.delete(&session_id).await),
+    )
 }
 
 #[tauri::command]
 pub(crate) fn choose_session_export_destination(
     app: AppHandle,
+    logs: State<'_, IssueLogRuntime>,
     suggested_title: String,
 ) -> Result<Option<String>, CommandFailure> {
     let selected = app
@@ -593,31 +809,38 @@ pub(crate) fn choose_session_export_destination(
     let Some(selected) = selected else {
         return Ok(None);
     };
-    selected
+    let result = selected
         .into_path()
         .map(|path| Some(path.to_string_lossy().into_owned()))
         .map_err(|_| CommandFailure {
             message_id: "session.export_destination_invalid",
-        })
+        });
+    finish_command(&logs.store, "session.choose_export_destination", result)
 }
 
 #[tauri::command]
 pub(crate) async fn export_session_markdown(
     app: AppHandle,
     state: State<'_, SessionRuntime>,
+    logs: State<'_, IssueLogRuntime>,
     detail: SessionDetail,
     destination: String,
 ) -> Result<(), SessionFailure> {
     let Some(_activity) = app.state::<UpdateRuntime>().activity.try_begin("会话导出") else {
-        return Err(SessionFailure::new(
-            crate::session::SessionFailureCategory::WriteFailed,
-            "update.installing",
-        ));
+        return finish_command(
+            &logs.store,
+            "session.export",
+            Err(SessionFailure::new(
+                crate::session::SessionFailureCategory::WriteFailed,
+                "update.installing",
+            )),
+        );
     };
-    state
+    let result = state
         .application
         .export_markdown(&detail, std::path::Path::new(&destination))
-        .await
+        .await;
+    finish_command(&logs.store, "session.export", result)
 }
 
 fn safe_export_name(title: &str) -> String {
@@ -650,6 +873,7 @@ pub(crate) struct LinuxExportDestination {
 #[tauri::command]
 pub(crate) fn choose_linux_export_destination(
     app: AppHandle,
+    logs: State<'_, IssueLogRuntime>,
     shell: LinuxShell,
 ) -> Result<Option<LinuxExportDestination>, LinuxExportFailure> {
     let selected = app
@@ -661,20 +885,30 @@ pub(crate) fn choose_linux_export_destination(
     let Some(selected) = selected else {
         return Ok(None);
     };
-    let path = selected.into_path().map_err(|_| LinuxExportFailure {
+    let path = match selected.into_path().map_err(|_| LinuxExportFailure {
         category: crate::provider::LinuxExportFailureCategory::UnsafeDestination,
         message_id: "linux_export.unsafe_destination",
-    })?;
-    Ok(Some(LinuxExportDestination {
-        exists: path.exists(),
-        path: path.to_string_lossy().into_owned(),
-    }))
+    }) {
+        Ok(path) => path,
+        Err(failure) => {
+            return finish_command(&logs.store, "linux_export.choose_destination", Err(failure));
+        }
+    };
+    finish_command(
+        &logs.store,
+        "linux_export.choose_destination",
+        Ok(Some(LinuxExportDestination {
+            exists: path.exists(),
+            path: path.to_string_lossy().into_owned(),
+        })),
+    )
 }
 
 #[tauri::command]
 pub(crate) fn export_linux_script(
     app: AppHandle,
     state: State<'_, ProviderRuntime>,
+    logs: State<'_, IssueLogRuntime>,
     shell: LinuxShell,
     destination: String,
     confirm_overwrite: bool,
@@ -684,16 +918,21 @@ pub(crate) fn export_linux_script(
         .activity
         .try_begin("Linux 导出")
     else {
-        return Err(LinuxExportFailure {
-            category: crate::provider::LinuxExportFailureCategory::StateUnavailable,
-            message_id: "update.installing",
-        });
+        return finish_command(
+            &logs.store,
+            "linux_export.write",
+            Err(LinuxExportFailure {
+                category: crate::provider::LinuxExportFailureCategory::StateUnavailable,
+                message_id: "update.installing",
+            }),
+        );
     };
-    state.application.export_linux_script(
+    let result = state.application.export_linux_script(
         shell,
         std::path::Path::new(&destination),
         confirm_overwrite,
-    )
+    );
+    finish_command(&logs.store, "linux_export.write", result)
 }
 
 #[tauri::command]
@@ -702,9 +941,10 @@ pub(crate) async fn get_environment_snapshot(
     logs: State<'_, IssueLogRuntime>,
 ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
     let application = state.application.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || application.inspect())
-        .await
-        .map_err(|_| environment_task_failed())?;
+    let result = match tauri::async_runtime::spawn_blocking(move || application.inspect()).await {
+        Ok(result) => result,
+        Err(_) => Err(environment_task_failed()),
+    };
     if let Ok(snapshot) = &result {
         if snapshot.state == crate::environment::EnvironmentState::Conflict {
             logs.store.append(
@@ -714,15 +954,8 @@ pub(crate) async fn get_environment_snapshot(
                 Some("state=conflict".to_owned()),
             );
         }
-    } else if let Err(failure) = &result {
-        logs.store.append(
-            IssueLogLevel::Error,
-            "environment.inspect",
-            failure.message_id,
-            Some(format!("category={:?}", failure.category)),
-        );
     }
-    result
+    finish_command(&logs.store, "environment.inspect", result)
 }
 
 #[tauri::command]
@@ -743,6 +976,40 @@ pub(crate) fn get_issue_log_path(state: State<'_, IssueLogRuntime>) -> String {
 }
 
 #[tauri::command]
+pub(crate) fn record_frontend_failure(
+    state: State<'_, IssueLogRuntime>,
+    event: FrontendFailureEvent,
+) {
+    let (event, message_id) = match event {
+        FrontendFailureEvent::UpdateProgressListener => (
+            "frontend.update_progress_listener",
+            "event.listener_registration_failed",
+        ),
+        FrontendFailureEvent::ProviderSwitchListener => (
+            "frontend.provider_switch_listener",
+            "event.listener_registration_failed",
+        ),
+        FrontendFailureEvent::ProviderValidationProgressListener => (
+            "frontend.provider_validation_progress_listener",
+            "event.listener_registration_failed",
+        ),
+        FrontendFailureEvent::UnhandledError => {
+            ("frontend.unhandled_error", "frontend.unhandled_error")
+        }
+        FrontendFailureEvent::UnhandledRejection => (
+            "frontend.unhandled_rejection",
+            "frontend.unhandled_rejection",
+        ),
+    };
+    state.store.append(
+        IssueLogLevel::Error,
+        event,
+        message_id,
+        Some("category=frontend".to_owned()),
+    );
+}
+
+#[tauri::command]
 pub(crate) fn copy_issue_logs(
     app: AppHandle,
     state: State<'_, IssueLogRuntime>,
@@ -753,17 +1020,20 @@ pub(crate) fn copy_issue_logs(
     let records = state
         .store
         .list(since_epoch_seconds, level, query.as_deref());
-    app.clipboard()
+    let result = app
+        .clipboard()
         .write_text(IssueLogStore::format(&records))
         .map_err(|_| CommandFailure {
             message_id: "diagnostics.copy_failed",
-        })?;
-    Ok(records.len())
+        })
+        .map(|_| records.len());
+    finish_command(&state.store, "diagnostics.copy", result)
 }
 
 #[tauri::command]
 pub(crate) fn choose_issue_log_export_destination(
     app: AppHandle,
+    logs: State<'_, IssueLogRuntime>,
 ) -> Result<Option<String>, CommandFailure> {
     let selected = app
         .dialog()
@@ -774,12 +1044,13 @@ pub(crate) fn choose_issue_log_export_destination(
     let Some(selected) = selected else {
         return Ok(None);
     };
-    selected
+    let result = selected
         .into_path()
         .map(|path| Some(path.to_string_lossy().into_owned()))
         .map_err(|_| CommandFailure {
             message_id: "diagnostics.export_destination_invalid",
-        })
+        });
+    finish_command(&logs.store, "diagnostics.choose_export_destination", result)
 }
 
 #[tauri::command]
@@ -793,10 +1064,12 @@ pub(crate) fn export_issue_logs(
     let records = state
         .store
         .list(since_epoch_seconds, level, query.as_deref());
-    std::fs::write(destination, IssueLogStore::format(&records)).map_err(|_| CommandFailure {
-        message_id: "diagnostics.export_failed",
-    })?;
-    Ok(records.len())
+    let result = std::fs::write(destination, IssueLogStore::format(&records))
+        .map_err(|_| CommandFailure {
+            message_id: "diagnostics.export_failed",
+        })
+        .map(|_| records.len());
+    finish_command(&state.store, "diagnostics.export", result)
 }
 
 #[tauri::command]
@@ -805,44 +1078,54 @@ pub(crate) fn export_all_issue_logs(
     destination: String,
 ) -> Result<usize, CommandFailure> {
     let records = state.store.list_all(0, None, None);
-    std::fs::write(destination, IssueLogStore::format(&records)).map_err(|_| CommandFailure {
-        message_id: "diagnostics.export_failed",
-    })?;
-    Ok(records.len())
+    let result = std::fs::write(destination, IssueLogStore::format(&records))
+        .map_err(|_| CommandFailure {
+            message_id: "diagnostics.export_failed",
+        })
+        .map(|_| records.len());
+    finish_command(&state.store, "diagnostics.export_all", result)
 }
 
 #[tauri::command]
 pub(crate) async fn list_wsl_environments(
     state: State<'_, WslRuntime>,
+    logs: State<'_, IssueLogRuntime>,
 ) -> Result<Vec<WslEnvironmentSummary>, WslFailure> {
     let application = state.application.clone();
-    tauri::async_runtime::spawn_blocking(move || application.list())
+    let result = tauri::async_runtime::spawn_blocking(move || application.list())
         .await
         .map_err(|_| {
             WslFailure::new(
                 crate::wsl::WslFailureCategory::StateUnavailable,
                 "wsl.state_unavailable",
             )
-        })?
+        })
+        .and_then(|result| result);
+    finish_command(&logs.store, "wsl.list", result)
 }
 
 #[tauri::command]
 pub(crate) async fn apply_wsl_provider(
     app: AppHandle,
     state: State<'_, WslRuntime>,
+    logs: State<'_, IssueLogRuntime>,
     environment_id: String,
     provider_id: String,
     expected_revision: String,
     confirm: bool,
 ) -> Result<WslApplyResult, WslFailure> {
     let Some(_activity) = app.state::<UpdateRuntime>().activity.try_begin("WSL2 应用") else {
-        return Err(WslFailure::new(
-            crate::wsl::WslFailureCategory::StateUnavailable,
-            "update.installing",
-        ));
+        return finish_command(
+            &logs.store,
+            "wsl.apply_provider",
+            Err(WslFailure::new(
+                crate::wsl::WslFailureCategory::StateUnavailable,
+                "update.installing",
+            )),
+        );
     };
     let application = state.application.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let result = tauri::async_runtime::spawn_blocking(move || {
         application.apply_provider(&environment_id, &provider_id, &expected_revision, confirm)
     })
     .await
@@ -851,13 +1134,16 @@ pub(crate) async fn apply_wsl_provider(
             crate::wsl::WslFailureCategory::StateUnavailable,
             "wsl.state_unavailable",
         )
-    })?
+    })
+    .and_then(|result| result);
+    finish_command(&logs.store, "wsl.apply_provider", result)
 }
 
 #[tauri::command]
 pub(crate) async fn refresh_wsl_environment(
     app: AppHandle,
     state: State<'_, WslRuntime>,
+    logs: State<'_, IssueLogRuntime>,
     environment_id: String,
     expected_revision: String,
     authorize_start: bool,
@@ -867,13 +1153,17 @@ pub(crate) async fn refresh_wsl_environment(
         .activity
         .try_begin("WSL2 环境协调")
     else {
-        return Err(WslFailure::new(
-            crate::wsl::WslFailureCategory::StateUnavailable,
-            "update.installing",
-        ));
+        return finish_command(
+            &logs.store,
+            "wsl.refresh",
+            Err(WslFailure::new(
+                crate::wsl::WslFailureCategory::StateUnavailable,
+                "update.installing",
+            )),
+        );
     };
     let application = state.application.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let result = tauri::async_runtime::spawn_blocking(move || {
         application.refresh_environment(&environment_id, &expected_revision, authorize_start)
     })
     .await
@@ -882,7 +1172,9 @@ pub(crate) async fn refresh_wsl_environment(
             crate::wsl::WslFailureCategory::StateUnavailable,
             "wsl.state_unavailable",
         )
-    })?
+    })
+    .and_then(|result| result);
+    finish_command(&logs.store, "wsl.refresh", result)
 }
 
 #[tauri::command]
@@ -894,10 +1186,14 @@ pub(crate) async fn apply_environment_provider(
     expected_revision: String,
 ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
     let Some(_activity) = app.state::<UpdateRuntime>().activity.try_begin("配置写入") else {
-        return Err(EnvironmentFailure::new(
-            EnvironmentFailureCategory::StateUnavailable,
-            "update.installing",
-        ));
+        return finish_command(
+            &logs.store,
+            "environment.apply_provider",
+            Err(EnvironmentFailure::new(
+                EnvironmentFailureCategory::StateUnavailable,
+                "update.installing",
+            )),
+        );
     };
     let application = state.application.clone();
     let requested_provider = provider_id.clone();
@@ -917,9 +1213,10 @@ pub(crate) async fn apply_environment_provider(
         }
     })
     .await
-    .map_err(|_| environment_task_failed())?;
-    match &result {
-        Ok(snapshot) => logs.store.append(
+    .map_err(|_| environment_task_failed())
+    .and_then(|result| result);
+    if let Ok(snapshot) = &result {
+        logs.store.append(
             IssueLogLevel::Info,
             "environment.apply_provider",
             "供应商配置已写入",
@@ -927,18 +1224,10 @@ pub(crate) async fn apply_environment_provider(
                 "provider_id={requested_provider}; pending_restart={}",
                 snapshot.pending_restart
             )),
-        ),
-        Err(failure) => logs.store.append(
-            IssueLogLevel::Error,
-            "environment.apply_provider",
-            failure.message_id,
-            Some(format!(
-                "provider_id={requested_provider}; category={:?}",
-                failure.category
-            )),
-        ),
+        );
     }
-    refresh_environment_tray_after(&app, result)
+    let result = refresh_environment_tray_after(&app, result);
+    finish_command(&logs.store, "environment.apply_provider", result)
 }
 
 #[tauri::command]
@@ -950,26 +1239,24 @@ pub(crate) async fn restore_last_environment_config(
     expected_revision: String,
 ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
     let Some(_activity) = app.state::<UpdateRuntime>().activity.try_begin("配置恢复") else {
-        return Err(EnvironmentFailure::new(
-            EnvironmentFailureCategory::StateUnavailable,
-            "update.installing",
-        ));
+        return finish_command(
+            &logs.store,
+            "environment.restore",
+            Err(EnvironmentFailure::new(
+                EnvironmentFailureCategory::StateUnavailable,
+                "update.installing",
+            )),
+        );
     };
     let application = state.application.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         application.restore_last_config(confirm_restore, &expected_revision)
     })
     .await
-    .map_err(|_| environment_task_failed())?;
-    if let Err(failure) = &result {
-        logs.store.append(
-            IssueLogLevel::Error,
-            "environment.restore",
-            failure.message_id,
-            Some(format!("category={:?}", failure.category)),
-        );
-    }
-    refresh_environment_tray_after(&app, result)
+    .map_err(|_| environment_task_failed())
+    .and_then(|result| result);
+    let result = refresh_environment_tray_after(&app, result);
+    finish_command(&logs.store, "environment.restore", result)
 }
 
 #[tauri::command]
@@ -980,32 +1267,32 @@ pub(crate) async fn switch_to_openai_login(
     expected_revision: String,
 ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
     let Some(_activity) = app.state::<UpdateRuntime>().activity.try_begin("配置写入") else {
-        return Err(EnvironmentFailure::new(
-            EnvironmentFailureCategory::StateUnavailable,
-            "update.installing",
-        ));
+        return finish_command(
+            &logs.store,
+            "environment.switch_to_openai_login",
+            Err(EnvironmentFailure::new(
+                EnvironmentFailureCategory::StateUnavailable,
+                "update.installing",
+            )),
+        );
     };
     let application = state.application.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         application.switch_to_openai_login(true, &expected_revision)
     })
     .await
-    .map_err(|_| environment_task_failed())?;
-    match &result {
-        Ok(snapshot) => logs.store.append(
+    .map_err(|_| environment_task_failed())
+    .and_then(|result| result);
+    if let Ok(snapshot) = &result {
+        logs.store.append(
             IssueLogLevel::Info,
             "environment.switch_to_openai_login",
             "已切换到 OpenAI 登录模式",
             Some(format!("state={:?}", snapshot.state)),
-        ),
-        Err(failure) => logs.store.append(
-            IssueLogLevel::Error,
-            "environment.switch_to_openai_login",
-            failure.message_id,
-            Some(format!("category={:?}", failure.category)),
-        ),
+        );
     }
-    refresh_environment_tray_after(&app, result)
+    let result = refresh_environment_tray_after(&app, result);
+    finish_command(&logs.store, "environment.switch_to_openai_login", result)
 }
 
 #[tauri::command]
@@ -1015,7 +1302,7 @@ pub(crate) async fn discover_provider_models(
     request_id: String,
     input: DiscoveryInput,
 ) -> Result<ModelDiscovery, ProviderFailure> {
-    finish_diagnostic_command(
+    finish_command(
         &logs.store,
         "provider.discover_models",
         state.application.discover_models(request_id, input).await,
@@ -1033,7 +1320,7 @@ pub(crate) async fn discover_provider_models_for_update(
         .application
         .discover_models_for_update(request_id, input)
         .await;
-    finish_diagnostic_command(&logs.store, "provider.discover_models_for_update", result)
+    finish_command(&logs.store, "provider.discover_models_for_update", result)
 }
 
 #[tauri::command]
@@ -1049,25 +1336,39 @@ pub(crate) async fn validate_provider(
         .activity
         .try_begin("供应商验证")
     else {
-        return Err(ProviderFailure::new(
-            ProviderFailureCategory::StateUnavailable,
-            "update.installing",
-        ));
+        return finish_command(
+            &logs.store,
+            "provider.validate",
+            Err(ProviderFailure::new(
+                ProviderFailureCategory::StateUnavailable,
+                "update.installing",
+            )),
+        );
     };
     let progress_request_id = request_id.clone();
     let result = state
         .application
         .validate_provider_with_progress(request_id, input, move |stage| {
-            let _ = app.emit(
-                "provider-validation-progress",
-                ProviderValidationProgress {
-                    request_id: progress_request_id.clone(),
-                    stage,
-                },
-            );
+            if app
+                .emit(
+                    "provider-validation-progress",
+                    ProviderValidationProgress {
+                        request_id: progress_request_id.clone(),
+                        stage,
+                    },
+                )
+                .is_err()
+            {
+                log_runtime_error(
+                    &app,
+                    "provider.validation_progress_event",
+                    "event.emit_failed",
+                    "category=event",
+                );
+            }
         })
         .await;
-    finish_diagnostic_command(&logs.store, "provider.validate", result)
+    finish_command(&logs.store, "provider.validate", result)
 }
 
 #[tauri::command]
@@ -1083,25 +1384,39 @@ pub(crate) async fn validate_provider_update(
         .activity
         .try_begin("供应商验证")
     else {
-        return Err(ProviderFailure::new(
-            ProviderFailureCategory::StateUnavailable,
-            "update.installing",
-        ));
+        return finish_command(
+            &logs.store,
+            "provider.validate_update",
+            Err(ProviderFailure::new(
+                ProviderFailureCategory::StateUnavailable,
+                "update.installing",
+            )),
+        );
     };
     let progress_request_id = request_id.clone();
     let result = state
         .application
         .validate_provider_update_with_progress(request_id, input, move |stage| {
-            let _ = app.emit(
-                "provider-validation-progress",
-                ProviderValidationProgress {
-                    request_id: progress_request_id.clone(),
-                    stage,
-                },
-            );
+            if app
+                .emit(
+                    "provider-validation-progress",
+                    ProviderValidationProgress {
+                        request_id: progress_request_id.clone(),
+                        stage,
+                    },
+                )
+                .is_err()
+            {
+                log_runtime_error(
+                    &app,
+                    "provider.validation_progress_event",
+                    "event.emit_failed",
+                    "category=event",
+                );
+            }
         })
         .await;
-    finish_diagnostic_command(&logs.store, "provider.validate_update", result)
+    finish_command(&logs.store, "provider.validate_update", result)
 }
 
 #[tauri::command]
@@ -1117,25 +1432,39 @@ pub(crate) async fn revalidate_provider(
         .activity
         .try_begin("供应商验证")
     else {
-        return Err(ProviderFailure::new(
-            ProviderFailureCategory::StateUnavailable,
-            "update.installing",
-        ));
+        return finish_command(
+            &logs.store,
+            "provider.revalidate",
+            Err(ProviderFailure::new(
+                ProviderFailureCategory::StateUnavailable,
+                "update.installing",
+            )),
+        );
     };
     let progress_request_id = request_id.clone();
     let result = state
         .application
         .revalidate_provider_with_progress(request_id, provider_id, move |stage| {
-            let _ = app.emit(
-                "provider-validation-progress",
-                ProviderValidationProgress {
-                    request_id: progress_request_id.clone(),
-                    stage,
-                },
-            );
+            if app
+                .emit(
+                    "provider-validation-progress",
+                    ProviderValidationProgress {
+                        request_id: progress_request_id.clone(),
+                        stage,
+                    },
+                )
+                .is_err()
+            {
+                log_runtime_error(
+                    &app,
+                    "provider.validation_progress_event",
+                    "event.emit_failed",
+                    "category=event",
+                );
+            }
         })
         .await;
-    finish_diagnostic_command(&logs.store, "provider.revalidate", result)
+    finish_command(&logs.store, "provider.revalidate", result)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1156,18 +1485,21 @@ pub(crate) fn cancel_provider_request(
 #[tauri::command]
 pub(crate) fn confirm_provider_validation_base_url(
     state: State<'_, ProviderRuntime>,
+    logs: State<'_, IssueLogRuntime>,
     validation_id: String,
     base_url: String,
 ) -> Result<(), ProviderFailure> {
-    state
+    let result = state
         .application
-        .confirm_validation_base_url(&validation_id, &base_url)
+        .confirm_validation_base_url(&validation_id, &base_url);
+    finish_command(&logs.store, "provider.confirm_base_url", result)
 }
 
 #[tauri::command]
 pub(crate) fn save_verified_provider(
     app: AppHandle,
     state: State<'_, ProviderRuntime>,
+    logs: State<'_, IssueLogRuntime>,
     validation_id: String,
     name: String,
 ) -> Result<ProviderSummary, ProviderFailure> {
@@ -1176,21 +1508,30 @@ pub(crate) fn save_verified_provider(
         .activity
         .try_begin("供应商目录写入")
     else {
-        return Err(ProviderFailure::new(
-            ProviderFailureCategory::StateUnavailable,
-            "update.installing",
-        ));
+        return finish_command(
+            &logs.store,
+            "provider.save",
+            Err(ProviderFailure::new(
+                ProviderFailureCategory::StateUnavailable,
+                "update.installing",
+            )),
+        );
     };
     let result = state
         .application
         .save_verified_provider(&validation_id, &name);
-    refresh_tray_after(&app, result)
+    finish_command(
+        &logs.store,
+        "provider.save",
+        refresh_tray_after(&app, result),
+    )
 }
 
 #[tauri::command]
 pub(crate) fn save_dayway_provider(
     app: AppHandle,
     state: State<'_, ProviderRuntime>,
+    logs: State<'_, IssueLogRuntime>,
     validation_id: String,
     confirm_name_conflict: bool,
 ) -> Result<ProviderSummary, ProviderFailure> {
@@ -1199,10 +1540,14 @@ pub(crate) fn save_dayway_provider(
         .activity
         .try_begin("供应商目录写入")
     else {
-        return Err(ProviderFailure::new(
-            ProviderFailureCategory::StateUnavailable,
-            "update.installing",
-        ));
+        return finish_command(
+            &logs.store,
+            "provider.save_dayway",
+            Err(ProviderFailure::new(
+                ProviderFailureCategory::StateUnavailable,
+                "update.installing",
+            )),
+        );
     };
     let result = state
         .application
@@ -1210,29 +1555,35 @@ pub(crate) fn save_dayway_provider(
             &validation_id,
             confirm_name_conflict,
         );
-    refresh_tray_after(&app, result)
+    finish_command(
+        &logs.store,
+        "provider.save_dayway",
+        refresh_tray_after(&app, result),
+    )
 }
 
 #[tauri::command]
-pub(crate) fn open_dayway_website() -> Result<(), ProviderFailure> {
+pub(crate) fn open_dayway_website(logs: State<'_, IssueLogRuntime>) -> Result<(), ProviderFailure> {
     #[cfg(target_os = "windows")]
     let result = Command::new("explorer.exe").arg(DAYWAY_WEBSITE).spawn();
     #[cfg(target_os = "macos")]
     let result = Command::new("open").arg(DAYWAY_WEBSITE).spawn();
     #[cfg(all(unix, not(target_os = "macos")))]
     let result = Command::new("xdg-open").arg(DAYWAY_WEBSITE).spawn();
-    result.map(|_| ()).map_err(|_| {
+    let result = result.map(|_| ()).map_err(|_| {
         ProviderFailure::new(
             ProviderFailureCategory::StateUnavailable,
             "provider.website_open_failed",
         )
-    })
+    });
+    finish_command(&logs.store, "provider.open_dayway_website", result)
 }
 
 #[tauri::command]
 pub(crate) fn rename_provider(
     app: AppHandle,
     state: State<'_, ProviderRuntime>,
+    logs: State<'_, IssueLogRuntime>,
     provider_id: String,
     name: String,
 ) -> Result<ProviderSummary, ProviderFailure> {
@@ -1241,19 +1592,28 @@ pub(crate) fn rename_provider(
         .activity
         .try_begin("供应商目录写入")
     else {
-        return Err(ProviderFailure::new(
-            ProviderFailureCategory::StateUnavailable,
-            "update.installing",
-        ));
+        return finish_command(
+            &logs.store,
+            "provider.rename",
+            Err(ProviderFailure::new(
+                ProviderFailureCategory::StateUnavailable,
+                "update.installing",
+            )),
+        );
     };
     let result = state.application.rename_provider(&provider_id, &name);
-    refresh_tray_after(&app, result)
+    finish_command(
+        &logs.store,
+        "provider.rename",
+        refresh_tray_after(&app, result),
+    )
 }
 
 #[tauri::command]
 pub(crate) fn save_provider_update(
     app: AppHandle,
     state: State<'_, ProviderRuntime>,
+    logs: State<'_, IssueLogRuntime>,
     validation_id: String,
     provider_id: String,
     name: String,
@@ -1263,29 +1623,42 @@ pub(crate) fn save_provider_update(
         .activity
         .try_begin("供应商目录写入")
     else {
-        return Err(ProviderFailure::new(
-            ProviderFailureCategory::StateUnavailable,
-            "update.installing",
-        ));
+        return finish_command(
+            &logs.store,
+            "provider.save_update",
+            Err(ProviderFailure::new(
+                ProviderFailureCategory::StateUnavailable,
+                "update.installing",
+            )),
+        );
     };
     let result = state
         .application
         .save_provider_update(&validation_id, &provider_id, &name);
-    refresh_tray_after(&app, result)
+    finish_command(
+        &logs.store,
+        "provider.save_update",
+        refresh_tray_after(&app, result),
+    )
 }
 
 #[tauri::command]
 pub(crate) async fn save_and_apply_provider_update(
     app: AppHandle,
+    logs: State<'_, IssueLogRuntime>,
     validation_id: String,
     provider_id: String,
     name: String,
 ) -> Result<AppliedProviderUpdate, ProviderFailure> {
     let Some(_activity) = app.state::<UpdateRuntime>().activity.try_begin("配置写入") else {
-        return Err(ProviderFailure::new(
-            ProviderFailureCategory::StateUnavailable,
-            "update.installing",
-        ));
+        return finish_command(
+            &logs.store,
+            "provider.save_and_apply_update",
+            Err(ProviderFailure::new(
+                ProviderFailureCategory::StateUnavailable,
+                "update.installing",
+            )),
+        );
     };
     let task_app = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
@@ -1305,14 +1678,16 @@ pub(crate) async fn save_and_apply_provider_update(
             ProviderFailureCategory::StateUnavailable,
             "provider.state_unavailable",
         )
-    })?;
-    match result {
+    })
+    .and_then(|result| result);
+    let result = match result {
         Ok(applied) => {
             let _ = tray::refresh_with_snapshot(&app, &applied.environment);
             Ok(applied)
         }
         Err(failure) => Err(failure),
-    }
+    };
+    finish_command(&logs.store, "provider.save_and_apply_update", result)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1335,6 +1710,7 @@ pub(crate) struct DeleteProviderFailure {
 #[tauri::command]
 pub(crate) async fn delete_provider(
     app: AppHandle,
+    logs: State<'_, IssueLogRuntime>,
     provider_id: String,
     authorize_stopped_wsl: bool,
 ) -> Result<DeleteProviderResult, DeleteProviderFailure> {
@@ -1343,12 +1719,16 @@ pub(crate) async fn delete_provider(
         .activity
         .try_begin("供应商目录写入")
     else {
-        return Err(DeleteProviderFailure {
-            category: "state_unavailable",
-            message_id: "update.installing",
-            lifecycle_outcome: None,
-            lifecycle_results: Vec::new(),
-        });
+        return finish_command(
+            &logs.store,
+            "provider.delete",
+            Err(DeleteProviderFailure {
+                category: "state_unavailable",
+                message_id: "update.installing",
+                lifecycle_outcome: None,
+                lifecycle_results: Vec::new(),
+            }),
+        );
     };
     let task_app = app.clone();
     let audit_provider_id = provider_id.clone();
@@ -1371,34 +1751,40 @@ pub(crate) async fn delete_provider(
         message_id: "wsl.state_unavailable",
         lifecycle_outcome: None,
         lifecycle_results: Vec::new(),
-    })?;
+    });
     let result = match result {
-        Ok((audit, ())) => Ok(DeleteProviderResult {
+        Err(failure) => Err(failure),
+        Ok(Ok((audit, ()))) => Ok(DeleteProviderResult {
             lifecycle_results: audit.lifecycle_results,
         }),
-        Err(WslDeletionAuditError::Verification(failure)) => Err(DeleteProviderFailure {
+        Ok(Err(WslDeletionAuditError::Verification(failure))) => Err(DeleteProviderFailure {
             category: "wsl_verification",
             message_id: failure.message_id,
             lifecycle_outcome: failure.lifecycle_outcome,
             lifecycle_results: Vec::new(),
         }),
-        Err(WslDeletionAuditError::Deletion {
+        Ok(Err(WslDeletionAuditError::Deletion {
             failure,
             lifecycle_results,
-        }) => Err(DeleteProviderFailure {
+        })) => Err(DeleteProviderFailure {
             category: "provider",
             message_id: failure.message_id,
             lifecycle_outcome: None,
             lifecycle_results,
         }),
     };
-    refresh_tray_after(&app, result)
+    finish_command(
+        &logs.store,
+        "provider.delete",
+        refresh_tray_after(&app, result),
+    )
 }
 
 #[tauri::command]
 pub(crate) fn reorder_providers(
     app: AppHandle,
     state: State<'_, ProviderRuntime>,
+    logs: State<'_, IssueLogRuntime>,
     provider_ids: Vec<String>,
 ) -> Result<Vec<ProviderSummary>, ProviderFailure> {
     let Some(_activity) = app
@@ -1406,36 +1792,55 @@ pub(crate) fn reorder_providers(
         .activity
         .try_begin("供应商目录写入")
     else {
-        return Err(ProviderFailure::new(
-            ProviderFailureCategory::StateUnavailable,
-            "update.installing",
-        ));
+        return finish_command(
+            &logs.store,
+            "provider.reorder",
+            Err(ProviderFailure::new(
+                ProviderFailureCategory::StateUnavailable,
+                "update.installing",
+            )),
+        );
     };
     let result = state.application.reorder_providers(&provider_ids);
-    refresh_tray_after(&app, result)
+    finish_command(
+        &logs.store,
+        "provider.reorder",
+        refresh_tray_after(&app, result),
+    )
 }
 
 #[tauri::command]
 pub(crate) fn reveal_provider_api_key(
     state: State<'_, ProviderRuntime>,
+    logs: State<'_, IssueLogRuntime>,
     provider_id: String,
 ) -> Result<ProviderApiKey, ProviderFailure> {
-    state.application.reveal_provider_api_key(&provider_id)
+    finish_command(
+        &logs.store,
+        "provider.reveal_api_key",
+        state.application.reveal_provider_api_key(&provider_id),
+    )
 }
 
 #[tauri::command]
 pub(crate) fn copy_provider_api_key(
     app: AppHandle,
     state: State<'_, ProviderRuntime>,
+    logs: State<'_, IssueLogRuntime>,
     provider_id: String,
 ) -> Result<(), ProviderFailure> {
-    let api_key = state.application.reveal_provider_api_key(&provider_id)?;
-    app.clipboard().write_text(api_key.expose()).map_err(|_| {
-        ProviderFailure::new(
-            ProviderFailureCategory::ClipboardUnavailable,
-            "provider.clipboard_unavailable",
-        )
-    })
+    let result = state
+        .application
+        .reveal_provider_api_key(&provider_id)
+        .and_then(|api_key| {
+            app.clipboard().write_text(api_key.expose()).map_err(|_| {
+                ProviderFailure::new(
+                    ProviderFailureCategory::ClipboardUnavailable,
+                    "provider.clipboard_unavailable",
+                )
+            })
+        });
+    finish_command(&logs.store, "provider.copy_api_key", result)
 }
 
 #[tauri::command]
@@ -1473,10 +1878,9 @@ fn environment_task_failed() -> EnvironmentFailure {
 #[cfg(test)]
 mod tests {
     use super::{
-        IssueLogLevel, IssueLogStore, ProviderFailure, ProviderFailureCategory,
-        UpdateFailureCategory, UpdateInstallFailure, UpdateInstallFailureCategory, UpdateSnapshot,
-        UpdateState, finish_diagnostic_command, log_update_check_failure,
-        log_update_install_failure,
+        DeleteProviderFailure, IssueLogLevel, IssueLogStore, UpdateFailureCategory,
+        UpdateInstallFailure, UpdateInstallFailureCategory, UpdateSnapshot, UpdateState,
+        finish_command, log_update_check_failure, log_update_install_failure,
     };
     use tempfile::tempdir;
 
@@ -1544,27 +1948,66 @@ mod tests {
     }
 
     #[test]
-    fn provider_discovery_auth_failure_is_written_as_fixed_metadata() {
+    fn provider_deletion_failure_is_written_without_sensitive_context() {
         let directory = tempdir().expect("issue log directory");
         let store = IssueLogStore::new(directory.path());
-        let failure = ProviderFailure::new(
-            ProviderFailureCategory::Authentication,
-            "provider.invalid_api_key",
-        );
+        let failure = DeleteProviderFailure {
+            category: "wsl_verification",
+            message_id: "wsl.command_failed",
+            lifecycle_outcome: None,
+            lifecycle_results: Vec::new(),
+        };
 
-        let result: Result<(), ProviderFailure> = Err(failure);
-        assert!(finish_diagnostic_command(&store, "provider.discover_models", result).is_err());
+        let result: Result<(), DeleteProviderFailure> = Err(failure);
+        assert!(finish_command(&store, "provider.delete", result).is_err());
 
-        let records = store.list(
-            0,
-            Some(IssueLogLevel::Error),
-            Some("provider.discover_models"),
-        );
+        let records = store.list(0, Some(IssueLogLevel::Error), Some("provider.delete"));
         assert_eq!(records.len(), 1);
-        assert_eq!(records[0].message, "provider.invalid_api_key");
+        assert_eq!(records[0].message, "wsl.command_failed");
         assert_eq!(
             records[0].details.as_deref(),
-            Some("category=Authentication")
+            Some("category=wsl_verification")
         );
+        let encoded = serde_json::to_string(&records[0]).expect("serialize issue log record");
+        assert!(!encoded.contains("api_key"));
+        assert!(!encoded.contains("base_url"));
+        assert!(!encoded.contains("provider_id"));
+    }
+
+    #[test]
+    fn every_fallible_tauri_command_is_connected_to_issue_logging() {
+        let source = include_str!("commands.rs");
+        let manually_logged = [
+            "get_startup_snapshot",
+            "refresh_startup_snapshot",
+            "install_update",
+            "enter_session_management",
+            "leave_session_management",
+            "cancel_session_request",
+        ];
+
+        for block in source.split("#[tauri::command]").skip(1) {
+            let Some(signature_end) = block.find('{') else {
+                continue;
+            };
+            let signature = &block[..signature_end];
+            if !signature.contains("-> Result<") {
+                continue;
+            }
+            let function_name = signature
+                .split("fn ")
+                .nth(1)
+                .and_then(|tail| tail.split(['(', '\n']).next())
+                .expect("fallible Tauri command name")
+                .trim();
+            assert!(
+                signature.contains("IssueLogRuntime"),
+                "fallible Tauri command {function_name} has no issue log state"
+            );
+            assert!(
+                block.contains("finish_command") || manually_logged.contains(&function_name),
+                "fallible Tauri command {function_name} does not record its failure"
+            );
+        }
     }
 }

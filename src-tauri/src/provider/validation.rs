@@ -63,7 +63,10 @@ impl ProviderValidator {
                 Err(DiscoveryAttemptFailure::Failure(failure)) => return Err(failure),
             }
         }
-        unreachable!("base URL candidates always contain the requested URL")
+        Err(ProviderFailure::new(
+            ProviderFailureCategory::ModelDiscovery,
+            "provider.models_request_failed",
+        ))
     }
 
     async fn discover_models_at(

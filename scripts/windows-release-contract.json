@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
   "issue": 28,
-  "desktopConsumerControl": "prohibited",
-  "documentMarker": "<!-- release-contract: desktop-consumer-control=prohibited -->",
+  "desktopConsumerControl": "trusted_start_confirmed_restart",
+  "documentMarker": "<!-- release-contract: desktop-consumer-control=trusted-start-confirmed-restart -->",
   "documents": [
     { "path": "CONTEXT.md" },
-    { "path": "docs/adr/0026-no-active-desktop-control.md" },
+    { "path": "docs/adr/0041-trusted-desktop-start-and-confirmed-restart.md" },
     { "path": "docs/ui/UI-SPEC.md" },
     { "path": "docs/ui/PROVIDER-MANAGEMENT-SPEC.md" }
   ],
@@ -13,10 +13,15 @@
     {
       "path": "docs/adr/0025-user-confirmed-desktop-restart.md",
       "status": "status: superseded by ADR-0026"
+    },
+    {
+      "path": "docs/adr/0026-no-active-desktop-control.md",
+      "status": "status: superseded by ADR-0041"
     }
   ],
-  "affirmativeDesktopControlPatterns": [
-    "GPTEasy\\s*(可以|将|会|支持|提供|负责).{0,30}(启动|关闭|终止|激活|重启).{0,30}(ChatGPT|Codex)"
+  "forbiddenDesktopControlPatterns": [
+    "(?<!不)(提供|允许|执行).{0,12}(强制终止|强制关闭)",
+    "(控制|操作)\\s*Codex CLI"
   ],
   "window": {
     "defaultWidth": 1120,
@@ -41,7 +46,9 @@
     { "id": "pending_restart_passive", "criterion": "passivePendingRestart" },
     { "id": "pending_restart_auto_clear", "criterion": "pendingRestartAutoClear" },
     { "id": "cli_new_process_read" },
-    { "id": "consumers_not_controlled", "criterion": "noActiveDesktopControl" },
+    { "id": "desktop_status_and_start", "criterion": "trustedDesktopStart" },
+    { "id": "desktop_confirmed_graceful_restart", "criterion": "gracefulDesktopRestart" },
+    { "id": "desktop_cli_isolation", "criterion": "cliLifecycleIsolation" },
     { "id": "restore_last_config" },
     { "id": "external_config_takeover" },
     { "id": "managed_conflict" },
