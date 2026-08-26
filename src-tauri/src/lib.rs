@@ -1,6 +1,7 @@
 pub mod codex;
 mod commands;
 pub mod consumer;
+pub mod diagnostic_assistant;
 pub mod diagnostic_report;
 pub mod diagnostics;
 pub mod environment;
@@ -34,8 +35,9 @@ use commands::{
     unarchive_sessions, validate_provider, validate_provider_update,
 };
 use diagnostic_report::{
-    DiagnosticApplication, DiagnosticRuntime, choose_diagnostic_export_destination,
-    export_diagnostic_report, get_diagnostic_report, repair_diagnostic_custom_provider,
+    DiagnosticApplication, DiagnosticRuntime, analyze_diagnostic_report,
+    choose_diagnostic_export_destination, export_diagnostic_report, get_diagnostic_report,
+    repair_diagnostic_custom_provider,
 };
 use diagnostics::IssueLogStore;
 use environment::EnvironmentApplication;
@@ -133,8 +135,9 @@ pub fn run() {
             open_update_release_notes,
             get_environment_snapshot,
             get_diagnostic_report,
-            choose_diagnostic_export_destination,
+            analyze_diagnostic_report,
             repair_diagnostic_custom_provider,
+            choose_diagnostic_export_destination,
             export_diagnostic_report,
             get_issue_log_path,
             list_issue_logs,

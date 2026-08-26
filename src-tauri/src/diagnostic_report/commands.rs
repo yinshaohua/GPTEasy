@@ -7,7 +7,8 @@ use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 
 use super::{DiagnosticApplication, DiagnosticRepairStatus, DiagnosticReport};
-use crate::commands::IssueLogRuntime;
+use crate::commands::{IssueLogRuntime, ProviderRuntime};
+use crate::diagnostic_assistant::{self, DiagnosticAssistantResult};
 use crate::diagnostics::{IssueLogLevel, IssueLogRecord};
 
 const DIAGNOSTIC_LOG_WINDOW_SECONDS: i64 = 30 * 24 * 60 * 60;
@@ -80,6 +81,42 @@ pub(crate) async fn get_diagnostic_report(
             message_id: "diagnostics.report_failed",
         });
     log_diagnostic_failure(&logs, "diagnostics.report", &result);
+    result
+}
+
+#[tauri::command]
+pub(crate) async fn analyze_diagnostic_report(
+    runtime: State<'_, DiagnosticRuntime>,
+    providers: State<'_, ProviderRuntime>,
+    logs: State<'_, IssueLogRuntime>,
+    provider_id: String,
+) -> Result<DiagnosticAssistantResult, DiagnosticFailure> {
+    let (provider, api_key) =
+        providers
+            .assistant_provider(&provider_id)
+            .map_err(|_| DiagnosticFailure {
+                message_id: "diagnostics.assistant_provider_unavailable",
+            })?;
+    let application = runtime.application.clone();
+    let records = recent_error_logs(&logs);
+    let report = tauri::async_runtime::spawn_blocking(move || application.inspect(&records))
+        .await
+        .map_err(|_| DiagnosticFailure {
+            message_id: "diagnostics.assistant_failed",
+        })?;
+    let result = diagnostic_assistant::analyze(
+        provider.id.clone(),
+        provider.name,
+        provider.base_url,
+        api_key,
+        provider.default_model,
+        &report,
+    )
+    .await
+    .map_err(|failure| DiagnosticFailure {
+        message_id: failure.message_id,
+    });
+    log_diagnostic_failure(&logs, "diagnostics.assistant", &result);
     result
 }
 

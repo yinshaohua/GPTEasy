@@ -15,6 +15,8 @@ import {
   chooseDiagnosticExportDestination,
   exportDiagnosticReport,
   getDiagnosticReport,
+  analyzeDiagnosticReport,
+  type DiagnosticAssistantResult,
   repairDiagnosticCustomProvider,
   type DiagnosticExportFormat,
   type DiagnosticConfigStatus,
@@ -22,6 +24,7 @@ import {
   type DiagnosticLoginStatus,
   type DiagnosticReport,
 } from "./contracts/diagnostics";
+import { listProviders, type ProviderSummary } from "./contracts/provider";
 
 const configStatusLabels: Record<DiagnosticConfigStatus, string> = {
   missing: "缺失",
@@ -48,6 +51,7 @@ export default function DiagnosticReportControl() {
   const [loading, setLoading] = useState(false);
   const [report, setReport] = useState<DiagnosticReport | null>(null);
   const [failed, setFailed] = useState(false);
+  const [providers, setProviders] = useState<ProviderSummary[]>([]);
 
   useEffect(() => {
     if (!open) return;
@@ -65,7 +69,11 @@ export default function DiagnosticReportControl() {
     setReport(null);
     setFailed(false);
     void getDiagnosticReport()
-      .then(setReport)
+      .then((nextReport) => {
+        setReport(nextReport);
+        return listProviders().catch(() => [] as ProviderSummary[]);
+      })
+      .then(setProviders)
       .catch(() => setFailed(true))
       .finally(() => setLoading(false));
   };
@@ -124,7 +132,7 @@ export default function DiagnosticReportControl() {
               </div>
             )}
             {!loading && report && (
-              <DiagnosticReportResult report={report} onReport={setReport} />
+              <DiagnosticReportResult report={report} onReport={setReport} providers={providers} />
             )}
           </section>
         </div>
@@ -136,9 +144,11 @@ export default function DiagnosticReportControl() {
 function DiagnosticReportResult({
   report,
   onReport,
+  providers,
 }: {
   report: DiagnosticReport;
   onReport: (report: DiagnosticReport) => void;
+  providers: ProviderSummary[];
 }) {
   const noRepairableFindings = report.findings.every((finding) => !finding.repairable);
   const [exporting, setExporting] = useState<DiagnosticExportFormat | null>(null);
@@ -148,6 +158,29 @@ function DiagnosticReportResult({
   const [repairing, setRepairing] = useState(false);
   const [repairFeedback, setRepairFeedback] = useState<string | null>(null);
   const [repairFailed, setRepairFailed] = useState(false);
+  const [assistantState, setAssistantState] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [assistant, setAssistant] = useState<DiagnosticAssistantResult | null>(null);
+  const [assistantProviderId, setAssistantProviderId] = useState<string>(
+    providers.find((provider) => provider.isCurrent)?.id ?? providers[0]?.id ?? "",
+  );
+  const [approvedPlanIds, setApprovedPlanIds] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (!assistantProviderId && providers[0]) setAssistantProviderId(providers[0].id);
+  }, [assistantProviderId, providers]);
+
+  const handleAssistant = () => {
+    if (!assistantProviderId || assistantState === "loading") return;
+    setAssistantState("loading");
+    setAssistant(null);
+    setApprovedPlanIds([]);
+    void analyzeDiagnosticReport(assistantProviderId)
+      .then((result) => {
+        setAssistant(result);
+        setAssistantState("ready");
+      })
+      .catch(() => setAssistantState("error"));
+  };
 
   const handleExport = (format: DiagnosticExportFormat) => {
     if (exporting) return;
@@ -168,16 +201,17 @@ function DiagnosticReportResult({
       .finally(() => setExporting(null));
   };
 
-  const handleRepair = () => {
-    const preview = report.repairPreview;
-    if (!preview || repairing) return;
+  const executeRepair = (previewId: string) => {
+    if (repairing) return;
     setRepairing(true);
     setRepairFeedback(null);
     setRepairFailed(false);
-    void repairDiagnosticCustomProvider(preview.previewId)
+    void repairDiagnosticCustomProvider(previewId)
       .then((execution) => {
         onReport(execution.report);
         setPreviewOpen(false);
+        setAssistant(null);
+        setApprovedPlanIds([]);
         const feedback = {
           succeeded: "修复成功，已重新诊断。",
           not_modified: "配置已变化，本次未修改。请查看重新诊断结果。",
@@ -192,6 +226,11 @@ function DiagnosticReportResult({
         setRepairFeedback("修复状态无法确认，需要人工处理。");
       })
       .finally(() => setRepairing(false));
+  };
+
+  const handleRepair = () => {
+    const preview = report.repairPreview;
+    if (preview) executeRepair(preview.previewId);
   };
 
   return (
@@ -238,6 +277,67 @@ function DiagnosticReportResult({
       {noRepairableFindings && (
         <p className="diagnostic-no-repair">需要人工处理：没有可安全自动修复的项目</p>
       )}
+      <section className="diagnostic-assistant" aria-labelledby="diagnostic-assistant-title">
+        <h3 id="diagnostic-assistant-title">AI 辅助分析</h3>
+        {providers.length === 0 ? (
+          <p>没有已验证供应商，暂时无法请求 AI 分析。你仍可导出本机诊断。</p>
+        ) : (
+          <div className="diagnostic-assistant-controls">
+            <label>
+              分析供应商
+              <select
+                aria-label="分析供应商"
+                value={assistantProviderId}
+                onChange={(event) => setAssistantProviderId(event.target.value)}
+                disabled={assistantState === "loading"}
+              >
+                {providers.map((provider) => (
+                  <option key={provider.id} value={provider.id}>
+                    {provider.name}{provider.isCurrent ? "（当前）" : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button className="secondary-button" type="button" onClick={handleAssistant} disabled={assistantState === "loading"}>
+              {assistantState === "loading" ? <LoaderCircle className="is-spinning" size={16} aria-hidden="true" /> : <Stethoscope size={16} aria-hidden="true" />}
+              {assistantState === "loading" ? "正在分析" : "让 AI 帮我分析"}
+            </button>
+          </div>
+        )}
+        {assistantState === "error" && <p className="diagnostic-assistant-error" role="alert">AI 请求失败或供应商不可用。请导出本机诊断结果。</p>}
+        {assistant && (
+          <div className="diagnostic-assistant-result">
+            <p><strong>{assistant.providerName} 的分析</strong></p>
+            <p>{assistant.explanation}</p>
+            <h4>待确认修复计划</h4>
+            {assistant.repairPlan.length === 0 ? <p>没有可由 GPTEasy 确定性执行的修复项。</p> : (
+              <>
+                {assistant.repairPlan.map((item) => (
+                  <label key={item.id} className="diagnostic-plan-item">
+                    <input
+                      type="checkbox"
+                      checked={approvedPlanIds.includes(item.id)}
+                      onChange={(event) => setApprovedPlanIds((ids) => event.target.checked ? [...ids, item.id] : ids.filter((id) => id !== item.id))}
+                    />
+                    <span><strong>{item.title}</strong><br />{item.description}</span>
+                  </label>
+                ))}
+                <button
+                  className="primary-button"
+                  type="button"
+                  disabled={approvedPlanIds.length === 0 || repairing}
+                  onClick={() => {
+                    const item = assistant.repairPlan.find((candidate) => approvedPlanIds.includes(candidate.id) && candidate.previewId);
+                    if (item?.previewId) executeRepair(item.previewId);
+                  }}
+                >
+                  <Wrench size={16} aria-hidden="true" />确认选中修复
+                </button>
+              </>
+            )}
+          </div>
+        )}
+      </section>
       {report.repairPreview && !previewOpen && (
         <button
           className="primary-button diagnostic-repair-trigger"

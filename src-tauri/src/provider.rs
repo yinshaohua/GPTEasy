@@ -853,6 +853,14 @@ impl ProviderApplication {
         })
     }
 
+    pub(crate) fn assistant_provider(
+        &self,
+        provider_id: &str,
+    ) -> Result<(ProviderSummary, String), ProviderFailure> {
+        catalog::get_provider(&self.state_store, provider_id)
+            .map(|record| (record.summary, record.api_key))
+    }
+
     pub fn list_providers(&self) -> Result<Vec<ProviderSummary>, ProviderFailure> {
         catalog::list_providers(&self.state_store)
     }

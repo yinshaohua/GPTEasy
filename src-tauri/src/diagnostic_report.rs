@@ -17,8 +17,8 @@ mod export;
 
 use commands::inspect_codex_cli_version;
 pub(crate) use commands::{
-    DiagnosticRuntime, choose_diagnostic_export_destination, export_diagnostic_report,
-    get_diagnostic_report, repair_diagnostic_custom_provider,
+    DiagnosticRuntime, analyze_diagnostic_report, choose_diagnostic_export_destination,
+    export_diagnostic_report, get_diagnostic_report, repair_diagnostic_custom_provider,
 };
 
 #[derive(Clone)]

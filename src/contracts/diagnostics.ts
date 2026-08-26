@@ -94,6 +94,23 @@ export interface DiagnosticRepairExecution {
   report: DiagnosticReport;
 }
 
+export interface DiagnosticRepairPlanItem {
+  id: string;
+  findingCode: string;
+  title: string;
+  description: string;
+  action: "repair_custom_provider";
+  previewId: string | null;
+  requiresConfirmation: boolean;
+}
+
+export interface DiagnosticAssistantResult {
+  providerId: string;
+  providerName: string;
+  explanation: string;
+  repairPlan: DiagnosticRepairPlanItem[];
+}
+
 const browserDiagnosticReport: DiagnosticReport = {
   schemaVersion: 2,
   environment: {
@@ -151,6 +168,28 @@ export function repairDiagnosticCustomProvider(
     });
   }
   return invoke<DiagnosticRepairExecution>("repair_diagnostic_custom_provider", { previewId });
+}
+
+export function analyzeDiagnosticReport(providerId: string): Promise<DiagnosticAssistantResult> {
+  if (isBrowserPreview()) {
+    return Promise.resolve({
+      providerId,
+      providerName: "浏览器预览供应商",
+      explanation: "当前诊断显示本地配置存在问题。请确认修复预览后再修改配置。",
+      repairPlan: browserDiagnosticReport.repairPreview
+        ? [{
+            id: "repair-custom-provider",
+            findingCode: "model_provider_missing_definition",
+            title: "补回 custom 供应商定义",
+            description: "依据已验证的本机证据补回兼容 provider 定义。",
+            action: "repair_custom_provider",
+            previewId: browserDiagnosticReport.repairPreview.previewId,
+            requiresConfirmation: true,
+          }]
+        : [],
+    });
+  }
+  return invoke<DiagnosticAssistantResult>("analyze_diagnostic_report", { providerId });
 }
 
 export function chooseDiagnosticExportDestination(

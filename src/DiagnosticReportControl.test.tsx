@@ -182,4 +182,56 @@ describe("DiagnosticReportControl", () => {
     expect(screen.getByText("未发现诊断项")).toBeInTheDocument();
     expect(screen.queryByText("修复预览")).not.toBeInTheDocument();
   });
+
+  it("defaults to the current verified provider and requires explicit plan approval", async () => {
+    const current = { id: "current-provider", name: "当前供应商", baseUrl: "https://current.example/v1", defaultModel: "model", verifiedAtEpochSeconds: 1, isCurrent: true, recommendationId: null, hasRecommendationUpdate: false };
+    const backup = { ...current, id: "backup-provider", name: "备用供应商", isCurrent: false };
+    const assistant = {
+      providerId: current.id,
+      providerName: current.name,
+      explanation: "发现本地 provider 定义缺失。",
+      repairPlan: [{ id: "repair-0", findingCode: "model_provider_missing_definition", title: "补回定义", description: "使用已验证证据。", action: "repair_custom_provider" as const, previewId: "preview-0", requiresConfirmation: true }],
+    };
+    invoke.mockImplementation((command: string, arguments_: { providerId?: string; previewId?: string } = {}) => {
+      if (command === "get_diagnostic_report") return Promise.resolve({ ...report, repairPreview: { previewId: "preview-0", source: "gpteasy_backup", providerName: "历史供应商", baseUrl: "https://history.example/v1", model: "model", authentication: "current_api_key", changes: ["backup_config", "add_custom_provider_definition", "verify_and_rediagnose"] } });
+      if (command === "list_providers") return Promise.resolve([current, backup]);
+      if (command === "analyze_diagnostic_report") {
+        expect(arguments_).toEqual({ providerId: "backup-provider" });
+        return Promise.resolve({ ...assistant, providerId: "backup-provider", providerName: "备用供应商" });
+      }
+      if (command === "repair_diagnostic_custom_provider") return Promise.resolve({ status: "succeeded", messageId: "diagnostics.repair_succeeded", report });
+      return Promise.reject(new Error(`unexpected command: ${command}`));
+    });
+    render(<DiagnosticReportControl />);
+    fireEvent.click(screen.getByRole("button", { name: "帮我排查" }));
+    await screen.findByText("诊断完成");
+    expect(screen.getByLabelText("分析供应商")).toHaveValue("current-provider");
+    fireEvent.change(screen.getByLabelText("分析供应商"), { target: { value: "backup-provider" } });
+    fireEvent.click(screen.getByRole("button", { name: "让 AI 帮我分析" }));
+    expect(await screen.findByText("备用供应商 的分析")).toBeInTheDocument();
+    expect(invoke).not.toHaveBeenCalledWith("repair_diagnostic_custom_provider", expect.anything());
+    fireEvent.click(screen.getByRole("checkbox", { name: /补回定义/ }));
+    fireEvent.click(screen.getByRole("button", { name: "确认选中修复" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("repair_diagnostic_custom_provider", { previewId: "preview-0" }));
+  });
+
+  it("keeps the local report exportable when AI analysis fails", async () => {
+    const provider = { id: "provider-1", name: "已验证供应商", baseUrl: "https://provider.example/v1", defaultModel: "model", verifiedAtEpochSeconds: 1, isCurrent: true, recommendationId: null, hasRecommendationUpdate: false };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_diagnostic_report") return Promise.resolve(report);
+      if (command === "list_providers") return Promise.resolve([provider]);
+      if (command === "analyze_diagnostic_report") return Promise.reject({ messageId: "diagnostics.assistant_failed" });
+      return Promise.reject(new Error(`unexpected command: ${command}`));
+    });
+    render(<DiagnosticReportControl />);
+    fireEvent.click(screen.getByRole("button", { name: "帮我排查" }));
+    await screen.findByText("诊断完成");
+
+    fireEvent.click(screen.getByRole("button", { name: "让 AI 帮我分析" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("请导出本机诊断结果");
+    expect(screen.getByRole("button", { name: "导出 JSON" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "导出 Markdown" })).toBeEnabled();
+    expect(screen.getByText("模型供应商定义缺失")).toBeInTheDocument();
+  });
 });

@@ -168,6 +168,13 @@ impl ProviderRuntime {
     pub(crate) fn shutdown_requests(&self) -> usize {
         self.application.shutdown_requests()
     }
+
+    pub(crate) fn assistant_provider(
+        &self,
+        provider_id: &str,
+    ) -> Result<(ProviderSummary, String), ProviderFailure> {
+        self.application.assistant_provider(provider_id)
+    }
 }
 
 impl EnvironmentRuntime {
