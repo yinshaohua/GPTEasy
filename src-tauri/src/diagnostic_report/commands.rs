@@ -6,13 +6,13 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 
-use super::{DiagnosticApplication, DiagnosticReport};
+use super::{DiagnosticApplication, DiagnosticRepairStatus, DiagnosticReport};
 use crate::commands::IssueLogRuntime;
 use crate::diagnostics::{IssueLogLevel, IssueLogRecord};
 
 const DIAGNOSTIC_LOG_WINDOW_SECONDS: i64 = 30 * 24 * 60 * 60;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct DiagnosticRuntime {
     application: DiagnosticApplication,
 }
@@ -59,6 +59,14 @@ pub(crate) struct DiagnosticFailure {
     pub message_id: &'static str,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DiagnosticRepairExecution {
+    status: DiagnosticRepairStatus,
+    message_id: &'static str,
+    report: DiagnosticReport,
+}
+
 #[tauri::command]
 pub(crate) async fn get_diagnostic_report(
     runtime: State<'_, DiagnosticRuntime>,
@@ -72,6 +80,31 @@ pub(crate) async fn get_diagnostic_report(
             message_id: "diagnostics.report_failed",
         });
     log_diagnostic_failure(&logs, "diagnostics.report", &result);
+    result
+}
+
+#[tauri::command]
+pub(crate) async fn repair_diagnostic_custom_provider(
+    runtime: State<'_, DiagnosticRuntime>,
+    logs: State<'_, IssueLogRuntime>,
+    preview_id: String,
+) -> Result<DiagnosticRepairExecution, DiagnosticFailure> {
+    let application = runtime.application.clone();
+    let records = recent_error_logs(&logs);
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let repair = application.repair_custom_provider(&preview_id);
+        let report = application.inspect(&records);
+        DiagnosticRepairExecution {
+            status: repair.status,
+            message_id: repair.message_id,
+            report,
+        }
+    })
+    .await
+    .map_err(|_| DiagnosticFailure {
+        message_id: "diagnostics.repair_failed",
+    });
+    log_diagnostic_failure(&logs, "diagnostics.repair_custom_provider", &result);
     result
 }
 

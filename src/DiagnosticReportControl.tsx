@@ -5,6 +5,7 @@ import {
   LoaderCircle,
   ShieldAlert,
   Stethoscope,
+  Wrench,
   X,
 } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -14,6 +15,7 @@ import {
   chooseDiagnosticExportDestination,
   exportDiagnosticReport,
   getDiagnosticReport,
+  repairDiagnosticCustomProvider,
   type DiagnosticExportFormat,
   type DiagnosticConfigStatus,
   type DiagnosticConsumerStatus,
@@ -121,7 +123,9 @@ export default function DiagnosticReportControl() {
                 </button>
               </div>
             )}
-            {!loading && report && <DiagnosticReportResult report={report} />}
+            {!loading && report && (
+              <DiagnosticReportResult report={report} onReport={setReport} />
+            )}
           </section>
         </div>
       ), document.body)}
@@ -129,11 +133,21 @@ export default function DiagnosticReportControl() {
   );
 }
 
-function DiagnosticReportResult({ report }: { report: DiagnosticReport }) {
+function DiagnosticReportResult({
+  report,
+  onReport,
+}: {
+  report: DiagnosticReport;
+  onReport: (report: DiagnosticReport) => void;
+}) {
   const noRepairableFindings = report.findings.every((finding) => !finding.repairable);
   const [exporting, setExporting] = useState<DiagnosticExportFormat | null>(null);
   const [exportFeedback, setExportFeedback] = useState<string | null>(null);
   const [exportFailed, setExportFailed] = useState(false);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [repairing, setRepairing] = useState(false);
+  const [repairFeedback, setRepairFeedback] = useState<string | null>(null);
+  const [repairFailed, setRepairFailed] = useState(false);
 
   const handleExport = (format: DiagnosticExportFormat) => {
     if (exporting) return;
@@ -152,6 +166,32 @@ function DiagnosticReportResult({ report }: { report: DiagnosticReport }) {
         setExportFeedback("导出失败，请重新选择保存位置。");
       })
       .finally(() => setExporting(null));
+  };
+
+  const handleRepair = () => {
+    const preview = report.repairPreview;
+    if (!preview || repairing) return;
+    setRepairing(true);
+    setRepairFeedback(null);
+    setRepairFailed(false);
+    void repairDiagnosticCustomProvider(preview.previewId)
+      .then((execution) => {
+        onReport(execution.report);
+        setPreviewOpen(false);
+        const feedback = {
+          succeeded: "修复成功，已重新诊断。",
+          not_modified: "配置已变化，本次未修改。请查看重新诊断结果。",
+          rolled_back: "修复未完成，原配置已回滚。",
+          manual_required: "无法安全自动修复，需要人工处理。",
+        }[execution.status];
+        setRepairFailed(execution.status !== "succeeded");
+        setRepairFeedback(feedback);
+      })
+      .catch(() => {
+        setRepairFailed(true);
+        setRepairFeedback("修复状态无法确认，需要人工处理。");
+      })
+      .finally(() => setRepairing(false));
   };
 
   return (
@@ -196,7 +236,59 @@ function DiagnosticReportResult({ report }: { report: DiagnosticReport }) {
         ))}
       </section>
       {noRepairableFindings && (
-        <p className="diagnostic-no-repair">没有可安全自动修复的项目</p>
+        <p className="diagnostic-no-repair">需要人工处理：没有可安全自动修复的项目</p>
+      )}
+      {report.repairPreview && !previewOpen && (
+        <button
+          className="primary-button diagnostic-repair-trigger"
+          type="button"
+          onClick={() => setPreviewOpen(true)}
+        >
+          <Wrench size={16} aria-hidden="true" />
+          查看修复预览
+        </button>
+      )}
+      {report.repairPreview && previewOpen && (
+        <section className="diagnostic-repair-preview" aria-labelledby="diagnostic-repair-title">
+          <h3 id="diagnostic-repair-title">修复预览</h3>
+          <dl>
+            <div>
+              <dt>恢复来源</dt>
+              <dd>{report.repairPreview.source === "current_config" ? "当前本机配置" : "有效 GPTEasy 备份"}</dd>
+            </div>
+            <div><dt>provider 名称</dt><dd>{report.repairPreview.providerName}</dd></div>
+            <div><dt>服务地址</dt><dd>{report.repairPreview.baseUrl}</dd></div>
+            <div><dt>模型</dt><dd>{report.repairPreview.model}</dd></div>
+            <div><dt>认证</dt><dd>沿用当前 API Key 凭据</dd></div>
+          </dl>
+          <p>将先备份 config.toml，再补回 custom provider 定义；写入后会校验并重新诊断。</p>
+          <div className="diagnostic-repair-actions">
+            <button
+              className="primary-button"
+              type="button"
+              onClick={handleRepair}
+              disabled={repairing}
+            >
+              {repairing
+                ? <LoaderCircle className="is-spinning" size={16} aria-hidden="true" />
+                : <Wrench size={16} aria-hidden="true" />}
+              确认并修复
+            </button>
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={() => setPreviewOpen(false)}
+              disabled={repairing}
+            >
+              取消
+            </button>
+          </div>
+        </section>
+      )}
+      {repairFeedback && (
+        <p role={repairFailed ? "alert" : "status"} className="diagnostic-repair-feedback">
+          {repairFeedback}
+        </p>
       )}
       <div className="diagnostic-export-actions">
         <button

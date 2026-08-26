@@ -18,7 +18,7 @@ function deferred<T>() {
 }
 
 const report = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   environment: {
     scope: "current_user",
     codexHome: "~/.codex",
@@ -43,6 +43,7 @@ const report = {
     repairable: false,
   }],
   errors: [],
+  repairPreview: null,
 };
 
 describe("DiagnosticReportControl", () => {
@@ -70,7 +71,7 @@ describe("DiagnosticReportControl", () => {
     expect(await screen.findByText("诊断完成")).toBeInTheDocument();
     expect(screen.getByText("模型供应商定义缺失")).toBeInTheDocument();
     expect(screen.getByText("custom")).toBeInTheDocument();
-    expect(screen.getByText("没有可安全自动修复的项目")).toBeInTheDocument();
+    expect(screen.getByText("需要人工处理：没有可安全自动修复的项目")).toBeInTheDocument();
     await waitFor(() => expect(screen.getByRole("button", { name: "帮我排查" })).toBeEnabled());
   });
 
@@ -120,5 +121,65 @@ describe("DiagnosticReportControl", () => {
       { format: "markdown", destination: "C:/reports/report.md" },
     ));
     expect(screen.getByRole("status")).toHaveTextContent("Markdown 已导出");
+  });
+
+  it("previews and confirms a deterministic repair before showing the rediagnosed result", async () => {
+    const repairableReport = {
+      ...report,
+      findings: [{ ...report.findings[0], repairable: true }],
+      repairPreview: {
+        previewId: "preview-revision",
+        source: "gpteasy_backup" as const,
+        providerName: "Historical Custom",
+        baseUrl: "https://historical.example/v1",
+        model: "gpt-5",
+        authentication: "current_api_key" as const,
+        changes: [
+          "backup_config" as const,
+          "add_custom_provider_definition" as const,
+          "verify_and_rediagnose" as const,
+        ],
+      },
+    };
+    const repairedReport = {
+      ...report,
+      environment: {
+        ...report.environment,
+        declaredProviders: ["custom"],
+      },
+      findings: [],
+      repairPreview: null,
+    };
+    invoke.mockImplementation((command: string, arguments_: { previewId?: string } = {}) => {
+      if (command === "get_diagnostic_report") return Promise.resolve(repairableReport);
+      if (command === "repair_diagnostic_custom_provider") {
+        expect(arguments_.previewId).toBe("preview-revision");
+        return Promise.resolve({
+          status: "succeeded",
+          messageId: "diagnostics.repair_succeeded",
+          report: repairedReport,
+        });
+      }
+      return Promise.reject(new Error(`unexpected command: ${command}`));
+    });
+    render(<DiagnosticReportControl />);
+    fireEvent.click(screen.getByRole("button", { name: "帮我排查" }));
+    await screen.findByText("诊断完成");
+
+    fireEvent.click(screen.getByRole("button", { name: "查看修复预览" }));
+
+    expect(screen.getByRole("heading", { name: "修复预览" })).toBeInTheDocument();
+    expect(screen.getByText("有效 GPTEasy 备份")).toBeInTheDocument();
+    expect(screen.getByText("https://historical.example/v1")).toBeInTheDocument();
+    expect(invoke).not.toHaveBeenCalledWith(
+      "repair_diagnostic_custom_provider",
+      expect.anything(),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "确认并修复" }));
+
+    expect(await screen.findByText("修复成功，已重新诊断。" )).toBeInTheDocument();
+    expect(screen.getByText("未发现诊断项")).toBeInTheDocument();
+    expect(screen.queryByText("修复预览")).not.toBeInTheDocument();
   });
 });

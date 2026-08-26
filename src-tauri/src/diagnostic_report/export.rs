@@ -7,8 +7,12 @@ use crate::consumer::ConsumerStatus;
 
 impl DiagnosticReport {
     pub fn redacted_json(&self) -> String {
-        serde_json::to_string_pretty(self)
-            .unwrap_or_else(|_| "{\"schemaVersion\":1,\"findings\":[]}".to_owned())
+        let mut report = serde_json::to_value(self).unwrap_or_default();
+        if let Some(object) = report.as_object_mut() {
+            object.remove("repairPreview");
+        }
+        serde_json::to_string_pretty(&report)
+            .unwrap_or_else(|_| "{\"schemaVersion\":2,\"findings\":[]}".to_owned())
     }
 
     pub fn redacted_markdown(&self) -> String {

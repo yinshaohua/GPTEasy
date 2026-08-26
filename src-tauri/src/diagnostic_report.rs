@@ -8,6 +8,9 @@ pub use crate::codex::CredentialStore;
 use crate::codex::{LoginStatus, LoginStatusCommand, credential_store_from_document};
 use crate::consumer::{ConsumerScanner, ConsumerStatus, WindowsConsumerScanner};
 use crate::diagnostics::IssueLogRecord;
+use crate::environment::{
+    CustomProviderRepairSource, CustomProviderRepairStatus, EnvironmentApplication,
+};
 
 mod commands;
 mod export;
@@ -15,13 +18,14 @@ mod export;
 use commands::inspect_codex_cli_version;
 pub(crate) use commands::{
     DiagnosticRuntime, choose_diagnostic_export_destination, export_diagnostic_report,
-    get_diagnostic_report,
+    get_diagnostic_report, repair_diagnostic_custom_provider,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DiagnosticApplication {
     codex_home: PathBuf,
     codex_home_override: Option<PathBuf>,
+    environment: Option<EnvironmentApplication>,
 }
 
 impl DiagnosticApplication {
@@ -29,6 +33,19 @@ impl DiagnosticApplication {
         Self {
             codex_home: codex_home.as_ref().to_path_buf(),
             codex_home_override,
+            environment: None,
+        }
+    }
+
+    pub fn with_environment(
+        codex_home: impl AsRef<Path>,
+        codex_home_override: Option<PathBuf>,
+        environment: EnvironmentApplication,
+    ) -> Self {
+        Self {
+            codex_home: codex_home.as_ref().to_path_buf(),
+            codex_home_override,
+            environment: Some(environment),
         }
     }
 
@@ -45,6 +62,14 @@ impl DiagnosticApplication {
             Some(_) => CodexHomeOverrideStatus::Differs,
         };
         let config = inspect_config(&self.codex_home.join("config.toml"));
+        let repair_preview = (codex_home_override_status != CodexHomeOverrideStatus::Differs)
+            .then(|| {
+                self.environment.as_ref().and_then(|environment| {
+                    environment.preview_custom_provider_repair().ok().flatten()
+                })
+            })
+            .flatten()
+            .map(DiagnosticRepairPreview::from);
         let mut findings: Vec<DiagnosticFinding> =
             config_status_finding(config.status).into_iter().collect();
         if let Some(active_provider) = config.active_provider.as_deref()
@@ -61,7 +86,7 @@ impl DiagnosticApplication {
                 summary: format!(
                     "config.toml 使用模型供应商“{active_provider}”，但没有声明同名 model_providers 配置。"
                 ),
-                repairable: false,
+                repairable: active_provider == "custom" && repair_preview.is_some(),
             });
         }
         if codex_home_override_status == CodexHomeOverrideStatus::Differs {
@@ -78,7 +103,7 @@ impl DiagnosticApplication {
         let (errors, log_findings) = classify_issue_logs(issue_logs);
         findings.extend(log_findings);
         DiagnosticReport {
-            schema_version: 1,
+            schema_version: 2,
             environment: DiagnosticEnvironment {
                 scope: DiagnosticScope::CurrentUser,
                 codex_home: "~/.codex",
@@ -102,6 +127,7 @@ impl DiagnosticApplication {
             },
             findings,
             errors,
+            repair_preview,
         }
     }
 
@@ -114,6 +140,30 @@ impl DiagnosticApplication {
             codex_cli_version: inspect_codex_cli_version(),
         };
         self.inspect_with(&observations, issue_logs)
+    }
+
+    pub fn repair_custom_provider(&self, preview_id: &str) -> DiagnosticRepairResult {
+        if self
+            .codex_home_override
+            .as_ref()
+            .is_some_and(|override_home| !paths_match(override_home, &self.codex_home))
+        {
+            return DiagnosticRepairResult {
+                status: DiagnosticRepairStatus::ManualRequired,
+                message_id: "diagnostics.repair_manual_required",
+            };
+        }
+        let Some(environment) = self.environment.as_ref() else {
+            return DiagnosticRepairResult {
+                status: DiagnosticRepairStatus::ManualRequired,
+                message_id: "diagnostics.repair_manual_required",
+            };
+        };
+        let result = environment.repair_custom_provider(preview_id);
+        DiagnosticRepairResult {
+            status: result.status.into(),
+            message_id: result.message_id,
+        }
     }
 }
 
@@ -222,6 +272,79 @@ pub enum DiagnosticSeverity {
     Warning,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticRepairSource {
+    CurrentConfig,
+    GpteasyBackup,
+}
+
+impl From<CustomProviderRepairSource> for DiagnosticRepairSource {
+    fn from(source: CustomProviderRepairSource) -> Self {
+        match source {
+            CustomProviderRepairSource::CurrentConfig => Self::CurrentConfig,
+            CustomProviderRepairSource::GpteasyBackup => Self::GpteasyBackup,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticRepairStatus {
+    Succeeded,
+    NotModified,
+    RolledBack,
+    ManualRequired,
+}
+
+impl From<CustomProviderRepairStatus> for DiagnosticRepairStatus {
+    fn from(status: CustomProviderRepairStatus) -> Self {
+        match status {
+            CustomProviderRepairStatus::Succeeded => Self::Succeeded,
+            CustomProviderRepairStatus::NotModified => Self::NotModified,
+            CustomProviderRepairStatus::RolledBack => Self::RolledBack,
+            CustomProviderRepairStatus::ManualRequired => Self::ManualRequired,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticRepairPreview {
+    pub preview_id: String,
+    pub source: DiagnosticRepairSource,
+    pub provider_name: String,
+    pub base_url: String,
+    pub model: String,
+    pub authentication: &'static str,
+    pub changes: Vec<&'static str>,
+}
+
+impl From<crate::environment::CustomProviderRepairPreview> for DiagnosticRepairPreview {
+    fn from(preview: crate::environment::CustomProviderRepairPreview) -> Self {
+        Self {
+            preview_id: preview.preview_id,
+            source: preview.source.into(),
+            provider_name: preview.provider_name,
+            base_url: preview.base_url,
+            model: preview.model,
+            authentication: "current_api_key",
+            changes: vec![
+                "backup_config",
+                "add_custom_provider_definition",
+                "verify_and_rediagnose",
+            ],
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticRepairResult {
+    pub status: DiagnosticRepairStatus,
+    pub message_id: &'static str,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiagnosticEnvironment {
@@ -285,6 +408,7 @@ pub struct DiagnosticReport {
     pub versions: DiagnosticVersions,
     pub findings: Vec<DiagnosticFinding>,
     pub errors: Vec<DiagnosticErrorMetadata>,
+    pub repair_preview: Option<DiagnosticRepairPreview>,
 }
 
 fn classify_issue_logs(

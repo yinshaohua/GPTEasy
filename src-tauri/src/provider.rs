@@ -965,7 +965,7 @@ impl ProviderApplication {
     }
 }
 
-fn combination_fingerprint(base_url: &str, api_key: &str, model: &str) -> String {
+pub(crate) fn combination_fingerprint(base_url: &str, api_key: &str, model: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"gpteasy-provider-combination-v1\0");
     hasher.update(base_url.as_bytes());

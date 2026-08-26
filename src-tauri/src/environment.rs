@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::codex::{LoginStatus, LoginStatusCommand};
 pub use crate::consumer::ConsumerStatus;
 use crate::consumer::{ConsumerIdentity, ConsumerScan, ConsumerScanner, WindowsConsumerScanner};
-use crate::provider::ProviderSummary;
+use crate::provider::{ProviderSummary, combination_fingerprint};
 use crate::state::StateStore;
 
 const MANAGED_START: &str = "# >>> GPTEasy managed provider >>>";
@@ -174,6 +174,35 @@ pub enum EnvironmentRecovery {
     KeptOldState,
     CompletedNewState,
     Conflict,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CustomProviderRepairSource {
+    CurrentConfig,
+    GpteasyBackup,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomProviderRepairPreview {
+    pub preview_id: String,
+    pub source: CustomProviderRepairSource,
+    pub provider_name: String,
+    pub base_url: String,
+    pub model: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CustomProviderRepairStatus {
+    Succeeded,
+    NotModified,
+    RolledBack,
+    ManualRequired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomProviderRepairResult {
+    pub status: CustomProviderRepairStatus,
+    pub message_id: &'static str,
 }
 
 pub trait EnvironmentFaultInjector: Send + Sync {
@@ -351,6 +380,115 @@ impl EnvironmentApplication {
         self.inspect_environment(&connection)
     }
 
+    pub fn preview_custom_provider_repair(
+        &self,
+    ) -> Result<Option<CustomProviderRepairPreview>, EnvironmentFailure> {
+        let _guard = self
+            .operation_lock
+            .lock()
+            .map_err(|_| state_unavailable())?;
+        let connection = self.open_state()?;
+        Ok(
+            PreparedCustomProviderRepair::prepare(&self.codex_home, &connection)?
+                .map(|prepared| prepared.preview),
+        )
+    }
+
+    pub fn repair_custom_provider(&self, preview_id: &str) -> CustomProviderRepairResult {
+        self.repair_custom_provider_inner(preview_id)
+            .unwrap_or(CustomProviderRepairResult {
+                status: CustomProviderRepairStatus::ManualRequired,
+                message_id: "diagnostics.repair_manual_required",
+            })
+    }
+
+    fn repair_custom_provider_inner(
+        &self,
+        preview_id: &str,
+    ) -> Result<CustomProviderRepairResult, EnvironmentFailure> {
+        let _guard = self
+            .operation_lock
+            .lock()
+            .map_err(|_| state_unavailable())?;
+        let mut connection = self.open_state()?;
+        if has_pending_operation(&connection)? {
+            return Ok(custom_repair_result(
+                CustomProviderRepairStatus::ManualRequired,
+            ));
+        }
+        let Some(prepared) = PreparedCustomProviderRepair::prepare(&self.codex_home, &connection)?
+        else {
+            return Ok(custom_repair_result(
+                CustomProviderRepairStatus::NotModified,
+            ));
+        };
+        if prepared.preview.preview_id != preview_id {
+            return Ok(custom_repair_result(
+                CustomProviderRepairStatus::NotModified,
+            ));
+        }
+        if self.faults.fails_backup_creation() {
+            return Ok(custom_repair_result(
+                CustomProviderRepairStatus::NotModified,
+            ));
+        }
+        let backup = match create_custom_provider_repair_backup(&self.codex_home, &prepared) {
+            Ok(backup) => backup,
+            Err(_) => {
+                return Ok(custom_repair_result(
+                    CustomProviderRepairStatus::NotModified,
+                ));
+            }
+        };
+        if persist_pending_custom_provider_repair(&mut connection, &prepared, &backup).is_err() {
+            let _ = fs::remove_dir_all(&backup);
+            return Ok(custom_repair_result(
+                CustomProviderRepairStatus::NotModified,
+            ));
+        }
+
+        let mut config_applied = false;
+        let attempt: Result<(), EnvironmentFailure> = (|| {
+            self.check_fault(EnvironmentFailurePoint::BeforeConfigReplace)?;
+            if !artifact_matches(
+                &self.codex_home.join("auth.json"),
+                prepared.credentials.bytes.as_deref(),
+            )? {
+                return Err(concurrent_modification());
+            }
+            prepared.config.commit()?;
+            config_applied = true;
+            self.check_interruption(EnvironmentFailurePoint::AfterConfigReplaced)?;
+            self.check_fault(EnvironmentFailurePoint::AfterConfigReplaced)?;
+            prepared.config.verify_new()?;
+            verify_custom_provider_repair(
+                &self.codex_home,
+                &prepared.candidate,
+                &prepared.credentials,
+            )?;
+            mark_backup_completed(&backup)?;
+            clear_pending(&connection, &prepared.operation_id)?;
+            Ok(())
+        })();
+        if let Err(failure) = attempt {
+            if failure.category == EnvironmentFailureCategory::OperationInterrupted {
+                return Err(failure);
+            }
+            let rolled_back = !self.faults.fails_rollback()
+                && (!config_applied || prepared.config.restore().is_ok());
+            if rolled_back {
+                let _ = unmark_backup_completed(&backup);
+                let _ = clear_pending(&connection, &prepared.operation_id);
+                return Ok(custom_repair_result(CustomProviderRepairStatus::RolledBack));
+            }
+            let _ = mark_pending_conflict(&mut connection, &prepared.operation_id);
+            return Ok(custom_repair_result(
+                CustomProviderRepairStatus::ManualRequired,
+            ));
+        }
+        Ok(custom_repair_result(CustomProviderRepairStatus::Succeeded))
+    }
+
     pub fn has_pending_restart(&self) -> Result<bool, EnvironmentFailure> {
         let connection = self.open_state()?;
         connection
@@ -403,6 +541,15 @@ impl EnvironmentApplication {
             }
         };
         let config = read_artifact(&self.codex_home.join("config.toml"))?;
+        if pending.operation_kind == "repair_custom_provider" {
+            return recover_interrupted_custom_provider_repair(
+                &self.codex_home,
+                &mut connection,
+                &pending,
+                &backup,
+                config,
+            );
+        }
         let credentials_affected = pending.old_credentials_fingerprint.is_some()
             || pending.new_credentials_fingerprint.is_some();
         let credentials = if credentials_affected {
@@ -1725,6 +1872,351 @@ struct PreparedOpenAiSwitch {
     config: PreparedRestoreArtifact,
 }
 
+#[derive(Debug, Clone)]
+struct PreparedCustomProviderRepair {
+    operation_id: String,
+    preview: CustomProviderRepairPreview,
+    candidate: CustomProviderCandidate,
+    config: PreparedArtifact,
+    credentials: ArtifactBytes,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CustomProviderCandidate {
+    source: CustomProviderRepairSource,
+    provider_name: String,
+    base_url: String,
+    model: String,
+    supports_websockets: bool,
+}
+
+impl PreparedCustomProviderRepair {
+    fn prepare(
+        codex_home: &Path,
+        connection: &Connection,
+    ) -> Result<Option<Self>, EnvironmentFailure> {
+        let config_path = codex_home.join("config.toml");
+        let config = read_artifact(&config_path)?;
+        let Some(config_bytes) = config.bytes.as_deref() else {
+            return Ok(None);
+        };
+        let text = std::str::from_utf8(config_bytes).map_err(|_| invalid_config())?;
+        let document = text.parse::<DocumentMut>().map_err(|_| invalid_config())?;
+        if document
+            .get("model_provider")
+            .and_then(|item| item.as_str())
+            != Some("custom")
+            || document
+                .get("model_providers")
+                .and_then(|item| item.as_table_like())
+                .is_some_and(|providers| providers.contains_key("custom"))
+        {
+            return Ok(None);
+        }
+        let Some(model) = document
+            .get("model")
+            .and_then(|item| item.as_str())
+            .filter(|model| !model.trim().is_empty())
+        else {
+            return Ok(None);
+        };
+        let credentials = read_artifact(&codex_home.join("auth.json"))?;
+        let Some(current_api_key) = api_key_credentials(&credentials) else {
+            return Ok(None);
+        };
+
+        let mut candidates = Vec::new();
+        if let Some(candidate) =
+            current_verified_custom_candidate(connection, &document, model, &current_api_key)
+        {
+            push_unique_custom_candidate(&mut candidates, candidate);
+        }
+        for backup in completed_backups(codex_home) {
+            let Ok(backup) = backup else {
+                continue;
+            };
+            if api_key_credentials(&backup.credentials).as_deref() != Some(current_api_key.as_str())
+            {
+                continue;
+            }
+            let Some(bytes) = backup.config.bytes.as_deref() else {
+                continue;
+            };
+            let Ok(text) = std::str::from_utf8(bytes) else {
+                continue;
+            };
+            let Ok(document) = text.parse::<DocumentMut>() else {
+                continue;
+            };
+            if document.get("model").and_then(|item| item.as_str()) != Some(model) {
+                continue;
+            }
+            let Some(providers) = document
+                .get("model_providers")
+                .and_then(|item| item.as_table_like())
+            else {
+                continue;
+            };
+            if let Some(candidate) = custom_provider_candidate(
+                providers.get("custom").and_then(|item| item.as_table()),
+                model,
+                CustomProviderRepairSource::GpteasyBackup,
+            ) {
+                push_unique_custom_candidate(&mut candidates, candidate);
+            }
+        }
+        let [candidate] = candidates.as_slice() else {
+            return Ok(None);
+        };
+        let candidate = candidate.clone();
+        let rendered = render_custom_provider_repair(text, &candidate)?;
+        let preview_id = custom_repair_preview_id(config_bytes, &credentials, &candidate);
+        let preview = CustomProviderRepairPreview {
+            preview_id,
+            source: candidate.source,
+            provider_name: candidate.provider_name.clone(),
+            base_url: candidate.base_url.clone(),
+            model: candidate.model.clone(),
+        };
+        Ok(Some(Self {
+            operation_id: Uuid::new_v4().to_string(),
+            preview,
+            candidate,
+            config: PreparedArtifact::new(config_path, config, rendered, ArtifactKind::Config),
+            credentials,
+        }))
+    }
+}
+
+fn current_verified_custom_candidate(
+    connection: &Connection,
+    document: &DocumentMut,
+    model: &str,
+    current_api_key: &str,
+) -> Option<CustomProviderCandidate> {
+    let provider_id = connection
+        .query_row(
+            "SELECT provider_id FROM last_applied_state
+             WHERE singleton = 1 AND mode = 'provider'",
+            [],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
+        .flatten()?;
+    let provider = load_provider(connection, &provider_id).ok()?;
+    if provider.default_model != model
+        || provider.api_key != current_api_key
+        || provider.verification_fingerprint
+            != combination_fingerprint(
+                &provider.base_url,
+                &provider.api_key,
+                &provider.default_model,
+            )
+    {
+        return None;
+    }
+    let table = document
+        .get("model_providers")
+        .and_then(|item| item.as_table_like())?
+        .get(&provider_id)?
+        .as_table();
+    let candidate =
+        custom_provider_candidate(table, model, CustomProviderRepairSource::CurrentConfig)?;
+    (candidate.provider_name == "custom"
+        && candidate.provider_name == provider.name
+        && candidate.base_url == provider.base_url)
+        .then_some(candidate)
+}
+
+fn custom_provider_candidate(
+    table: Option<&toml_edit::Table>,
+    model: &str,
+    source: CustomProviderRepairSource,
+) -> Option<CustomProviderCandidate> {
+    let table = table?;
+    let provider_name = table.get("name")?.as_str()?.trim();
+    let base_url = table.get("base_url")?.as_str()?.trim();
+    if provider_name.is_empty()
+        || !compatible_provider_url(base_url)
+        || table.get("wire_api")?.as_str()? != "responses"
+        || table.get("requires_openai_auth")?.as_bool()? != true
+        || table
+            .get("supports_websockets")
+            .and_then(|item| item.as_bool())
+            .unwrap_or(false)
+    {
+        return None;
+    }
+    Some(CustomProviderCandidate {
+        source,
+        provider_name: provider_name.to_owned(),
+        base_url: base_url.to_owned(),
+        model: model.to_owned(),
+        supports_websockets: false,
+    })
+}
+
+fn compatible_provider_url(base_url: &str) -> bool {
+    let Ok(url) = url::Url::parse(base_url) else {
+        return false;
+    };
+    let loopback = match url.host() {
+        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    };
+    url.scheme() == "https" || (url.scheme() == "http" && loopback)
+}
+
+fn push_unique_custom_candidate(
+    candidates: &mut Vec<CustomProviderCandidate>,
+    candidate: CustomProviderCandidate,
+) {
+    if let Some(existing) = candidates.iter_mut().find(|existing| {
+        existing.provider_name == candidate.provider_name
+            && existing.base_url == candidate.base_url
+            && existing.model == candidate.model
+            && existing.supports_websockets == candidate.supports_websockets
+    }) {
+        if candidate.source == CustomProviderRepairSource::CurrentConfig {
+            existing.source = CustomProviderRepairSource::CurrentConfig;
+        }
+    } else {
+        candidates.push(candidate);
+    }
+}
+
+fn api_key_credentials(credentials: &ArtifactBytes) -> Option<String> {
+    let value: Value = serde_json::from_slice(credentials.bytes.as_deref()?).ok()?;
+    if value.get("auth_mode")?.as_str()? != "apikey" {
+        return None;
+    }
+    value
+        .get("OPENAI_API_KEY")?
+        .as_str()
+        .filter(|api_key| !api_key.is_empty())
+        .map(str::to_owned)
+}
+
+fn render_custom_provider_repair(
+    original: &str,
+    candidate: &CustomProviderCandidate,
+) -> Result<Vec<u8>, EnvironmentFailure> {
+    let newline = if original.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let mut document = original
+        .parse::<DocumentMut>()
+        .map_err(|_| invalid_config())?;
+    if document.get("model_providers").is_none() {
+        document.insert(
+            "model_providers",
+            toml_edit::Item::Table(toml_edit::Table::new()),
+        );
+    }
+    let providers = document
+        .get_mut("model_providers")
+        .and_then(|item| item.as_table_mut())
+        .ok_or_else(invalid_config)?;
+    if providers.contains_key("custom") {
+        return Err(concurrent_modification());
+    }
+    let mut custom = toml_edit::Table::new();
+    custom.insert("name", toml_edit::value(&candidate.provider_name));
+    custom.insert("base_url", toml_edit::value(&candidate.base_url));
+    custom.insert("wire_api", toml_edit::value("responses"));
+    custom.insert("requires_openai_auth", toml_edit::value(true));
+    custom.insert(
+        "supports_websockets",
+        toml_edit::value(candidate.supports_websockets),
+    );
+    providers.insert("custom", toml_edit::Item::Table(custom));
+    let rendered = normalize_newlines(&document.to_string(), newline);
+    rendered
+        .parse::<DocumentMut>()
+        .map_err(|_| invalid_config())?;
+    Ok(rendered.into_bytes())
+}
+
+fn custom_repair_preview_id(
+    config: &[u8],
+    credentials: &ArtifactBytes,
+    candidate: &CustomProviderCandidate,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"gpteasy-custom-provider-repair-preview-v1\0");
+    hasher.update(config);
+    hasher.update(b"\0");
+    if let Some(bytes) = credentials.bytes.as_deref() {
+        hasher.update(bytes);
+    }
+    hasher.update(b"\0");
+    hasher.update(candidate.provider_name.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(candidate.base_url.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(candidate.model.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn verify_custom_provider_repair(
+    codex_home: &Path,
+    candidate: &CustomProviderCandidate,
+    expected_credentials: &ArtifactBytes,
+) -> Result<(), EnvironmentFailure> {
+    let config = fs::read(codex_home.join("config.toml")).map_err(|_| artifact_write_failed())?;
+    let text = std::str::from_utf8(&config).map_err(|_| invalid_config())?;
+    let document = text.parse::<DocumentMut>().map_err(|_| invalid_config())?;
+    let repaired = document
+        .get("model_providers")
+        .and_then(|item| item.as_table_like())
+        .and_then(|providers| providers.get("custom"))
+        .and_then(|item| item.as_table());
+    let actual = custom_provider_candidate(
+        repaired,
+        document
+            .get("model")
+            .and_then(|item| item.as_str())
+            .unwrap_or_default(),
+        candidate.source,
+    )
+    .ok_or_else(artifact_write_failed)?;
+    if !artifact_matches(
+        &codex_home.join("auth.json"),
+        expected_credentials.bytes.as_deref(),
+    )? {
+        return Err(concurrent_modification());
+    }
+    if document
+        .get("model_provider")
+        .and_then(|item| item.as_str())
+        == Some("custom")
+        && actual.provider_name == candidate.provider_name
+        && actual.base_url == candidate.base_url
+        && actual.model == candidate.model
+        && api_key_credentials(expected_credentials).is_some()
+    {
+        Ok(())
+    } else {
+        Err(artifact_write_failed())
+    }
+}
+
+fn custom_repair_result(status: CustomProviderRepairStatus) -> CustomProviderRepairResult {
+    let message_id = match status {
+        CustomProviderRepairStatus::Succeeded => "diagnostics.repair_succeeded",
+        CustomProviderRepairStatus::NotModified => "diagnostics.repair_not_modified",
+        CustomProviderRepairStatus::RolledBack => "diagnostics.repair_rolled_back",
+        CustomProviderRepairStatus::ManualRequired => "diagnostics.repair_manual_required",
+    };
+    CustomProviderRepairResult { status, message_id }
+}
+
 impl PreparedOpenAiSwitch {
     fn prepare(codex_home: &Path) -> Result<Self, EnvironmentFailure> {
         let current = read_artifact(&codex_home.join("config.toml"))?;
@@ -2368,6 +2860,33 @@ fn persist_pending_restore(
     transaction.commit().map_err(|_| state_unavailable())
 }
 
+fn persist_pending_custom_provider_repair(
+    connection: &mut Connection,
+    prepared: &PreparedCustomProviderRepair,
+    backup: &Path,
+) -> Result<(), EnvironmentFailure> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| state_unavailable())?;
+    transaction
+        .execute(
+            "INSERT INTO pending_config_operation (
+                singleton, operation_id, operation_kind, stage,
+                old_config_fingerprint, new_config_fingerprint,
+                backup_reference, target_snapshot_json, started_at
+             ) VALUES (1, ?1, 'repair_custom_provider', 'prepared', ?2, ?3, ?4, '{}', ?5)",
+            params![
+                prepared.operation_id,
+                prepared.config.old_fingerprint,
+                prepared.config.new_fingerprint,
+                backup.to_string_lossy(),
+                epoch_seconds().to_string(),
+            ],
+        )
+        .map_err(|_| state_unavailable())?;
+    transaction.commit().map_err(|_| state_unavailable())
+}
+
 fn commit_applied_state(
     connection: &mut Connection,
     prepared: &PreparedSwitch,
@@ -2655,6 +3174,41 @@ fn commit_recovered_state(
     transaction.commit().map_err(|_| state_unavailable())
 }
 
+fn recover_interrupted_custom_provider_repair(
+    codex_home: &Path,
+    connection: &mut Connection,
+    pending: &PendingRecovery,
+    backup_path: &Path,
+    current: ArtifactBytes,
+) -> Result<EnvironmentRecovery, EnvironmentFailure> {
+    let current_fingerprint = current.fingerprint(ArtifactKind::Config);
+    if fingerprints_match(&current_fingerprint, &pending.old_config_fingerprint, true) {
+        unmark_backup_completed(backup_path)?;
+        clear_pending(connection, &pending.operation_id)?;
+        return Ok(EnvironmentRecovery::KeptOldState);
+    }
+    if fingerprints_match(&current_fingerprint, &pending.new_config_fingerprint, true) {
+        let backup = load_completed_backup(backup_path.to_path_buf())?;
+        if backup.config.fingerprint(ArtifactKind::Config) != pending.old_config_fingerprint {
+            mark_pending_conflict(connection, &pending.operation_id)?;
+            return Ok(EnvironmentRecovery::Conflict);
+        }
+        let restore = PreparedRestoreArtifact::new(
+            codex_home.join("config.toml"),
+            current,
+            backup.config,
+            ArtifactKind::Config,
+        );
+        if restore.commit().is_ok() && restore.verify_target().is_ok() {
+            unmark_backup_completed(backup_path)?;
+            clear_pending(connection, &pending.operation_id)?;
+            return Ok(EnvironmentRecovery::KeptOldState);
+        }
+    }
+    mark_pending_conflict(connection, &pending.operation_id)?;
+    Ok(EnvironmentRecovery::Conflict)
+}
+
 fn commit_restored_state(
     connection: &mut Connection,
     prepared: &PreparedRestore,
@@ -2911,6 +3465,54 @@ fn create_backup(
     result.map(|_| operation)
 }
 
+fn create_custom_provider_repair_backup(
+    codex_home: &Path,
+    prepared: &PreparedCustomProviderRepair,
+) -> Result<PathBuf, EnvironmentFailure> {
+    let root = codex_home.join(".gpteasy-backups");
+    reject_redirect(&root)?;
+    let operation = root.join(format!(
+        "operation-{}-{}",
+        epoch_nanos(),
+        prepared.operation_id
+    ));
+    fs::create_dir_all(&operation).map_err(|_| backup_failed())?;
+    let result = (|| {
+        let original = prepared
+            .config
+            .old
+            .bytes
+            .as_deref()
+            .ok_or_else(backup_failed)?;
+        write_new_synced(&operation.join("config.toml"), original).map_err(|_| backup_failed())?;
+        let manifest = serde_json::to_vec_pretty(&BackupManifest {
+            format_version: BACKUP_FORMAT_VERSION,
+            operation_id: prepared.operation_id.clone(),
+            operation_kind: "repair_custom_provider".to_owned(),
+            config_affected: true,
+            credentials_affected: false,
+            config_existed: true,
+            credentials_existed: false,
+            old_config_fingerprint: prepared.config.old_fingerprint.clone(),
+            new_config_fingerprint: Some(prepared.config.new_fingerprint.clone()),
+            old_credentials_fingerprint: None,
+            new_credentials_fingerprint: None,
+            credential_fields: None,
+            previous_mode: None,
+            previous_provider_id: None,
+            restore_target_recorded: false,
+        })
+        .map_err(|_| backup_failed())?;
+        write_new_synced(&operation.join("manifest.json"), &manifest)
+            .map_err(|_| backup_failed())?;
+        prune_backups(&root)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&operation);
+    }
+    result.map(|_| operation)
+}
+
 fn create_openai_backup(
     codex_home: &Path,
     prepared: &PreparedOpenAiSwitch,
@@ -3059,17 +3661,33 @@ fn unmark_backup_completed(backup: &Path) -> Result<(), EnvironmentFailure> {
 fn latest_completed_backup(
     codex_home: &Path,
 ) -> Result<Option<CompletedBackup>, EnvironmentFailure> {
+    let backups = completed_backups(codex_home);
+    if backups.iter().any(Result::is_err) {
+        return Err(backup_invalid());
+    }
+    Ok(backups.into_iter().find_map(Result::ok))
+}
+
+fn completed_backups(codex_home: &Path) -> Vec<Result<CompletedBackup, EnvironmentFailure>> {
     let root = codex_home.join(".gpteasy-backups");
-    reject_redirect(&root).map_err(|_| backup_invalid())?;
+    if reject_redirect(&root).is_err() {
+        return vec![Err(backup_invalid())];
+    }
     let entries = match fs::read_dir(&root) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err(backup_invalid()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(_) => return vec![Err(backup_invalid())],
     };
     let mut completed = Vec::new();
     for entry in entries {
-        let entry = entry.map_err(|_| backup_invalid())?;
-        let file_type = entry.file_type().map_err(|_| backup_invalid())?;
+        let Ok(entry) = entry else {
+            completed.push(Err(backup_invalid()));
+            continue;
+        };
+        let Ok(file_type) = entry.file_type() else {
+            completed.push(Err(backup_invalid()));
+            continue;
+        };
         let path = entry.path();
         if !file_type.is_dir()
             || !path
@@ -3083,21 +3701,28 @@ fn latest_completed_backup(
         let marker_type = match fs::symlink_metadata(&marker) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(_) => return Err(backup_invalid()),
+            Err(_) => {
+                completed.push(Err(backup_invalid()));
+                continue;
+            }
         };
         if !marker_type.file_type().is_file()
-            || fs::read(&marker).map_err(|_| backup_invalid())? != BACKUP_COMPLETION_CONTENT
+            || fs::read(&marker).ok().as_deref() != Some(BACKUP_COMPLETION_CONTENT)
         {
-            return Err(backup_invalid());
+            completed.push(Err(backup_invalid()));
+            continue;
         }
-        completed.push(path);
+        completed.push(Ok(path));
     }
-    completed.sort_by(|left, right| right.file_name().cmp(&left.file_name()));
+    completed.sort_by(|left, right| {
+        let left = left.as_ref().ok().and_then(|path| path.file_name());
+        let right = right.as_ref().ok().and_then(|path| path.file_name());
+        right.cmp(&left)
+    });
     completed
         .into_iter()
-        .next()
-        .map(load_completed_backup)
-        .transpose()
+        .map(|path| path.and_then(load_completed_backup))
+        .collect()
 }
 
 fn historical_managed_provider_ids(codex_home: &Path) -> Vec<String> {
@@ -3169,7 +3794,11 @@ fn load_completed_backup(path: PathBuf) -> Result<CompletedBackup, EnvironmentFa
             .map_err(|_| backup_invalid())?;
     let valid_kind = matches!(
         manifest.operation_kind.as_str(),
-        "switch_provider" | "save_and_apply" | "restore_latest" | "switch_openai_login"
+        "switch_provider"
+            | "save_and_apply"
+            | "restore_latest"
+            | "switch_openai_login"
+            | "repair_custom_provider"
     );
     let operation_name_matches = path
         .file_name()

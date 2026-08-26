@@ -35,7 +35,7 @@ use commands::{
 };
 use diagnostic_report::{
     DiagnosticApplication, DiagnosticRuntime, choose_diagnostic_export_destination,
-    export_diagnostic_report, get_diagnostic_report,
+    export_diagnostic_report, get_diagnostic_report, repair_diagnostic_custom_provider,
 };
 use diagnostics::IssueLogStore;
 use environment::EnvironmentApplication;
@@ -80,16 +80,19 @@ pub fn run() {
                     .join("update-install-attempt.json"),
             )));
             let codex_home = home.join(".codex");
-            app.manage(DiagnosticRuntime::new(DiagnosticApplication::new(
-                &codex_home,
-                std::env::var_os("CODEX_HOME").map(std::path::PathBuf::from),
-            )));
+            let environment = EnvironmentApplication::new(state_store.clone(), &codex_home);
+            app.manage(DiagnosticRuntime::new(
+                DiagnosticApplication::with_environment(
+                    &codex_home,
+                    std::env::var_os("CODEX_HOME").map(std::path::PathBuf::from),
+                    environment.clone(),
+                ),
+            ));
             let coordinator = StartupCoordinator::new(
                 state_store.clone(),
                 CodexInspector::new(&codex_home, LoginStatusCommand::codex_default()),
             );
             app.manage(StartupRuntime::new(coordinator));
-            let environment = EnvironmentApplication::new(state_store.clone(), codex_home);
             let _ = environment.recover_pending();
             app.manage(EnvironmentRuntime::new(environment));
             let wsl = WslApplication::new(state_store.clone());
@@ -131,6 +134,7 @@ pub fn run() {
             get_environment_snapshot,
             get_diagnostic_report,
             choose_diagnostic_export_destination,
+            repair_diagnostic_custom_provider,
             export_diagnostic_report,
             get_issue_log_path,
             list_issue_logs,

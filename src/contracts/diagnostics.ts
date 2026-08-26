@@ -28,6 +28,25 @@ export type DiagnosticConfigStatus =
 export type DiagnosticConsumerStatus = "running" | "stopped" | "unknown";
 export type DiagnosticLoginStatus = "logged_in" | "not_logged_in" | "unavailable";
 export type DiagnosticExportFormat = "json" | "markdown";
+export type DiagnosticRepairStatus =
+  | "succeeded"
+  | "not_modified"
+  | "rolled_back"
+  | "manual_required";
+
+export interface DiagnosticRepairPreview {
+  previewId: string;
+  source: "current_config" | "gpteasy_backup";
+  providerName: string;
+  baseUrl: string;
+  model: string;
+  authentication: "current_api_key";
+  changes: Array<
+    | "backup_config"
+    | "add_custom_provider_definition"
+    | "verify_and_rediagnose"
+  >;
+}
 
 export interface DiagnosticReport {
   schemaVersion: number;
@@ -66,10 +85,17 @@ export interface DiagnosticReport {
     occurrences: number;
     lastSeenEpochSeconds: number;
   }>;
+  repairPreview: DiagnosticRepairPreview | null;
+}
+
+export interface DiagnosticRepairExecution {
+  status: DiagnosticRepairStatus;
+  messageId: string;
+  report: DiagnosticReport;
 }
 
 const browserDiagnosticReport: DiagnosticReport = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   environment: {
     scope: "current_user",
     codexHome: "~/.codex",
@@ -91,14 +117,40 @@ const browserDiagnosticReport: DiagnosticReport = {
     severity: "error",
     title: "模型供应商定义缺失",
     summary: "config.toml 使用模型供应商“custom”，但没有声明同名 model_providers 配置。",
-    repairable: false,
+    repairable: true,
   }],
   errors: [],
+  repairPreview: {
+    previewId: "browser-preview",
+    source: "gpteasy_backup",
+    providerName: "Historical Custom",
+    baseUrl: "https://provider.example/v1",
+    model: "gpt-5",
+    authentication: "current_api_key",
+    changes: [
+      "backup_config",
+      "add_custom_provider_definition",
+      "verify_and_rediagnose",
+    ],
+  },
 };
 
 export function getDiagnosticReport(): Promise<DiagnosticReport> {
   if (isBrowserPreview()) return Promise.resolve(browserDiagnosticReport);
   return invoke<DiagnosticReport>("get_diagnostic_report");
+}
+
+export function repairDiagnosticCustomProvider(
+  previewId: string,
+): Promise<DiagnosticRepairExecution> {
+  if (isBrowserPreview()) {
+    return Promise.resolve({
+      status: "not_modified",
+      messageId: "diagnostics.repair_not_modified",
+      report: browserDiagnosticReport,
+    });
+  }
+  return invoke<DiagnosticRepairExecution>("repair_diagnostic_custom_provider", { previewId });
 }
 
 export function chooseDiagnosticExportDestination(
