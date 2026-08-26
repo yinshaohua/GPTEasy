@@ -145,6 +145,8 @@ export const providerFailureMessages: Record<string, string> = {
   "provider.redirect_forbidden": "供应商请求发生了不允许的重定向。",
   "provider.authentication_failed":
     "API Key 未通过供应商认证。请确认 API Key 有效且账户有可用余额；验证会实际调用模型并产生少量费用。",
+  "provider.invalid_api_key":
+    "远端服务拒绝了 API Key。请确认 API Key 有效后重试。",
   "provider.rate_limited": "供应商暂时限制了请求，请稍后重试。",
   "provider.models_request_failed": "无法从供应商获取模型。",
   "provider.models_invalid": "供应商返回的模型列表无法读取。",

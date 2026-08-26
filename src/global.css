@@ -2577,6 +2577,193 @@ select:focus-visible {
   border-bottom: 1px solid var(--border, #dfe3e8);
 }
 
+.diagnostic-trigger {
+  margin-bottom: 5px;
+  color: var(--accent);
+}
+
+.diagnostic-report-dialog {
+  width: min(680px, calc(100vw - 32px));
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
+}
+
+.diagnostic-report-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.diagnostic-report-header h2,
+.diagnostic-report-header p {
+  margin: 0;
+}
+
+.diagnostic-report-header p {
+  margin-top: 3px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.diagnostic-report-header .field-icon-button {
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
+  border-radius: 4px;
+}
+
+.diagnostic-report-loading {
+  min-height: 220px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.diagnostic-report-failure {
+  min-height: 220px;
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-content: center;
+  gap: 6px 10px;
+  color: var(--danger);
+}
+
+.diagnostic-report-failure p {
+  margin: 3px 0 0;
+  color: var(--text-muted);
+}
+
+.diagnostic-report-failure .secondary-button {
+  grid-column: 2;
+  justify-self: start;
+  margin-top: 8px;
+}
+
+.diagnostic-report-result {
+  padding-top: 16px;
+}
+
+.diagnostic-report-success {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 14px;
+  color: var(--accent);
+}
+
+.diagnostic-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 0;
+  border-top: 1px solid var(--border);
+}
+
+.diagnostic-facts > div {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(92px, 42%) minmax(0, 1fr);
+  gap: 10px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.diagnostic-facts > div:nth-child(odd) {
+  padding-right: 18px;
+}
+
+.diagnostic-facts dt,
+.diagnostic-facts dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.diagnostic-facts dt {
+  color: var(--text-muted);
+}
+
+.diagnostic-facts dd {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.diagnostic-findings {
+  margin-top: 18px;
+}
+
+.diagnostic-findings h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.diagnostic-findings > p,
+.diagnostic-findings article {
+  margin: 0;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.diagnostic-findings article p {
+  margin: 3px 0 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.diagnostic-no-repair {
+  margin: 14px 0 0;
+  padding: 10px 12px;
+  color: var(--warning);
+  background: var(--warning-soft);
+  border-left: 3px solid var(--warning);
+  font-size: 13px;
+}
+
+.diagnostic-export-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.diagnostic-export-feedback {
+  margin: 9px 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-align: right;
+}
+
+.diagnostic-export-feedback[role="alert"] {
+  color: var(--danger);
+}
+
+@media (max-width: 540px) {
+  .diagnostic-facts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .diagnostic-facts > div:nth-child(odd) {
+    padding-right: 0;
+  }
+
+  .diagnostic-export-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .diagnostic-export-actions .secondary-button {
+    width: 100%;
+  }
+}
+
 .issue-log-toolbar label {
   display: grid;
   gap: 6px;

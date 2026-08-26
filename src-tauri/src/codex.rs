@@ -126,7 +126,7 @@ impl CodexInspector {
         (
             CodexConfigStatus::Valid,
             fingerprint,
-            credential_store(&document),
+            credential_store_from_document(&document),
             recovered_desktop_rewrite,
         )
     }
@@ -136,6 +136,7 @@ impl CodexInspector {
 pub struct LoginStatusCommand {
     program: OsString,
     arguments: Vec<OsString>,
+    codex_home: Option<OsString>,
 }
 
 impl LoginStatusCommand {
@@ -150,6 +151,7 @@ impl LoginStatusCommand {
                 .into_iter()
                 .map(|argument| argument.as_ref().to_os_string())
                 .collect(),
+            codex_home: None,
         }
     }
 
@@ -164,6 +166,12 @@ impl LoginStatusCommand {
         }
     }
 
+    pub fn codex_for_home(codex_home: impl AsRef<OsStr>) -> Self {
+        let mut command = Self::codex_default();
+        command.codex_home = Some(codex_home.as_ref().to_os_string());
+        command
+    }
+
     pub(crate) fn status(&self) -> LoginStatus {
         let mut command = Command::new(&self.program);
         command
@@ -171,6 +179,9 @@ impl LoginStatusCommand {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        if let Some(codex_home) = self.codex_home.as_ref() {
+            command.env("CODEX_HOME", codex_home);
+        }
         configure_hidden_process(&mut command);
         match command.status() {
             Ok(status) if status.success() => LoginStatus::LoggedIn,
@@ -241,7 +252,7 @@ pub struct CodexSnapshot {
     pub(crate) credential_fingerprint: Option<String>,
 }
 
-fn credential_store(document: &DocumentMut) -> CredentialStore {
+pub(crate) fn credential_store_from_document(document: &DocumentMut) -> CredentialStore {
     let Some(item) = document.get("cli_auth_credentials_store") else {
         return CredentialStore::File;
     };

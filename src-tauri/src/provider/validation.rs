@@ -647,7 +647,13 @@ fn classify_status(status: StatusCode, model_discovery: bool) -> Result<(), Prov
             "provider.redirect_forbidden",
         ));
     }
-    if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+    if status == StatusCode::UNAUTHORIZED {
+        return Err(ProviderFailure::new(
+            ProviderFailureCategory::Authentication,
+            "provider.invalid_api_key",
+        ));
+    }
+    if status == StatusCode::FORBIDDEN {
         return Err(ProviderFailure::new(
             ProviderFailureCategory::Authentication,
             "provider.authentication_failed",

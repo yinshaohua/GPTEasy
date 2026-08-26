@@ -175,6 +175,9 @@ async fn model_discovery_does_not_guess_paths_for_non_path_failures() {
             .expect_err("non-path failures must stop candidate probing");
 
         assert_eq!(failure.category, expected, "status {status}");
+        if status.starts_with("401") {
+            assert_eq!(failure.message_id, "provider.invalid_api_key");
+        }
         assert_eq!(server.finish(), ["/wrong/models"], "status {status}");
     }
 

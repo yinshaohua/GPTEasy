@@ -1132,16 +1132,7 @@ impl AppServerConnection {
                 continue;
             }
             if let Some(error) = message.get("error") {
-                let category = if is_method_not_found_error(error) {
-                    SessionFailureCategory::Incompatible
-                } else {
-                    SessionFailureCategory::RequestFailed
-                };
-                let message_id = if category == SessionFailureCategory::Incompatible {
-                    "session.incompatible"
-                } else {
-                    "session.request_failed"
-                };
+                let (category, message_id) = classify_request_error(error);
                 return Err(SessionFailure::new(category, message_id));
             }
             return message.get("result").cloned().ok_or_else(protocol_failure);
@@ -1166,6 +1157,23 @@ impl AppServerConnection {
             .map_err(|_| unexpected_exit())?;
         stdin.flush().await.map_err(|_| unexpected_exit())
     }
+}
+
+fn classify_request_error(error: &Value) -> (SessionFailureCategory, &'static str) {
+    if is_method_not_found_error(error) {
+        return (SessionFailureCategory::Incompatible, "session.incompatible");
+    }
+    let searchable = error.to_string().to_ascii_lowercase();
+    if searchable.contains("model provider") && searchable.contains("not found") {
+        return (
+            SessionFailureCategory::RequestFailed,
+            "session.model_provider_not_found",
+        );
+    }
+    (
+        SessionFailureCategory::RequestFailed,
+        "session.request_failed",
+    )
 }
 
 fn is_method_not_found_error(error: &Value) -> bool {
@@ -1882,5 +1890,30 @@ mod tests {
         );
         assert!(!is_interactive_thread(Some(&json!("subAgent"))));
         assert!(!is_interactive_thread(Some(&json!("unknown"))));
+    }
+
+    #[test]
+    fn request_errors_expose_stable_provider_lookup_metadata_without_raw_payloads() {
+        let local = json!({
+            "code": -32000,
+            "message": "Model provider custom not found",
+            "data": { "api_key": "must-not-leak" }
+        });
+        let unrelated = json!({ "code": -32000, "message": "request failed" });
+
+        assert_eq!(
+            classify_request_error(&local),
+            (
+                SessionFailureCategory::RequestFailed,
+                "session.model_provider_not_found"
+            )
+        );
+        assert_eq!(
+            classify_request_error(&unrelated),
+            (
+                SessionFailureCategory::RequestFailed,
+                "session.request_failed"
+            )
+        );
     }
 }

@@ -12,6 +12,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 
 import type { UpdateSnapshot } from "./contracts/update";
+import DiagnosticReportControl from "./DiagnosticReportControl";
 
 export interface UpdateSidebarState {
   snapshot: UpdateSnapshot;
@@ -49,6 +50,7 @@ export default function AppSidebar({
     <aside className="sidebar" aria-label="应用导航">
       <Brand />
       <nav className="sidebar-nav" aria-label="主要菜单">
+        <DiagnosticReportControl />
         <button
           className="nav-item"
           type="button"

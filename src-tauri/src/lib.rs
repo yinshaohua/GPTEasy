@@ -1,6 +1,7 @@
 pub mod codex;
 mod commands;
 pub mod consumer;
+pub mod diagnostic_report;
 pub mod diagnostics;
 pub mod environment;
 pub mod provider;
@@ -31,6 +32,10 @@ use commands::{
     revalidate_provider, reveal_provider_api_key, save_and_apply_provider_update,
     save_dayway_provider, save_provider_update, save_verified_provider, switch_to_openai_login,
     unarchive_sessions, validate_provider, validate_provider_update,
+};
+use diagnostic_report::{
+    DiagnosticApplication, DiagnosticRuntime, choose_diagnostic_export_destination,
+    export_diagnostic_report, get_diagnostic_report,
 };
 use diagnostics::IssueLogStore;
 use environment::EnvironmentApplication;
@@ -75,6 +80,10 @@ pub fn run() {
                     .join("update-install-attempt.json"),
             )));
             let codex_home = home.join(".codex");
+            app.manage(DiagnosticRuntime::new(DiagnosticApplication::new(
+                &codex_home,
+                std::env::var_os("CODEX_HOME").map(std::path::PathBuf::from),
+            )));
             let coordinator = StartupCoordinator::new(
                 state_store.clone(),
                 CodexInspector::new(&codex_home, LoginStatusCommand::codex_default()),
@@ -120,6 +129,9 @@ pub fn run() {
             open_update_manual_download,
             open_update_release_notes,
             get_environment_snapshot,
+            get_diagnostic_report,
+            choose_diagnostic_export_destination,
+            export_diagnostic_report,
             get_issue_log_path,
             list_issue_logs,
             copy_issue_logs,

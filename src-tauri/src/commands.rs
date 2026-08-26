@@ -63,6 +63,47 @@ impl IssueLogRuntime {
     }
 }
 
+trait DiagnosticLoggableFailure {
+    fn message_id(&self) -> &str;
+    fn category(&self) -> String;
+}
+
+impl DiagnosticLoggableFailure for ProviderFailure {
+    fn message_id(&self) -> &str {
+        self.message_id
+    }
+
+    fn category(&self) -> String {
+        format!("{:?}", self.category)
+    }
+}
+
+impl DiagnosticLoggableFailure for SessionFailure {
+    fn message_id(&self) -> &str {
+        &self.message_id
+    }
+
+    fn category(&self) -> String {
+        format!("{:?}", self.category)
+    }
+}
+
+fn finish_diagnostic_command<T, E: DiagnosticLoggableFailure>(
+    store: &IssueLogStore,
+    event: &'static str,
+    result: Result<T, E>,
+) -> Result<T, E> {
+    if let Err(failure) = &result {
+        store.append(
+            IssueLogLevel::Error,
+            event,
+            failure.message_id(),
+            Some(format!("category={}", failure.category())),
+        );
+    }
+    result
+}
+
 pub(crate) struct UpdateRuntime {
     pub(crate) coordinator: UpdateCoordinator,
     pub(crate) activity: UpdateActivityGate,
@@ -458,9 +499,14 @@ pub(crate) async fn leave_session_management(
 #[tauri::command]
 pub(crate) async fn list_sessions(
     state: State<'_, SessionRuntime>,
+    logs: State<'_, IssueLogRuntime>,
     query: SessionQuery,
 ) -> Result<SessionListPage, SessionFailure> {
-    state.application.list(query).await
+    finish_diagnostic_command(
+        &logs.store,
+        "session.list",
+        state.application.list(query).await,
+    )
 }
 
 #[tauri::command]
@@ -474,9 +520,14 @@ pub(crate) async fn cancel_session_request(
 #[tauri::command]
 pub(crate) async fn read_session(
     state: State<'_, SessionRuntime>,
+    logs: State<'_, IssueLogRuntime>,
     session_id: String,
 ) -> Result<SessionDetail, SessionFailure> {
-    state.application.read(&session_id).await
+    finish_diagnostic_command(
+        &logs.store,
+        "session.read",
+        state.application.read(&session_id).await,
+    )
 }
 
 #[tauri::command]
@@ -953,28 +1004,36 @@ pub(crate) async fn switch_to_openai_login(
 #[tauri::command]
 pub(crate) async fn discover_provider_models(
     state: State<'_, ProviderRuntime>,
+    logs: State<'_, IssueLogRuntime>,
     request_id: String,
     input: DiscoveryInput,
 ) -> Result<ModelDiscovery, ProviderFailure> {
-    state.application.discover_models(request_id, input).await
+    finish_diagnostic_command(
+        &logs.store,
+        "provider.discover_models",
+        state.application.discover_models(request_id, input).await,
+    )
 }
 
 #[tauri::command]
 pub(crate) async fn discover_provider_models_for_update(
     state: State<'_, ProviderRuntime>,
+    logs: State<'_, IssueLogRuntime>,
     request_id: String,
     input: ProviderUpdateDiscoveryInput,
 ) -> Result<ModelDiscovery, ProviderFailure> {
-    state
+    let result = state
         .application
         .discover_models_for_update(request_id, input)
-        .await
+        .await;
+    finish_diagnostic_command(&logs.store, "provider.discover_models_for_update", result)
 }
 
 #[tauri::command]
 pub(crate) async fn validate_provider(
     app: AppHandle,
     state: State<'_, ProviderRuntime>,
+    logs: State<'_, IssueLogRuntime>,
     request_id: String,
     input: ProviderValidationInput,
 ) -> Result<ProviderValidationReceipt, ProviderFailure> {
@@ -989,7 +1048,7 @@ pub(crate) async fn validate_provider(
         ));
     };
     let progress_request_id = request_id.clone();
-    state
+    let result = state
         .application
         .validate_provider_with_progress(request_id, input, move |stage| {
             let _ = app.emit(
@@ -1000,13 +1059,15 @@ pub(crate) async fn validate_provider(
                 },
             );
         })
-        .await
+        .await;
+    finish_diagnostic_command(&logs.store, "provider.validate", result)
 }
 
 #[tauri::command]
 pub(crate) async fn validate_provider_update(
     app: AppHandle,
     state: State<'_, ProviderRuntime>,
+    logs: State<'_, IssueLogRuntime>,
     request_id: String,
     input: ProviderUpdateValidationInput,
 ) -> Result<ProviderValidationReceipt, ProviderFailure> {
@@ -1021,7 +1082,7 @@ pub(crate) async fn validate_provider_update(
         ));
     };
     let progress_request_id = request_id.clone();
-    state
+    let result = state
         .application
         .validate_provider_update_with_progress(request_id, input, move |stage| {
             let _ = app.emit(
@@ -1032,13 +1093,15 @@ pub(crate) async fn validate_provider_update(
                 },
             );
         })
-        .await
+        .await;
+    finish_diagnostic_command(&logs.store, "provider.validate_update", result)
 }
 
 #[tauri::command]
 pub(crate) async fn revalidate_provider(
     app: AppHandle,
     state: State<'_, ProviderRuntime>,
+    logs: State<'_, IssueLogRuntime>,
     request_id: String,
     provider_id: String,
 ) -> Result<ProviderRevalidationResult, ProviderFailure> {
@@ -1053,7 +1116,7 @@ pub(crate) async fn revalidate_provider(
         ));
     };
     let progress_request_id = request_id.clone();
-    state
+    let result = state
         .application
         .revalidate_provider_with_progress(request_id, provider_id, move |stage| {
             let _ = app.emit(
@@ -1064,7 +1127,8 @@ pub(crate) async fn revalidate_provider(
                 },
             );
         })
-        .await
+        .await;
+    finish_diagnostic_command(&logs.store, "provider.revalidate", result)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1402,8 +1466,9 @@ fn environment_task_failed() -> EnvironmentFailure {
 #[cfg(test)]
 mod tests {
     use super::{
-        IssueLogLevel, IssueLogStore, UpdateFailureCategory, UpdateInstallFailure,
-        UpdateInstallFailureCategory, UpdateSnapshot, UpdateState, log_update_check_failure,
+        IssueLogLevel, IssueLogStore, ProviderFailure, ProviderFailureCategory,
+        UpdateFailureCategory, UpdateInstallFailure, UpdateInstallFailureCategory, UpdateSnapshot,
+        UpdateState, finish_diagnostic_command, log_update_check_failure,
         log_update_install_failure,
     };
     use tempfile::tempdir;
@@ -1468,6 +1533,31 @@ mod tests {
         assert_eq!(
             records[0].details.as_deref(),
             Some("category=launch_failed target_version=1.1.0")
+        );
+    }
+
+    #[test]
+    fn provider_discovery_auth_failure_is_written_as_fixed_metadata() {
+        let directory = tempdir().expect("issue log directory");
+        let store = IssueLogStore::new(directory.path());
+        let failure = ProviderFailure::new(
+            ProviderFailureCategory::Authentication,
+            "provider.invalid_api_key",
+        );
+
+        let result: Result<(), ProviderFailure> = Err(failure);
+        assert!(finish_diagnostic_command(&store, "provider.discover_models", result).is_err());
+
+        let records = store.list(
+            0,
+            Some(IssueLogLevel::Error),
+            Some("provider.discover_models"),
+        );
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].message, "provider.invalid_api_key");
+        assert_eq!(
+            records[0].details.as_deref(),
+            Some("category=Authentication")
         );
     }
 }

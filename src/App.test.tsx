@@ -1964,7 +1964,11 @@ describe("Codex 环境接管", () => {
     expect(await screen.findByRole("heading", { name: "供应商管理" })).toBeInTheDocument();
     const navigation = screen.getByRole("navigation", { name: "主要菜单" });
     const navigationItems = within(navigation).getAllByRole("button");
-    expect(navigationItems.map((button) => button.textContent)).toEqual(["供应商管理", "会话管理"]);
+    expect(navigationItems.map((button) => button.textContent)).toEqual([
+      "帮我排查",
+      "供应商管理",
+      "会话管理",
+    ]);
     const openAi = within(openSettingsMenu()).getByRole("menuitem", { name: "返回 OpenAI 登录模式" });
     await waitFor(() => expect(openAi).toBeEnabled());
     expect(screen.queryByRole("heading", { name: "外部配置" })).not.toBeInTheDocument();

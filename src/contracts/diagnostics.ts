@@ -18,6 +18,104 @@ export interface IssueLogFilter {
   query: string;
 }
 
+export type DiagnosticConfigStatus =
+  | "missing"
+  | "unreadable"
+  | "encoding_error"
+  | "toml_syntax_error"
+  | "valid";
+
+export type DiagnosticConsumerStatus = "running" | "stopped" | "unknown";
+export type DiagnosticLoginStatus = "logged_in" | "not_logged_in" | "unavailable";
+export type DiagnosticExportFormat = "json" | "markdown";
+
+export interface DiagnosticReport {
+  schemaVersion: number;
+  environment: {
+    scope: "current_user";
+    codexHome: "~/.codex";
+    codexHomeOverrideStatus: "unset" | "matches" | "differs";
+    configStatus: DiagnosticConfigStatus;
+    activeProvider: string | null;
+    declaredProviders: string[];
+  };
+  authentication: {
+    loginStatus: DiagnosticLoginStatus;
+    authFileStatus: "missing" | "present" | "unreadable";
+    credentialStore: "unknown" | "file" | "keyring" | "auto" | "unsupported";
+  };
+  consumers: {
+    desktop: DiagnosticConsumerStatus;
+    cli: DiagnosticConsumerStatus;
+  };
+  versions: {
+    gpteasy: string;
+    codexCli: string | null;
+  };
+  findings: Array<{
+    code: string;
+    origin: "local" | "remote";
+    severity: "error" | "warning" | "info";
+    title: string;
+    summary: string;
+    repairable: boolean;
+  }>;
+  errors: Array<{
+    errorCode: string;
+    origin: "local" | "remote";
+    occurrences: number;
+    lastSeenEpochSeconds: number;
+  }>;
+}
+
+const browserDiagnosticReport: DiagnosticReport = {
+  schemaVersion: 1,
+  environment: {
+    scope: "current_user",
+    codexHome: "~/.codex",
+    codexHomeOverrideStatus: "unset",
+    configStatus: "valid",
+    activeProvider: "custom",
+    declaredProviders: [],
+  },
+  authentication: {
+    loginStatus: "logged_in",
+    authFileStatus: "present",
+    credentialStore: "file",
+  },
+  consumers: { desktop: "running", cli: "stopped" },
+  versions: { gpteasy: "1.2.1", codexCli: "0.147.0" },
+  findings: [{
+    code: "model_provider_missing_definition",
+    origin: "local",
+    severity: "error",
+    title: "模型供应商定义缺失",
+    summary: "config.toml 使用模型供应商“custom”，但没有声明同名 model_providers 配置。",
+    repairable: false,
+  }],
+  errors: [],
+};
+
+export function getDiagnosticReport(): Promise<DiagnosticReport> {
+  if (isBrowserPreview()) return Promise.resolve(browserDiagnosticReport);
+  return invoke<DiagnosticReport>("get_diagnostic_report");
+}
+
+export function chooseDiagnosticExportDestination(
+  format: DiagnosticExportFormat,
+): Promise<string | null> {
+  if (isBrowserPreview()) return Promise.resolve(null);
+  return invoke<string | null>("choose_diagnostic_export_destination", { format });
+}
+
+export function exportDiagnosticReport(
+  format: DiagnosticExportFormat,
+  destination: string,
+): Promise<void> {
+  if (isBrowserPreview()) return Promise.resolve();
+  return invoke<void>("export_diagnostic_report", { format, destination });
+}
+
 export function getIssueLogPath(): Promise<string> {
   if (isBrowserPreview()) return Promise.resolve("issue-log.jsonl");
   return invoke<string>("get_issue_log_path");
