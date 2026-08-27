@@ -62,6 +62,14 @@ bash scripts/setup-gitcode-distribution.sh
 
 正式清单只包含 `windows-x86_64`，签名字段保存 `.sig` 正文。任何附件、匿名下载或版本门禁失败都不会写入清单，也不会修改或删除 GitHub Release。可控 HTTP adapter 测试通过 `npm run test:gitcode-sync` 运行。
 
+## 已知限制与后续优化
+
+v1.3.0 发布后真实匿名复核发现，客户端内置的 GitCode 稳定分支 Raw 地址可能被 WAF 返回 HTTP 403；同一仓库的公开 Contents API、不可变 blob 和 Release 附件仍可正常读取。该问题不是附件缺失，重复上传或重新创建 Release 不能修复。v1.3.0 遇到此问题时，用户需要从 GitHub Releases 或 GitCode Releases 手工下载安装包。
+
+后续优化由 [#53](https://github.com/yinshaohua/GPTEasy/issues/53) 跟踪：客户端先读取现有 Raw 地址，只有网络失败、非成功 HTTP 状态或无法解析为 JSON 的 WAF 正文时，才匿名读取固定仓库、分支和路径的 GitCode Contents API，并严格解码其 Base64 清单正文。两个通道仍各至多请求一次，不引入后台重试，不使用 GitCode Token，也不回退到 GitHub 或第二个分发仓库；清单语义、HTTPS 下载地址、稳定版本和 updater 签名门禁全部保持不变。
+
+这项优化改变了 ADR-0038 的“单一 Raw 端点”和 ADR-0039 的“每次清单检查只发出一次匿名读取请求”的具体传输约束。实施 #53 时必须同步新增或修订 ADR；在此之前，当前 ADR 和 v1.3.0 行为仍是有效事实。
+
 ## 发布准备
 
 在干净的 `main` 上统一准备 JavaScript、Rust 和 Tauri 版本：

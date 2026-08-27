@@ -27,6 +27,13 @@
 - 桌面终止集合来自动态发现的受信任 AppX 安装和 PID/创建时间复核；独立 CLI 永不进入该集合。
 - 更新继续只信任单一 GitCode 清单端点和内置 updater 公钥，安装仍需用户确认。
 
+## 已知限制与后续安排
+
+- 发布后真实匿名复核发现，客户端内置的 GitCode 稳定分支 Raw 清单地址可能返回 HTTP 403；Contents API、不可变 blob 和 Release 附件均可读取，因此重复上传附件不能解决该问题。
+- v1.3.0 不包含清单通道回退。更新检查受影响时，用户需要从 GitHub Releases 或 GitCode Releases 手工下载安装包。
+- 后续优化由 [#53](https://github.com/yinshaohua/GPTEasy/issues/53) 跟踪：Raw 读取因网络或 WAF 失败时，匿名读取同一 GitCode 分发仓库的 Contents API/Base64 清单。它不回退到 GitHub、不使用客户端 Token，也不放宽 updater 签名和用户确认安装门禁。
+- 实施 #53 时同步更新 ADR-0038/0039；在新版本发布前，不把计划中的回退描述为 v1.3.0 已具备能力。
+
 ## 验证记录
 
 - 真实 Windows 桌面测试观察到旧 Codex 桌面根及其后代退出，并扫描到新的可信桌面根；独立 Codex CLI 的 PID 与创建时间保持不变。
