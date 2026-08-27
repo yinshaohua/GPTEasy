@@ -3,13 +3,13 @@ param(
     [Parameter(Mandatory = $true)]
     [ValidateSet('Acceptance', 'Release')]
     [string]$Mode,
-    [Parameter(Mandatory = $true)]
     [string]$EvidencePath,
     [Parameter(Mandatory = $true)]
     [string]$InstallerPath,
     [Parameter(Mandatory = $true)]
     [string]$CandidateManifestPath,
-    [string]$RepositoryRoot
+    [string]$RepositoryRoot,
+    [switch]$ConfirmMaintainerAcceptance
 )
 
 $ErrorActionPreference = 'Stop'
@@ -48,33 +48,24 @@ function Get-FileSignature([string]$Path) {
 }
 
 $root = (Resolve-Path -LiteralPath $RepositoryRoot).Path
-$evidenceFile = Get-Item -LiteralPath (Resolve-Path -LiteralPath $EvidencePath).Path
 $installer = Get-Item -LiteralPath (Resolve-Path -LiteralPath $InstallerPath).Path
 $candidateManifestFile = Get-Item -LiteralPath (Resolve-Path -LiteralPath $CandidateManifestPath).Path
-$evidence = Get-Content -LiteralPath $evidenceFile.FullName -Raw | ConvertFrom-Json
 $candidateManifest = Get-Content -LiteralPath $candidateManifestFile.FullName -Raw | ConvertFrom-Json
+$hasEvidence = -not [string]::IsNullOrWhiteSpace($EvidencePath)
+$evidence = $null
+if ($hasEvidence) {
+    $evidenceFile = Get-Item -LiteralPath (Resolve-Path -LiteralPath $EvidencePath).Path
+    $evidence = Get-Content -LiteralPath $evidenceFile.FullName -Raw | ConvertFrom-Json
+}
 
-if ($evidence.schemaVersion -ne 1) {
-    Add-GateError 'Evidence schemaVersion must be 1.'
+if ($Mode -eq 'Acceptance' -and -not $hasEvidence) {
+    Add-GateError 'Acceptance mode requires interactive Windows UAT evidence.'
 }
-if ($evidence.issue -ne $releaseContract.issue) {
-    Add-GateError 'Evidence must belong to Issue #28.'
-}
-if ($evidence.evidenceOrigin -eq 'synthetic-test') {
-    Add-GateError 'Synthetic evidence cannot satisfy the Windows UAT gate.'
-} elseif ($evidence.evidenceOrigin -ne 'interactive-windows-uat') {
-    Add-GateError 'Evidence origin must be the interactive Windows UAT runner.'
-}
-try {
-    [void][DateTimeOffset]::Parse([string]$evidence.completedAtUtc)
-} catch {
-    Add-GateError 'Evidence completedAtUtc is invalid.'
+if ($Mode -eq 'Release' -and -not $ConfirmMaintainerAcceptance) {
+    Add-GateError 'Release mode requires explicit maintainer acceptance.'
 }
 
 $head = (& git -C $root rev-parse HEAD | Out-String).Trim()
-if ($LASTEXITCODE -ne 0 -or $evidence.gitCommit -ne $head) {
-    Add-GateError 'Evidence gitCommit does not match the current HEAD.'
-}
 if ($candidateManifest.schemaVersion -ne 1 -or $candidateManifest.issue -ne $releaseContract.issue) {
     Add-GateError 'The candidate manifest schema or issue is invalid.'
 }
@@ -91,44 +82,67 @@ if ($candidateVerification.frontendCheck -ne 'passed' -or
     $candidateVerification.rustTests -ne 'passed' -or
     $candidateVerification.acceptanceGate -ne 'passed' -or
     $candidateVerification.releaseTree -ne 'passed' -or
-    $candidateVerification.releaseContract -ne 'passed') {
+    $candidateVerification.releaseContract -ne 'passed' -or
+    $candidateVerification.updateTrustRoot -ne 'passed' -or
+    $candidateVerification.updaterSignature -ne 'passed') {
     Add-GateError 'The candidate manifest does not record all required build gates as passed.'
 }
-$candidateManifestSha256 = Get-Sha256File $candidateManifestFile.FullName
-if ($evidence.candidateManifestSha256 -ne $candidateManifestSha256) {
-    Add-GateError 'Evidence is not bound to this candidate manifest.'
-}
-if ($evidence.platform.os -ne 'windows' -or
-    $evidence.platform.architecture -ne 'x64' -or
-    [int]$evidence.platform.build -lt 19045) {
-    Add-GateError 'Evidence platform must be Windows x64 build 19045 or newer.'
-}
-$cliVersionMatch = [regex]::Match([string]$evidence.codexCliVersion, '^codex-cli (\d+\.\d+\.\d+)')
-if (-not $cliVersionMatch.Success -or
-    [version]$cliVersionMatch.Groups[1].Value -lt [version]'0.147.0') {
-    Add-GateError 'Evidence must record a supported Codex CLI version.'
-}
-if ([string]$evidence.providerCombinationFingerprint -notmatch '^[0-9a-f]{64}$' -or
-    [string]$evidence.providerCombinationFingerprint -match '^0{64}$') {
-    Add-GateError 'Evidence provider combination fingerprint is invalid.'
-}
+if ($hasEvidence) {
+    if ($evidence.schemaVersion -ne 1) {
+        Add-GateError 'Evidence schemaVersion must be 1.'
+    }
+    if ($evidence.issue -ne $releaseContract.issue) {
+        Add-GateError 'Evidence must belong to Issue #28.'
+    }
+    if ($evidence.evidenceOrigin -eq 'synthetic-test') {
+        Add-GateError 'Synthetic evidence cannot satisfy the Windows UAT gate.'
+    } elseif ($evidence.evidenceOrigin -ne 'interactive-windows-uat') {
+        Add-GateError 'Evidence origin must be the interactive Windows UAT runner.'
+    }
+    try {
+        [void][DateTimeOffset]::Parse([string]$evidence.completedAtUtc)
+    } catch {
+        Add-GateError 'Evidence completedAtUtc is invalid.'
+    }
+    if ($evidence.gitCommit -ne $head) {
+        Add-GateError 'Evidence gitCommit does not match the current HEAD.'
+    }
+    $candidateManifestSha256 = Get-Sha256File $candidateManifestFile.FullName
+    if ($evidence.candidateManifestSha256 -ne $candidateManifestSha256) {
+        Add-GateError 'Evidence is not bound to this candidate manifest.'
+    }
+    if ($evidence.platform.os -ne 'windows' -or
+        $evidence.platform.architecture -ne 'x64' -or
+        [int]$evidence.platform.build -lt 19045) {
+        Add-GateError 'Evidence platform must be Windows x64 build 19045 or newer.'
+    }
+    $cliVersionMatch = [regex]::Match([string]$evidence.codexCliVersion, '^codex-cli (\d+\.\d+\.\d+)')
+    if (-not $cliVersionMatch.Success -or
+        [version]$cliVersionMatch.Groups[1].Value -lt [version]'0.147.0') {
+        Add-GateError 'Evidence must record a supported Codex CLI version.'
+    }
+    if ([string]$evidence.providerCombinationFingerprint -notmatch '^[0-9a-f]{64}$' -or
+        [string]$evidence.providerCombinationFingerprint -match '^0{64}$') {
+        Add-GateError 'Evidence provider combination fingerprint is invalid.'
+    }
 
-$seenChecks = @{}
-foreach ($check in @($evidence.checks)) {
-    $id = [string]$check.id
-    if ([string]::IsNullOrWhiteSpace($id)) {
-        Add-GateError 'Evidence contains a check without an id.'
-        continue
+    $seenChecks = @{}
+    foreach ($check in @($evidence.checks)) {
+        $id = [string]$check.id
+        if ([string]::IsNullOrWhiteSpace($id)) {
+            Add-GateError 'Evidence contains a check without an id.'
+            continue
+        }
+        if ($seenChecks.ContainsKey($id)) {
+            Add-GateError "Evidence contains a duplicate check: $id."
+            continue
+        }
+        $seenChecks[$id] = $check.passed -eq $true
     }
-    if ($seenChecks.ContainsKey($id)) {
-        Add-GateError "Evidence contains a duplicate check: $id."
-        continue
-    }
-    $seenChecks[$id] = $check.passed -eq $true
-}
-foreach ($required in $requiredChecks) {
-    if (-not $seenChecks.ContainsKey($required) -or -not $seenChecks[$required]) {
-        Add-GateError "Required UAT check is missing or failed: $required."
+    foreach ($required in $requiredChecks) {
+        if (-not $seenChecks.ContainsKey($required) -or -not $seenChecks[$required]) {
+            Add-GateError "Required UAT check is missing or failed: $required."
+        }
     }
 }
 
@@ -139,19 +153,21 @@ if ($candidateArtifactName -ne $installer.Name -or
     [int64]$candidateManifest.artifact.size -ne $installer.Length) {
     Add-GateError 'The candidate manifest artifact does not match the installer.'
 }
-if ($evidence.artifact.fileName -ne $installer.Name) {
-    Add-GateError 'Evidence artifact fileName does not match the installer.'
-}
-if ($evidence.artifact.sha256 -ne $actualHash) {
-    Add-GateError 'Evidence artifact SHA-256 does not match the installer.'
-}
-if ([int64]$evidence.artifact.size -ne $installer.Length) {
-    Add-GateError 'Evidence artifact size does not match the installer.'
+if ($hasEvidence) {
+    if ($evidence.artifact.fileName -ne $installer.Name) {
+        Add-GateError 'Evidence artifact fileName does not match the installer.'
+    }
+    if ($evidence.artifact.sha256 -ne $actualHash) {
+        Add-GateError 'Evidence artifact SHA-256 does not match the installer.'
+    }
+    if ([int64]$evidence.artifact.size -ne $installer.Length) {
+        Add-GateError 'Evidence artifact size does not match the installer.'
+    }
 }
 
 $signature = Get-FileSignature $installer.FullName
 $signatureStatus = $signature.Status.ToString()
-if ($evidence.artifact.authenticodeStatus -ne $signatureStatus) {
+if ($hasEvidence -and $evidence.artifact.authenticodeStatus -ne $signatureStatus) {
     Add-GateError 'Evidence Authenticode status does not match the installer.'
 }
 if ($candidateManifest.artifact.authenticodeStatus -ne $signatureStatus) {
@@ -195,6 +211,8 @@ $report = [ordered]@{
     gitCommit = $head
     artifactSha256 = $actualHash
     authenticodeStatus = $signatureStatus
+    acceptance = if ($Mode -eq 'Release') { 'maintainer-confirmed' } else { 'interactive-windows-uat' }
+    uatEvidenceChecked = $hasEvidence
     errors = @($errors)
 }
 $report | ConvertTo-Json -Depth 5

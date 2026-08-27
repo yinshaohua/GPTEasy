@@ -71,7 +71,9 @@ fn unsigned_uat_fixture() -> (TempDir, PathBuf, PathBuf, PathBuf) {
             "rustTests": "passed",
             "acceptanceGate": "passed",
             "releaseTree": "passed",
-            "releaseContract": "passed"
+            "releaseContract": "passed",
+            "updateTrustRoot": "passed",
+            "updaterSignature": "passed"
         },
         "artifact": {
             "path": "src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/GPTEasy_1.0.0_x64-setup.exe",
@@ -141,6 +143,38 @@ fn run_readiness_gate(
         .arg(&root)
         .current_dir(&root);
     command.output().expect("run release readiness gate")
+}
+
+fn run_maintainer_release_gate(
+    installer: &Path,
+    candidate_manifest: &Path,
+    confirm_acceptance: bool,
+) -> std::process::Output {
+    let root = repository_root();
+    let mut command = Command::new("powershell.exe");
+    command
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            "scripts/test-release-readiness.ps1",
+            "-Mode",
+            "Release",
+            "-InstallerPath",
+        ])
+        .arg(installer)
+        .arg("-CandidateManifestPath")
+        .arg(candidate_manifest)
+        .arg("-RepositoryRoot")
+        .arg(&root);
+    if confirm_acceptance {
+        command.arg("-ConfirmMaintainerAcceptance");
+    }
+    command
+        .current_dir(&root)
+        .output()
+        .expect("run maintainer release gate")
 }
 
 #[test]
@@ -469,21 +503,36 @@ fn acceptance_readiness_rejects_synthetic_evidence_without_rejecting_unsigned_ar
 
 #[test]
 fn formal_release_readiness_allows_unsigned_installer() {
-    let (_temp, evidence, installer, manifest) = unsigned_uat_fixture();
-    let output = run_readiness_gate("Release", &evidence, &installer, &manifest);
+    let (_temp, _evidence, installer, manifest) = unsigned_uat_fixture();
+    let output = run_maintainer_release_gate(&installer, &manifest, true);
+    assert!(
+        output.status.success(),
+        "maintainer release gate failed: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).expect("parse readiness report");
+    assert_eq!(report["passed"], true);
+    assert_eq!(report["authenticodeStatus"], "NotSigned");
+    assert_eq!(report["acceptance"], "maintainer-confirmed");
+    assert_eq!(report["uatEvidenceChecked"], false);
+}
+
+#[test]
+fn formal_release_readiness_requires_explicit_maintainer_acceptance() {
+    let (_temp, _evidence, installer, manifest) = unsigned_uat_fixture();
+    let output = run_maintainer_release_gate(&installer, &manifest, false);
     assert!(!output.status.success());
     let report: Value = serde_json::from_slice(&output.stdout).expect("parse readiness failure");
-    assert_eq!(report["passed"], false);
     assert!(
-        !report["errors"]
+        report["errors"]
             .as_array()
             .expect("errors array")
             .iter()
             .any(|error| error
                 .as_str()
-                .is_some_and(|value| value.contains("Authenticode")))
+                .is_some_and(|value| value.contains("maintainer acceptance")))
     );
-    assert_eq!(report["authenticodeStatus"], "NotSigned");
 }
 
 #[test]

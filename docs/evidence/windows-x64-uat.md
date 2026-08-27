@@ -1,12 +1,12 @@
-# Issue #28 / #39 Windows x64 真实 UAT 与安装交付
+# Windows x64 候选、维护者验收与可选真实 UAT
 
-Issue #28 采用三层门禁，不能用自动化 fixture 替代真实 UAT：
+Windows 正式发布采用两层必需门禁和一层可选深度验收：
 
 1. `candidate:windows` 在干净的 `main` 上执行类型检查、完整测试、Issue #28 综合验收门禁、发布树检查、领域/UI 合同一致性检查和 Tauri x64 NSIS 构建。
-2. `uat:windows` 只允许在一次性 Windows x64 当前用户账户中运行，记录真实供应商、Codex CLI、打包应用单实例与安装生命周期的脱敏证据。
-3. `release:check` 复核证据、提交、安装包哈希、发布树、当前领域/UI 合同和 Authenticode 状态。`Acceptance` 与 `Release` 都允许 `Valid` 或 `NotSigned`，但候选清单、UAT 证据和安装包的状态必须一致；未签名正式发布必须在 GitHub Release 中明确提示 Windows SmartScreen 风险。
+2. `release:check -Mode Release -ConfirmMaintainerAcceptance` 复核当前提交、候选 manifest、安装包哈希、自动门禁、发布树、当前领域/UI 合同和 Authenticode 状态，并要求维护者明确确认人工测试结果和发布授权。
+3. `uat:windows` 在一次性 Windows x64 当前用户账户中记录真实供应商、Codex CLI、打包应用单实例与安装生命周期的脱敏证据；它是按风险或维护者要求执行的可选深度验收，不是每次正式发布的默认前置条件。
 
-三层门禁共享 `scripts/windows-release-contract.json`：Issue 身份、窗口尺寸、当前合同文档和必需 UAT check ID 只在该结构化合同中定义一次。合同同时登记 #39 的 `session_*` 检查，覆盖真实 App Server 方法/筛选、协议降级、外部消费者 mutation 门禁、无闪窗生命周期、Job Object 退出回收和精确所有权恢复。当前领域与 UI 文档使用稳定标记声明桌面控制只允许可信启动、用户确认后的可信桌面进程树重启和 CLI 生命周期隔离；删除标记或加入静默终止、CLI 控制等越界声明会使发布合同门禁失败。
+候选、发布检查和可选 UAT 共享 `scripts/windows-release-contract.json`：Issue 身份、窗口尺寸、当前合同文档和 UAT check ID 只在该结构化合同中定义一次。合同同时登记 #39 的 `session_*` 检查，覆盖真实 App Server 方法/筛选、协议降级、外部消费者 mutation 门禁、无闪窗生命周期、Job Object 退出回收和精确所有权恢复。当前领域与 UI 文档使用稳定标记声明桌面控制只允许可信启动、用户确认后的可信桌面进程树重启和 CLI 生命周期隔离；删除标记或加入静默终止、CLI 控制等越界声明会使发布合同门禁失败。
 
 真实 Codex App Server 合同测试位于 `src-tauri/tests/real_session_contract.rs`，默认 `#[ignore]`，不会把开发机的 Codex 登录状态变成普通 CI 前置条件。一次性 UAT 环境可设置 `GPTEASY_RUN_REAL_CODEX_SESSION_CONTRACT=1` 后用 `cargo test --manifest-path src-tauri/Cargo.toml --test real_session_contract -- --ignored` 运行；归档/取消归档还需要显式设置 `GPTEASY_RUN_REAL_CODEX_SESSION_MUTATIONS=1` 和目标 `GPTEASY_REAL_CODEX_SESSION_ID`，永久删除另需 `GPTEASY_ALLOW_REAL_CODEX_DELETE=1`。
 
@@ -20,7 +20,7 @@ npm run candidate:windows
 
 构建清单写入 `src-tauri/target/release-candidate/manifest.json`，安装包位于对应 target 的 `release/bundle/nsis/`。两者都在 Git 忽略目录中。清单只记录相对路径、SHA-256、大小、提交和签名状态。
 
-## UAT 前置条件
+## 可选 UAT 前置条件
 
 - 使用 Windows 10 22H2（build 19045）或更高版本的 x64 一次性当前用户账户，不使用日常开发账户。
 - Codex CLI 0.147.0 或更高版本。为验收 #49 的桌面操作，需要安装当前用户可发现、发布者身份可验证的 OpenAI ChatGPT/Codex AppX 桌面版。
@@ -38,7 +38,7 @@ npm run candidate:windows
 
 不要把真实值放入命令参数、环境变量、控制台记录、截图、Issue 或 Git。UAT 脚本只读取该文件以验证保护状态、计算不可逆组合指纹并扫描最终 JSON；供应商字段由操作员在应用中手工输入。
 
-## 执行 UAT
+## 执行可选 UAT
 
 功能验收包运行：
 
@@ -59,20 +59,20 @@ npm run uat:windows -- --InstallerPath <setup.exe> -CandidateManifestPath <manif
 
 脚本本身不会终止 GPTEasy 或 Codex；桌面正常退出和受控进程树结束只由操作员在 GPTEasy 界面中明确确认触发。覆盖安装和卸载前，操作员必须使用托盘中的“退出”结束 GPTEasy。成功证据写入 `src-tauri/target/uat/<UTC 时间>/evidence.json`，不包含用户名、绝对路径、服务地址、模型或 API Key。
 
-## 复核证据
+## 发布检查
 
-验收包：
+提供交互式 UAT 证据时，可以单独复核验收包：
 
 ```powershell
 npm run release:check -- -Mode Acceptance -EvidencePath <evidence.json> -InstallerPath <setup.exe> -CandidateManifestPath <manifest.json>
 ```
 
-正式对外发布：
+正式对外发布默认由维护者明确确认人工测试，不要求 `EvidencePath`：
 
 ```powershell
-npm run release:check -- -Mode Release -EvidencePath <evidence.json> -InstallerPath <setup.exe> -CandidateManifestPath <manifest.json>
+npm run release:check -- -Mode Release -InstallerPath <setup.exe> -CandidateManifestPath <manifest.json> -ConfirmMaintainerAcceptance
 ```
 
-复核会同时绑定候选 manifest、当前提交、UAT JSON 和安装包哈希，并默认拒绝测试生成的 synthetic evidence。它会重新运行发布树及领域/UI 合同一致性检查，确认 ADR-0041、领域词汇和当前 UI 合同只允许可信桌面启动、用户确认后的可信桌面进程树重启和 CLI 生命周期隔离。正式发布模式会重新读取安装包 Authenticode 状态，只接受 `Valid` 或 `NotSigned`，并要求它与候选 manifest 和 UAT JSON 完全一致；无效、未知或被破坏的签名仍会失败。
+发布检查绑定候选 manifest、当前提交和安装包哈希，并重新运行发布树及领域/UI 合同一致性检查，确认 ADR-0041、领域词汇和当前 UI 合同只允许可信桌面启动、用户确认后的可信桌面进程树重启和 CLI 生命周期隔离。它重新读取安装包 Authenticode 状态，只接受 `Valid` 或 `NotSigned`，并要求它与候选 manifest 完全一致；无效、未知或被破坏的签名仍会失败。若提供 `EvidencePath`，还会绑定并复核同一候选的交互式 UAT JSON，且默认拒绝测试生成的 synthetic evidence。
 
-当前开发机不满足一次性账户和真实凭据前置条件时，只能生成并校验未签名安装包，不能生成真实 UAT 通过证据，也不能关闭 Issue #28。
+当前开发机不满足一次性账户和真实凭据前置条件时，不得生成或声称真实 UAT 通过；维护者仍可在完整候选门禁通过且已经完成与本次风险相称的人工测试后明确授权正式发布。

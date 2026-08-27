@@ -57,7 +57,7 @@ bash scripts/setup-gitcode-distribution.sh
 1. 拒绝草稿、预发布和非稳定 SemVer Release；读取当前正式清单以阻止版本降级，首次发布则验证分发仓库 README 的 Raw 可读性。当前清单优先使用 GitCode API 返回的 Base64 正文；没有内嵌正文时再使用固定分支 Raw 地址和 API 返回的不可变 blob 地址，并在遇到 418 等临时风控响应时重试和回退，避免单一下载路径阻塞同步；
 2. 下载 GitHub Release 中的 Windows x64 NSIS 安装包及其 `.sig`，计算大小和 SHA-256，并生成 `SHA256SUMS.txt`；
 3. 创建或复用同 Tag GitCode Release，正文直接采用 GitHub 中文发布说明；
-4. 已存在的同名附件必须经匿名下载证明大小和 SHA-256 相同，缺失附件才上传；冲突立即停止；
+4. 已存在的同名附件必须经匿名下载证明大小和 SHA-256 相同，缺失附件才上传；上传遇到网络异常、超时或 `408/425/429/5xx` 时执行三次有限重试，认证、权限和其它确定性错误立即停止；同名内容冲突也立即停止；
 5. 所有附件上传后再次匿名下载校验，最后才写入正式清单。
 
 正式清单只包含 `windows-x86_64`，签名字段保存 `.sig` 正文。任何附件、匿名下载或版本门禁失败都不会写入清单，也不会修改或删除 GitHub Release。可控 HTTP adapter 测试通过 `npm run test:gitcode-sync` 运行。
@@ -90,3 +90,11 @@ Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY_PATH
 ```powershell
 npm run release:manifest -- -ManifestPath <latest.md>
 ```
+
+维护者确认已经完成与本次变更相称的人工测试后，正式发布检查不要求一次性账户 UAT 证据：
+
+```powershell
+npm run release:check -- -Mode Release -InstallerPath <setup.exe> -CandidateManifestPath <manifest.json> -ConfirmMaintainerAcceptance
+```
+
+发布说明必须如实列出实际执行的人工测试，不得把未运行的交互式 UAT 写成通过。

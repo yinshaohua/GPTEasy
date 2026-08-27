@@ -1,4 +1,4 @@
-/* global Buffer, URL, fetch, process, setTimeout */
+/* global AbortSignal, Buffer, URL, fetch, process, setTimeout */
 
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -156,6 +156,9 @@ async function loadConfiguration() {
     testMode,
     anonymousAttempts: testMode ? Number(process.env.GITCODE_SYNC_ANONYMOUS_ATTEMPTS ?? "1") : 40,
     anonymousDelayMs: testMode ? Number(process.env.GITCODE_SYNC_RETRY_DELAY_MS ?? "0") : 5000,
+    uploadAttempts: testMode ? Number(process.env.GITCODE_SYNC_UPLOAD_ATTEMPTS ?? "3") : 3,
+    uploadDelayMs: testMode ? Number(process.env.GITCODE_SYNC_RETRY_DELAY_MS ?? "0") : 5000,
+    uploadTimeoutMs: testMode ? Number(process.env.GITCODE_SYNC_UPLOAD_TIMEOUT_MS ?? "1000") : 180000,
   };
 }
 
@@ -307,13 +310,33 @@ async function uploadAsset(upload, asset) {
   if (url.protocol !== "https:" && !(configuration.testMode && url.protocol === "http:" && url.hostname === "127.0.0.1")) {
     throw new Error("GitCode returned an invalid attachment upload URL");
   }
-  const response = await fetch(upload.url, {
-    method: "PUT",
-    headers: upload.headers,
-    body: asset.bytes,
-    redirect: "follow",
-  });
-  if (!response.ok) throw new Error(`GitCode upload failed for ${asset.name} with HTTP ${response.status}`);
+  for (let attempt = 1; attempt <= configuration.uploadAttempts; attempt += 1) {
+    try {
+      const response = await fetch(upload.url, {
+        method: "PUT",
+        headers: upload.headers,
+        body: asset.bytes,
+        redirect: "follow",
+        signal: AbortSignal.timeout(configuration.uploadTimeoutMs),
+      });
+      if (response.ok) return;
+      if (attempt >= configuration.uploadAttempts || !isRetryableUploadStatus(response.status)) {
+        throw new Error(`GitCode upload failed for ${asset.name} with HTTP ${response.status}`);
+      }
+      process.stderr.write(`GitCode upload for ${asset.name} returned HTTP ${response.status}; retrying\n`);
+    } catch (error) {
+      if (attempt >= configuration.uploadAttempts
+        || (error instanceof Error && error.message.startsWith("GitCode upload failed"))) {
+        throw error;
+      }
+      process.stderr.write(`GitCode upload for ${asset.name} failed before a response; retrying\n`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, configuration.uploadDelayMs));
+  }
+}
+
+function isRetryableUploadStatus(status) {
+  return [408, 425, 429, 500, 502, 503, 504].includes(status);
 }
 
 function attachmentUrl(config, name) {

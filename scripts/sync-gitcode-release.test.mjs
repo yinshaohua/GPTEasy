@@ -64,6 +64,22 @@ test("部分上传后重跑会复用匹配附件并补传缺失附件", async ()
   }
 });
 
+test("GitCode 附件上传遇到瞬时 5xx 时有限重试后再推进清单", async () => {
+  const adapter = await startAdapter({
+    transientUploadFailures: new Map([[INSTALLER, 2]]),
+  });
+  try {
+    const result = await runSync(adapter.baseUrl);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(adapter.state.uploadAttempts.get(INSTALLER), 3);
+    assert.equal(adapter.state.uploads.get(INSTALLER)?.equals(INSTALLER_BYTES), true);
+    assert.equal(adapter.state.manifests.length, 1);
+    assert.equal(adapter.state.records.at(-1).operation, "manifest-write");
+  } finally {
+    await adapter.close();
+  }
+});
+
 test("同名附件内容冲突时停止且不推进正式清单", async () => {
   const adapter = await startAdapter({
     releaseExists: true,
@@ -273,6 +289,8 @@ async function startAdapter(options = {}) {
     releaseExists: options.releaseExists ?? false,
     uploads: options.uploads ?? new Map(),
     uploadedThisRun: [],
+    uploadAttempts: new Map(),
+    transientUploadFailures: options.transientUploadFailures ?? new Map(),
     failAnonymousName: options.failAnonymousName,
     currentManifest: options.currentManifest,
     releasePatch: options.releasePatch ?? {},
@@ -347,6 +365,11 @@ async function startAdapter(options = {}) {
     if (request.method === "PUT" && url.pathname.startsWith("/upload/")) {
       assert.equal(authorization, undefined);
       const name = decodeURIComponent(url.pathname.slice("/upload/".length));
+      const attempts = (state.uploadAttempts.get(name) ?? 0) + 1;
+      state.uploadAttempts.set(name, attempts);
+      if (attempts <= (state.transientUploadFailures.get(name) ?? 0)) {
+        return json(response, 502, { message: "temporary upload failure" });
+      }
       state.uploads.set(name, body);
       state.uploadedThisRun.push(name);
       state.records.push({ ...record, operation: "upload" });
