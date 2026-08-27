@@ -26,7 +26,7 @@ test("首次同步验证所有附件后最后推进正式清单", async () => {
     assert.equal(manifest.notes, "正式中文发布说明");
     assert.equal(manifest.pub_date, "2026-08-18T08:00:00Z");
     assert.equal(manifest.platforms["windows-x86_64"].signature, SIGNATURE_TEXT);
-    assert.match(manifest.platforms["windows-x86_64"].url, /\/attach_files\/GPTEasy_1\.2\.3_x64-setup\.exe\/download$/);
+    assert.match(manifest.platforms["windows-x86_64"].url, /\/releases\/download\/v1\.2\.3\/GPTEasy_1\.2\.3_x64-setup\.exe$/);
     assert.ok(adapter.state.records.filter((record) => record.operation === "anonymous-download")
       .every((record) => record.authorization === undefined));
   } finally {
@@ -43,7 +43,7 @@ test("Release 正文中的字面量转义换行会规范化为 Markdown 换行",
     assert.equal(result.code, 0, result.stderr);
     assert.equal(adapter.state.manifests[0].notes, "第一行\n\n### 更新\n- 第二行");
     const releaseCreate = adapter.state.records.find((record) => record.operation === "release-create");
-    assert.equal(JSON.parse(releaseCreate.body).body, "第一行\n\n### 更新\n- 第二行");
+    assert.equal(new URLSearchParams(releaseCreate.body).get("body"), "第一行\n\n### 更新\n- 第二行");
   } finally {
     await adapter.close();
   }
@@ -64,7 +64,25 @@ test("部分上传后重跑会复用匹配附件并补传缺失附件", async ()
   }
 });
 
-test("GitCode 附件上传遇到瞬时 5xx 时有限重试后再推进清单", async () => {
+test("已有 Release 正文变化时以表单编码更新数值 Release ID", async () => {
+  const adapter = await startAdapter({
+    releaseExists: true,
+    releaseResponsePatch: { body: "旧说明" },
+  });
+  try {
+    const result = await runSync(adapter.baseUrl);
+    assert.equal(result.code, 0, result.stderr);
+    const update = adapter.state.records.find((record) => record.operation === "release-update");
+    assert.ok(update, "expected an existing Release update");
+    assert.equal(update.path, "/gitee/repos/dist/releases/releases/42");
+    assert.match(update.contentType, /^application\/x-www-form-urlencoded/);
+    assert.equal(new URLSearchParams(update.body).get("body"), "正式中文发布说明");
+  } finally {
+    await adapter.close();
+  }
+});
+
+test("Gitee 附件上传遇到瞬时 5xx 时有限重试后再推进清单", async () => {
   const adapter = await startAdapter({
     transientUploadFailures: new Map([[INSTALLER, 2]]),
   });
@@ -75,6 +93,33 @@ test("GitCode 附件上传遇到瞬时 5xx 时有限重试后再推进清单", a
     assert.equal(adapter.state.uploads.get(INSTALLER)?.equals(INSTALLER_BYTES), true);
     assert.equal(adapter.state.manifests.length, 1);
     assert.equal(adapter.state.records.at(-1).operation, "manifest-write");
+  } finally {
+    await adapter.close();
+  }
+});
+
+test("Gitee 附件上传遇到 429 时有限重试后再推进清单", async () => {
+  const adapter = await startAdapter({
+    transientUploadFailures: new Map([[INSTALLER, 1]]),
+    transientUploadStatus: 429,
+  });
+  try {
+    const result = await runSync(adapter.baseUrl);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(adapter.state.uploadAttempts.get(INSTALLER), 2);
+    assert.equal(adapter.state.manifests.length, 1);
+  } finally {
+    await adapter.close();
+  }
+});
+
+test("Gitee 错误响应中的认证 Token 会被脱敏", async () => {
+  const adapter = await startAdapter({ failGiteeRequestWithToken: true });
+  try {
+    const result = await runSync(adapter.baseUrl);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /<REDACTED>/);
+    assert.doesNotMatch(result.stderr, /gitee-test-token/);
   } finally {
     await adapter.close();
   }
@@ -227,7 +272,7 @@ test("固定分支 Raw 被 418 拦截时会回退到 API blob 并继续同步", 
   }
 });
 
-test("GitCode API 提供内嵌清单时不依赖匿名 Raw", async () => {
+test("Gitee API 提供内嵌清单时不依赖匿名 Raw", async () => {
   const adapter = await startAdapter({
     currentManifest: {
       version: "1.1.1",
@@ -257,22 +302,22 @@ test("GitCode API 提供内嵌清单时不依赖匿名 Raw", async () => {
 });
 
 async function runSync(baseUrl) {
-  const child = spawn(process.execPath, ["scripts/sync-gitcode-release.mjs"], {
+  const child = spawn(process.execPath, ["scripts/sync-gitee-release.mjs"], {
     cwd: process.cwd(),
     env: {
       ...process.env,
       GITHUB_TOKEN: "github-test-token",
       GITHUB_REPOSITORY: "source/project",
       RELEASE_TAG: TAG,
-      GITCODE_TOKEN: "gitcode-test-token",
-      GITCODE_REPOSITORY: "dist/releases",
-      GITCODE_DEFAULT_BRANCH: "main",
+      GITEE_TOKEN: "gitee-test-token",
+      GITEE_REPOSITORY: "dist/releases",
+      GITEE_DEFAULT_BRANCH: "main",
       GITHUB_API_URL: `${baseUrl}/github`,
-      GITCODE_API_BASE_URL: `${baseUrl}/gitcode`,
-      GITCODE_RAW_BASE_URL: baseUrl,
-      GITCODE_SYNC_TEST_MODE: "1",
-      GITCODE_SYNC_ANONYMOUS_ATTEMPTS: "3",
-      GITCODE_SYNC_RETRY_DELAY_MS: "0",
+      GITEE_API_BASE_URL: `${baseUrl}/gitee`,
+      GITEE_RAW_BASE_URL: baseUrl,
+      GITEE_SYNC_TEST_MODE: "1",
+      GITEE_SYNC_ANONYMOUS_ATTEMPTS: "3",
+      GITEE_SYNC_RETRY_DELAY_MS: "0",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -291,9 +336,12 @@ async function startAdapter(options = {}) {
     uploadedThisRun: [],
     uploadAttempts: new Map(),
     transientUploadFailures: options.transientUploadFailures ?? new Map(),
+    transientUploadStatus: options.transientUploadStatus ?? 502,
+    failGiteeRequestWithToken: options.failGiteeRequestWithToken ?? false,
     failAnonymousName: options.failAnonymousName,
     currentManifest: options.currentManifest,
     releasePatch: options.releasePatch ?? {},
+    releaseResponsePatch: options.releaseResponsePatch ?? {},
     releaseAssets: options.releaseAssets,
     failRawBaseline: options.failRawBaseline ?? false,
     failRawManifestBranch: options.failRawManifestBranch ?? false,
@@ -308,7 +356,7 @@ async function startAdapter(options = {}) {
     const url = new URL(request.url, "http://127.0.0.1");
     const body = await requestBody(request);
     const authorization = request.headers.authorization;
-    const record = { method: request.method, path: url.pathname, authorization };
+    const record = { method: request.method, path: url.pathname, authorization, contentType: request.headers["content-type"] };
 
     if (url.pathname === `/github/repos/source/project/releases/tags/${TAG}`) {
       assert.equal(authorization, "Bearer github-test-token");
@@ -335,21 +383,24 @@ async function startAdapter(options = {}) {
       const name = decodeURIComponent(url.pathname.slice("/github-assets/".length));
       return bytes(response, 200, name === INSTALLER ? INSTALLER_BYTES : Buffer.from(SIGNATURE_TEXT));
     }
-    if (url.pathname.startsWith("/gitcode/") && !url.pathname.endsWith("/download")) {
-      assert.equal(authorization, "Bearer gitcode-test-token");
+    if (url.pathname.startsWith("/gitee/")) {
+      assert.equal(authorization, "Bearer gitee-test-token");
     }
-    if (request.method === "GET" && url.pathname.endsWith(`/releases/${TAG}`)) {
+    if (request.method === "GET" && url.pathname.endsWith(`/releases/tags/${TAG}`)) {
+      if (state.failGiteeRequestWithToken) return json(response, 500, { message: `token=${state.giteeToken ?? "gitee-test-token"}` });
       if (!state.releaseExists) return json(response, 404, { message: "not found" });
       return json(response, 200, releaseResponse(state, server));
     }
     if (request.method === "POST" && url.pathname.endsWith("/releases")) {
       state.releaseExists = true;
       state.records.push({ ...record, body: body.toString("utf8"), operation: "release-create" });
+      assert.match(record.contentType, /^application\/x-www-form-urlencoded/);
       return json(response, 201, releaseResponse(state, server));
     }
-    if (request.method === "GET" && url.pathname.endsWith("/upload_url")) {
-      const name = url.searchParams.get("file_name");
-      return json(response, 200, { url: `${origin(server)}/upload/${encodeURIComponent(name)}`, headers: { "x-upload": "fixture" } });
+    if (request.method === "PATCH" && url.pathname.endsWith("/releases/42")) {
+      assert.match(record.contentType, /^application\/x-www-form-urlencoded/);
+      state.records.push({ ...record, body: body.toString("utf8"), operation: "release-update" });
+      return json(response, 200, releaseResponse(state, server));
     }
     if (request.method === "GET" && url.pathname.endsWith("/contents/latest.md")) {
       if (!state.currentManifest) return json(response, 404, { message: "not found" });
@@ -362,22 +413,22 @@ async function startAdapter(options = {}) {
     if (request.method === "GET" && url.pathname.endsWith("/contents/README.md")) {
       return json(response, 200, { download_url: `${origin(server)}/raw/README.md` });
     }
-    if (request.method === "PUT" && url.pathname.startsWith("/upload/")) {
-      assert.equal(authorization, undefined);
-      const name = decodeURIComponent(url.pathname.slice("/upload/".length));
+    if (request.method === "POST" && /\/releases\/42\/attach_files$/.test(url.pathname)) {
+      assert.match(record.contentType, /^multipart\/form-data; boundary=/);
+      const name = multipartFilename(body);
       const attempts = (state.uploadAttempts.get(name) ?? 0) + 1;
       state.uploadAttempts.set(name, attempts);
       if (attempts <= (state.transientUploadFailures.get(name) ?? 0)) {
-        return json(response, 502, { message: "temporary upload failure" });
+        return json(response, state.transientUploadStatus, { message: "temporary upload failure" });
       }
-      state.uploads.set(name, body);
+      state.uploads.set(name, multipartFile(body));
       state.uploadedThisRun.push(name);
       state.records.push({ ...record, operation: "upload" });
-      return json(response, 201, {});
+      return json(response, 201, attachmentResponse(name, state, server));
     }
-    if (request.method === "GET" && url.pathname.includes("/attach_files/") && url.pathname.endsWith("/download")) {
+    if (request.method === "GET" && url.pathname.startsWith(`/releases/download/${TAG}/`)) {
       assert.equal(authorization, undefined);
-      const name = decodeURIComponent(url.pathname.split("/attach_files/")[1].slice(0, -"/download".length));
+      const name = decodeURIComponent(url.pathname.slice(`/releases/download/${TAG}/`.length));
       state.records.push({ ...record, operation: "anonymous-download" });
       if (state.failAnonymousName === name) return bytes(response, 403, Buffer.from("forbidden"));
       return bytes(response, state.uploads.has(name) ? 200 : 404, state.uploads.get(name) ?? Buffer.from("missing"));
@@ -401,8 +452,9 @@ async function startAdapter(options = {}) {
       return bytes(response, 200, Buffer.from("# GPTEasy Releases\n"));
     }
     if (["POST", "PUT"].includes(request.method) && url.pathname.endsWith("/contents/latest.md")) {
-      const payload = JSON.parse(body.toString("utf8"));
-      state.manifests.push(JSON.parse(Buffer.from(payload.content, "base64").toString("utf8")));
+      assert.match(record.contentType, /^application\/x-www-form-urlencoded/);
+      const payload = new URLSearchParams(body.toString("utf8"));
+      state.manifests.push(JSON.parse(Buffer.from(payload.get("content"), "base64").toString("utf8")));
       state.records.push({ ...record, operation: "manifest-write" });
       return json(response, 201, {});
     }
@@ -421,14 +473,36 @@ async function startAdapter(options = {}) {
 
 function releaseResponse(state, server) {
   return {
+    id: 42,
     tag_name: TAG,
     name: "GPTEasy 1.2.3",
     body: "正式中文发布说明",
-    assets: [...state.uploads.keys()].map((name) => ({
-      name,
-      download_url: `${origin(server)}/gitcode/repos/dist/releases/releases/${TAG}/attach_files/${encodeURIComponent(name)}/download`,
-    })),
+    attach_files: [...state.uploads.keys()].map((name) => attachmentResponse(name, state, server)),
+    ...state.releaseResponsePatch,
   };
+}
+
+function attachmentResponse(name, state, server) {
+  return {
+    id: [...state.uploads.keys()].indexOf(name) + 1,
+    name,
+    browser_download_url: `${origin(server)}/releases/download/${TAG}/${encodeURIComponent(name)}`,
+  };
+}
+
+function multipartFilename(body) {
+  const match = body.toString("latin1").match(/filename="([^"\r\n]+)"/);
+  assert.ok(match, "multipart upload must include a filename");
+  return match[1];
+}
+
+function multipartFile(body) {
+  const text = body.toString("latin1");
+  const headerEnd = text.indexOf("\r\n\r\n");
+  assert.notEqual(headerEnd, -1, "multipart upload must include a part body");
+  const end = text.lastIndexOf("\r\n--");
+  assert.ok(end > headerEnd, "multipart upload must include a closing boundary");
+  return body.subarray(headerEnd + 4, end);
 }
 
 function origin(server) {

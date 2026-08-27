@@ -19,24 +19,24 @@ function Test-UpdaterPrivateKeyText([string]$Value) {
 }
 
 try {
-    $distribution = Get-Content -LiteralPath (Join-Path $root 'scripts/gitcode-distribution.json') -Raw | ConvertFrom-Json
+    $distribution = Get-Content -LiteralPath (Join-Path $root 'scripts/gitee-distribution.json') -Raw | ConvertFrom-Json
 } catch {
     $distribution = $null
-    Add-TrustError 'GitCode distribution contract is missing or invalid.'
+    Add-TrustError 'Gitee distribution contract is missing or invalid.'
 }
 if ($null -ne $distribution) {
     $apiUri = $null
     $rawUri = $null
-    if ($distribution.schemaVersion -ne 1 -or $distribution.issue -ne 41 -or
+    if ($distribution.schemaVersion -ne 1 -or $distribution.issue -ne 55 -or
         -not [Uri]::TryCreate([string]$distribution.apiBaseUrl, [UriKind]::Absolute, [ref]$apiUri) -or $apiUri.Scheme -cne 'https' -or
         -not [Uri]::TryCreate([string]$distribution.rawBaseUrl, [UriKind]::Absolute, [ref]$rawUri) -or $rawUri.Scheme -cne 'https' -or
         [string]$distribution.formalManifestPath -notmatch '^[^/\s]+\.md$' -or
         -not ([string]$distribution.smokeManifestPrefix).StartsWith('smoke/', [StringComparison]::Ordinal) -or
         $distribution.platform -cne 'windows-x86_64' -or
-        $distribution.repositoryVariable -cne 'GITCODE_REPOSITORY' -or
-        $distribution.branchVariable -cne 'GITCODE_DEFAULT_BRANCH' -or
-        $distribution.tokenSecret -cne 'GITCODE_TOKEN') {
-        Add-TrustError 'GitCode distribution contract identity or public protocol settings are invalid.'
+        $distribution.repositoryVariable -cne 'GITEE_REPOSITORY' -or
+        $distribution.branchVariable -cne 'GITEE_DEFAULT_BRANCH' -or
+        $distribution.tokenSecret -cne 'GITEE_TOKEN') {
+        Add-TrustError 'Gitee distribution contract identity or public protocol settings are invalid.'
     }
 }
 
@@ -61,10 +61,10 @@ if ($null -ne $config) {
         $uri = $null
         if (-not [Uri]::TryCreate($endpoint, [UriKind]::Absolute, [ref]$uri) -or
             $uri.Scheme -cne 'https' -or
-            $uri.Host -cne 'raw.gitcode.com' -or
+            $uri.Host -cne 'gitee.com' -or
             -not $uri.AbsolutePath.EndsWith("/$([string]$distribution.formalManifestPath)", [StringComparison]::Ordinal) -or
             $uri.Query) {
-            Add-TrustError 'The updater endpoint must be one HTTPS raw.gitcode.com Markdown manifest URL.'
+            Add-TrustError 'The updater endpoint must be one HTTPS gitee.com Markdown manifest URL.'
         }
     }
     $publicKey = [string]$config.plugins.updater.pubkey
@@ -82,47 +82,50 @@ if ($null -ne $config) {
     }
 }
 
-$workflowPath = Join-Path $root '.github/workflows/gitcode-smoke.yml'
-$syncWorkflowPath = Join-Path $root '.github/workflows/gitcode-sync.yml'
-$smokePath = Join-Path $root 'scripts/smoke-gitcode-release.sh'
-$syncPath = Join-Path $root 'scripts/sync-gitcode-release.mjs'
-$wizardPath = Join-Path $root 'scripts/setup-gitcode-distribution.sh'
-try { $workflow = [System.IO.File]::ReadAllText($workflowPath) } catch { $workflow = ''; Add-TrustError 'GitCode smoke workflow is missing.' }
-try { $syncWorkflow = [System.IO.File]::ReadAllText($syncWorkflowPath) } catch { $syncWorkflow = ''; Add-TrustError 'GitCode sync workflow is missing.' }
-try { $smoke = [System.IO.File]::ReadAllText($smokePath) } catch { $smoke = ''; Add-TrustError 'GitCode smoke command is missing.' }
-try { $sync = [System.IO.File]::ReadAllText($syncPath) } catch { $sync = ''; Add-TrustError 'GitCode sync command is missing.' }
-try { $wizard = [System.IO.File]::ReadAllText($wizardPath) } catch { $wizard = ''; Add-TrustError 'GitCode setup wizard is missing.' }
+$workflowPath = Join-Path $root '.github/workflows/gitee-smoke.yml'
+$syncWorkflowPath = Join-Path $root '.github/workflows/gitee-sync.yml'
+$smokePath = Join-Path $root 'scripts/smoke-gitee-release.sh'
+$syncPath = Join-Path $root 'scripts/sync-gitee-release.mjs'
+$wizardPath = Join-Path $root 'scripts/setup-gitee-distribution.sh'
+try { $workflow = [System.IO.File]::ReadAllText($workflowPath) } catch { $workflow = ''; Add-TrustError 'Gitee smoke workflow is missing.' }
+try { $syncWorkflow = [System.IO.File]::ReadAllText($syncWorkflowPath) } catch { $syncWorkflow = ''; Add-TrustError 'Gitee sync workflow is missing.' }
+try { $smoke = [System.IO.File]::ReadAllText($smokePath) } catch { $smoke = ''; Add-TrustError 'Gitee smoke command is missing.' }
+try { $sync = [System.IO.File]::ReadAllText($syncPath) } catch { $sync = ''; Add-TrustError 'Gitee sync command is missing.' }
+try { $wizard = [System.IO.File]::ReadAllText($wizardPath) } catch { $wizard = ''; Add-TrustError 'Gitee setup wizard is missing.' }
 
-if (-not $workflow.Contains('GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}')) {
-    Add-TrustError 'GitCode Token must come from the GITCODE_TOKEN Actions secret.'
+if (-not $workflow.Contains('GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}')) {
+    Add-TrustError 'Gitee Token must come from the GITEE_TOKEN Actions secret.'
 }
-if (-not $workflow.Contains('GITCODE_REPOSITORY: ${{ vars.GITCODE_REPOSITORY }}')) {
-    Add-TrustError 'GitCode repository must come from a public Actions variable.'
+if (-not $workflow.Contains('GITEE_REPOSITORY: ${{ vars.GITEE_REPOSITORY }}')) {
+    Add-TrustError 'Gitee repository must come from a public Actions variable.'
 }
 if (-not $syncWorkflow.Contains('types: [published]') -or
-    -not $syncWorkflow.Contains('GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}') -or
-    -not $syncWorkflow.Contains('GITCODE_REPOSITORY: ${{ vars.GITCODE_REPOSITORY }}') -or
+    -not $syncWorkflow.Contains('GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}') -or
+    -not $syncWorkflow.Contains('GITEE_REPOSITORY: ${{ vars.GITEE_REPOSITORY }}') -or
     $syncWorkflow -match '(?i)(npm run (build|tauri)|cargo build|tauri build)') {
-    Add-TrustError 'GitCode formal sync must consume published Release assets without rebuilding.'
+    Add-TrustError 'Gitee formal sync must consume published Release assets without rebuilding.'
 }
-if (-not $sync.Contains('Authorization: `Bearer ${configuration.gitcodeToken}`') -or
+if (-not $sync.Contains('Authorization: `Bearer ${configuration.giteeToken}`') -or
     $sync -match '(?i)(access_token=|PRIVATE-TOKEN)') {
-    Add-TrustError 'GitCode formal sync authentication must use the Bearer header only.'
+    Add-TrustError 'Gitee formal sync authentication must use the Bearer header only.'
 }
-if (-not $smoke.Contains('Authorization: Bearer $GITCODE_TOKEN') -or
+if (-not $smoke.Contains('Authorization: Bearer $GITEE_TOKEN') -or
     $smoke -match '(?i)(access_token=|PRIVATE-TOKEN)') {
-    Add-TrustError 'GitCode API authentication must use the Bearer header only.'
+    Add-TrustError 'Gitee API authentication must use the Bearer header only.'
 }
-if (-not $smoke.Contains('gitcode-distribution.json')) {
-    Add-TrustError 'GitCode smoke must consume the public distribution contract.'
+if (-not $smoke.Contains('gitee-distribution.json')) {
+    Add-TrustError 'Gitee smoke must consume the public distribution contract.'
 }
-if ($smoke.Contains([string]$distribution.formalManifestPath)) {
-    Add-TrustError 'The API smoke command must not advance the formal latest manifest.'
+if (-not $sync.Contains('new FormData') -or -not $sync.Contains('new URLSearchParams') -or -not $sync.Contains('numericReleaseId')) {
+    Add-TrustError 'Gitee sync must use numeric Release IDs, multipart attachments and form-data content writes.'
 }
-if (-not $wizard.Contains('ask_secret GITCODE_TOKEN') -or
+if (-not $smoke.Contains('--range 0-0') -or -not $smoke.Contains('prerelease=true')) {
+    Add-TrustError 'Gitee smoke must use a prerelease and anonymous Range download.'
+}
+if (-not $wizard.Contains('ask_secret GITEE_TOKEN') -or
     -not $wizard.Contains('set_secret "$TOKEN_SECRET_NAME"') -or
-    -not $wizard.Contains('unset GITCODE_TOKEN')) {
-    Add-TrustError 'The setup wizard must capture, store, and clear the GitCode Token safely.'
+    -not $wizard.Contains('unset GITEE_TOKEN')) {
+    Add-TrustError 'The setup wizard must capture, store, and clear the Gitee Token safely.'
 }
 
 $trackedOutput = & git -C $root ls-files -z

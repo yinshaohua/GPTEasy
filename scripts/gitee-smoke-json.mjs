@@ -8,20 +8,9 @@ switch (command) {
     const config = JSON.parse(await readFile(configPath, "utf8"));
     const value = config[key];
     if (typeof value !== "string" && typeof value !== "number") {
-      throw new Error(`GitCode distribution config is missing ${key}`);
+      throw new Error(`Gitee distribution config is missing ${key}`);
     }
     process.stdout.write(String(value));
-    break;
-  }
-  case "release-body": {
-    const [tag] = args;
-    process.stdout.write(
-      JSON.stringify({
-        tag_name: tag,
-        name: `GPTEasy 分发冒烟 ${tag}`,
-        body: "非正式 API 冒烟资源，不是 GPTEasy 正式版本。",
-      }),
-    );
     break;
   }
   case "urlencode": {
@@ -33,7 +22,7 @@ switch (command) {
     process.stdout.write(
       `${JSON.stringify({
         schemaVersion: 1,
-        kind: "gitcode-api-smoke",
+        kind: "gitee-api-smoke",
         tag,
         asset,
         sha256,
@@ -41,17 +30,11 @@ switch (command) {
     );
     break;
   }
-  case "content-body": {
-    const [branch, message, manifestPath] = args;
-    const content = (await readFile(manifestPath)).toString("base64");
-    process.stdout.write(JSON.stringify({ branch, message, content }));
-    break;
-  }
   case "verify-manifest": {
     const [manifestPath, tag, sha256] = args;
     const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
     if (
-      manifest.kind !== "gitcode-api-smoke" ||
+      manifest.kind !== "gitee-api-smoke" ||
       manifest.tag !== tag ||
       manifest.sha256 !== sha256
     ) {
@@ -68,18 +51,19 @@ switch (command) {
       downloadUrl.origin !== expectedOrigin ||
       !downloadUrl.pathname.includes("/blobs/")
     ) {
-      throw new Error("GitCode content metadata returned an unexpected Raw URL");
+      throw new Error("Gitee content metadata returned an unexpected Raw URL");
     }
     process.stdout.write(downloadUrl.toString());
     break;
   }
   case "report": {
-    const [tag, attachment, manifest] = args;
+    const [tag, releaseId, attachment, manifest] = args;
     process.stdout.write(
       `${JSON.stringify({
         passed: true,
         formalManifestAdvanced: false,
         tag,
+        releaseId: Number(releaseId),
         anonymousAttachment: attachment,
         anonymousRawManifest: manifest,
       })}\n`,
@@ -88,7 +72,7 @@ switch (command) {
   }
   case "api-error": {
     const response = JSON.parse(await readFile(args[0], "utf8"));
-    const token = process.env.GITCODE_TOKEN ?? "";
+    const token = process.env.GITEE_TOKEN ?? "";
     const redact = (value) => {
       const text = String(value ?? "").slice(0, 500);
       return token ? text.replaceAll(token, "<REDACTED>") : text;
@@ -103,5 +87,5 @@ switch (command) {
     break;
   }
   default:
-    throw new Error(`unknown GitCode smoke JSON command: ${command ?? ""}`);
+    throw new Error(`unknown Gitee smoke JSON command: ${command ?? ""}`);
 }

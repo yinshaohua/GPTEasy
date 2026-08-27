@@ -36,7 +36,7 @@ const pendingUpdate = {
   failureCategory: null,
   errorMessage: null,
   manualDownloadUrl: "https://github.com/yinshaohua/GPTEasy/releases/latest",
-  releaseNotesUrl: "https://gitcode.com/ericyin99/GPTEasy-Releases/releases/tag/v1.2.0",
+  releaseNotesUrl: "https://gitee.com/ericshaohua/gpteasy-releases/releases/tag/v1.2.0",
 };
 
 async function openProviderCatalog(page: Page, width: number, height: number) {

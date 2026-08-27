@@ -1,0 +1,28 @@
+name: Gitee 分发冒烟
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+      GITEE_REPOSITORY: ${{ vars.GITEE_REPOSITORY }}
+      GITEE_DEFAULT_BRANCH: ${{ vars.GITEE_DEFAULT_BRANCH }}
+      SMOKE_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 验证公开仓库输入
+        shell: bash
+        run: |
+          test -n "$GITEE_REPOSITORY"
+          test -n "$GITEE_DEFAULT_BRANCH"
+          test -n "$GITEE_TOKEN"
+      - name: 验证 Gitee Release、附件与测试清单
+        shell: bash
+        run: bash scripts/smoke-gitee-release.sh

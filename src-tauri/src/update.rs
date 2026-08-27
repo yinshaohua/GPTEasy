@@ -11,8 +11,8 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 pub const MANUAL_DOWNLOAD_URL: &str = "https://github.com/yinshaohua/GPTEasy/releases/latest";
-pub const GITCODE_RELEASES_URL: &str =
-    "https://gitcode.com/ericyin99/GPTEasy-Releases/releases/tag";
+pub const GITEE_RELEASES_URL: &str =
+    "https://gitee.com/ericshaohua/gpteasy-releases/releases/tag";
 pub const CHECK_INTERVAL_SECONDS: u64 = 24 * 60 * 60;
 const NSIS_INSTALL_ARGUMENTS: [&str; 2] = ["/P", "/R"];
 
@@ -756,7 +756,7 @@ fn is_permitted_update_url(url: &str) -> bool {
 }
 
 fn release_notes_url(version: &str) -> String {
-    format!("{GITCODE_RELEASES_URL}/v{version}")
+    format!("{GITEE_RELEASES_URL}/v{version}")
 }
 
 fn now_epoch_seconds() -> u64 {
@@ -1000,7 +1000,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_snapshot_links_to_the_versioned_gitcode_release() {
+    fn pending_snapshot_links_to_the_versioned_gitee_release() {
         let coordinator = UpdateCoordinator::with_endpoint("1.0.0", "http://127.0.0.1", "key");
         coordinator.mark_ready(
             Manifest {
@@ -1014,7 +1014,7 @@ mod tests {
 
         assert_eq!(
             coordinator.snapshot().release_notes_url.as_deref(),
-            Some("https://gitcode.com/ericyin99/GPTEasy-Releases/releases/tag/v1.1.0")
+            Some("https://gitee.com/ericshaohua/gpteasy-releases/releases/tag/v1.1.0")
         );
     }
 

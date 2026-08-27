@@ -14,7 +14,7 @@ if (
   );
 }
 if (!/^[^/\s]+\/[^/\s]+$/.test(repository)) {
-  throw new Error("GitCode repository must use owner/repo form");
+  throw new Error("Gitee repository must use owner/repo form");
 }
 
 let decodedKey;
@@ -35,7 +35,7 @@ if (
 const repositoryRoot = optionValue ? path.resolve(optionValue) : process.cwd();
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const distribution = JSON.parse(
-  await readFile(path.join(scriptDirectory, "gitcode-distribution.json"), "utf8"),
+  await readFile(path.join(scriptDirectory, "gitee-distribution.json"), "utf8"),
 );
 const configPath = path.join(repositoryRoot, "src-tauri", "tauri.conf.json");
 const config = JSON.parse(await readFile(configPath, "utf8"));

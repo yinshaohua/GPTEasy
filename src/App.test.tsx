@@ -425,7 +425,7 @@ describe("应用更新", () => {
       failureCategory: null,
       errorMessage: null,
       manualDownloadUrl: "https://github.com/yinshaohua/GPTEasy/releases/latest",
-      releaseNotesUrl: "https://gitcode.com/ericyin99/GPTEasy-Releases/releases/tag/v1.1.0",
+      releaseNotesUrl: "https://gitee.com/ericshaohua/gpteasy-releases/releases/tag/v1.1.0",
     };
     const failedUpdate = {
       ...readyUpdate,
@@ -451,7 +451,7 @@ describe("应用更新", () => {
     expect(dialog).toHaveTextContent("更新已下载并通过签名验证");
     expect(dialog).toHaveTextContent("修复稳定性问题");
     expect(dialog).not.toHaveTextContent("第二段完整说明不在摘要中显示");
-    fireEvent.click(within(dialog).getByRole("button", { name: "查看 GitCode 完整发布说明" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "查看 Gitee 完整发布说明" }));
     expect(invoke).toHaveBeenCalledWith("open_update_release_notes", {
       url: readyUpdate.releaseNotesUrl,
     });
@@ -481,7 +481,7 @@ describe("应用更新", () => {
       failureCategory: null,
       errorMessage: null,
       manualDownloadUrl: "https://github.com/yinshaohua/GPTEasy/releases/latest",
-      releaseNotesUrl: "https://gitcode.com/ericyin99/GPTEasy-Releases/releases/tag/v1.1.0",
+      releaseNotesUrl: "https://gitee.com/ericshaohua/gpteasy-releases/releases/tag/v1.1.0",
     };
     invoke.mockImplementation((command: string) => {
       if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);

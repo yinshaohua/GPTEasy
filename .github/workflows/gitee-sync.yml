@@ -1,4 +1,4 @@
-name: GitCode 正式分发同步
+name: Gitee 正式分发同步
 
 on:
   release:
@@ -21,18 +21,18 @@ jobs:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GITHUB_REPOSITORY: ${{ github.repository }}
       RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
-      GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
-      GITCODE_REPOSITORY: ${{ vars.GITCODE_REPOSITORY }}
-      GITCODE_DEFAULT_BRANCH: ${{ vars.GITCODE_DEFAULT_BRANCH }}
+      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+      GITEE_REPOSITORY: ${{ vars.GITEE_REPOSITORY }}
+      GITEE_DEFAULT_BRANCH: ${{ vars.GITEE_DEFAULT_BRANCH }}
     steps:
       - uses: actions/checkout@v4
       - name: 验证同步输入
         shell: bash
         run: |
           test -n "$RELEASE_TAG"
-          test -n "$GITCODE_REPOSITORY"
-          test -n "$GITCODE_DEFAULT_BRANCH"
-          test -n "$GITCODE_TOKEN"
-      - name: 从 GitHub Release 下载并同步 GitCode
+          test -n "$GITEE_REPOSITORY"
+          test -n "$GITEE_DEFAULT_BRANCH"
+          test -n "$GITEE_TOKEN"
+      - name: 从 GitHub Release 下载并同步 Gitee
         shell: bash
-        run: node scripts/sync-gitcode-release.mjs
+        run: node scripts/sync-gitee-release.mjs

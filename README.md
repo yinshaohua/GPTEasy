@@ -8,7 +8,7 @@ GPTEasy 是一款面向 Windows 用户的 Codex 配置与会话管理工具。�
 
 ## 下载与安装
 
-国内用户可从 [GitCode Releases](https://gitcode.com/ericyin99/GPTEasy-Releases/releases) 下载最新的 Windows x64 当前用户安装包；[GitHub Releases](https://github.com/yinshaohua/GPTEasy/releases/latest) 继续提供源码、发布说明和备用下载。两个平台分发同一次正式构建的安装包，安装不需要管理员权限。
+国内用户可从 [Gitee Releases](https://gitee.com/ericshaohua/gpteasy-releases/releases) 下载最新的 Windows x64 当前用户安装包；[GitHub Releases](https://github.com/yinshaohua/GPTEasy/releases/latest) 继续提供源码、发布说明和备用下载。两个平台分发同一次正式构建的安装包，安装不需要管理员权限。
 
 `v1.1.0` 是首个内置应用更新信任根的更新自举版本，必须先手工下载安装。此后的正式更新由应用自动检查和下载，签名验证通过后仍需用户明确选择“重启并更新”。
 
@@ -92,7 +92,7 @@ cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1
 npm run candidate:windows
 ```
 
-应用更新的 GitCode 分发信任根、带密码 updater 密钥、冒烟工作流与版本准备流程参见 [`docs/release/gitcode-distribution.md`](docs/release/gitcode-distribution.md)。首次设置在 Git Bash 或 WSL2 中运行 `bash scripts/setup-gitcode-distribution.sh`；私钥和密码不得进入仓库、日志或发布附件。
+应用更新的 Gitee 分发信任根、带密码 updater 密钥、冒烟工作流与版本准备流程参见 [`docs/release/gitee-distribution.md`](docs/release/gitee-distribution.md)。首次设置在 Git Bash 或 WSL2 中运行 `bash scripts/setup-gitee-distribution.sh`；私钥和密码不得进入仓库、日志或发布附件。
 
 候选构建要求在干净的 `main` 工作树中运行。
 

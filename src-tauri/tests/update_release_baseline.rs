@@ -194,7 +194,7 @@ fn updater_manifest_gate_accepts_only_complete_windows_stable_entries() {
             "pub_date": "2026-08-18T00:00:00Z",
             "platforms": {
                 "windows-x86_64": {
-                    "url": "https://gitcode.com/example/releases/download/v1.2.3/GPTEasy.exe",
+                    "url": "https://gitee.com/example/releases/download/v1.2.3/GPTEasy.exe",
                     "signature": TEST_SIGNATURE
                 }
             }
@@ -297,19 +297,19 @@ fn trust_root_gate_allows_only_public_inputs_and_rejects_tracked_private_keys() 
     fs::create_dir_all(temp.path().join(".github/workflows")).expect("create workflow directory");
     fs::create_dir_all(temp.path().join("scripts")).expect("create script directory");
     fs::write(
-        temp.path().join("scripts/gitcode-distribution.json"),
+        temp.path().join("scripts/gitee-distribution.json"),
         serde_json::to_vec_pretty(&json!({
             "schemaVersion": 1,
-            "issue": 41,
-            "apiBaseUrl": "https://api.gitcode.com/api/v5",
-            "rawBaseUrl": "https://raw.gitcode.com",
+            "issue": 55,
+            "apiBaseUrl": "https://api.gitee.com/api/v5",
+            "rawBaseUrl": "https://gitee.com",
             "defaultBranch": "main",
             "formalManifestPath": "latest.md",
             "smokeManifestPrefix": "smoke/",
             "platform": "windows-x86_64",
-            "repositoryVariable": "GITCODE_REPOSITORY",
-            "branchVariable": "GITCODE_DEFAULT_BRANCH",
-            "tokenSecret": "GITCODE_TOKEN"
+            "repositoryVariable": "GITEE_REPOSITORY",
+            "branchVariable": "GITEE_DEFAULT_BRANCH",
+            "tokenSecret": "GITEE_TOKEN"
         }))
         .expect("distribution contract JSON"),
     )
@@ -320,7 +320,7 @@ fn trust_root_gate_allows_only_public_inputs_and_rejects_tracked_private_keys() 
             "bundle": { "createUpdaterArtifacts": true },
             "plugins": {
                 "updater": {
-                    "endpoints": ["https://raw.gitcode.com/example/releases/raw/main/latest.md"],
+                    "endpoints": ["https://gitee.com/example/releases/raw/main/latest.md"],
                     "pubkey": PUBLIC_KEY
                 }
             }
@@ -329,28 +329,28 @@ fn trust_root_gate_allows_only_public_inputs_and_rejects_tracked_private_keys() 
     )
     .expect("write Tauri trust root");
     fs::write(
-        temp.path().join(".github/workflows/gitcode-smoke.yml"),
-        "env:\n  GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}\n  GITCODE_REPOSITORY: ${{ vars.GITCODE_REPOSITORY }}\n",
+        temp.path().join(".github/workflows/gitee-smoke.yml"),
+        "env:\n  GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}\n  GITEE_REPOSITORY: ${{ vars.GITEE_REPOSITORY }}\n",
     )
     .expect("write workflow");
     fs::write(
-        temp.path().join(".github/workflows/gitcode-sync.yml"),
-        "on:\n  release:\n    types: [published]\nenv:\n  GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}\n  GITCODE_REPOSITORY: ${{ vars.GITCODE_REPOSITORY }}\n",
+        temp.path().join(".github/workflows/gitee-sync.yml"),
+        "on:\n  release:\n    types: [published]\nenv:\n  GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}\n  GITEE_REPOSITORY: ${{ vars.GITEE_REPOSITORY }}\n",
     )
     .expect("write sync workflow");
     fs::write(
-        temp.path().join("scripts/smoke-gitcode-release.sh"),
-        "#!/usr/bin/env bash\n# gitcode-distribution.json\nAuthorization: Bearer $GITCODE_TOKEN\n",
+        temp.path().join("scripts/smoke-gitee-release.sh"),
+        "#!/usr/bin/env bash\n# gitee-distribution.json\nAuthorization: Bearer $GITEE_TOKEN\n--range 0-0\nprerelease=true\n",
     )
     .expect("write smoke script");
     fs::write(
-        temp.path().join("scripts/sync-gitcode-release.mjs"),
-        "const headers = { Authorization: `Bearer ${configuration.gitcodeToken}` };\n",
+        temp.path().join("scripts/sync-gitee-release.mjs"),
+        "const headers = { Authorization: `Bearer ${configuration.giteeToken}` };\nnew FormData();\nnew URLSearchParams();\nnumericReleaseId();\n",
     )
     .expect("write sync script");
     fs::write(
-        temp.path().join("scripts/setup-gitcode-distribution.sh"),
-        "#!/usr/bin/env bash\nask_secret GITCODE_TOKEN\nset_secret \"$TOKEN_SECRET_NAME\"\nunset GITCODE_TOKEN\n",
+        temp.path().join("scripts/setup-gitee-distribution.sh"),
+        "#!/usr/bin/env bash\nask_secret GITEE_TOKEN\nset_secret \"$TOKEN_SECRET_NAME\"\nunset GITEE_TOKEN\n",
     )
     .expect("write setup wizard");
     let init = Command::new("git")
@@ -427,10 +427,10 @@ fn configure_trust_root_writes_only_public_endpoint_and_key() {
     assert_eq!(config["plugins"]["updater"]["pubkey"], PUBLIC_KEY);
     assert_eq!(
         config["plugins"]["updater"]["endpoints"],
-        json!(["https://raw.gitcode.com/example/releases/raw/main/latest.md"])
+        json!(["https://gitee.com/example/releases/raw/main/latest.md"])
     );
     let serialized = serde_json::to_string(&config).expect("serialize configured trust root");
-    assert!(!serialized.contains("GITCODE_TOKEN"));
+    assert!(!serialized.contains("GITEE_TOKEN"));
     assert!(!serialized.contains("PRIVATE_KEY"));
 }
 
@@ -512,11 +512,11 @@ fn encrypted_updater_key_check_understands_the_current_tauri_header() {
 }
 
 #[test]
-fn repository_declares_repeatable_gitcode_setup_without_formal_smoke_manifest_writes() {
+fn repository_declares_repeatable_gitee_setup_without_formal_smoke_manifest_writes() {
     let root = repository_root();
-    let wizard = fs::read_to_string(root.join("scripts/setup-gitcode-distribution.sh"))
-        .expect("read GitCode setup wizard");
-    let contract = read_json(root.join("scripts/gitcode-distribution.json"));
+    let wizard = fs::read_to_string(root.join("scripts/setup-gitee-distribution.sh"))
+        .expect("read Gitee setup wizard");
+    let contract = read_json(root.join("scripts/gitee-distribution.json"));
     let token_secret = contract["tokenSecret"].as_str().expect("token secret name");
     let repository_variable = contract["repositoryVariable"]
         .as_str()
@@ -524,67 +524,80 @@ fn repository_declares_repeatable_gitcode_setup_without_formal_smoke_manifest_wr
     let branch_variable = contract["branchVariable"]
         .as_str()
         .expect("branch variable name");
-    assert!(wizard.contains("ask_secret GITCODE_TOKEN"));
+    assert!(wizard.contains("ask_secret GITEE_TOKEN"));
     assert!(wizard.contains("set_secret \"$TOKEN_SECRET_NAME\""));
     assert!(wizard.contains("set_var \"$REPOSITORY_VARIABLE_NAME\""));
     assert!(wizard.contains("set_var \"$BRANCH_VARIABLE_NAME\""));
-    assert_eq!(token_secret, "GITCODE_TOKEN");
-    assert_eq!(repository_variable, "GITCODE_REPOSITORY");
-    assert_eq!(branch_variable, "GITCODE_DEFAULT_BRANCH");
+    assert!(wizard.contains("Gitee distribution repository must be public"));
+    assert!(wizard.contains("anonymous Gitee README read failed"));
+    assert_eq!(token_secret, "GITEE_TOKEN");
+    assert_eq!(repository_variable, "GITEE_REPOSITORY");
+    assert_eq!(branch_variable, "GITEE_DEFAULT_BRANCH");
     assert!(wizard.contains("离线备份"));
-    assert_eq!(wizard.matches("ask_secret GITCODE_TOKEN").count(), 1);
-    assert!(wizard.contains("gh workflow run gitcode-smoke.yml"));
+    assert_eq!(wizard.matches("ask_secret GITEE_TOKEN").count(), 1);
+    assert!(wizard.contains("gh workflow run gitee-smoke.yml"));
 
-    let workflow = fs::read_to_string(root.join(".github/workflows/gitcode-smoke.yml"))
-        .expect("read GitCode smoke workflow");
-    assert!(workflow.contains("GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}"));
-    assert!(workflow.contains("GITCODE_REPOSITORY: ${{ vars.GITCODE_REPOSITORY }}"));
+    let workflow = fs::read_to_string(root.join(".github/workflows/gitee-smoke.yml"))
+        .expect("read Gitee smoke workflow");
+    assert!(workflow.contains("GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}"));
+    assert!(workflow.contains("GITEE_REPOSITORY: ${{ vars.GITEE_REPOSITORY }}"));
 
-    let smoke = fs::read_to_string(root.join("scripts/smoke-gitcode-release.sh"))
-        .expect("read GitCode smoke command");
+    let smoke = fs::read_to_string(root.join("scripts/smoke-gitee-release.sh"))
+        .expect("read Gitee smoke command");
     assert!(smoke.contains("smoke-"));
     assert!(!smoke.contains("latest.md"));
 }
 
 #[test]
-fn gitcode_distribution_contract_contains_only_public_protocol_configuration() {
-    let contract = read_json(repository_root().join("scripts/gitcode-distribution.json"));
+fn gitee_distribution_contract_contains_only_public_protocol_configuration() {
+    let contract = read_json(repository_root().join("scripts/gitee-distribution.json"));
     assert_eq!(contract["schemaVersion"], 1);
-    assert_eq!(contract["issue"], 41);
-    assert_eq!(contract["apiBaseUrl"], "https://api.gitcode.com/api/v5");
-    assert_eq!(contract["rawBaseUrl"], "https://raw.gitcode.com");
+    assert_eq!(contract["issue"], 55);
+    assert_eq!(contract["apiBaseUrl"], "https://api.gitee.com/api/v5");
+    assert_eq!(contract["rawBaseUrl"], "https://gitee.com");
     assert_eq!(contract["formalManifestPath"], "latest.md");
     assert_eq!(contract["smokeManifestPrefix"], "smoke/");
     assert_eq!(contract["platform"], "windows-x86_64");
-    assert_eq!(contract["repositoryVariable"], "GITCODE_REPOSITORY");
-    assert_eq!(contract["branchVariable"], "GITCODE_DEFAULT_BRANCH");
-    assert_eq!(contract["tokenSecret"], "GITCODE_TOKEN");
-    let serialized = serde_json::to_string(&contract).expect("serialize GitCode contract");
+    assert_eq!(contract["repositoryVariable"], "GITEE_REPOSITORY");
+    assert_eq!(contract["branchVariable"], "GITEE_DEFAULT_BRANCH");
+    assert_eq!(contract["tokenSecret"], "GITEE_TOKEN");
+    let serialized = serde_json::to_string(&contract).expect("serialize Gitee contract");
     assert!(!serialized.contains("Bearer "));
     assert!(!serialized.contains("PRIVATE_KEY"));
     assert!(!serialized.contains("PASSWORD"));
 }
 
 #[test]
-fn gitcode_smoke_exercises_authenticated_writes_and_anonymous_reads() {
+fn gitee_smoke_declares_authenticated_writes_and_anonymous_reads() {
+    let smoke = fs::read_to_string(repository_root().join("scripts/smoke-gitee-release.sh"))
+        .expect("read Gitee smoke command");
+    assert!(smoke.contains("Authorization: Bearer $GITEE_TOKEN"));
+    assert!(smoke.contains("--form \"file=@$CURL_ASSET_PATH"));
+    assert!(smoke.contains("--range 0-0"));
+    assert!(smoke.contains("prerelease=true"));
+
     #[derive(Debug)]
     struct RequestRecord {
         method: String,
         path: String,
         authorization: Option<String>,
-        upload_test_header: Option<String>,
     }
 
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake GitCode server");
-    let address = listener.local_addr().expect("fake GitCode address");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake Gitee server");
+    let address = listener.local_addr().expect("fake Gitee address");
+    let fixture = "GPTEasy Gitee distribution smoke fixture\n".to_owned();
+    let fixture_relative = PathBuf::from("src-tauri/target/gitee-smoke-fixture.txt");
+    let fixture_for_bash = fixture_relative.to_string_lossy().replace('\\', "/");
+    let fixture_path = repository_root().join(&fixture_relative);
+    fs::write(&fixture_path, &fixture).expect("write smoke attachment fixture");
     let records = Arc::new(Mutex::new(Vec::<RequestRecord>::new()));
     let server_records = Arc::clone(&records);
     let server = thread::spawn(move || {
         let mut raw_manifest = String::new();
         let mut attachment_downloads = 0;
         let mut raw_downloads = 0;
-        for _ in 0..9 {
-            let (mut stream, _) = listener.accept().expect("accept fake GitCode request");
+        for _ in 0..8 {
+            let (mut stream, _) = listener.accept().expect("accept fake Gitee request");
             let mut request = Vec::new();
             let mut buffer = [0_u8; 8192];
             let header_end;
@@ -620,11 +633,6 @@ fn gitcode_smoke_exercises_authenticated_writes_and_anonymous_reads() {
                     .or_else(|| line.strip_prefix("authorization: "))
                     .map(str::to_owned)
             });
-            let upload_test_header = headers.lines().find_map(|line| {
-                line.strip_prefix("x-upload-test: ")
-                    .or_else(|| line.strip_prefix("X-Upload-Test: "))
-                    .map(str::to_owned)
-            });
             server_records
                 .lock()
                 .expect("request records")
@@ -632,41 +640,33 @@ fn gitcode_smoke_exercises_authenticated_writes_and_anonymous_reads() {
                     method: method.clone(),
                     path: path.clone(),
                     authorization,
-                    upload_test_header,
                 });
 
             let (status, content_type, response) = if method == "POST"
                 && path.ends_with("/releases")
             {
-                (201, "application/json", "{}".to_owned())
-            } else if method == "GET"
-                && path.contains("/upload_url?file_name=gpteasy-smoke-42-1.txt")
-            {
-                (
-                    200,
-                    "application/json",
-                    format!(
-                        "{{\"url\":\"http://{address}/upload\",\"headers\":{{\"x-upload-test\":\"fixture\"}}}}"
-                    ),
-                )
-            } else if method == "PUT" && path == "/upload" {
-                (201, "application/json", "{}".to_owned())
+                (201, "application/json", "{\"id\":42}".to_owned())
+            } else if method == "POST" && path.ends_with("/releases/42/attach_files") {
+                (201, "application/json", "{\"id\":7}".to_owned())
             } else if method == "GET" && path.ends_with("/download") {
                 attachment_downloads += 1;
-                if attachment_downloads == 1 {
-                    (418, "text/plain", "not propagated".to_owned())
+                let body = if attachment_downloads == 1 {
+                    fixture[..1].to_owned()
                 } else {
-                    (
-                        200,
-                        "text/plain",
-                        "GPTEasy GitCode distribution smoke smoke-42-1\n".to_owned(),
-                    )
-                }
+                    fixture.clone()
+                };
+                (200, "text/plain", body)
             } else if method == "POST" && path.contains("/contents/smoke/") {
                 let body = &request[header_end..header_end + content_length];
-                let content: Value = serde_json::from_slice(body).expect("content request JSON");
+                let body = String::from_utf8_lossy(body);
+                let content = body
+                    .split("name=\"content\"")
+                    .nth(1)
+                    .and_then(|value| value.split("\r\n\r\n").nth(1))
+                    .and_then(|value| value.split("\r\n--").next())
+                    .expect("content request form-data");
                 let decoded = base64::engine::general_purpose::STANDARD
-                    .decode(content["content"].as_str().expect("base64 content"))
+                    .decode(content)
                     .expect("decode test manifest");
                 raw_manifest = String::from_utf8(decoded).expect("test manifest UTF-8");
                 (201, "application/json", "{}".to_owned())
@@ -712,31 +712,35 @@ fn gitcode_smoke_exercises_authenticated_writes_and_anonymous_reads() {
     });
 
     let output = Command::new(git_bash())
-        .arg("scripts/smoke-gitcode-release.sh")
-        .env("GITCODE_TOKEN", "test-token")
-        .env("GITCODE_REPOSITORY", "example/releases")
-        .env("GITCODE_DEFAULT_BRANCH", "main")
+        .arg("scripts/smoke-gitee-release.sh")
+        .env("GITEE_TOKEN", "test-token")
+        .env("GITEE_REPOSITORY", "example/releases")
+        .env("GITEE_DEFAULT_BRANCH", "main")
         .env("SMOKE_RUN_ID", "42-1")
-        .env("GITCODE_SMOKE_TEST_MODE", "1")
-        .env("GITCODE_API_BASE_URL", format!("http://{address}/api/v5"))
-        .env("GITCODE_RAW_BASE_URL", format!("http://{address}/raw"))
-        .env("GITCODE_SMOKE_RETRY_DELAY_SECONDS", "0")
+        .env("GITEE_SMOKE_TEST_MODE", "1")
+        .env("SMOKE_ASSET_PATH", fixture_for_bash)
+        .env("GITEE_API_BASE_URL", format!("http://{address}/api/v5"))
+        .env("GITEE_RAW_BASE_URL", format!("http://{address}/raw"))
+        .env("GITEE_SMOKE_RETRY_DELAY_SECONDS", "0")
         .current_dir(repository_root())
         .output()
-        .expect("run GitCode smoke against fake server");
+        .expect("run Gitee smoke against fake server");
     assert!(
         output.status.success(),
-        "GitCode smoke failed: {}{}",
+        "Gitee smoke failed: {}{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    server.join().expect("fake GitCode server");
+    server.join().expect("fake Gitee server");
+    fs::remove_file(&fixture_path).expect("remove smoke attachment fixture");
     let report: Value = serde_json::from_slice(&output.stdout).expect("smoke report JSON");
     assert_eq!(report["passed"], true);
     assert_eq!(report["formalManifestAdvanced"], false);
+    assert_eq!(report["tag"], "smoke-42-1");
+    assert_eq!(report["releaseId"], 42);
 
     let records = records.lock().expect("read request records");
-    assert_eq!(records.len(), 9);
+    assert_eq!(records.len(), 8);
     assert!(
         records
             .iter()
@@ -753,7 +757,6 @@ fn gitcode_smoke_exercises_authenticated_writes_and_anonymous_reads() {
         }
     }
     assert_eq!(records[0].method, "POST");
-    assert_eq!(records[2].method, "PUT");
-    assert_eq!(records[2].upload_test_header.as_deref(), Some("fixture"));
-    assert_eq!(records[8].method, "GET");
+    assert_eq!(records[1].method, "POST");
+    assert_eq!(records[7].method, "GET");
 }

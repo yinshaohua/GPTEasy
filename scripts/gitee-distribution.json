@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "issue": 55,
+  "apiBaseUrl": "https://api.gitee.com/api/v5",
+  "rawBaseUrl": "https://gitee.com",
+  "defaultBranch": "main",
+  "formalManifestPath": "latest.md",
+  "smokeManifestPrefix": "smoke/",
+  "platform": "windows-x86_64",
+  "repositoryVariable": "GITEE_REPOSITORY",
+  "branchVariable": "GITEE_DEFAULT_BRANCH",
+  "tokenSecret": "GITEE_TOKEN"
+}

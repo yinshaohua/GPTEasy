@@ -181,84 +181,111 @@ finish() {
 
 # ──────────────────────────────────────────────────────────────────────────
 # STAGES — author this section. One stage() per step the human takes.
+# Replace the example below. Set TOTAL_STAGES to match the stages you write.
 # ──────────────────────────────────────────────────────────────────────────
 
-TOTAL_STAGES=3
-ENV_FILE=".release.env"
-GITCODE_REPOSITORY="ericyin99/GPTEasy-Releases"
-GITCODE_DEFAULT_BRANCH="main"
-GITCODE_API_BASE="https://api.gitcode.com/api/v5"
+TOTAL_STAGES=6
+[[ "$ENV_FILE" == ".env" ]] && ENV_FILE=".release.env"
 
-banner "GPTEasy GitCode README"
+CONTRACT_PATH="scripts/gitee-distribution.json"
+config_value() {
+  node scripts/gitee-smoke-json.mjs config "$CONTRACT_PATH" "$1"
+}
+REPOSITORY_VARIABLE_NAME=$(config_value repositoryVariable)
+BRANCH_VARIABLE_NAME=$(config_value branchVariable)
+TOKEN_SECRET_NAME=$(config_value tokenSecret)
+CONTRACT_DEFAULT_BRANCH=$(config_value defaultBranch)
 
-stage "确认本地发布目标"
-say "GitCode 只接收 README.md；源码、构建目录和应用图片不会上传。"
-[[ -f "README.md" ]] || { warn "仓库根目录找不到 README.md"; exit 1; }
-write_env GITCODE_REPOSITORY "$GITCODE_REPOSITORY"
-write_env GITCODE_DEFAULT_BRANCH "$GITCODE_DEFAULT_BRANCH"
+banner "GPTEasy Gitee 分发设置"
 
-stage "创建并保存 GitCode Token"
-say "Token 只保存在被 Git 忽略的 .release.env，不会写入聊天或提交。"
-open_url "https://gitcode.com/setting/token-classic"
-step "登录 GitCode，创建用于维护公开仓库内容的最小权限 Token。"
-step "仅选择目标仓库内容写入（以及 API 要求的仓库 Release 维护权限）；不要授予账户管理权限。"
-step "复制 Token；页面关闭后通常无法再次查看。"
-ask_secret GITCODE_TOKEN "粘贴 GitCode Token（输入不会显示）："
-[[ -n "$GITCODE_TOKEN" ]] || { warn "Token 不能为空"; exit 1; }
-write_env GITCODE_TOKEN "$GITCODE_TOKEN"
-chmod 600 "$ENV_FILE" 2>/dev/null || true
+stage "创建公开分发仓库"
+say "该仓库只保存下载说明、更新清单和 Release，不镜像源码，也不执行构建。"
+open_url "https://gitee.com/new"
+step "创建公开仓库；使用 main 作为默认分支，并用下载说明初始化 README。"
+ask GITEE_REPOSITORY "输入公开仓库坐标（owner/repo）："
+[[ "$GITEE_REPOSITORY" =~ ^[^/[:space:]]+/[^/[:space:]]+$ ]] || { warn "仓库坐标必须是 owner/repo"; exit 1; }
+GITEE_DEFAULT_BRANCH="$CONTRACT_DEFAULT_BRANCH"
+write_env GITEE_REPOSITORY "$GITEE_REPOSITORY"
+write_env GITEE_DEFAULT_BRANCH "$GITEE_DEFAULT_BRANCH"
 
-stage "同步并验证 README"
-say "正在把本地 README.md 写入 GitCode，并用匿名 Raw 地址核对内容。"
-export GITCODE_TOKEN
-export GITCODE_REPOSITORY GITCODE_DEFAULT_BRANCH
-export GITCODE_API_BASE
-node --input-type=module <<'NODE'
-import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+stage "创建最小权限 Token"
+open_url "https://gitee.com/setting/token-classic"
+step "创建仅能维护该公开仓库 Release 与仓库内容的 Token；不要授予账户管理权限。"
+step "复制 Token。页面关闭后通常无法再次查看。"
+ask_secret GITEE_TOKEN "粘贴 Gitee Token（输入不会显示）："
+[[ -n "$GITEE_TOKEN" ]] || { warn "Token 不能为空"; exit 1; }
+set_secret "$TOKEN_SECRET_NAME" "$GITEE_TOKEN"
 
-const apiBase = process.env.GITCODE_API_BASE;
-const repository = process.env.GITCODE_REPOSITORY;
-const branch = process.env.GITCODE_DEFAULT_BRANCH;
-const token = process.env.GITCODE_TOKEN;
-const local = await readFile("README.md");
-const endpoint = `${apiBase}/repos/${repository}/contents/README.md?ref=${encodeURIComponent(branch)}`;
+stage "验证公开仓库"
+say "正在验证仓库可匿名访问，且 main 已由 README 初始化。"
+export GITEE_TOKEN
+GITEE_REPOSITORY="$GITEE_REPOSITORY" GITEE_DEFAULT_BRANCH="$GITEE_DEFAULT_BRANCH" node --input-type=module <<'NODE'
+const repository = process.env.GITEE_REPOSITORY;
+const branch = process.env.GITEE_DEFAULT_BRANCH;
+const token = process.env.GITEE_TOKEN;
+const apiBase = "https://api.gitee.com/api/v5";
 
-async function request(url, options = {}) {
-  const response = await fetch(url, {
-    ...options,
-    headers: {
-      Accept: "application/json",
-      Authorization: `Bearer ${token}`,
-      ...(options.body ? { "Content-Type": "application/json" } : {}),
-      ...(options.headers ?? {}),
-    },
-  });
-  const body = await response.text();
-  if (!response.ok) throw new Error(`GitCode request failed with HTTP ${response.status}`);
-  try { return body ? JSON.parse(body) : {}; } catch { throw new Error("GitCode returned invalid JSON"); }
+const response = await fetch(`${apiBase}/repos/${repository}`, {
+  headers: { Accept: "application/json", Authorization: `Bearer ${token}` },
+});
+if (!response.ok) throw new Error(`Gitee repository lookup failed with HTTP ${response.status}`);
+const details = await response.json();
+if (details.private === true || details.public === false) throw new Error("Gitee distribution repository must be public");
+if (details.default_branch !== branch) throw new Error(`Gitee default branch must be ${branch}`);
+const readme = await fetch(`${apiBase}/repos/${repository}/contents/README.md?ref=${encodeURIComponent(branch)}`, {
+  headers: { Accept: "application/json", Authorization: `Bearer ${token}` },
+});
+if (!readme.ok) throw new Error(`Gitee README on ${branch} is unavailable (HTTP ${readme.status})`);
+const anonymous = await fetch(`https://gitee.com/${repository}/raw/${encodeURIComponent(branch)}/README.md`);
+if (!anonymous.ok || !(await anonymous.text()).trim()) throw new Error("anonymous Gitee README read failed");
+NODE
+unset GITEE_TOKEN
+set_var "$REPOSITORY_VARIABLE_NAME" "$GITEE_REPOSITORY"
+set_var "$BRANCH_VARIABLE_NAME" "$GITEE_DEFAULT_BRANCH"
+
+stage "生成 updater 信任根"
+say "私钥必须留在仓库外。Tauri 将在终端中隐藏询问并确认密码。"
+ask UPDATER_KEY_PATH "输入仓库外私钥路径（建议 ~/.tauri/gpteasy-updater.key）："
+[[ -n "$UPDATER_KEY_PATH" ]] || UPDATER_KEY_PATH="$HOME/.tauri/gpteasy-updater.key"
+UPDATER_KEY_PATH="${UPDATER_KEY_PATH/#\~/$HOME}"
+mkdir -p "$(dirname "$UPDATER_KEY_PATH")"
+if [[ ! -f "$UPDATER_KEY_PATH" ]]; then
+  npx --no-install tauri signer generate --write-keys "$UPDATER_KEY_PATH"
+else
+  note "保留已有私钥：$UPDATER_KEY_PATH"
+fi
+[[ -s "$UPDATER_KEY_PATH" && -s "$UPDATER_KEY_PATH.pub" ]] || { warn "Tauri 未生成完整密钥对"; exit 1; }
+if ! node scripts/check-encrypted-updater-key.mjs "$UPDATER_KEY_PATH" >/dev/null; then
+  warn "私钥没有使用密码加密；请安全删除后重新生成"
+  exit 1
+fi
+UPDATER_PUBLIC_KEY=$(tr -d '\r\n' < "$UPDATER_KEY_PATH.pub")
+write_env UPDATER_KEY_PATH "$UPDATER_KEY_PATH"
+write_env UPDATER_PUBLIC_KEY "$UPDATER_PUBLIC_KEY"
+node scripts/configure-update-trust-root.mjs "$GITEE_REPOSITORY" "$UPDATER_PUBLIC_KEY"
+
+stage "确认离线备份"
+step "把私钥文件复制到至少一份离线加密介质。"
+step "把密钥密码保存到与私钥分离的密码管理器或离线记录。"
+confirm "已经验证离线备份可读取，并确认密码没有写入仓库或终端日志？" || {
+  warn "离线备份确认前不能完成信任根设置"
+  exit 1
 }
 
-const current = await request(endpoint);
-if (!current?.sha) throw new Error("GitCode README metadata did not include a file SHA");
-await request(`${apiBase}/repos/${repository}/contents/README.md`, {
-  method: "PUT",
-  body: JSON.stringify({
-    branch,
-    message: "更新项目 README",
-    content: local.toString("base64"),
-    sha: current.sha,
-  }),
-});
-
-const updated = await request(endpoint);
-if (!updated?.download_url) throw new Error("GitCode README metadata did not include a Raw URL");
-const rawResponse = await fetch(updated.download_url);
-if (!rawResponse.ok) throw new Error(`GitCode Raw README returned HTTP ${rawResponse.status}`);
-const remote = Buffer.from(await rawResponse.arrayBuffer());
-const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
-if (hash(local) !== hash(remote)) throw new Error("GitCode README content does not match the local file");
-process.stdout.write(`README verified: ${repository}/README.md (${hash(local)})\n`);
-NODE
+stage "运行非正式 API 冒烟"
+say "GitHub workflow 从 secret 读取 Token；本机不再保存或重复输入。"
+confirm "工作流已经提交并推送到 GitHub main，立即触发真实冒烟？" || {
+  SKIPPED+=("Gitee API smoke workflow")
+  finish
+  exit 0
+}
+if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+  gh workflow run gitee-smoke.yml
+  sleep 3
+  gh run watch --workflow gitee-smoke.yml --exit-status
+else
+  SKIPPED+=("Gitee API smoke workflow (run: gh workflow run gitee-smoke.yml)")
+  warn "gh 未就绪，未运行冒烟工作流"
+fi
 
 finish

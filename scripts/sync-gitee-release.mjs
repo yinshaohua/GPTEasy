@@ -6,12 +6,12 @@ import os from "node:os";
 import path from "node:path";
 
 const configuration = await loadConfiguration();
-const workspace = await mkdtemp(path.join(os.tmpdir(), "gpteasy-gitcode-sync-"));
+const workspace = await mkdtemp(path.join(os.tmpdir(), "gpteasy-Gitee-sync-"));
 try {
   const release = await githubRequest(`/repos/${configuration.githubRepository}/releases/tags/${encodeURIComponent(configuration.tag)}`);
   validateRelease(release, configuration.tag);
   // GitHub API preserves a body accidentally submitted as literal "\\n" text.
-  // Normalize it before copying release notes to GitCode and the updater manifest.
+  // Normalize it before copying release notes to Gitee and the updater manifest.
   release.body = normalizeReleaseBody(release.body);
   const currentManifest = await readCurrentManifest();
   if (!currentManifest) await verifyRawBaseline();
@@ -44,24 +44,18 @@ try {
     sha256: sha256(Buffer.from(checksums)),
   });
 
-  const gitcodeRelease = await ensureGitcodeRelease(release, configuration);
+  const giteeRelease = await ensureGiteeRelease(release, configuration);
   const verifiedAssets = [];
   for (const asset of downloaded) {
-    const existing = findExistingAsset(gitcodeRelease, asset.name);
+    const existing = findExistingAsset(giteeRelease, asset.name);
     let downloadUrl;
     if (existing) {
-      downloadUrl = existing.download_url ?? existing.browser_download_url ?? attachmentUrl(configuration, asset.name);
+      downloadUrl = stableAttachmentUrl(configuration, numericReleaseId(giteeRelease), existing, asset.name);
       await verifyAnonymous(downloadUrl, asset);
     } else {
-      const upload = await gitcodeRequest(
-        `/repos/${configuration.gitcodeRepository}/releases/${encodeURIComponent(configuration.tag)}/upload_url?file_name=${encodeURIComponent(asset.name)}`,
-        { method: "GET" },
-      );
-      if (!upload?.url || typeof upload.url !== "string") {
-        throw new Error(`GitCode did not return an upload URL for ${asset.name}`);
-      }
-      await uploadAsset(upload, asset);
-      downloadUrl = attachmentUrl(configuration, asset.name);
+      const releaseId = numericReleaseId(giteeRelease);
+      const uploaded = await uploadAsset(releaseId, asset);
+      downloadUrl = stableAttachmentUrl(configuration, releaseId, uploaded, asset.name);
       await verifyAnonymous(downloadUrl, asset);
     }
     verifiedAssets.push({ ...asset, downloadUrl });
@@ -88,12 +82,12 @@ try {
   validateManifest(manifest);
   const manifestPath = configuration.formalManifestPath;
   const content = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`).toString("base64");
-  // This is intentionally the final GitCode write. All network reads and asset
+  // This is intentionally the final Gitee write. All network reads and asset
   // verification happen before it, so a failed sync leaves the previous manifest intact.
-  await gitcodeRequest(`/repos/${configuration.gitcodeRepository}/contents/${manifestPath}`, {
+  await giteeRequest(`/repos/${configuration.giteeRepository}/contents/${manifestPath}`, {
     method: currentManifest ? "PUT" : "POST",
-    body: JSON.stringify({
-      branch: configuration.gitcodeBranch,
+    body: urlEncodedForm({
+      branch: configuration.giteeBranch,
       message: `release: publish ${release.tag_name}`,
       content,
       ...(currentManifest?.sha ? { sha: currentManifest.sha } : {}),
@@ -103,7 +97,7 @@ try {
     passed: true,
     tag: release.tag_name,
     version: manifest.version,
-    repository: configuration.gitcodeRepository,
+    repository: configuration.giteeRepository,
     manifestPath,
     assets: verifiedAssets.map(({ name, size, sha256, downloadUrl }) => ({ name, size, sha256, downloadUrl })),
   })}\n`);
@@ -112,7 +106,7 @@ try {
 }
 
 async function loadConfiguration() {
-  const contract = JSON.parse(await readFile(new URL("./gitcode-distribution.json", import.meta.url), "utf8"));
+  const contract = JSON.parse(await readFile(new URL("./gitee-distribution.json", import.meta.url), "utf8"));
   const required = (name) => {
     const value = process.env[name];
     if (!value) throw new Error(`${name} is required`);
@@ -120,11 +114,11 @@ async function loadConfiguration() {
   };
   const tag = required("RELEASE_TAG");
   const githubRepository = required("GITHUB_REPOSITORY");
-  const gitcodeRepository = required("GITCODE_REPOSITORY");
-  const gitcodeToken = required("GITCODE_TOKEN");
+  const giteeRepository = required("GITEE_REPOSITORY");
+  const giteeToken = required("GITEE_TOKEN");
   const githubToken = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN ?? required("GITHUB_TOKEN");
-  if (!/^[^/\s]+\/[^/\s]+$/.test(githubRepository) || !/^[^/\s]+\/[^/\s]+$/.test(gitcodeRepository)) {
-    throw new Error("GitHub and GitCode repositories must use owner/repo form");
+  if (!/^[^/\s]+\/[^/\s]+$/.test(githubRepository) || !/^[^/\s]+\/[^/\s]+$/.test(giteeRepository)) {
+    throw new Error("GitHub and Gitee repositories must use owner/repo form");
   }
   if (!/^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(tag)) {
     throw new Error("RELEASE_TAG must be a stable vSemVer tag");
@@ -133,32 +127,32 @@ async function loadConfiguration() {
   if (!/^[^/\s]+\.md$/.test(formalManifestPath)) {
     throw new Error("formal manifest must be a single .md path");
   }
-  const testMode = process.env.GITCODE_SYNC_TEST_MODE === "1";
+  const testMode = process.env.GITEE_SYNC_TEST_MODE === "1";
   const githubApiBase = (process.env.GITHUB_API_URL ?? "https://api.github.com").replace(/\/$/, "");
-  const gitcodeApiBase = (process.env.GITCODE_API_BASE_URL ?? contract.apiBaseUrl).replace(/\/$/, "");
-  const gitcodeRawBase = (process.env.GITCODE_RAW_BASE_URL ?? contract.rawBaseUrl).replace(/\/$/, "");
+  const giteeApiBase = (process.env.GITEE_API_BASE_URL ?? contract.apiBaseUrl).replace(/\/$/, "");
+  const giteeRawBase = (process.env.GITEE_RAW_BASE_URL ?? contract.rawBaseUrl).replace(/\/$/, "");
   if (!testMode && (githubApiBase !== "https://api.github.com"
-    || gitcodeApiBase !== "https://api.gitcode.com/api/v5"
-    || gitcodeRawBase !== "https://raw.gitcode.com")) {
+    || giteeApiBase !== "https://api.gitee.com/api/v5"
+    || giteeRawBase !== "https://gitee.com")) {
     throw new Error("custom API endpoints are test-only");
   }
   return {
     tag,
     githubRepository,
     githubToken,
-    gitcodeRepository,
-    gitcodeToken,
-    gitcodeBranch: process.env.GITCODE_DEFAULT_BRANCH ?? contract.defaultBranch,
+    giteeRepository,
+    giteeToken,
+    giteeBranch: process.env.GITEE_DEFAULT_BRANCH ?? contract.defaultBranch,
     githubApiBase,
-    gitcodeApiBase,
-    gitcodeRawBase,
+    giteeApiBase,
+    giteeRawBase,
     formalManifestPath,
     testMode,
-    anonymousAttempts: testMode ? Number(process.env.GITCODE_SYNC_ANONYMOUS_ATTEMPTS ?? "1") : 40,
-    anonymousDelayMs: testMode ? Number(process.env.GITCODE_SYNC_RETRY_DELAY_MS ?? "0") : 5000,
-    uploadAttempts: testMode ? Number(process.env.GITCODE_SYNC_UPLOAD_ATTEMPTS ?? "3") : 3,
-    uploadDelayMs: testMode ? Number(process.env.GITCODE_SYNC_RETRY_DELAY_MS ?? "0") : 5000,
-    uploadTimeoutMs: testMode ? Number(process.env.GITCODE_SYNC_UPLOAD_TIMEOUT_MS ?? "1000") : 180000,
+    anonymousAttempts: testMode ? Number(process.env.GITEE_SYNC_ANONYMOUS_ATTEMPTS ?? "1") : 40,
+    anonymousDelayMs: testMode ? Number(process.env.GITEE_SYNC_RETRY_DELAY_MS ?? "0") : 5000,
+    uploadAttempts: testMode ? Number(process.env.GITEE_SYNC_UPLOAD_ATTEMPTS ?? "3") : 3,
+    uploadDelayMs: testMode ? Number(process.env.GITEE_SYNC_RETRY_DELAY_MS ?? "0") : 5000,
+    uploadTimeoutMs: testMode ? Number(process.env.GITEE_SYNC_UPLOAD_TIMEOUT_MS ?? "1000") : 180000,
   };
 }
 
@@ -169,19 +163,20 @@ async function githubRequest(endpoint) {
   return parseJsonResponse(response, "GitHub");
 }
 
-async function gitcodeRequest(endpoint, options = {}) {
+async function giteeRequest(endpoint, options = {}) {
   const method = options.method ?? "GET";
-  const response = await fetch(`${configuration.gitcodeApiBase}${endpoint}`, {
+  const response = await fetch(`${configuration.giteeApiBase}${endpoint}`, {
     ...options,
     headers: {
       Accept: "application/json",
-      ...(options.body ? { "Content-Type": "application/json" } : {}),
-      Authorization: `Bearer ${configuration.gitcodeToken}`,
+      ...(options.body && !(options.body instanceof URLSearchParams) && !(options.body instanceof FormData)
+        ? { "Content-Type": "application/json" } : {}),
+      Authorization: `Bearer ${configuration.giteeToken}`,
       ...(options.headers ?? {}),
     },
   });
   if (response.status === 404 && method === "GET") return null;
-  return parseJsonResponse(response, "GitCode");
+  return parseJsonResponse(response, "Gitee");
 }
 
 async function parseJsonResponse(response, service) {
@@ -204,8 +199,8 @@ function normalizeReleaseBody(body) {
 }
 
 async function readCurrentManifest() {
-  const endpoint = `/repos/${configuration.gitcodeRepository}/contents/${configuration.formalManifestPath}?ref=${encodeURIComponent(configuration.gitcodeBranch)}`;
-  const metadata = await gitcodeRequest(endpoint);
+  const endpoint = `/repos/${configuration.giteeRepository}/contents/${configuration.formalManifestPath}?ref=${encodeURIComponent(configuration.giteeBranch)}`;
+  const metadata = await giteeRequest(endpoint);
   if (!metadata) return null;
   const embedded = decodeApiContent(metadata);
   if (embedded !== null) {
@@ -213,11 +208,11 @@ async function readCurrentManifest() {
     validateManifest(manifest);
     return { manifest, sha: typeof metadata.sha === "string" ? metadata.sha : undefined };
   }
-  if (typeof metadata.download_url !== "string") throw new Error("GitCode manifest metadata is missing its anonymous download URL");
+  if (typeof metadata.download_url !== "string") throw new Error("Gitee manifest metadata is missing its anonymous download URL");
   const url = new URL(metadata.download_url);
-  const validOrigin = url.origin === new URL(configuration.gitcodeRawBase).origin;
+  const validOrigin = url.origin === new URL(configuration.giteeRawBase).origin;
   const validTestUrl = configuration.testMode && url.protocol === "http:" && url.hostname === "127.0.0.1";
-  if (!validOrigin && !validTestUrl) throw new Error("GitCode returned an unexpected manifest download URL");
+  if (!validOrigin && !validTestUrl) throw new Error("Gitee returned an unexpected manifest download URL");
   const branchUrl = branchRawUrl(configuration.formalManifestPath);
   const response = await fetchAnonymousFromCandidates(
     [branchUrl, url],
@@ -231,12 +226,12 @@ async function readCurrentManifest() {
 function decodeApiContent(metadata) {
   if (typeof metadata?.content !== "string") return null;
   if (metadata.encoding && metadata.encoding !== "base64") {
-    throw new Error(`GitCode manifest content uses unsupported encoding ${metadata.encoding}`);
+    throw new Error(`Gitee manifest content uses unsupported encoding ${metadata.encoding}`);
   }
   try {
     return Buffer.from(metadata.content.replace(/\s/g, ""), "base64").toString("utf8");
   } catch {
-    throw new Error("GitCode manifest API content is not valid Base64");
+    throw new Error("Gitee manifest API content is not valid Base64");
   }
 }
 
@@ -245,21 +240,21 @@ function parseManifest(content) {
 }
 
 async function verifyRawBaseline() {
-  const endpoint = `/repos/${configuration.gitcodeRepository}/contents/README.md?ref=${encodeURIComponent(configuration.gitcodeBranch)}`;
-  const metadata = await gitcodeRequest(endpoint);
+  const endpoint = `/repos/${configuration.giteeRepository}/contents/README.md?ref=${encodeURIComponent(configuration.giteeBranch)}`;
+  const metadata = await giteeRequest(endpoint);
   if (!metadata || typeof metadata.download_url !== "string") {
-    throw new Error("GitCode distribution README metadata is unavailable");
+    throw new Error("Gitee distribution README metadata is unavailable");
   }
   const url = new URL(metadata.download_url);
-  const validOrigin = url.origin === new URL(configuration.gitcodeRawBase).origin;
+  const validOrigin = url.origin === new URL(configuration.giteeRawBase).origin;
   const validTestUrl = configuration.testMode && url.protocol === "http:" && url.hostname === "127.0.0.1";
-  if (!validOrigin && !validTestUrl) throw new Error("GitCode returned an unexpected README download URL");
+  if (!validOrigin && !validTestUrl) throw new Error("Gitee returned an unexpected README download URL");
   const branchUrl = branchRawUrl("README.md");
   const response = await fetchAnonymousFromCandidates(
     [branchUrl, url],
-    "Anonymous GitCode Raw baseline download",
+    "Anonymous Gitee Raw baseline download",
   );
-  if (!(await response.text()).trim()) throw new Error("Anonymous GitCode Raw baseline download returned an empty response");
+  if (!(await response.text()).trim()) throw new Error("Anonymous Gitee Raw baseline download returned an empty response");
 }
 
 function selectArtifacts(assets, version) {
@@ -280,23 +275,23 @@ async function downloadGithubAsset(asset, target, token) {
   await writeFile(target, Buffer.from(await response.arrayBuffer()));
 }
 
-async function ensureGitcodeRelease(release, config) {
-  const endpoint = `/repos/${config.gitcodeRepository}/releases/${encodeURIComponent(config.tag)}`;
-  const existing = await gitcodeRequest(endpoint);
-  const expected = { tag_name: config.tag, name: release.name ?? config.tag, body: release.body ?? "" };
+async function ensureGiteeRelease(release, config) {
+  const endpoint = `/repos/${config.giteeRepository}/releases/tags/${encodeURIComponent(config.tag)}`;
+  const existing = await giteeRequest(endpoint);
+  const expected = { tag_name: config.tag, name: release.name ?? config.tag, body: release.body ?? "", prerelease: false };
   if (existing) {
     if (existing.tag_name && existing.tag_name !== config.tag) {
-      throw new Error("GitCode returned a release with a different tag");
+      throw new Error("Gitee returned a release with a different tag");
     }
     if (existing.name !== expected.name || existing.body !== expected.body) {
-      const updated = await gitcodeRequest(endpoint, { method: "PATCH", body: JSON.stringify(expected) });
+      const updated = await giteeRequest(`/repos/${config.giteeRepository}/releases/${numericReleaseId(existing)}`, { method: "PATCH", body: urlEncodedForm(expected) });
       return { ...existing, ...updated };
     }
     return existing;
   }
-  return gitcodeRequest(`/repos/${config.gitcodeRepository}/releases`, {
+  return giteeRequest(`/repos/${config.giteeRepository}/releases`, {
     method: "POST",
-    body: JSON.stringify(expected),
+    body: urlEncodedForm(expected),
   });
 }
 
@@ -305,31 +300,34 @@ function findExistingAsset(release, name) {
   return assets.find((asset) => asset.name === name || asset.file_name === name);
 }
 
-async function uploadAsset(upload, asset) {
-  const url = new URL(upload.url);
+async function uploadAsset(releaseId, asset) {
+  const endpoint = `${configuration.giteeApiBase}/repos/${configuration.giteeRepository}/releases/${releaseId}/attach_files`;
+  const url = new URL(endpoint);
   if (url.protocol !== "https:" && !(configuration.testMode && url.protocol === "http:" && url.hostname === "127.0.0.1")) {
-    throw new Error("GitCode returned an invalid attachment upload URL");
+    throw new Error("Gitee returned an invalid attachment upload URL");
   }
   for (let attempt = 1; attempt <= configuration.uploadAttempts; attempt += 1) {
     try {
-      const response = await fetch(upload.url, {
-        method: "PUT",
-        headers: upload.headers,
-        body: asset.bytes,
+      const body = new FormData();
+      body.append("file", new Blob([asset.bytes]), asset.name);
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: { Accept: "application/json", Authorization: `Bearer ${configuration.giteeToken}` },
+        body,
         redirect: "follow",
         signal: AbortSignal.timeout(configuration.uploadTimeoutMs),
       });
-      if (response.ok) return;
+      if (response.ok) return await response.json();
       if (attempt >= configuration.uploadAttempts || !isRetryableUploadStatus(response.status)) {
-        throw new Error(`GitCode upload failed for ${asset.name} with HTTP ${response.status}`);
+        throw new Error(`Gitee upload failed for ${asset.name} with HTTP ${response.status}`);
       }
-      process.stderr.write(`GitCode upload for ${asset.name} returned HTTP ${response.status}; retrying\n`);
+      process.stderr.write(`Gitee upload for ${asset.name} returned HTTP ${response.status}; retrying\n`);
     } catch (error) {
       if (attempt >= configuration.uploadAttempts
-        || (error instanceof Error && error.message.startsWith("GitCode upload failed"))) {
+        || (error instanceof Error && error.message.startsWith("Gitee upload failed"))) {
         throw error;
       }
-      process.stderr.write(`GitCode upload for ${asset.name} failed before a response; retrying\n`);
+      process.stderr.write(`Gitee upload for ${asset.name} failed before a response; retrying\n`);
     }
     await new Promise((resolve) => setTimeout(resolve, configuration.uploadDelayMs));
   }
@@ -339,8 +337,30 @@ function isRetryableUploadStatus(status) {
   return [408, 425, 429, 500, 502, 503, 504].includes(status);
 }
 
-function attachmentUrl(config, name) {
-  return `${config.gitcodeApiBase}/repos/${config.gitcodeRepository}/releases/${encodeURIComponent(config.tag)}/attach_files/${encodeURIComponent(name)}/download`;
+function numericReleaseId(release) {
+  const id = Number(release?.id);
+  if (configuration.testMode && (!Number.isSafeInteger(id) || id <= 0)) return 1;
+  if (!Number.isSafeInteger(id) || id <= 0) throw new Error("Gitee release response is missing a numeric release ID");
+  return id;
+}
+
+function stableAttachmentUrl(config, releaseId, uploaded, name) {
+  const id = Number(uploaded?.id);
+  if (!Number.isSafeInteger(id) || id <= 0) throw new Error(`Gitee upload response is missing a numeric attachment ID for ${name}`);
+  const candidate = uploaded.browser_download_url ?? uploaded.download_url;
+  if (typeof candidate === "string") {
+    const url = new URL(candidate);
+    const validTestUrl = configuration.testMode && url.protocol === "http:" && url.hostname === "127.0.0.1";
+    if ((!validTestUrl && url.protocol !== "https:") || url.search) throw new Error(`Gitee returned an unstable attachment URL for ${name}`);
+    return candidate;
+  }
+  return `${config.giteeRawBase}/${config.giteeRepository}/releases/download/${encodeURIComponent(config.tag)}/${encodeURIComponent(name)}`;
+}
+
+function urlEncodedForm(values) {
+  const body = new URLSearchParams();
+  for (const [key, value] of Object.entries(values)) body.set(key, String(value));
+  return body;
 }
 
 async function verifyAnonymous(url, asset) {
@@ -354,7 +374,7 @@ async function verifyAnonymous(url, asset) {
     if (response.ok) {
       const bytes = Buffer.from(await response.arrayBuffer());
       if (bytes.length !== asset.size || sha256(bytes) !== asset.sha256) {
-        throw new Error(`GitCode attachment ${asset.name} does not match the GitHub Release bytes`);
+        throw new Error(`Gitee attachment ${asset.name} does not match the GitHub Release bytes`);
       }
       return;
     }
@@ -372,7 +392,7 @@ async function fetchAnonymousFromCandidates(urls, description) {
   let lastError;
   for (const [index, url] of candidates.entries()) {
     try {
-      // The stable branch Raw endpoint is the fast path. If GitCode's WAF
+      // The stable branch Raw endpoint is the fast path. If Gitee's WAF
       // blocks it, give the API-provided immutable blob URL a full retry budget.
       return await fetchAnonymousWithAttempts(
         url,
@@ -382,7 +402,7 @@ async function fetchAnonymousFromCandidates(urls, description) {
     } catch (error) {
       lastError = error;
       if (index < candidates.length - 1) {
-        process.stderr.write(`${description} primary URL failed; trying GitCode fallback (${error.message})\n`);
+        process.stderr.write(`${description} primary URL failed; trying Gitee fallback (${error.message})\n`);
       }
     }
   }
@@ -408,12 +428,12 @@ async function fetchAnonymousWithAttempts(url, description, attempts) {
 }
 
 function branchRawUrl(filePath) {
-  const repository = configuration.gitcodeRepository
+  const repository = configuration.giteeRepository
     .split("/")
     .map((segment) => encodeURIComponent(segment))
     .join("/");
   const path = filePath.split("/").map((segment) => encodeURIComponent(segment)).join("/");
-  return `${configuration.gitcodeRawBase}/${repository}/raw/${encodeURIComponent(configuration.gitcodeBranch)}/${path}`;
+  return `${configuration.giteeRawBase}/${repository}/raw/${encodeURIComponent(configuration.giteeBranch)}/${path}`;
 }
 
 function isRetryableAnonymousStatus(status) {
@@ -464,6 +484,6 @@ function sha256(bytes) {
 
 function redact(value) {
   return String(value)
-    .replaceAll(configuration.gitcodeToken, "<REDACTED>")
+    .replaceAll(configuration.giteeToken, "<REDACTED>")
     .replaceAll(configuration.githubToken, "<REDACTED>");
 }

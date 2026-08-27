@@ -621,7 +621,7 @@ pub(crate) fn open_update_release_notes(
 }
 
 fn is_valid_update_release_notes_url(url: &str) -> bool {
-    let prefix = format!("{}/v", crate::update::GITCODE_RELEASES_URL);
+    let prefix = format!("{}/v", crate::update::GITEE_RELEASES_URL);
     let Some(version) = url.strip_prefix(&prefix) else {
         return false;
     };
@@ -637,9 +637,9 @@ mod update_release_notes_tests {
     use super::is_valid_update_release_notes_url;
 
     #[test]
-    fn accepts_the_expected_gitcode_release_url() {
+    fn accepts_the_expected_gitee_release_url() {
         assert!(is_valid_update_release_notes_url(
-            "https://gitcode.com/ericyin99/GPTEasy-Releases/releases/tag/v1.1.4"
+            "https://gitee.com/ericshaohua/gpteasy-releases/releases/tag/v1.1.4"
         ));
     }
 
@@ -647,9 +647,9 @@ mod update_release_notes_tests {
     fn rejects_untrusted_or_malformed_release_urls() {
         for url in [
             "https://example.com/releases/tag/v1.1.4",
-            "https://gitcode.com/ericyin99/GPTEasy-Releases/releases/tag/v1.1",
-            "https://gitcode.com/ericyin99/GPTEasy-Releases/releases/tag/v1.1.4/notes",
-            "https://gitcode.com/ericyin99/GPTEasy-Releases/releases/tag/v1.1.4?next=evil",
+            "https://gitee.com/ericshaohua/gpteasy-releases/releases/tag/v1.1",
+            "https://gitee.com/ericshaohua/gpteasy-releases/releases/tag/v1.1.4/notes",
+            "https://gitee.com/ericshaohua/gpteasy-releases/releases/tag/v1.1.4?next=evil",
         ] {
             assert!(!is_valid_update_release_notes_url(url), "accepted {url}");
         }

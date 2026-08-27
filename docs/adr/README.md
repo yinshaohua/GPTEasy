@@ -18,6 +18,7 @@ ADR 记录难以逆转且有真实取舍的决定。重建遵循 ADR-0009 的“
 - ADR-0040：诊断修复只从用户确认的预览进入，并仅根据唯一且与当前凭据一致的本地证据补回缺失 `custom` 定义；失败或中断恢复原配置。
 - ADR-0042：诊断助手只提交后端动作注册表允许的结构化动作，并在用户确认后复用既有受控流程；模型不能执行任意写入或 shell 命令。
 - ADR-0044：正式发布绑定完整自动门禁、候选产物校验和维护者明确验收授权；一次性 Windows 交互式 UAT 保留为可选深度验收。
+- ADR-0045：国内分发直接切换到 Gitee；保留 updater 密钥，使用数值 Release ID、form-data/multipart API 和真实匿名冒烟闭环。
 
 ## Historical Or Deferred
 
@@ -27,4 +28,5 @@ ADR 记录难以逆转且有真实取舍的决定。重建遵循 ADR-0009 的“
 - ADR-0020 的被动待重启原则由 ADR-0026 恢复；ADR-0025 已被 ADR-0026 取代。
 - ADR-0022 已被 ADR-0037 取代。
 - ADR-0026 已被 ADR-0041 取代。
+- ADR-0038、0039 中 GitCode 活动分发决定已被 ADR-0045 取代。
 - 旧 GSD 管理文件已删除；当前代码曾交付的能力摘要见 [`docs/archive/implemented-features-2026-08-09.md`](../archive/implemented-features-2026-08-09.md)。
