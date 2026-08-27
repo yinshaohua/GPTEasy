@@ -274,7 +274,7 @@ fn build_menu(
     let settings = MenuItemBuilder::with_id(SETTINGS_ID, "设置...").build(app)?;
     let exit = MenuItemBuilder::with_id(EXIT_ID, "退出 GPTEasy").build(app)?;
     let mut menu = MenuBuilder::new(app).item(&status).separator();
-    for provider in tray_provider_items(providers, snapshot.is_some()) {
+    for provider in tray_provider_items(providers, snapshot) {
         let item = CheckMenuItemBuilder::with_id(provider.id, provider.label)
             .checked(provider.checked)
             .enabled(provider.enabled)
@@ -286,15 +286,18 @@ fn build_menu(
 
 fn tray_provider_items(
     providers: &[ProviderSummary],
-    environment_available: bool,
+    snapshot: Option<&EnvironmentSnapshot>,
 ) -> Vec<TrayProviderItem> {
+    let current_provider_id = snapshot
+        .and_then(|snapshot| snapshot.current_provider.as_ref())
+        .map(|provider| provider.id.as_str());
     providers
         .iter()
         .map(|provider| TrayProviderItem {
             id: format!("{PROVIDER_PREFIX}{}", provider.id),
             label: escape_menu_text(&provider.name),
-            checked: provider.is_current,
-            enabled: environment_available,
+            checked: current_provider_id == Some(provider.id.as_str()),
+            enabled: snapshot.is_some(),
         })
         .collect()
 }
@@ -310,7 +313,7 @@ fn status_text(snapshot: Option<&EnvironmentSnapshot>) -> String {
             .map(|provider| format!("当前供应商：{}", provider.name))
             .unwrap_or_else(|| "状态：供应商模式".to_owned()),
         (EnvironmentState::Managed, Some(AuthenticationMode::OpenaiLogin)) => {
-            "状态：OpenAI 登录模式".to_owned()
+            "状态：OpenAI 登录".to_owned()
         }
         (EnvironmentState::External, _) => "状态：外部配置".to_owned(),
         (EnvironmentState::Conflict, _) => "状态：管理冲突".to_owned(),
@@ -635,8 +638,12 @@ mod tests {
             provider("dayway-id", "DayWay", Some("dayway")),
             provider("ordinary-id", "Ordinary", None),
         ];
+        let inspected = snapshot(
+            EnvironmentState::Managed,
+            Some(AuthenticationMode::Provider),
+        );
         assert_eq!(
-            tray_provider_items(&saved, true),
+            tray_provider_items(&saved, Some(&inspected)),
             vec![
                 TrayProviderItem {
                     id: "provider:dayway-id".to_owned(),
@@ -652,16 +659,20 @@ mod tests {
                 },
             ]
         );
-        assert!(tray_provider_items(&[], true).is_empty());
+        assert!(tray_provider_items(&[], Some(&inspected)).is_empty());
     }
 
     #[test]
     fn tray_keeps_the_current_provider_enabled_and_marks_it_checked() {
-        let mut current = provider("current-id", "Current", None);
-        current.is_current = true;
+        let current = provider("current-id", "Current", None);
+        let mut inspected = snapshot(
+            EnvironmentState::Managed,
+            Some(AuthenticationMode::Provider),
+        );
+        inspected.current_provider = Some(current.clone());
 
         assert_eq!(
-            tray_provider_items(std::slice::from_ref(&current), true),
+            tray_provider_items(std::slice::from_ref(&current), Some(&inspected)),
             vec![TrayProviderItem {
                 id: "provider:current-id".to_owned(),
                 label: "Current".to_owned(),
@@ -670,14 +681,35 @@ mod tests {
             }]
         );
         assert_eq!(
-            tray_provider_items(&[current], false),
+            tray_provider_items(&[current], None),
             vec![TrayProviderItem {
                 id: "provider:current-id".to_owned(),
                 label: "Current".to_owned(),
-                checked: true,
+                checked: false,
                 enabled: false,
             }]
         );
+    }
+
+    #[test]
+    fn tray_does_not_mark_recorded_current_provider_for_external_openai_login() {
+        let mut recorded_current = provider("provider-id", "Recorded", None);
+        recorded_current.is_current = true;
+        let inspected = snapshot(
+            EnvironmentState::External,
+            Some(AuthenticationMode::OpenaiLogin),
+        );
+
+        assert_eq!(
+            tray_provider_items(&[recorded_current], Some(&inspected)),
+            vec![TrayProviderItem {
+                id: "provider:provider-id".to_owned(),
+                label: "Recorded".to_owned(),
+                checked: false,
+                enabled: true,
+            }]
+        );
+        assert_eq!(status_text(Some(&inspected)), "状态：外部配置");
     }
 
     #[test]

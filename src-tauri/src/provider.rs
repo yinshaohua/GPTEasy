@@ -22,7 +22,10 @@ use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::environment::{EnvironmentApplication, ProviderTarget, VerifiedProviderUpdate};
+use crate::environment::{
+    AuthenticationMode, EnvironmentApplication, EnvironmentState, ProviderTarget,
+    VerifiedProviderUpdate,
+};
 use crate::state::StateStore;
 
 pub use validation::ProviderValidator;
@@ -631,6 +634,34 @@ impl ProviderApplication {
         provider_id: &str,
         name: &str,
     ) -> Result<ProviderSummary, ProviderFailure> {
+        self.save_provider_update_inner(validation_id, provider_id, name, false)
+    }
+
+    pub fn save_provider_update_for_environment(
+        &self,
+        environment: &EnvironmentApplication,
+        validation_id: &str,
+        provider_id: &str,
+        name: &str,
+    ) -> Result<ProviderSummary, ProviderFailure> {
+        let snapshot = environment.inspect().map_err(|failure| {
+            ProviderFailure::new(
+                ProviderFailureCategory::StateUnavailable,
+                failure.message_id,
+            )
+        })?;
+        let allow_recorded_current = snapshot.state == EnvironmentState::External
+            || snapshot.mode == Some(AuthenticationMode::OpenaiLogin);
+        self.save_provider_update_inner(validation_id, provider_id, name, allow_recorded_current)
+    }
+
+    fn save_provider_update_inner(
+        &self,
+        validation_id: &str,
+        provider_id: &str,
+        name: &str,
+        allow_recorded_current: bool,
+    ) -> Result<ProviderSummary, ProviderFailure> {
         let name = name.trim();
         if name.is_empty() {
             return Err(ProviderFailure::new(
@@ -665,6 +696,7 @@ impl ProviderApplication {
             original_name,
             original_fingerprint,
             &candidate,
+            allow_recorded_current,
         )?;
         self.discard_validation(validation_id);
         Ok(summary)

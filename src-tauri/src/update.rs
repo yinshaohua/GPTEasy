@@ -15,39 +15,6 @@ pub const GITCODE_RELEASES_URL: &str =
     "https://gitcode.com/ericyin99/GPTEasy-Releases/releases/tag";
 pub const CHECK_INTERVAL_SECONDS: u64 = 24 * 60 * 60;
 const NSIS_INSTALL_ARGUMENTS: [&str; 2] = ["/P", "/R"];
-const UPDATE_REQUEST_ATTEMPTS: usize = 3;
-const UPDATE_RETRY_DELAYS: [Duration; UPDATE_REQUEST_ATTEMPTS - 1] =
-    [Duration::from_secs(1), Duration::from_secs(3)];
-const RECOVERY_CHECK_DELAYS: [Duration; 4] = [
-    Duration::from_secs(5 * 60),
-    Duration::from_secs(30 * 60),
-    Duration::from_secs(2 * 60 * 60),
-    Duration::from_secs(CHECK_INTERVAL_SECONDS),
-];
-
-#[derive(Default)]
-pub(crate) struct UpdateCheckSchedule {
-    recoverable_failures: usize,
-}
-
-impl UpdateCheckSchedule {
-    pub(crate) fn next_delay(&mut self, snapshot: &UpdateSnapshot) -> Duration {
-        let recoverable = snapshot.state == UpdateState::Failed
-            && matches!(
-                snapshot.failure_category,
-                Some(UpdateFailureCategory::CheckFailed | UpdateFailureCategory::DownloadFailed)
-            );
-        if recoverable {
-            let index = self
-                .recoverable_failures
-                .min(RECOVERY_CHECK_DELAYS.len() - 1);
-            self.recoverable_failures = self.recoverable_failures.saturating_add(1);
-            return RECOVERY_CHECK_DELAYS[index];
-        }
-        self.recoverable_failures = 0;
-        Duration::from_secs(CHECK_INTERVAL_SECONDS)
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -200,11 +167,6 @@ struct PendingUpdate {
     bytes: Vec<u8>,
 }
 
-enum DownloadAttemptFailure {
-    Retryable(Option<Duration>),
-    Permanent,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct InstallAttempt {
     target_version: String,
@@ -343,7 +305,7 @@ impl UpdateCoordinator {
             client: Client::builder()
                 .user_agent(user_agent)
                 .connect_timeout(Duration::from_secs(10))
-                .timeout(Duration::from_secs(30 * 60))
+                .timeout(Duration::from_secs(30))
                 .build()
                 .expect("更新 HTTP 客户端初始化失败"),
             endpoint: endpoint.into(),
@@ -468,27 +430,9 @@ impl UpdateCoordinator {
         self.begin_download(&manifest);
         progress(self.snapshot());
 
-        let mut bytes = None;
-        for attempt in 0..UPDATE_REQUEST_ATTEMPTS {
-            match self.download_once(&platform.url, &mut progress).await {
-                Ok(downloaded) => {
-                    bytes = Some(downloaded);
-                    break;
-                }
-                Err(DownloadAttemptFailure::Permanent) => {
-                    return self.fail(UpdateFailureCategory::DownloadFailed);
-                }
-                Err(DownloadAttemptFailure::Retryable(retry_after)) => {
-                    if let Some(delay) = update_retry_delay(attempt, retry_after) {
-                        tokio::time::sleep(delay).await;
-                        self.reset_download_progress();
-                        progress(self.snapshot());
-                    }
-                }
-            }
-        }
-        let Some(bytes) = bytes else {
-            return self.fail(UpdateFailureCategory::DownloadFailed);
+        let bytes = match self.download_once(&platform.url, &mut progress).await {
+            Ok(bytes) => bytes,
+            Err(()) => return self.fail(UpdateFailureCategory::DownloadFailed),
         };
         if verify_signature(&bytes, &platform.signature, &self.public_key).is_err() {
             return self.fail(UpdateFailureCategory::SignatureInvalid);
@@ -516,54 +460,35 @@ impl UpdateCoordinator {
     }
 
     async fn fetch_manifest(&self) -> Result<Manifest, UpdateFailureCategory> {
-        let mut last_failure = UpdateFailureCategory::CheckFailed;
-        for attempt in 0..UPDATE_REQUEST_ATTEMPTS {
-            let mut retry_after = None;
-            match self.client.get(&self.endpoint).send().await {
-                Ok(response) if response.status().is_success() => {
-                    match response.json::<Manifest>().await {
-                        Ok(manifest) => return Ok(manifest),
-                        Err(_) => last_failure = UpdateFailureCategory::CheckFailed,
-                    }
-                }
-                Ok(response) if is_retryable_update_status(response.status().as_u16()) => {
-                    retry_after = retry_after_delay(response.headers());
-                    last_failure = UpdateFailureCategory::CheckFailed;
-                }
-                Ok(_) => return Err(UpdateFailureCategory::CheckFailed),
-                Err(_) => last_failure = UpdateFailureCategory::CheckFailed,
-            }
-            if let Some(delay) = update_retry_delay(attempt, retry_after) {
-                tokio::time::sleep(delay).await;
-            }
+        let response = self
+            .client
+            .get(&self.endpoint)
+            .send()
+            .await
+            .map_err(|_| UpdateFailureCategory::CheckFailed)?;
+        if !response.status().is_success() {
+            return Err(UpdateFailureCategory::CheckFailed);
         }
-        Err(last_failure)
+        response
+            .json::<Manifest>()
+            .await
+            .map_err(|_| UpdateFailureCategory::CheckFailed)
     }
 
-    async fn download_once<F>(
-        &self,
-        url: &str,
-        progress: &mut F,
-    ) -> Result<Vec<u8>, DownloadAttemptFailure>
+    async fn download_once<F>(&self, url: &str, progress: &mut F) -> Result<Vec<u8>, ()>
     where
         F: FnMut(UpdateSnapshot) + Send,
     {
-        let response = match self.client.get(url).send().await {
-            Ok(response) if response.status().is_success() => response,
-            Ok(response) if is_retryable_update_status(response.status().as_u16()) => {
-                return Err(DownloadAttemptFailure::Retryable(retry_after_delay(
-                    response.headers(),
-                )));
-            }
-            Ok(_) => return Err(DownloadAttemptFailure::Permanent),
-            Err(_) => return Err(DownloadAttemptFailure::Retryable(None)),
-        };
+        let response = self.client.get(url).send().await.map_err(|_| ())?;
+        if !response.status().is_success() {
+            return Err(());
+        }
         let total = response.content_length();
         let initial_capacity = total.unwrap_or_default().min(16 * 1024 * 1024) as usize;
         let mut bytes = Vec::with_capacity(initial_capacity);
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|_| DownloadAttemptFailure::Retryable(None))?;
+            let chunk = chunk.map_err(|_| ())?;
             bytes.extend_from_slice(&chunk);
             self.set_progress(bytes.len() as u64, total);
             progress(self.snapshot());
@@ -605,14 +530,6 @@ impl UpdateCoordinator {
             state.snapshot.progress_percent = total
                 .filter(|total| *total > 0)
                 .map(|total| ((downloaded.saturating_mul(100) / total).min(100)) as u8);
-        }
-    }
-
-    fn reset_download_progress(&self) {
-        if let Ok(mut state) = self.state.lock() {
-            state.snapshot.downloaded_bytes = 0;
-            state.snapshot.total_bytes = None;
-            state.snapshot.progress_percent = None;
         }
     }
 
@@ -817,13 +734,9 @@ impl UpdateCoordinator {
             state.snapshot.failure_category = Some(category);
             state.snapshot.error_message = Some(
                 match category {
-                    UpdateFailureCategory::CheckFailed => {
-                        "暂时无法检查应用更新，将在后台自动重试；也可以立即重试。"
-                    }
+                    UpdateFailureCategory::CheckFailed => "暂时无法检查应用更新，请手动重试。",
                     UpdateFailureCategory::ManifestInvalid => "更新清单无效，已停止本次更新。",
-                    UpdateFailureCategory::DownloadFailed => {
-                        "应用更新下载失败，将在后台自动重试；也可以立即重试。"
-                    }
+                    UpdateFailureCategory::DownloadFailed => "应用更新下载失败，请手动重试。",
                     UpdateFailureCategory::SignatureInvalid => {
                         "应用更新未通过签名验证，已拒绝使用。"
                     }
@@ -834,24 +747,6 @@ impl UpdateCoordinator {
         }
         self.snapshot()
     }
-}
-
-fn is_retryable_update_status(status: u16) -> bool {
-    matches!(status, 403 | 404 | 408 | 418 | 425 | 429) || (500..=599).contains(&status)
-}
-
-fn retry_after_delay(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
-    headers
-        .get(reqwest::header::RETRY_AFTER)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .map(|seconds| Duration::from_secs(seconds.min(30)))
-}
-
-fn update_retry_delay(attempt: usize, retry_after: Option<Duration>) -> Option<Duration> {
-    UPDATE_RETRY_DELAYS
-        .get(attempt)
-        .map(|local| retry_after.map_or(*local, |remote| remote.max(*local)))
 }
 
 fn is_permitted_update_url(url: &str) -> bool {
@@ -897,7 +792,6 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
-    use std::time::Instant;
     use tempfile::TempDir;
 
     const TEST_PUBLIC_KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXkgRTc2MjBGMTg0MkI0RTgxRgpSV1FmNkxSQ0dBOWk1M21sWWVjTzRJelQ1MVRHUHB2V3VjTlNDaDFDQk0wUVRhTG43M1k3R0ZPMw==";
@@ -907,69 +801,30 @@ mod tests {
         base_url: String,
     }
 
-    struct ScriptedResponse {
-        status: u16,
-        headers: Vec<(String, String)>,
-        body: String,
-    }
-
-    impl ScriptedResponse {
-        fn new(status: u16, body: impl Into<String>) -> Self {
-            Self {
-                status,
-                headers: Vec::new(),
-                body: body.into(),
-            }
-        }
-
-        fn with_header(mut self, name: &str, value: &str) -> Self {
-            self.headers.push((name.to_owned(), value.to_owned()));
-            self
-        }
-    }
-
     impl ScriptedHttpServer {
         fn start(responses: Vec<(u16, String)>) -> Self {
             Self::start_with(move |_| responses)
         }
 
         fn start_with(build_responses: impl FnOnce(&str) -> Vec<(u16, String)>) -> Self {
-            Self::start_detailed_with(move |base_url| {
-                build_responses(base_url)
-                    .into_iter()
-                    .map(|(status, body)| ScriptedResponse::new(status, body))
-                    .collect()
-            })
-        }
-
-        fn start_detailed_with(
-            build_responses: impl FnOnce(&str) -> Vec<ScriptedResponse>,
-        ) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind update server");
             let address = listener.local_addr().expect("update server address");
             let base_url = format!("http://{address}");
             let responses = build_responses(&base_url);
             thread::spawn(move || {
-                for response in responses {
+                for (status, body) in responses {
                     let (mut stream, _) = listener.accept().expect("accept update request");
                     let mut request = [0_u8; 4096];
                     let _ = stream.read(&mut request);
-                    let reason = if response.status == 200 {
+                    let reason = if status == 200 {
                         "OK"
                     } else {
                         "Temporary failure"
                     };
-                    let headers = response
-                        .headers
-                        .iter()
-                        .map(|(name, value)| format!("{name}: {value}\r\n"))
-                        .collect::<String>();
                     write!(
                         stream,
-                        "HTTP/1.1 {} {reason}\r\n{headers}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                        response.status,
-                        response.body.len(),
-                        response.body
+                        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len(),
                     )
                     .expect("write update response");
                 }
@@ -983,56 +838,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transient_manifest_failures_recover_without_exposing_failed_state() {
-        let manifest = serde_json::json!({
-            "version": "1.1.5",
-            "platforms": {}
-        })
-        .to_string();
-        let server = ScriptedHttpServer::start(vec![
-            (418, String::new()),
-            (418, String::new()),
-            (200, manifest),
-        ]);
-        let coordinator =
-            UpdateCoordinator::with_endpoint("1.1.5", server.url("/latest.md"), "unused");
-
-        let snapshot = coordinator.check_and_download(|_| {}).await;
-
-        assert_eq!(snapshot.state, UpdateState::UpToDate);
-        assert_eq!(snapshot.failure_category, None);
-    }
-
-    #[tokio::test]
-    async fn throttled_manifest_check_respects_retry_after() {
-        let manifest = serde_json::json!({
-            "version": "1.1.5",
-            "platforms": {}
-        })
-        .to_string();
-        let server = ScriptedHttpServer::start_detailed_with(move |_| {
-            vec![
-                ScriptedResponse::new(429, "").with_header("Retry-After", "2"),
-                ScriptedResponse::new(200, manifest),
-            ]
-        });
-        let coordinator =
-            UpdateCoordinator::with_endpoint("1.1.5", server.url("/latest.md"), "unused");
-        let started = Instant::now();
-
-        let snapshot = coordinator.check_and_download(|_| {}).await;
-
-        assert_eq!(snapshot.state, UpdateState::UpToDate);
-        assert!(started.elapsed() >= Duration::from_secs(2));
-    }
-
-    #[tokio::test]
-    async fn repeated_non_json_manifest_remains_a_recoverable_check_failure() {
-        let server = ScriptedHttpServer::start(vec![
-            (200, "<html>temporary WAF response</html>".to_owned()),
-            (200, "<html>temporary WAF response</html>".to_owned()),
-            (200, "<html>temporary WAF response</html>".to_owned()),
-        ]);
+    async fn transient_manifest_failure_is_exposed_until_the_user_retries() {
+        let server = ScriptedHttpServer::start(vec![(418, String::new())]);
         let coordinator =
             UpdateCoordinator::with_endpoint("1.1.5", server.url("/latest.md"), "unused");
 
@@ -1046,7 +853,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transient_download_failure_restarts_and_reaches_pending_update() {
+    async fn throttled_manifest_check_is_not_retried_automatically() {
+        let server = ScriptedHttpServer::start(vec![(429, String::new())]);
+        let coordinator =
+            UpdateCoordinator::with_endpoint("1.1.5", server.url("/latest.md"), "unused");
+
+        let snapshot = coordinator.check_and_download(|_| {}).await;
+
+        assert_eq!(snapshot.state, UpdateState::Failed);
+        assert_eq!(
+            snapshot.failure_category,
+            Some(UpdateFailureCategory::CheckFailed)
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_non_json_manifest_remains_a_recoverable_check_failure() {
+        let server = ScriptedHttpServer::start(vec![(
+            200,
+            "<html>temporary WAF response</html>".to_owned(),
+        )]);
+        let coordinator =
+            UpdateCoordinator::with_endpoint("1.1.5", server.url("/latest.md"), "unused");
+
+        let snapshot = coordinator.check_and_download(|_| {}).await;
+
+        assert_eq!(snapshot.state, UpdateState::Failed);
+        assert_eq!(
+            snapshot.failure_category,
+            Some(UpdateFailureCategory::CheckFailed)
+        );
+    }
+
+    #[tokio::test]
+    async fn transient_download_failure_is_exposed_until_the_user_retries() {
         let server = ScriptedHttpServer::start_with(|base_url| {
             let manifest = serde_json::json!({
                 "version": "1.1.6",
@@ -1058,63 +898,18 @@ mod tests {
                 }
             })
             .to_string();
-            vec![
-                (200, manifest),
-                (503, String::new()),
-                (200, "test".to_owned()),
-            ]
+            vec![(200, manifest), (503, String::new())]
         });
         let coordinator =
             UpdateCoordinator::with_endpoint("1.1.5", server.url("/latest.md"), TEST_PUBLIC_KEY);
 
         let snapshot = coordinator.check_and_download(|_| {}).await;
 
-        assert_eq!(snapshot.state, UpdateState::Pending);
+        assert_eq!(snapshot.state, UpdateState::Failed);
         assert_eq!(snapshot.available_version.as_deref(), Some("1.1.6"));
-        assert_eq!(snapshot.downloaded_bytes, 4);
-        assert_eq!(snapshot.failure_category, None);
-    }
-
-    #[test]
-    fn recoverable_failures_back_off_and_success_resets_the_schedule() {
-        let failed = |category| {
-            let mut snapshot = UpdateSnapshot::new("1.1.5");
-            snapshot.state = UpdateState::Failed;
-            snapshot.failure_category = Some(category);
-            snapshot
-        };
-        let mut schedule = UpdateCheckSchedule::default();
-
         assert_eq!(
-            schedule.next_delay(&failed(UpdateFailureCategory::CheckFailed)),
-            Duration::from_secs(5 * 60)
-        );
-        assert_eq!(
-            schedule.next_delay(&failed(UpdateFailureCategory::DownloadFailed)),
-            Duration::from_secs(30 * 60)
-        );
-        assert_eq!(
-            schedule.next_delay(&failed(UpdateFailureCategory::CheckFailed)),
-            Duration::from_secs(2 * 60 * 60)
-        );
-        assert_eq!(
-            schedule.next_delay(&failed(UpdateFailureCategory::CheckFailed)),
-            Duration::from_secs(24 * 60 * 60)
-        );
-        assert_eq!(
-            schedule.next_delay(&failed(UpdateFailureCategory::SignatureInvalid)),
-            Duration::from_secs(24 * 60 * 60)
-        );
-
-        let mut up_to_date = UpdateSnapshot::new("1.1.5");
-        up_to_date.state = UpdateState::UpToDate;
-        assert_eq!(
-            schedule.next_delay(&up_to_date),
-            Duration::from_secs(24 * 60 * 60)
-        );
-        assert_eq!(
-            schedule.next_delay(&failed(UpdateFailureCategory::CheckFailed)),
-            Duration::from_secs(5 * 60)
+            snapshot.failure_category,
+            Some(UpdateFailureCategory::DownloadFailed)
         );
     }
 

@@ -26,9 +26,10 @@ use commands::{
     copy_provider_api_key, delete_provider, delete_session, discard_provider_validation,
     discover_provider_models, discover_provider_models_for_update, enter_session_management,
     export_all_issue_logs, export_issue_logs, export_linux_script, export_session_markdown,
-    get_desktop_snapshot, get_environment_snapshot, get_issue_log_path, get_startup_snapshot,
-    get_update_snapshot, install_update, leave_session_management, list_issue_logs, list_providers,
-    list_sessions, list_wsl_environments, open_dayway_website, open_update_manual_download,
+    force_apply_environment_provider, get_desktop_snapshot, get_environment_snapshot,
+    get_issue_log_path, get_startup_snapshot, get_update_snapshot, install_update,
+    leave_session_management, list_issue_logs, list_providers, list_sessions,
+    list_wsl_environments, open_dayway_website, open_update_manual_download,
     open_update_release_notes, perform_update_check, read_session, record_frontend_failure,
     refresh_startup_snapshot, refresh_wsl_environment, rename_provider, reorder_providers,
     restart_desktop_application, restore_last_environment_config, revalidate_provider,
@@ -38,9 +39,9 @@ use commands::{
 };
 use desktop::DesktopApplication;
 use diagnostic_report::{
-    DiagnosticApplication, DiagnosticRuntime, analyze_diagnostic_report,
-    choose_diagnostic_export_destination, export_diagnostic_report, get_diagnostic_report,
-    repair_diagnostic_custom_provider,
+    DiagnosticApplication, DiagnosticRuntime, analyze_diagnostic_report, chat_diagnostic_assistant,
+    choose_diagnostic_export_destination, copy_diagnostic_bundle, export_diagnostic_bundle,
+    get_diagnostic_report, repair_diagnostic_custom_provider,
 };
 use diagnostics::{IssueLogLevel, IssueLogStore, install_panic_issue_logging};
 use environment::{EnvironmentApplication, EnvironmentRecovery};
@@ -183,9 +184,11 @@ pub fn run() {
             restart_desktop_application,
             get_diagnostic_report,
             analyze_diagnostic_report,
+            chat_diagnostic_assistant,
             repair_diagnostic_custom_provider,
             choose_diagnostic_export_destination,
-            export_diagnostic_report,
+            copy_diagnostic_bundle,
+            export_diagnostic_bundle,
             get_issue_log_path,
             list_issue_logs,
             record_frontend_failure,
@@ -207,6 +210,7 @@ pub fn run() {
             refresh_wsl_environment,
             apply_wsl_provider,
             apply_environment_provider,
+            force_apply_environment_provider,
             switch_to_openai_login,
             restore_last_environment_config,
             list_providers,
@@ -238,10 +242,12 @@ pub fn run() {
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 fn start_update_monitor(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
-        let mut schedule = update::UpdateCheckSchedule::default();
         loop {
-            let snapshot = perform_update_check(&app, false).await;
-            tokio::time::sleep(schedule.next_delay(&snapshot)).await;
+            perform_update_check(&app, false).await;
+            tokio::time::sleep(std::time::Duration::from_secs(
+                update::CHECK_INTERVAL_SECONDS,
+            ))
+            .await;
         }
     });
 }

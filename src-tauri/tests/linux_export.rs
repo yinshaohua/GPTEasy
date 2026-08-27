@@ -58,7 +58,7 @@ fn bash_export_captures_every_verified_provider_in_catalog_order() {
         script.find("# 供应商目录。可脱离 GPTEasy 手工维护") < script.find("gpteasy__start_marker"),
         "the editable provider catalog must precede the runtime implementation"
     );
-    assert!(!script.contains("OpenAI 登录模式"));
+    assert!(!script.contains("OpenAI 登录"));
     assert!(
         script.contains("printf '  %s) %s (%s)%s\\n' \"$index\" \"$name\" \"$model\" \"$marker\"")
     );
@@ -102,7 +102,7 @@ fn zsh_export_captures_every_verified_provider_in_catalog_order() {
     assert!(script.contains("alpha-secret-key"));
     assert!(script.contains("beta-secret-key"));
     assert!(script.find("Alpha Provider") < script.find("Beta Provider"));
-    assert!(!script.contains("OpenAI 登录模式"));
+    assert!(!script.contains("OpenAI 登录"));
 }
 
 #[test]

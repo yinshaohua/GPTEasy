@@ -316,6 +316,58 @@ fn finish_command<T, E: IssueLoggableFailure>(
     result
 }
 
+fn finish_command_with_desktop_restart(
+    store: &IssueLogStore,
+    result: Result<DesktopSnapshot, DesktopFailure>,
+    expected_root_count: usize,
+    observed_after_failure: Option<&DesktopSnapshot>,
+) -> Result<DesktopSnapshot, DesktopFailure> {
+    match &result {
+        Ok(snapshot) => store.append(
+            IssueLogLevel::Info,
+            "desktop.restart",
+            snapshot.message_id,
+            Some(format!(
+                "phase=completed expected_root_count={expected_root_count} observed_status={} observed_root_count={}",
+                stable_category_name(&snapshot.status),
+                snapshot.roots.len()
+            )),
+        ),
+        Err(failure) => {
+            let observed_status = observed_after_failure
+                .map(|snapshot| stable_category_name(&snapshot.status))
+                .unwrap_or_else(|| "unavailable".to_owned());
+            let observed_root_count = observed_after_failure
+                .map(|snapshot| snapshot.roots.len().to_string())
+                .unwrap_or_else(|| "unavailable".to_owned());
+            store.append(
+                IssueLogLevel::Error,
+                "desktop.restart",
+                failure.message_id,
+                Some(format!(
+                    "category={} phase={} expected_root_count={expected_root_count} observed_status={observed_status} observed_root_count={observed_root_count}",
+                    stable_category_name(&failure.category),
+                    desktop_failure_phase(failure.category),
+                )),
+            );
+        }
+    }
+    result
+}
+
+fn desktop_failure_phase(category: DesktopFailureCategory) -> &'static str {
+    match category {
+        DesktopFailureCategory::ActionUnavailable => "availability",
+        DesktopFailureCategory::IdentityChanged => "identity_recheck",
+        DesktopFailureCategory::CloseFailed => "close_request",
+        DesktopFailureCategory::CloseTimedOut => "close_observation",
+        DesktopFailureCategory::TerminationFailed => "termination_request",
+        DesktopFailureCategory::TerminationTimedOut => "termination_observation",
+        DesktopFailureCategory::ActivationFailed => "activation",
+        DesktopFailureCategory::LaunchNotObserved => "launch_observation",
+    }
+}
+
 fn log_runtime_error(
     app: &AppHandle,
     event: &'static str,
@@ -383,10 +435,20 @@ pub(crate) async fn restart_desktop_application(
     expected_roots: Vec<crate::consumer::ConsumerIdentity>,
 ) -> Result<DesktopSnapshot, DesktopFailure> {
     let application = state.application.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || application.restart(&expected_roots))
-        .await
-        .map_err(|_| desktop_task_failed())?;
-    finish_command(&logs.store, "desktop.restart", result)
+    let expected_root_count = expected_roots.len();
+    let (result, observed_after_failure) = tauri::async_runtime::spawn_blocking(move || {
+        let result = application.restart(&expected_roots);
+        let observed_after_failure = result.is_err().then(|| application.inspect());
+        (result, observed_after_failure)
+    })
+    .await
+    .map_err(|_| desktop_task_failed())?;
+    finish_command_with_desktop_restart(
+        &logs.store,
+        result,
+        expected_root_count,
+        observed_after_failure.as_ref(),
+    )
 }
 
 #[tauri::command]
@@ -1231,6 +1293,43 @@ pub(crate) async fn apply_environment_provider(
 }
 
 #[tauri::command]
+pub(crate) async fn force_apply_environment_provider(
+    app: AppHandle,
+    state: State<'_, EnvironmentRuntime>,
+    logs: State<'_, IssueLogRuntime>,
+    provider_id: String,
+    expected_revision: String,
+    confirm_rebuild: bool,
+) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
+    let Some(_activity) = app
+        .state::<UpdateRuntime>()
+        .activity
+        .try_begin("强制设置供应商")
+    else {
+        return finish_command(
+            &logs.store,
+            "environment.force_apply_provider",
+            Err(EnvironmentFailure::new(
+                EnvironmentFailureCategory::StateUnavailable,
+                "update.installing",
+            )),
+        );
+    };
+    let application = state.application.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        application.force_apply_provider_at_revision(
+            &provider_id,
+            &expected_revision,
+            confirm_rebuild,
+        )
+    })
+    .await
+    .map_err(|_| environment_task_failed())
+    .and_then(|result| result);
+    finish_command(&logs.store, "environment.force_apply_provider", result)
+}
+
+#[tauri::command]
 pub(crate) async fn restore_last_environment_config(
     app: AppHandle,
     state: State<'_, EnvironmentRuntime>,
@@ -1287,7 +1386,7 @@ pub(crate) async fn switch_to_openai_login(
         logs.store.append(
             IssueLogLevel::Info,
             "environment.switch_to_openai_login",
-            "已切换到 OpenAI 登录模式",
+            "已切换到 OpenAI 登录",
             Some(format!("state={:?}", snapshot.state)),
         );
     }
@@ -1632,9 +1731,13 @@ pub(crate) fn save_provider_update(
             )),
         );
     };
-    let result = state
-        .application
-        .save_provider_update(&validation_id, &provider_id, &name);
+    let environment = app.state::<EnvironmentRuntime>();
+    let result = state.application.save_provider_update_for_environment(
+        &environment.application,
+        &validation_id,
+        &provider_id,
+        &name,
+    );
     finish_command(
         &logs.store,
         "provider.save_update",
@@ -1880,8 +1983,11 @@ mod tests {
     use super::{
         DeleteProviderFailure, IssueLogLevel, IssueLogStore, UpdateFailureCategory,
         UpdateInstallFailure, UpdateInstallFailureCategory, UpdateSnapshot, UpdateState,
-        finish_command, log_update_check_failure, log_update_install_failure,
+        finish_command, finish_command_with_desktop_restart, log_update_check_failure,
+        log_update_install_failure,
     };
+    use crate::consumer::{ConsumerIdentity, ConsumerRole, ConsumerStatus};
+    use crate::desktop::{DesktopAction, DesktopFailure, DesktopFailureCategory, DesktopSnapshot};
     use tempfile::tempdir;
 
     fn failed_update_snapshot(category: UpdateFailureCategory) -> UpdateSnapshot {
@@ -1972,6 +2078,73 @@ mod tests {
         assert!(!encoded.contains("api_key"));
         assert!(!encoded.contains("base_url"));
         assert!(!encoded.contains("provider_id"));
+    }
+
+    #[test]
+    fn desktop_restart_termination_timeout_log_records_phase_and_counts_without_process_identity() {
+        let directory = tempdir().expect("issue log directory");
+        let store = IssueLogStore::new(directory.path());
+        let failure = DesktopFailure {
+            category: DesktopFailureCategory::TerminationTimedOut,
+            message_id: "desktop.termination_timed_out",
+        };
+        let observed = DesktopSnapshot {
+            status: ConsumerStatus::Running,
+            action: DesktopAction::Restart,
+            message_id: "desktop.ready_to_restart",
+            roots: vec![ConsumerIdentity {
+                role: ConsumerRole::Desktop,
+                pid: 42_042,
+                started_at_epoch_millis: 8_000,
+            }],
+        };
+
+        let result = finish_command_with_desktop_restart(&store, Err(failure), 1, Some(&observed));
+
+        assert!(result.is_err());
+        let records = store.list(0, Some(IssueLogLevel::Error), Some("desktop.restart"));
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].details.as_deref(),
+            Some(
+                "category=termination_timed_out phase=termination_observation expected_root_count=1 observed_status=running observed_root_count=1"
+            )
+        );
+        let encoded = serde_json::to_string(&records[0]).expect("serialize issue log record");
+        assert!(!encoded.contains("42042"));
+        assert!(!encoded.contains("8000"));
+    }
+
+    #[test]
+    fn desktop_restart_success_log_distinguishes_confirmed_tree_termination() {
+        let directory = tempdir().expect("issue log directory");
+        let store = IssueLogStore::new(directory.path());
+        let snapshot = DesktopSnapshot {
+            status: ConsumerStatus::Running,
+            action: DesktopAction::Restart,
+            message_id: "desktop.restarted_after_termination",
+            roots: vec![ConsumerIdentity {
+                role: ConsumerRole::Desktop,
+                pid: 42_042,
+                started_at_epoch_millis: 8_000,
+            }],
+        };
+
+        let result = finish_command_with_desktop_restart(&store, Ok(snapshot), 1, None);
+
+        assert!(result.is_ok());
+        let records = store.list(0, Some(IssueLogLevel::Info), Some("desktop.restart"));
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].message, "desktop.restarted_after_termination");
+        assert_eq!(
+            records[0].details.as_deref(),
+            Some(
+                "phase=completed expected_root_count=1 observed_status=running observed_root_count=1"
+            )
+        );
+        let encoded = serde_json::to_string(&records[0]).expect("serialize issue log record");
+        assert!(!encoded.contains("42042"));
+        assert!(!encoded.contains("8000"));
     }
 
     #[test]

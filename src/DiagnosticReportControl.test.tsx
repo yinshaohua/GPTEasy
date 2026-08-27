@@ -4,263 +4,87 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import DiagnosticReportControl from "./DiagnosticReportControl";
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
-
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise;
-    reject = rejectPromise;
-  });
-  return { promise, reject, resolve };
-}
 
 const report = {
   schemaVersion: 2,
-  environment: {
-    scope: "current_user",
-    codexHome: "~/.codex",
-    codexHomeOverrideStatus: "unset",
-    configStatus: "valid",
-    activeProvider: "custom",
-    declaredProviders: [],
-  },
-  authentication: {
-    loginStatus: "logged_in",
-    authFileStatus: "present",
-    credentialStore: "file",
-  },
-  consumers: { desktop: "running", cli: "stopped" },
+  environment: { scope: "current_user" as const, codexHome: "~/.codex" as const, codexHomeOverrideStatus: "unset" as const, configStatus: "valid" as const, activeProvider: "custom", declaredProviders: [] },
+  authentication: { loginStatus: "logged_in" as const, authFileStatus: "present" as const, credentialStore: "file" as const },
+  consumers: { desktop: "stopped" as const, cli: "stopped" as const },
   versions: { gpteasy: "1.2.1", codexCli: "0.147.0" },
-  findings: [{
-    code: "model_provider_missing_definition",
-    origin: "local",
-    severity: "error",
-    title: "模型供应商定义缺失",
-    summary: "config.toml 使用模型供应商“custom”，但没有声明同名配置。",
-    repairable: false,
-  }],
+  findings: [{ code: "model_provider_missing_definition", origin: "local" as const, severity: "error" as const, title: "模型供应商定义缺失", summary: "config.toml 使用模型供应商 custom，但没有声明同名配置。", repairable: true }],
   errors: [],
-  repairPreview: null,
+  repairPreview: { previewId: "preview-1", source: "gpteasy_backup" as const, providerName: "历史供应商", baseUrl: "https://provider.example/v1", model: "gpt-5", authentication: "current_api_key" as const, changes: ["backup_config" as const, "add_custom_provider_definition" as const, "verify_and_rediagnose" as const] },
 };
+const provider = { id: "provider-1", name: "当前供应商", baseUrl: "https://provider.example/v1", defaultModel: "gpt-5", verifiedAtEpochSeconds: 1, isCurrent: true, recommendationId: null, hasRecommendationUpdate: false };
 
 describe("DiagnosticReportControl", () => {
-  beforeEach(() => {
-    cleanup();
-    invoke.mockReset();
-  });
+  beforeEach(() => { cleanup(); invoke.mockReset(); });
 
-  it("shows busy, successful report, and no safe repair state from the top action", async () => {
-    const request = deferred<typeof report>();
-    invoke.mockImplementation((command: string) => {
-      if (command === "get_diagnostic_report") return request.promise;
-      return Promise.reject(new Error(`unexpected command: ${command}`));
-    });
+  it("matches the Codex action style and reveals diagnostic details on demand", async () => {
+    invoke.mockImplementation((command: string) => command === "get_diagnostic_report" ? Promise.resolve(report) : command === "list_providers" ? Promise.resolve([provider]) : Promise.reject(new Error(command)));
     render(<DiagnosticReportControl />);
-
-    fireEvent.click(screen.getByRole("button", { name: "帮我排查" }));
-
-    expect(screen.getByRole("dialog", { name: "本机诊断报告" })).toBeInTheDocument();
-    expect(screen.getByText("正在检查当前用户 Codex 环境")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "帮我排查" })).toBeDisabled();
-
-    request.resolve(report);
-
-    expect(await screen.findByText("诊断完成")).toBeInTheDocument();
+    const trigger = screen.getByRole("button", { name: "帮帮我" });
+    expect(trigger).toHaveClass("secondary-button", "compact");
+    expect(trigger).not.toHaveClass("command-button");
+    fireEvent.click(trigger);
+    const dialog = await screen.findByRole("dialog", { name: "帮帮我" });
+    expect(dialog).toBeInTheDocument();
+    expect(dialog).toHaveTextContent("AI 将结合脱敏诊断和你输入的问题协助排查");
+    expect(dialog).toHaveTextContent("不会直接执行任意命令");
+    expect(dialog).not.toHaveTextContent("当前用户 Codex 环境");
+    expect(screen.getByText("发现 1 个需要处理的问题")).toBeInTheDocument();
+    expect(screen.queryByText("模型供应商定义缺失")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /查看详情/ }));
     expect(screen.getByText("模型供应商定义缺失")).toBeInTheDocument();
-    expect(screen.getByText("custom")).toBeInTheDocument();
-    expect(screen.getByText("需要人工处理：没有可安全自动修复的项目")).toBeInTheDocument();
-    await waitFor(() => expect(screen.getByRole("button", { name: "帮我排查" })).toBeEnabled());
+    const providerSelect = screen.getByRole("combobox", { name: "对话供应商" });
+    const toolbar = providerSelect.closest(".diagnostic-toolbar");
+    expect(toolbar).toContainElement(screen.getByRole("button", { name: "复制信息" }));
+    expect(toolbar).toContainElement(screen.getByRole("button", { name: "导出信息" }));
+    expect(screen.queryByRole("button", { name: /JSON|Markdown/ })).not.toBeInTheDocument();
   });
 
-  it("shows a failure state and can retry the diagnosis", async () => {
-    const retry = deferred<typeof report>();
-    invoke
-      .mockRejectedValueOnce({ messageId: "diagnostics.report_failed" })
-      .mockImplementation((command: string) => {
-        if (command === "get_diagnostic_report") return retry.promise;
-        return Promise.reject(new Error(`unexpected command: ${command}`));
-      });
-    render(<DiagnosticReportControl />);
-
-    fireEvent.click(screen.getByRole("button", { name: "帮我排查" }));
-
-    expect(await screen.findByRole("alert")).toHaveTextContent("诊断失败");
-    fireEvent.click(screen.getByRole("button", { name: "重新检查" }));
-    retry.resolve(report);
-
-    expect(await screen.findByText("诊断完成")).toBeInTheDocument();
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-  });
-
-  it("exports redacted JSON and Markdown through backend commands", async () => {
-    invoke.mockImplementation((command: string, arguments_: { format?: string } = {}) => {
+  it("sends quick prompts through the selected provider and renders an action card", async () => {
+    invoke.mockImplementation((command: string, args: { providerId?: string; message?: string } = {}) => {
       if (command === "get_diagnostic_report") return Promise.resolve(report);
-      if (command === "choose_diagnostic_export_destination") {
-        return Promise.resolve(`C:/reports/report.${arguments_.format === "json" ? "json" : "md"}`);
+      if (command === "list_providers") return Promise.resolve([provider]);
+      if (command === "chat_diagnostic_assistant") {
+        expect(args.providerId).toBe(provider.id);
+        expect(args.message).toBe("无法将供应商设置到 Codex");
+        return Promise.resolve({ providerId: provider.id, providerName: provider.name, reply: "可以依据本机证据修复。", repairPlan: [{ id: "repair-custom-provider", findingCode: "model_provider_missing_definition", title: "补回 provider 定义", description: "使用已验证证据。", action: "repair_custom_provider", previewId: "preview-1", requiresConfirmation: true }] });
       }
-      if (command === "export_diagnostic_report") return Promise.resolve();
-      return Promise.reject(new Error(`unexpected command: ${command}`));
+      if (command === "repair_diagnostic_custom_provider") return Promise.resolve({ status: "succeeded", messageId: "diagnostics.repair_succeeded", report: { ...report, findings: [], repairPreview: null } });
+      return Promise.reject(new Error(command));
     });
     render(<DiagnosticReportControl />);
-    fireEvent.click(screen.getByRole("button", { name: "帮我排查" }));
-    await screen.findByText("诊断完成");
-
-    fireEvent.click(screen.getByRole("button", { name: "导出 JSON" }));
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith(
-      "export_diagnostic_report",
-      { format: "json", destination: "C:/reports/report.json" },
-    ));
-    expect(screen.getByRole("status")).toHaveTextContent("JSON 已导出");
-
-    fireEvent.click(screen.getByRole("button", { name: "导出 Markdown" }));
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith(
-      "export_diagnostic_report",
-      { format: "markdown", destination: "C:/reports/report.md" },
-    ));
-    expect(screen.getByRole("status")).toHaveTextContent("Markdown 已导出");
+    fireEvent.click(screen.getByRole("button", { name: "帮帮我" }));
+    await screen.findByText("发现 1 个需要处理的问题");
+    fireEvent.click(screen.getByRole("button", { name: "无法将供应商设置到 Codex" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("chat_diagnostic_assistant", expect.objectContaining({ providerId: provider.id, message: "无法将供应商设置到 Codex" })));
+    expect(await screen.findByText("可以依据本机证据修复。")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "查看并确认" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认执行" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("repair_diagnostic_custom_provider", { previewId: "preview-1" }));
   });
 
-  it("previews and confirms a deterministic repair before showing the rediagnosed result", async () => {
-    const repairableReport = {
-      ...report,
-      findings: [{ ...report.findings[0], repairable: true }],
-      repairPreview: {
-        previewId: "preview-revision",
-        source: "gpteasy_backup" as const,
-        providerName: "Historical Custom",
-        baseUrl: "https://historical.example/v1",
-        model: "gpt-5",
-        authentication: "current_api_key" as const,
-        changes: [
-          "backup_config" as const,
-          "add_custom_provider_definition" as const,
-          "verify_and_rediagnose" as const,
-        ],
-      },
-    };
-    const repairedReport = {
-      ...report,
-      environment: {
-        ...report.environment,
-        declaredProviders: ["custom"],
-      },
-      findings: [],
-      repairPreview: null,
-    };
-    invoke.mockImplementation((command: string, arguments_: { previewId?: string } = {}) => {
-      if (command === "get_diagnostic_report") return Promise.resolve(repairableReport);
-      if (command === "repair_diagnostic_custom_provider") {
-        expect(arguments_.previewId).toBe("preview-revision");
-        return Promise.resolve({
-          status: "succeeded",
-          messageId: "diagnostics.repair_succeeded",
-          report: repairedReport,
-        });
-      }
-      return Promise.reject(new Error(`unexpected command: ${command}`));
-    });
-    render(<DiagnosticReportControl />);
-    fireEvent.click(screen.getByRole("button", { name: "帮我排查" }));
-    await screen.findByText("诊断完成");
-
-    fireEvent.click(screen.getByRole("button", { name: "查看修复预览" }));
-
-    expect(screen.getByRole("heading", { name: "修复预览" })).toBeInTheDocument();
-    expect(screen.getByText("有效 GPTEasy 备份")).toBeInTheDocument();
-    expect(screen.getByText("https://historical.example/v1")).toBeInTheDocument();
-    expect(invoke).not.toHaveBeenCalledWith(
-      "repair_diagnostic_custom_provider",
-      expect.anything(),
-    );
-
-    fireEvent.click(screen.getByRole("button", { name: "确认并修复" }));
-
-    expect(await screen.findByText("修复成功，已重新诊断。" )).toBeInTheDocument();
-    expect(screen.getByText("未发现诊断项")).toBeInTheDocument();
-    expect(screen.queryByText("修复预览")).not.toBeInTheDocument();
-  });
-
-  it("defaults to the current verified provider and requires explicit plan approval", async () => {
-    const current = { id: "current-provider", name: "当前供应商", baseUrl: "https://current.example/v1", defaultModel: "model", verifiedAtEpochSeconds: 1, isCurrent: true, recommendationId: null, hasRecommendationUpdate: false };
-    const backup = { ...current, id: "backup-provider", name: "备用供应商", isCurrent: false };
-    const assistant = {
-      providerId: current.id,
-      providerName: current.name,
-      explanation: "发现本地 provider 定义缺失。",
-      repairPlan: [{ id: "repair-0", findingCode: "model_provider_missing_definition", title: "补回定义", description: "使用已验证证据。", action: "repair_custom_provider" as const, previewId: "preview-0", requiresConfirmation: true }],
-    };
-    invoke.mockImplementation((command: string, arguments_: { providerId?: string; previewId?: string } = {}) => {
-      if (command === "get_diagnostic_report") return Promise.resolve({ ...report, repairPreview: { previewId: "preview-0", source: "gpteasy_backup", providerName: "历史供应商", baseUrl: "https://history.example/v1", model: "model", authentication: "current_api_key", changes: ["backup_config", "add_custom_provider_definition", "verify_and_rediagnose"] } });
-      if (command === "list_providers") return Promise.resolve([current, backup]);
-      if (command === "analyze_diagnostic_report") {
-        expect(arguments_).toEqual({ providerId: "backup-provider" });
-        return Promise.resolve({ ...assistant, providerId: "backup-provider", providerName: "备用供应商" });
-      }
-      if (command === "repair_diagnostic_custom_provider") return Promise.resolve({ status: "succeeded", messageId: "diagnostics.repair_succeeded", report });
-      return Promise.reject(new Error(`unexpected command: ${command}`));
-    });
-    render(<DiagnosticReportControl />);
-    fireEvent.click(screen.getByRole("button", { name: "帮我排查" }));
-    await screen.findByText("诊断完成");
-    expect(screen.getByLabelText("分析供应商")).toHaveValue("current-provider");
-    fireEvent.change(screen.getByLabelText("分析供应商"), { target: { value: "backup-provider" } });
-    fireEvent.click(screen.getByRole("button", { name: "让 AI 帮我分析" }));
-    expect(await screen.findByText("备用供应商 的分析")).toBeInTheDocument();
-    expect(invoke).not.toHaveBeenCalledWith("repair_diagnostic_custom_provider", expect.anything());
-    fireEvent.click(screen.getByRole("checkbox", { name: /补回定义/ }));
-    fireEvent.click(screen.getByRole("button", { name: "确认选中修复" }));
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith("repair_diagnostic_custom_provider", { previewId: "preview-0" }));
-  });
-
-  it("prefers the current provider when providers arrive after the report", async () => {
-    const providersRequest = deferred<Array<{
-      id: string;
-      name: string;
-      baseUrl: string;
-      defaultModel: string;
-      verifiedAtEpochSeconds: number;
-      isCurrent: boolean;
-      recommendationId: null;
-      hasRecommendationUpdate: boolean;
-    }>>();
-    const backup = { id: "backup-provider", name: "备用供应商", baseUrl: "https://backup.example/v1", defaultModel: "model", verifiedAtEpochSeconds: 1, isCurrent: false, recommendationId: null, hasRecommendationUpdate: false };
-    const current = { ...backup, id: "current-provider", name: "当前供应商", isCurrent: true };
-    invoke.mockImplementation((command: string) => {
-      if (command === "get_diagnostic_report") return Promise.resolve(report);
-      if (command === "list_providers") return providersRequest.promise;
-      return Promise.reject(new Error(`unexpected command: ${command}`));
-    });
-
-    render(<DiagnosticReportControl />);
-    fireEvent.click(screen.getByRole("button", { name: "帮我排查" }));
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith("list_providers"));
-
-    providersRequest.resolve([backup, current]);
-
-    await screen.findByText("诊断完成");
-    expect(await screen.findByLabelText("分析供应商")).toHaveValue("current-provider");
-  });
-
-  it("keeps the local report exportable when AI analysis fails", async () => {
-    const provider = { id: "provider-1", name: "已验证供应商", baseUrl: "https://provider.example/v1", defaultModel: "model", verifiedAtEpochSeconds: 1, isCurrent: true, recommendationId: null, hasRecommendationUpdate: false };
+  it("copies and exports the redacted report and current conversation as one Markdown bundle", async () => {
     invoke.mockImplementation((command: string) => {
       if (command === "get_diagnostic_report") return Promise.resolve(report);
       if (command === "list_providers") return Promise.resolve([provider]);
-      if (command === "analyze_diagnostic_report") return Promise.reject({ messageId: "diagnostics.assistant_failed" });
-      return Promise.reject(new Error(`unexpected command: ${command}`));
+      if (command === "copy_diagnostic_bundle") return Promise.resolve();
+      if (command === "choose_diagnostic_export_destination") return Promise.resolve("C:/reports/report.md");
+      if (command === "export_diagnostic_bundle") return Promise.resolve();
+      return Promise.reject(new Error(command));
     });
     render(<DiagnosticReportControl />);
-    fireEvent.click(screen.getByRole("button", { name: "帮我排查" }));
-    await screen.findByText("诊断完成");
-
-    fireEvent.click(screen.getByRole("button", { name: "让 AI 帮我分析" }));
-
-    expect(await screen.findByRole("alert")).toHaveTextContent("请导出本机诊断结果");
-    expect(screen.getByRole("button", { name: "导出 JSON" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "导出 Markdown" })).toBeEnabled();
-    expect(screen.getByText("模型供应商定义缺失")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "帮帮我" }));
+    await screen.findByText("发现 1 个需要处理的问题");
+    fireEvent.click(screen.getByRole("button", { name: "复制信息" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("copy_diagnostic_bundle", { conversation: [] }));
+    expect(screen.getAllByRole("status").some((element) => element.textContent?.includes("已复制诊断信息"))).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "导出信息" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("choose_diagnostic_export_destination"));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("export_diagnostic_bundle", { destination: "C:/reports/report.md", conversation: [] }));
+    expect(screen.getAllByRole("status").some((element) => element.textContent?.includes("已导出诊断信息"))).toBe(true);
   });
 });

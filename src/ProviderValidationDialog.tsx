@@ -6,7 +6,8 @@ import { providerFailureMessages, providerMessages } from "./messages";
 
 export type ProviderValidationSource =
   | { kind: "detail"; providerName: string }
-  | { kind: "catalog"; providerName: string };
+  | { kind: "catalog"; providerName: string }
+  | { kind: "force"; providerName: string };
 
 export interface ProviderValidationSession {
   source: ProviderValidationSource;

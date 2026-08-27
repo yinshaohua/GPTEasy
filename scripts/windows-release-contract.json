@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "issue": 28,
-  "desktopConsumerControl": "trusted_start_confirmed_restart",
-  "documentMarker": "<!-- release-contract: desktop-consumer-control=trusted-start-confirmed-restart -->",
+  "desktopConsumerControl": "trusted_start_confirmed_tree_restart",
+  "documentMarker": "<!-- release-contract: desktop-consumer-control=trusted-start-confirmed-tree-restart -->",
   "documents": [
     { "path": "CONTEXT.md" },
     { "path": "docs/adr/0041-trusted-desktop-start-and-confirmed-restart.md" },
@@ -20,7 +20,7 @@
     }
   ],
   "forbiddenDesktopControlPatterns": [
-    "(?<!不)(提供|允许|执行).{0,12}(强制终止|强制关闭)",
+    "GPTEasy.{0,8}(静默|未经确认|无需确认|无确认).{0,12}(终止|结束|关闭)",
     "(控制|操作)\\s*Codex CLI"
   ],
   "window": {
@@ -47,7 +47,7 @@
     { "id": "pending_restart_auto_clear", "criterion": "pendingRestartAutoClear" },
     { "id": "cli_new_process_read" },
     { "id": "desktop_status_and_start", "criterion": "trustedDesktopStart" },
-    { "id": "desktop_confirmed_graceful_restart", "criterion": "gracefulDesktopRestart" },
+    { "id": "desktop_confirmed_tree_restart", "criterion": "confirmedDesktopTreeRestart" },
     { "id": "desktop_cli_isolation", "criterion": "cliLifecycleIsolation" },
     { "id": "restore_last_config" },
     { "id": "external_config_takeover" },

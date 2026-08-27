@@ -1311,7 +1311,7 @@ describe("供应商目录生命周期", () => {
     expect(screen.queryByRole("button", { name: "恢复上次配置" })).not.toBeInTheDocument();
     expect(screen.queryByText("其他环境供应商操作")).not.toBeInTheDocument();
     expect(screen.queryByText("当前 Windows Codex 环境操作")).not.toBeInTheDocument();
-    const openAi = within(openSettingsMenu()).getByRole("menuitem", { name: "返回 OpenAI 登录模式" });
+    const openAi = within(openSettingsMenu()).getByRole("menuitem", { name: "返回 OpenAI 登录" });
     expect(openAi).toBeEnabled();
     expect(openAi).toHaveAttribute("title", "使用或恢复 Codex 已有的 ChatGPT 账户登录。");
     expect(screen.queryByText("当前用户")).not.toBeInTheDocument();
@@ -1503,7 +1503,7 @@ describe("供应商目录生命周期", () => {
     fireEvent.click(screen.getByRole("button", { name: "切换" }));
 
     const switchingButton = screen.getByRole("button", { name: "选择使用 Concurrent Provider" });
-    const openAiButton = within(openSettingsMenu()).getByRole("menuitem", { name: "返回 OpenAI 登录模式" });
+    const openAiButton = within(openSettingsMenu()).getByRole("menuitem", { name: "返回 OpenAI 登录" });
     expect(switchingButton.querySelector(".is-spinning")).toBeInTheDocument();
     expect(openAiButton.querySelector(".is-spinning")).not.toBeInTheDocument();
     await waitFor(() => expect(environmentReads).toBe(2));
@@ -1664,18 +1664,35 @@ describe("供应商目录生命周期", () => {
     expect(screen.getByRole("button", { name: "删除 Current Provider" })).toBeDisabled();
   }, 10_000);
 
-  it("非当前供应商从保存发起验证后自动保存且只保存一次", async () => {
+  it("外部 OpenAI 登录覆盖目录历史当前标记并允许普通保存", async () => {
     const provider = {
       id: "68bf9ee2-3ba5-4517-b47e-12a11e038de4",
       name: "Atlas",
       baseUrl: "https://atlas.example/v1",
       defaultModel: "model-a",
       verifiedAtEpochSeconds: 1_786_140_000,
-      isCurrent: false,
+      isCurrent: true,
+    };
+    const externalOpenAiEnvironment = {
+      state: "external",
+      mode: "openai_login",
+      messageId: "environment.external_openai_login",
+      revision: "external-openai-revision",
+      requiresTakeoverConfirmation: true,
+      takeoverAvailable: true,
+      impacts: [],
+      currentProvider: null,
+      restoreAvailability: "no_backup",
+      restorePreview: null,
+      loginStatus: "not_logged_in",
+      pendingRestart: false,
+      requiresConsumerConfirmation: false,
+      consumers: { desktop: "stopped", cli: "stopped" },
     };
     invoke.mockImplementation((command: string) => {
       if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
       if (command === "list_providers") return Promise.resolve([provider]);
+      if (command === "get_environment_snapshot") return Promise.resolve(externalOpenAiEnvironment);
       if (command === "discover_provider_models_for_update") {
         return Promise.resolve({
           normalizedBaseUrl: "https://atlas.example/next/v1",
@@ -1704,6 +1721,7 @@ describe("供应商目录生命周期", () => {
     });
 
     render(<App />);
+    expect(await screen.findByRole("button", { name: "选择使用 Atlas" })).toBeEnabled();
     fireEvent.click(
       await screen.findByRole("button", { name: "修改 Atlas" }, { timeout: 5_000 }),
     );
@@ -1994,11 +2012,10 @@ describe("Codex 环境接管", () => {
     const navigation = screen.getByRole("navigation", { name: "主要菜单" });
     const navigationItems = within(navigation).getAllByRole("button");
     expect(navigationItems.map((button) => button.textContent)).toEqual([
-      "帮我排查",
       "供应商管理",
       "会话管理",
     ]);
-    const openAi = within(openSettingsMenu()).getByRole("menuitem", { name: "返回 OpenAI 登录模式" });
+    const openAi = within(openSettingsMenu()).getByRole("menuitem", { name: "返回 OpenAI 登录" });
     await waitFor(() => expect(openAi).toBeEnabled());
     expect(screen.queryByRole("heading", { name: "外部配置" })).not.toBeInTheDocument();
     expect(screen.queryByText("待重启")).not.toBeInTheDocument();
@@ -2007,7 +2024,7 @@ describe("Codex 环境接管", () => {
     expect(screen.queryByText("当前 Windows Codex 环境操作")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /选择 WSL2 供应商/ })).toBeEnabled();
     expect(screen.getByRole("button", { name: /导出 Linux 脚本/ })).toBeDisabled();
-    expect(within(screen.getByRole("region", { name: "Codex 环境操作" })).getAllByRole("button")).toHaveLength(2);
+    expect(within(screen.getByRole("region", { name: "Codex 环境操作" })).getAllByRole("button")).toHaveLength(1);
     expect(screen.queryByText("当前用户")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Codex 环境" })).not.toBeInTheDocument();
   });
@@ -2304,7 +2321,7 @@ describe("Codex 环境接管", () => {
       .toBe(false);
   });
 
-  it("管理冲突无法安全解析时不提供强制覆盖", async () => {
+  it("管理冲突无法安全解析时仍提供强制设置入口", async () => {
     const provider = {
       id: "90f00c5a-59a7-4936-a791-583d90b81b73",
       name: "Blocked Provider",
@@ -2337,12 +2354,14 @@ describe("Codex 环境接管", () => {
 
     render(<App />);
 
-    expect(await screen.findByText("无法安全解析当前配置，不能强制覆盖。")).toBeInTheDocument();
+    await screen.findByRole("heading", { name: "供应商目录" });
+    await screen.findByText(provider.name, { selector: ".provider-row-name" });
+    expect(screen.getByRole("button", { name: "强制设置" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "选择使用 Blocked Provider" })).toBeDisabled();
     expect(invoke.mock.calls.some(([command]) => command === "apply_environment_provider")).toBe(false);
   });
 
-  it("读取认证与消费者状态，并从供应商管理确认切换到 OpenAI 登录模式", async () => {
+  it("读取认证与消费者状态，并从供应商管理确认切换到 OpenAI 登录", async () => {
     const external = {
       state: "external",
       mode: null,
@@ -2377,12 +2396,12 @@ describe("Codex 环境接管", () => {
     render(<App />);
 
     await screen.findByRole("heading", { name: "供应商管理" });
-    const openAiButton = within(openSettingsMenu()).getByRole("menuitem", { name: "返回 OpenAI 登录模式" });
+    const openAiButton = within(openSettingsMenu()).getByRole("menuitem", { name: "返回 OpenAI 登录" });
     await waitFor(() => expect(openAiButton).toBeEnabled());
     expect(screen.queryByRole("heading", { name: "外部配置" })).not.toBeInTheDocument();
     fireEvent.click(openAiButton);
     const dialog = screen.getByRole("dialog", { name: "确认配置切换" });
-    expect(dialog).toHaveTextContent("切换到 OpenAI 登录模式");
+    expect(dialog).toHaveTextContent("切换到 OpenAI 登录");
     expect(dialog).not.toHaveTextContent("重启");
     fireEvent.click(screen.getByRole("button", { name: "切换" }));
 
@@ -2391,12 +2410,12 @@ describe("Codex 环境接管", () => {
         expectedRevision: "openai-ready-revision",
       });
     });
-    const activeOpenAi = within(openSettingsMenu()).getByRole("menuitem", { name: "返回 OpenAI 登录模式" });
+    const activeOpenAi = within(openSettingsMenu()).getByRole("menuitem", { name: "返回 OpenAI 登录" });
     expect(activeOpenAi).toBeDisabled();
-    expect(activeOpenAi).toHaveAttribute("title", "当前已是 OpenAI 登录模式。");
+    expect(activeOpenAi).toHaveAttribute("title", "当前已使用 OpenAI 登录。");
   });
 
-  it("登录状态缺失时仍可发起 OpenAI 模式切换，并由后端拒绝写入", async () => {
+  it("登录状态缺失时仍可退出供应商模式并等待用户在 Codex 登录", async () => {
     const environment = {
       state: "external",
       mode: null,
@@ -2416,7 +2435,13 @@ describe("Codex 环境接管", () => {
       if (command === "list_wsl_environments") return Promise.resolve([]);
       if (command === "get_environment_snapshot") return Promise.resolve(environment);
       if (command === "switch_to_openai_login") {
-        return Promise.reject({ category: "openai_login_required", messageId: "environment.openai_login_required" });
+        return Promise.resolve({
+          ...environment,
+          state: "managed",
+          mode: "openai_login",
+          messageId: "environment.openai_login_missing",
+          revision: "openai-login-required",
+        });
       }
       return Promise.resolve(undefined);
     });
@@ -2424,8 +2449,8 @@ describe("Codex 环境接管", () => {
     render(<App />);
 
     await screen.findByRole("heading", { name: "供应商管理" });
-    const openAiButton = within(openSettingsMenu()).getByRole("menuitem", { name: "返回 OpenAI 登录模式" });
-    await waitFor(() => expect(openAiButton).toHaveAttribute("title", "请先在 Codex 中完成 ChatGPT 账户登录。"));
+    const openAiButton = within(openSettingsMenu()).getByRole("menuitem", { name: "返回 OpenAI 登录" });
+    await waitFor(() => expect(openAiButton).toHaveAttribute("title", "退出供应商模式后，可在 Codex 中登录 ChatGPT。"));
     expect(openAiButton).toBeEnabled();
     fireEvent.click(openAiButton);
     fireEvent.click(screen.getByRole("button", { name: "切换" }));
@@ -2433,7 +2458,10 @@ describe("Codex 环境接管", () => {
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("switch_to_openai_login", {
       expectedRevision: "blocked-not-logged-in",
     }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("请先在 Codex 中完成 ChatGPT 账户登录。");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    const activeOpenAi = within(openSettingsMenu()).getByRole("menuitem", { name: "返回 OpenAI 登录" });
+    expect(activeOpenAi).toBeDisabled();
+    expect(activeOpenAi).toHaveAttribute("title", "OpenAI 登录已在外部失效；当前模式保持不变。");
   });
 
   it("外部注销后保留 OpenAI 模式，并在确认后返回已验证供应商", async () => {
@@ -2477,7 +2505,7 @@ describe("Codex 环境接管", () => {
     render(<App />);
 
     await screen.findByRole("heading", { name: "供应商管理" });
-    const openAiButton = within(openSettingsMenu()).getByRole("menuitem", { name: "返回 OpenAI 登录模式" });
+    const openAiButton = within(openSettingsMenu()).getByRole("menuitem", { name: "返回 OpenAI 登录" });
     await waitFor(() => expect(openAiButton).toHaveAttribute("title",
       "OpenAI 登录已在外部失效；当前模式保持不变。",
     ));
@@ -2531,9 +2559,9 @@ describe("启动状态", () => {
     render(<App />);
     await screen.findByRole("heading", { name: "供应商管理" });
 
-    const openAiButton = within(openSettingsMenu()).getByRole("menuitem", { name: "返回 OpenAI 登录模式" });
+    const openAiButton = within(openSettingsMenu()).getByRole("menuitem", { name: "返回 OpenAI 登录" });
     await waitFor(() => expect(openAiButton).toHaveAttribute("title",
-      "请先在 Codex 中完成 ChatGPT 账户登录。",
+      "退出供应商模式后，可在 Codex 中登录 ChatGPT。",
     ));
     expect(screen.queryByRole("heading", { name: "外部配置" })).not.toBeInTheDocument();
     expect(invoke).toHaveBeenCalledWith("get_startup_snapshot");
@@ -2667,6 +2695,7 @@ describe("Codex 桌面版受控启动与重启", () => {
     fireEvent.click(await screen.findByRole("button", { name: "重启 Codex" }));
 
     const dialog = screen.getByRole("dialog", { name: "确认重启 Codex" });
+    expect(dialog).toHaveTextContent("将结束 Codex 桌面进程及其中任务");
     expect(dialog).toHaveTextContent("Codex CLI 不会被启动、关闭或重启");
     expect(screen.getByRole("button", { name: "取消" })).toHaveFocus();
     fireEvent.click(screen.getByRole("button", { name: "取消" }));
@@ -2691,8 +2720,8 @@ describe("Codex 桌面版受控启动与重启", () => {
       }
       if (command === "restart_desktop_application") {
         return Promise.reject({
-          category: "close_timed_out",
-          messageId: "desktop.close_timed_out",
+          category: "termination_timed_out",
+          messageId: "desktop.termination_timed_out",
         });
       }
       return Promise.resolve(undefined);
@@ -2705,7 +2734,7 @@ describe("Codex 桌面版受控启动与重启", () => {
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("restart_desktop_application", {
       expectedRoots: roots,
     }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("Codex 未能正常退出，未重新启动。");
+    expect(await screen.findByRole("alert")).toHaveTextContent("结束 Codex 桌面版后仍检测到原进程，未重新启动。");
     expect(screen.queryByText("Codex 已重新启动。")).not.toBeInTheDocument();
   });
 
@@ -2766,6 +2795,90 @@ describe("Codex 桌面版受控启动与重启", () => {
     const headingRow = heading.closest(".catalog-heading");
     expect(headingRow).not.toBeNull();
     expect(within(headingRow as HTMLElement).getByRole("button", { name: "添加供应商" }))
+      .toBeInTheDocument();
+  });
+
+  it("强制设置按目录顺序重验供应商，并在重建确认后调用后端", async () => {
+    const provider = {
+      id: "68bf9ee2-3ba5-4517-b47e-12a11e038de4",
+      name: "Atlas",
+      baseUrl: "https://atlas.example/v1",
+      defaultModel: "model-a",
+      verifiedAtEpochSeconds: 1_786_140_000,
+      isCurrent: false,
+    };
+    const environment = {
+      state: "conflict",
+      mode: null,
+      messageId: "environment.conflict",
+      revision: "force-revision",
+      requiresTakeoverConfirmation: true,
+      takeoverAvailable: false,
+      impacts: [],
+      currentProvider: null,
+      restoreAvailability: "no_backup",
+      restorePreview: null,
+      loginStatus: "logged_in",
+      pendingRestart: false,
+      requiresConsumerConfirmation: false,
+      consumers: { desktop: "stopped", cli: "stopped" },
+    };
+    invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([provider]);
+      if (command === "get_environment_snapshot") return Promise.resolve(environment);
+      if (command === "revalidate_provider") {
+        return Promise.resolve({ provider, validationReceipt: null });
+      }
+      if (command === "force_apply_environment_provider") {
+        if (!args?.confirmRebuild) {
+          return Promise.reject({
+            category: "force_rebuild_confirmation_required",
+            messageId: "environment.force_rebuild_confirmation_required",
+          });
+        }
+        return Promise.resolve({
+          ...environment,
+          state: "managed",
+          mode: "provider",
+          revision: "force-applied-revision",
+          requiresTakeoverConfirmation: false,
+          takeoverAvailable: true,
+          currentProvider: { ...provider, isCurrent: true },
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+
+    const heading = await screen.findByRole("heading", { name: "供应商目录" });
+    const headingRow = heading.closest(".catalog-heading");
+    await screen.findByText("Atlas", { selector: ".provider-row-name" });
+    expect(within(headingRow as HTMLElement).getAllByRole("button").map((button) => button.textContent))
+      .toEqual(["导出 Linux 脚本", "强制设置", "添加供应商"]);
+
+    const force = screen.getByRole("button", { name: "强制设置" });
+    expect(force).toBeEnabled();
+    fireEvent.click(force);
+    const forceDialog = screen.getByRole("dialog", { name: "强制设置供应商" });
+    fireEvent.click(within(forceDialog).getByRole("button", { name: /Atlas/ }));
+    expect(await screen.findByText("验证通过")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "完成" }));
+
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("force_apply_environment_provider", {
+      providerId: provider.id,
+      expectedRevision: "force-revision",
+      confirmRebuild: false,
+    }));
+    const confirmation = await screen.findByRole("dialog", { name: "重建 Codex 配置？" });
+    fireEvent.click(within(confirmation).getByRole("button", { name: "备份并重建" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("force_apply_environment_provider", {
+      providerId: provider.id,
+      expectedRevision: "force-revision",
+      confirmRebuild: true,
+    }));
+    expect(await screen.findByText("已强制设置“Atlas”为当前供应商。", { selector: "[role='status']" }))
       .toBeInTheDocument();
   });
 });

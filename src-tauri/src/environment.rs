@@ -139,6 +139,7 @@ pub enum EnvironmentFailureCategory {
     ConsumerConfirmationRequired,
     OpenAiLoginRequired,
     OpenAiLoginUnavailable,
+    ForceRebuildConfirmationRequired,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -735,48 +736,6 @@ impl EnvironmentApplication {
                 "environment.mode_switch_confirmation_required",
             ));
         }
-        let login = self.login_probe.inspect();
-        let restorable_chatgpt = has_restorable_chatgpt_credentials(&self.codex_home)?;
-        match login {
-            LoginInspection {
-                status: LoginStatus::LoggedIn,
-                method: LoginMethod::ChatGpt,
-            } => {}
-            LoginInspection {
-                status: LoginStatus::LoggedIn,
-                method: LoginMethod::ApiKey,
-            }
-            | LoginInspection {
-                status: LoginStatus::LoggedIn,
-                method: LoginMethod::Unknown,
-            } if restorable_chatgpt => {}
-            LoginInspection {
-                status: LoginStatus::LoggedIn,
-                method: LoginMethod::ApiKey,
-            }
-            | LoginInspection {
-                status: LoginStatus::NotLoggedIn,
-                ..
-            } => {
-                return Err(EnvironmentFailure::new(
-                    EnvironmentFailureCategory::OpenAiLoginRequired,
-                    "environment.openai_login_required",
-                ));
-            }
-            LoginInspection {
-                status: LoginStatus::Unavailable,
-                ..
-            }
-            | LoginInspection {
-                status: LoginStatus::LoggedIn,
-                method: LoginMethod::Unknown,
-            } => {
-                return Err(EnvironmentFailure::new(
-                    EnvironmentFailureCategory::OpenAiLoginUnavailable,
-                    "environment.openai_login_unavailable",
-                ));
-            }
-        }
         let _guard = self
             .operation_lock
             .lock()
@@ -899,7 +858,47 @@ impl EnvironmentApplication {
             confirm_switch_risk,
             Some(expected_revision),
             None,
+            false,
         )
+    }
+
+    pub fn force_apply_provider_at_revision(
+        &self,
+        provider_id: &str,
+        expected_revision: &str,
+        confirm_rebuild: bool,
+    ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
+        let _guard = self
+            .operation_lock
+            .lock()
+            .map_err(|_| state_unavailable())?;
+        let mut connection = self.open_state()?;
+        let provider = load_provider(&connection, provider_id)?;
+        match self.apply_target(
+            &mut connection,
+            provider.clone(),
+            true,
+            Some(expected_revision),
+            None,
+            false,
+        ) {
+            Ok(snapshot) => Ok(snapshot),
+            Err(failure) if requires_forced_rebuild(&failure) && !confirm_rebuild => {
+                Err(EnvironmentFailure::new(
+                    EnvironmentFailureCategory::ForceRebuildConfirmationRequired,
+                    "environment.force_rebuild_confirmation_required",
+                ))
+            }
+            Err(failure) if requires_forced_rebuild(&failure) => self.apply_target(
+                &mut connection,
+                provider,
+                true,
+                Some(expected_revision),
+                None,
+                true,
+            ),
+            Err(failure) => Err(failure),
+        }
     }
 
     pub(crate) fn save_and_apply_provider_update(
@@ -932,6 +931,7 @@ impl EnvironmentApplication {
             confirm_consumer_risk,
             None,
             Some(guard),
+            false,
         )
     }
 
@@ -942,6 +942,7 @@ impl EnvironmentApplication {
         confirm_switch_risk: bool,
         expected_revision: Option<&str>,
         update_guard: Option<UpdateGuard>,
+        rebuild_config: bool,
     ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
         let before = self.inspect_environment(connection)?;
         let mut consumer_scan = self.consumer_scanner.scan();
@@ -978,8 +979,11 @@ impl EnvironmentApplication {
         }
 
         let provider_alias_ids = known_provider_ids(connection)?;
-        let prepared =
-            PreparedSwitch::prepare(&self.codex_home, provider, provider_alias_ids, update_guard)?;
+        let prepared = if rebuild_config {
+            PreparedSwitch::prepare_rebuild(&self.codex_home, provider)?
+        } else {
+            PreparedSwitch::prepare(&self.codex_home, provider, provider_alias_ids, update_guard)?
+        };
         if expected_revision.is_some_and(|expected| prepared.old_revision() != expected) {
             return Err(concurrent_modification());
         }
@@ -1473,6 +1477,19 @@ fn inspect_environment(
         });
     }
 
+    if last_applied.as_ref().map(|applied| applied.0.as_str()) == Some("provider")
+        && explicitly_uses_external_openai_login(&config, &credentials)
+    {
+        return Ok(external_openai_snapshot(
+            impacts,
+            revision,
+            restore_availability,
+            &restore_preview,
+            login_status,
+            pending_restart,
+        ));
+    }
+
     let last_applied_provider = last_applied.and_then(|applied| {
         if applied.0 == "provider" {
             applied
@@ -1690,6 +1707,34 @@ enum OpenAiConfigState {
     UnsafeConflict,
 }
 
+fn explicitly_uses_external_openai_login(
+    config: &ArtifactBytes,
+    credentials: &ArtifactBytes,
+) -> bool {
+    let uses_chatgpt_credentials = credentials
+        .bytes
+        .as_deref()
+        .and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok())
+        .and_then(|value| value.get("auth_mode").cloned())
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .as_deref()
+        == Some("chatgpt");
+    if !uses_chatgpt_credentials {
+        return false;
+    }
+    let Some(config_bytes) = config.bytes.as_deref() else {
+        return true;
+    };
+    let Some(config_text) = std::str::from_utf8(config_bytes).ok() else {
+        return false;
+    };
+    let Some(document) = config_text.parse::<DocumentMut>().ok() else {
+        return false;
+    };
+    matches!(managed_block(config_text), ManagedBlock::None)
+        && document.get("model_provider").is_none()
+}
+
 fn external_snapshot(
     impacts: Vec<ArtifactImpact>,
     revision: String,
@@ -1702,6 +1747,32 @@ fn external_snapshot(
         state: EnvironmentState::External,
         mode: None,
         message_id: "environment.external",
+        revision,
+        requires_takeover_confirmation: true,
+        takeover_available: true,
+        impacts,
+        current_provider: None,
+        restore_availability,
+        restore_preview: restore_preview.clone(),
+        login_status,
+        pending_restart,
+        requires_consumer_confirmation: false,
+        consumers: unknown_consumers(),
+    }
+}
+
+fn external_openai_snapshot(
+    impacts: Vec<ArtifactImpact>,
+    revision: String,
+    restore_availability: RestoreAvailability,
+    restore_preview: &Option<RestorePreview>,
+    login_status: LoginStatus,
+    pending_restart: bool,
+) -> EnvironmentSnapshot {
+    EnvironmentSnapshot {
+        state: EnvironmentState::External,
+        mode: Some(AuthenticationMode::OpenaiLogin),
+        message_id: "environment.external_openai_login",
         revision,
         requires_takeover_confirmation: true,
         takeover_available: true,
@@ -1907,6 +1978,7 @@ struct PreparedSwitch {
     credentials: PreparedArtifact,
     openai_credentials_recovery: Option<PreparedArtifact>,
     update_guard: Option<UpdateGuard>,
+    force_recovery: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -2373,6 +2445,38 @@ impl PreparedSwitch {
             ),
             openai_credentials_recovery,
             update_guard,
+            force_recovery: false,
+        })
+    }
+
+    fn prepare_rebuild(
+        codex_home: &Path,
+        provider: ProviderTarget,
+    ) -> Result<Self, EnvironmentFailure> {
+        let config_path = codex_home.join("config.toml");
+        let credentials_path = codex_home.join("auth.json");
+        let config = read_artifact(&config_path)?;
+        let credentials = read_artifact(&credentials_path)?;
+        let rendered_config = render_managed_block(&provider, &[], "\n").into_bytes();
+        let rendered_credentials = render_credentials(None, &provider.api_key)?;
+        Ok(Self {
+            operation_id: Uuid::new_v4().to_string(),
+            provider,
+            config: PreparedArtifact::new(
+                config_path,
+                config,
+                rendered_config,
+                ArtifactKind::Config,
+            ),
+            credentials: PreparedArtifact::new(
+                credentials_path,
+                credentials,
+                rendered_credentials,
+                ArtifactKind::Credentials,
+            ),
+            openai_credentials_recovery: None,
+            update_guard: None,
+            force_recovery: true,
         })
     }
 
@@ -3551,7 +3655,12 @@ fn create_backup(
     ));
     fs::create_dir_all(&operation).map_err(|_| backup_failed())?;
     let result = (|| {
-        let credential_fields = credential_fields_backup(&prepared.credentials.old)?;
+        if prepared.force_recovery {
+            create_force_recovery_sidecar_backup(&prepared.config)?;
+        }
+        // A force recovery can deliberately replace an unreadable credentials artifact.
+        // Preserve its raw bytes in the backup instead of rejecting the recovery.
+        let credential_fields = credential_fields_backup(&prepared.credentials.old).unwrap_or(None);
         if let Some(bytes) = prepared.config.old.bytes.as_deref() {
             write_new_synced(&operation.join("config.toml"), bytes).map_err(|_| backup_failed())?;
         }
@@ -3594,6 +3703,22 @@ fn create_backup(
         let _ = fs::remove_dir_all(&operation);
     }
     result.map(|_| operation)
+}
+
+fn create_force_recovery_sidecar_backup(
+    config: &PreparedArtifact,
+) -> Result<(), EnvironmentFailure> {
+    let Some(bytes) = config.old.bytes.as_deref() else {
+        return Ok(());
+    };
+    let parent = config.path.parent().ok_or_else(backup_failed)?;
+    let name = config
+        .path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(backup_failed)?;
+    let path = parent.join(format!("{name}.{}.bak", epoch_nanos()));
+    write_new_synced(&path, bytes).map_err(|_| backup_failed())
 }
 
 fn create_custom_provider_repair_backup(
@@ -5162,6 +5287,16 @@ fn invalid_config() -> EnvironmentFailure {
     EnvironmentFailure::new(
         EnvironmentFailureCategory::InvalidConfig,
         "environment.config_invalid",
+    )
+}
+
+fn requires_forced_rebuild(failure: &EnvironmentFailure) -> bool {
+    matches!(
+        failure.category,
+        EnvironmentFailureCategory::InvalidConfig
+            | EnvironmentFailureCategory::InvalidCredentials
+            | EnvironmentFailureCategory::ManagedConflict
+            | EnvironmentFailureCategory::UnsupportedCredentialStore
     )
 }
 

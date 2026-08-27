@@ -124,7 +124,7 @@ fn config_changes_are_independent_from_desktop_lifecycle_contracts() {
 }
 
 #[test]
-fn production_exposes_only_trusted_desktop_start_and_graceful_restart() {
+fn production_exposes_only_trusted_desktop_start_and_confirmed_tree_restart() {
     let root = repository_root();
     let commands =
         fs::read_to_string(root.join("src-tauri/src/commands.rs")).expect("read Tauri commands");
@@ -158,7 +158,9 @@ fn production_exposes_only_trusted_desktop_start_and_graceful_restart() {
         "OPENAI_WINDOWS_PUBLISHER_ID",
         "scan_for_install_locations",
         "request_windows_close",
+        "terminate_windows_process_trees",
         "WM_CLOSE",
+        "TerminateProcess",
         "shell:AppsFolder",
     ] {
         assert!(
@@ -166,11 +168,7 @@ fn production_exposes_only_trusted_desktop_start_and_graceful_restart() {
             "trusted desktop boundary is missing {required_boundary}"
         );
     }
-    for forbidden_capability in [
-        "force_restart_desktop_application",
-        "force_terminate",
-        "TerminateProcess",
-    ] {
+    for forbidden_capability in ["force_restart_desktop_application", "force_terminate"] {
         assert!(!commands.contains(forbidden_capability));
         assert!(!assembly.contains(forbidden_capability));
         assert!(!desktop.contains(forbidden_capability));

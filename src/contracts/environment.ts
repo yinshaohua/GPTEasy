@@ -131,6 +131,19 @@ export function applyEnvironmentProvider(
   });
 }
 
+export function forceApplyEnvironmentProvider(
+  providerId: string,
+  expectedRevision: string,
+  confirmRebuild = false,
+): Promise<EnvironmentSnapshot> {
+  if (isBrowserPreview()) return Promise.reject(previewFailure);
+  return invoke<EnvironmentSnapshot>("force_apply_environment_provider", {
+    providerId,
+    expectedRevision,
+    confirmRebuild,
+  });
+}
+
 export function restoreLastEnvironmentConfig(
   confirmRestore: boolean,
   expectedRevision: string,

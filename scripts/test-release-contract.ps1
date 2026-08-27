@@ -24,7 +24,7 @@ try {
 if ($null -ne $releaseContract) {
     if ($releaseContract.schemaVersion -ne 1 -or
         $releaseContract.issue -ne 28 -or
-        $releaseContract.desktopConsumerControl -ne 'trusted_start_confirmed_restart') {
+        $releaseContract.desktopConsumerControl -ne 'trusted_start_confirmed_tree_restart') {
         $contradictions.Add('The structured Windows release contract identity is invalid.')
     }
 

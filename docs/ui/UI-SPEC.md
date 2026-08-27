@@ -1,6 +1,6 @@
 # GPTEasy v0.1 UI Contract
 
-<!-- release-contract: desktop-consumer-control=trusted-start-confirmed-restart -->
+<!-- release-contract: desktop-consumer-control=trusted-start-confirmed-tree-restart -->
 
 > 本文是已经交付的 v0.1 历史基线。v0.1 之后的当前目标见 [`PROVIDER-MANAGEMENT-SPEC.md`](./PROVIDER-MANAGEMENT-SPEC.md)。
 
@@ -31,10 +31,10 @@
 
 - 页面顶部显示环境实际状态：当前供应商、OpenAI 登录模式、外部配置、管理冲突或待重启。
 - 环境实际状态可以包含桌面 Codex、Codex CLI 的检测结果和被动待重启状态；检测不完整时明确显示无法确认。
-- 切换到 OpenAI 登录模式只在本页提供；检测不到 Codex 已有登录凭据时禁用写入并提示先在 Codex 登录。
+- 切换到 OpenAI 登录模式只在本页提供；检测不到 Codex 已有登录凭据或无法确认登录状态时仍允许明确确认退出供应商模式，并提示切换后可在 Codex 中登录。
 - OpenAI 登录模式生效后若凭据消失，保留模式并显示页面内警告，不自动改写配置。
 - 外部配置只允许在选择已验证供应商、查看替换范围并确认后接管。
-- 管理冲突只允许在重新选择已验证供应商、查看替换范围并确认后重新接管；无法安全解析时不提供强制覆盖。
+- 管理冲突能够安全解析时，只允许在重新选择已验证供应商、查看替换范围并确认后重新接管；无法安全解析时可从独立的“强制设置”入口选择已验证供应商，重新验证，并在再次确认备份后由后端重建最小受管配置，不接受任意覆盖内容。
 - 供应商管理主界面不提供“恢复上次配置”入口。
 
 ## Confirmation
@@ -44,7 +44,7 @@
 - 从 OpenAI 登录模式选择供应商时必须确认；若同时存在进程风险，合并为同一个确认框。
 - 外部配置接管、管理冲突重新接管和切换到 OpenAI 登录模式分别使用一次明确确认。
 - 不提供自动重启、立即重启、倒计时或默认自动选择。
-- 页面顶部显示 ChatGPT/Codex 桌面版运行状态；停止时提供“启动 Codex”，运行时提供“重启 Codex”。重启先二次确认并优先请求正常退出，失败时显示失败，不提供强制终止。Codex CLI 不由 GPTEasy 控制。
+- 页面顶部显示 ChatGPT/Codex 桌面版运行状态；停止时提供“启动 Codex”，运行时提供“重启 Codex”。重启先二次确认并说明任务中断风险，优先请求正常退出，仍驻留时结束再次复核的同一可信桌面进程树。Codex CLI 不由 GPTEasy 控制。
 
 ## Tray
 

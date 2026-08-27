@@ -175,8 +175,28 @@ test("默认窗口横向展示目录行且底部操作可见", async ({ page }, 
     expect(new Set(row.titleTops.map(Math.round)).size).toBe(1);
   }
 
+  const catalogButtons = page.locator(".catalog-heading-actions button");
+  await expect(catalogButtons).toHaveCount(3);
+  await expect(catalogButtons).toHaveText(["导出 Linux 脚本", "强制设置", "添加供应商"]);
+  for (const button of await catalogButtons.all()) {
+    const box = await button.boundingBox();
+    expect(box).not.toBeNull();
+    expect(box!.height).toBeGreaterThanOrEqual(29);
+    expect(box!.height).toBeLessThanOrEqual(31);
+    expect(box!.y + box!.height).toBeLessThanOrEqual(620);
+  }
+  const addProviderBox = await catalogButtons.last().boundingBox();
+  const providerActionBoxes = await page
+    .locator(".provider-list-row:not(.provider-template-row) .provider-row-actions .command-button")
+    .evaluateAll((buttons) => buttons.map((button) => button.getBoundingClientRect().right));
+  expect(addProviderBox).not.toBeNull();
+  expect(providerActionBoxes.length).toBeGreaterThan(0);
+  for (const right of providerActionBoxes) {
+    expect(right).toBeCloseTo(addProviderBox!.x + addProviderBox!.width, 1);
+  }
+
   const environmentButtons = page.locator(".environment-tools button");
-  await expect(environmentButtons).toHaveCount(2);
+  await expect(environmentButtons).toHaveCount(1);
   for (const button of await environmentButtons.all()) {
     const box = await button.boundingBox();
     expect(box).not.toBeNull();
@@ -254,12 +274,21 @@ test("最小窗口无横向溢出且所有操作可滚动到达", async ({ page 
   expect(layout.overlaps).toEqual([]);
   expect(layout.clippedButtons).toEqual([]);
 
+  const compactAddProviderBox = await page.getByRole("button", { name: "添加供应商" }).boundingBox();
+  const compactProviderActionRights = await page
+    .locator(".provider-list-row:not(.provider-template-row) .provider-row-actions .command-button")
+    .evaluateAll((buttons) => buttons.map((button) => button.getBoundingClientRect().right));
+  expect(compactAddProviderBox).not.toBeNull();
+  for (const right of compactProviderActionRights) {
+    expect(right).toBeCloseTo(compactAddProviderBox!.x + compactAddProviderBox!.width, 1);
+  }
+
   await page.getByRole("region", { name: "Codex 环境操作" }).scrollIntoViewIfNeeded();
   await expect(page.getByRole("button", { name: "恢复上次配置" })).toHaveCount(0);
   await expect(page.getByText("其他环境供应商操作")).toHaveCount(0);
   await expect(page.getByText("当前 Windows Codex 环境操作")).toHaveCount(0);
-  await page.getByRole("button", { name: "设置" }).click();
-  await expect(page.getByRole("menuitem", { name: "返回 OpenAI 登录模式" })).toBeVisible();
+  await page.getByRole("button", { name: "设置", exact: true }).click();
+  await expect(page.getByRole("menuitem", { name: "返回 OpenAI 登录" })).toBeVisible();
   await expect(page.getByText("当前用户")).toHaveCount(0);
   await page.screenshot({ path: testInfo.outputPath("provider-layout-680x520.png"), fullPage: true });
 });

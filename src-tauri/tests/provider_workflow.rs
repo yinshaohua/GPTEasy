@@ -1543,6 +1543,66 @@ async fn current_provider_update_commits_catalog_and_codex_artifacts_together() 
     assert_eq!(auth["OPENAI_API_KEY"], "replacement-current-key");
 }
 
+#[tokio::test]
+async fn externally_restored_openai_login_allows_saving_a_historically_current_provider() {
+    let temp = TempDir::new().expect("temp state directory");
+    let store = StateStore::new(StatePaths::from_root(temp.path().join("state")));
+    assert!(store.bootstrap().is_ready());
+    let application = ProviderApplication::new(store.clone(), validator());
+    let creation_server = ValidationServer::start(ValidationScenario::Success);
+    let original = create_provider(
+        &application,
+        "create-external-openai-target",
+        creation_server.base_url,
+        "Historical Current Provider",
+        "original-current-key",
+    )
+    .await;
+    let codex_home = temp.path().join(".codex");
+    let environment = EnvironmentApplication::new(store, &codex_home);
+    environment
+        .apply_provider(&original.id, true)
+        .expect("establish provider history");
+    std::fs::write(codex_home.join("config.toml"), "model = 'gpt-5.4'\n")
+        .expect("simulate external OpenAI config");
+    std::fs::write(
+        codex_home.join("auth.json"),
+        br#"{"auth_mode":"chatgpt","tokens":{"access_token":"private"}}"#,
+    )
+    .expect("simulate external ChatGPT credentials");
+
+    let update_server = ValidationServer::start(ValidationScenario::Success);
+    let receipt = application
+        .validate_provider_update(
+            "validate-external-openai-update".to_owned(),
+            ProviderUpdateValidationInput {
+                provider_id: original.id.clone(),
+                base_url: update_server.base_url.clone(),
+                api_key: Some("replacement-key".to_owned()),
+                default_model: "model-a".to_owned(),
+            },
+        )
+        .await
+        .expect("validate historically current provider update");
+
+    let updated = application
+        .save_provider_update_for_environment(
+            &environment,
+            &receipt.validation_id,
+            &original.id,
+            "Updated Historical Provider",
+        )
+        .expect("external OpenAI login means the provider is not actually current");
+
+    assert_eq!(updated.name, "Updated Historical Provider");
+    assert_eq!(updated.base_url, format!("{}/", update_server.base_url));
+    assert!(!updated.is_current);
+    assert_eq!(
+        std::fs::read_to_string(codex_home.join("config.toml")).expect("read unchanged config"),
+        "model = 'gpt-5.4'\n"
+    );
+}
+
 struct FailBeforeDatabaseCommit;
 
 impl EnvironmentFaultInjector for FailBeforeDatabaseCommit {

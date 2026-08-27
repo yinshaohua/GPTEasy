@@ -30,6 +30,7 @@ pub trait DesktopActivator: Send + Sync {
 
 pub trait DesktopProcessController: Send + Sync {
     fn request_close(&self, roots: &[ConsumerIdentity]) -> Result<(), DesktopBoundaryError>;
+    fn terminate_tree(&self, roots: &[ConsumerIdentity]) -> Result<(), DesktopBoundaryError>;
 }
 
 pub trait DesktopClock: Send + Sync {
@@ -60,6 +61,8 @@ pub enum DesktopFailureCategory {
     IdentityChanged,
     CloseFailed,
     CloseTimedOut,
+    TerminationFailed,
+    TerminationTimedOut,
     ActivationFailed,
     LaunchNotObserved,
 }
@@ -78,18 +81,20 @@ pub struct DesktopApplication {
     activator: Arc<dyn DesktopActivator>,
     process_controller: Arc<dyn DesktopProcessController>,
     clock: Arc<dyn DesktopClock>,
-    scan_attempts: usize,
+    close_scan_attempts: usize,
+    launch_scan_attempts: usize,
     scan_delay: Duration,
 }
 
 impl DesktopApplication {
     pub fn new() -> Self {
-        Self::with_boundaries(
+        Self::with_polling_boundaries(
             Arc::new(WindowsDesktopPackageDiscovery),
             Arc::new(WindowsConsumerScanner::new()),
             Arc::new(WindowsDesktopActivator),
             Arc::new(WindowsDesktopProcessController),
             Arc::new(SystemDesktopClock),
+            4,
             20,
             Duration::from_millis(250),
         )
@@ -104,13 +109,36 @@ impl DesktopApplication {
         scan_attempts: usize,
         scan_delay: Duration,
     ) -> Self {
-        Self {
+        Self::with_polling_boundaries(
             discovery,
             scanner,
             activator,
             process_controller,
             clock,
             scan_attempts,
+            scan_attempts,
+            scan_delay,
+        )
+    }
+
+    pub fn with_polling_boundaries(
+        discovery: Arc<dyn DesktopPackageDiscovery>,
+        scanner: Arc<dyn ConsumerScanner>,
+        activator: Arc<dyn DesktopActivator>,
+        process_controller: Arc<dyn DesktopProcessController>,
+        clock: Arc<dyn DesktopClock>,
+        close_scan_attempts: usize,
+        launch_scan_attempts: usize,
+        scan_delay: Duration,
+    ) -> Self {
+        Self {
+            discovery,
+            scanner,
+            activator,
+            process_controller,
+            clock,
+            close_scan_attempts,
+            launch_scan_attempts,
             scan_delay,
         }
     }
@@ -159,7 +187,7 @@ impl DesktopApplication {
         if before.desktop != ConsumerStatus::Stopped {
             return Err(action_unavailable("desktop.action_unavailable"));
         }
-        self.activate_and_observe(&package, &before.desktop_roots)
+        self.activate_and_observe(&package, &before.desktop_roots, "desktop.running")
     }
 
     pub fn restart(
@@ -168,6 +196,9 @@ impl DesktopApplication {
     ) -> Result<DesktopSnapshot, DesktopFailure> {
         let package = self.discover_package().map_err(action_unavailable)?;
         let before = self.scan_for_package(&package);
+        if before.desktop == ConsumerStatus::Stopped {
+            return self.activate_and_observe(&package, expected_roots, "desktop.running");
+        }
         if before.desktop != ConsumerStatus::Running
             || before.desktop_roots.is_empty()
             || before.desktop_roots != expected_roots
@@ -177,18 +208,53 @@ impl DesktopApplication {
                 "desktop.identity_changed",
             ));
         }
-        self.process_controller
+        let close_requested = self
+            .process_controller
             .request_close(&before.desktop_roots)
+            .is_ok();
+        if close_requested && self.wait_for_roots_to_exit(&package, expected_roots) {
+            return self.activate_and_observe(
+                &package,
+                expected_roots,
+                "desktop.restarted_after_normal_exit",
+            );
+        }
+
+        let before_termination = self.scan_for_package(&package);
+        if before_termination.desktop == ConsumerStatus::Stopped {
+            return self.activate_and_observe(
+                &package,
+                expected_roots,
+                "desktop.restarted_after_normal_exit",
+            );
+        }
+        if before_termination.desktop != ConsumerStatus::Running
+            || before_termination.desktop_roots != expected_roots
+        {
+            return Err(desktop_failure(
+                DesktopFailureCategory::IdentityChanged,
+                "desktop.identity_changed",
+            ));
+        }
+        self.process_controller
+            .terminate_tree(&before_termination.desktop_roots)
             .map_err(|_| {
-                desktop_failure(DesktopFailureCategory::CloseFailed, "desktop.close_failed")
+                desktop_failure(
+                    DesktopFailureCategory::TerminationFailed,
+                    "desktop.termination_failed",
+                )
             })?;
         if !self.wait_for_roots_to_exit(&package, expected_roots) {
             return Err(desktop_failure(
-                DesktopFailureCategory::CloseTimedOut,
-                "desktop.close_timed_out",
+                DesktopFailureCategory::TerminationTimedOut,
+                "desktop.termination_timed_out",
             ));
         }
-        self.activate_and_observe(&package, expected_roots)
+        self.activate_and_observe(
+            &package,
+            expected_roots,
+            "desktop.restarted_after_termination",
+        )
     }
 
     fn discover_package(&self) -> Result<DesktopPackage, &'static str> {
@@ -209,7 +275,7 @@ impl DesktopApplication {
         package: &DesktopPackage,
         expected_roots: &[ConsumerIdentity],
     ) -> bool {
-        for attempt in 0..self.scan_attempts.max(1) {
+        for attempt in 0..self.close_scan_attempts.max(1) {
             self.wait_between_scans(attempt);
             let scan = self.scan_for_package(package);
             if scan.desktop != ConsumerStatus::Unknown
@@ -228,6 +294,7 @@ impl DesktopApplication {
         &self,
         package: &DesktopPackage,
         previous_roots: &[ConsumerIdentity],
+        success_message_id: &'static str,
     ) -> Result<DesktopSnapshot, DesktopFailure> {
         let activation_started_at = self.clock.now_epoch_millis();
         self.activator.activate(&package.aumid()).map_err(|_| {
@@ -236,7 +303,7 @@ impl DesktopApplication {
                 "desktop.activation_failed",
             )
         })?;
-        for attempt in 0..self.scan_attempts.max(1) {
+        for attempt in 0..self.launch_scan_attempts.max(1) {
             self.wait_between_scans(attempt);
             let scan = self.scan_for_package(package);
             if scan.desktop == ConsumerStatus::Running
@@ -248,7 +315,7 @@ impl DesktopApplication {
                 return Ok(desktop_snapshot(
                     ConsumerStatus::Running,
                     DesktopAction::Restart,
-                    "desktop.running",
+                    success_message_id,
                     scan.desktop_roots,
                 ));
             }
@@ -403,6 +470,18 @@ impl DesktopProcessController for WindowsDesktopProcessController {
             Err(DesktopBoundaryError)
         }
     }
+
+    fn terminate_tree(&self, roots: &[ConsumerIdentity]) -> Result<(), DesktopBoundaryError> {
+        #[cfg(windows)]
+        {
+            terminate_windows_process_trees(roots)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = roots;
+            Err(DesktopBoundaryError)
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -479,30 +558,47 @@ ConvertTo-Json -Compress -InputObject $packages
 
 #[cfg(windows)]
 fn request_windows_close(roots: &[ConsumerIdentity]) -> Result<(), DesktopBoundaryError> {
+    use std::collections::HashMap;
+
     use windows_sys::Win32::Foundation::{CloseHandle, HWND, LPARAM};
     use windows_sys::Win32::System::Threading::{
         GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowThreadProcessId, PostMessageW, WM_CLOSE,
+        EnumWindows, GetClassNameW, GetWindowTextLengthW, GetWindowThreadProcessId,
+        IsWindowVisible, PostMessageW, WM_CLOSE,
     };
 
     struct CloseContext {
         pids: HashSet<u32>,
-        posted: bool,
-        failed: bool,
+        candidates: HashMap<u32, (HWND, u8)>,
     }
 
-    unsafe extern "system" fn close_root_window(hwnd: HWND, lparam: LPARAM) -> i32 {
+    unsafe extern "system" fn collect_root_window(hwnd: HWND, lparam: LPARAM) -> i32 {
         let context = unsafe { &mut *(lparam as *mut CloseContext) };
         let mut pid = 0;
         unsafe {
             GetWindowThreadProcessId(hwnd, &mut pid);
         }
         if context.pids.contains(&pid) {
-            context.posted = true;
-            if unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) } == 0 {
-                context.failed = true;
+            let mut class_name = [0_u16; 64];
+            let class_name_length =
+                unsafe { GetClassNameW(hwnd, class_name.as_mut_ptr(), class_name.len() as i32) };
+            if class_name_length > 0
+                && is_desktop_close_window_class(&String::from_utf16_lossy(
+                    &class_name[..class_name_length as usize],
+                ))
+            {
+                let score = (unsafe { IsWindowVisible(hwnd) } != 0) as u8 * 2
+                    + (unsafe { GetWindowTextLengthW(hwnd) } > 0) as u8;
+                let current_score = context
+                    .candidates
+                    .get(&pid)
+                    .map(|(_, score)| *score)
+                    .unwrap_or_default();
+                if score > current_score || !context.candidates.contains_key(&pid) {
+                    context.candidates.insert(pid, (hwnd, score));
+                }
             }
         }
         1
@@ -534,21 +630,196 @@ fn request_windows_close(roots: &[ConsumerIdentity]) -> Result<(), DesktopBounda
 
     let mut context = CloseContext {
         pids: roots.iter().map(|root| root.pid).collect(),
-        posted: false,
-        failed: false,
+        candidates: HashMap::new(),
     };
     let enumerated = unsafe {
         EnumWindows(
-            Some(close_root_window),
+            Some(collect_root_window),
             (&mut context as *mut CloseContext) as LPARAM,
         )
     };
+    if enumerated == 0 || context.candidates.len() != roots.len() {
+        close_windows_handles(handles);
+        return Err(DesktopBoundaryError);
+    }
+    let failed = context
+        .candidates
+        .values()
+        .any(|(hwnd, _)| unsafe { PostMessageW(*hwnd, WM_CLOSE, 0, 0) } == 0);
     close_windows_handles(handles);
-    if enumerated == 0 || !context.posted || context.failed {
+    if failed {
         Err(DesktopBoundaryError)
     } else {
         Ok(())
     }
+}
+
+#[cfg(windows)]
+fn terminate_windows_process_trees(roots: &[ConsumerIdentity]) -> Result<(), DesktopBoundaryError> {
+    use std::collections::HashMap;
+    use std::mem::size_of;
+
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES, GetLastError,
+        INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
+    };
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+        TH32CS_SNAPPROCESS,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+        TerminateProcess, WaitForSingleObject,
+    };
+
+    if roots.is_empty()
+        || roots
+            .iter()
+            .any(|root| root.role != crate::consumer::ConsumerRole::Desktop)
+    {
+        return Err(DesktopBoundaryError);
+    }
+
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Err(DesktopBoundaryError);
+    }
+    let mut parents = HashMap::new();
+    let mut entry = PROCESSENTRY32W {
+        dwSize: size_of::<PROCESSENTRY32W>() as u32,
+        ..unsafe { std::mem::zeroed() }
+    };
+    if unsafe { Process32FirstW(snapshot, &mut entry) } == 0 {
+        unsafe {
+            CloseHandle(snapshot);
+        }
+        return Err(DesktopBoundaryError);
+    }
+    loop {
+        parents.insert(entry.th32ProcessID, entry.th32ParentProcessID);
+        entry.dwSize = size_of::<PROCESSENTRY32W>() as u32;
+        if unsafe { Process32NextW(snapshot, &mut entry) } != 0 {
+            continue;
+        }
+        let complete = unsafe { GetLastError() } == ERROR_NO_MORE_FILES;
+        unsafe {
+            CloseHandle(snapshot);
+        }
+        if !complete {
+            return Err(DesktopBoundaryError);
+        }
+        break;
+    }
+
+    let snapshot_epoch_millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX);
+    let root_pids = roots.iter().map(|root| root.pid).collect::<HashSet<_>>();
+    let mut descendants = parents
+        .keys()
+        .filter(|pid| !root_pids.contains(pid))
+        .filter_map(|pid| process_tree_depth(*pid, &parents, &root_pids).map(|depth| (*pid, depth)))
+        .collect::<Vec<_>>();
+    descendants.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(&right.0)));
+
+    let access = PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | PROCESS_SYNCHRONIZE;
+    let mut descendant_handles = Vec::with_capacity(descendants.len());
+    for (pid, _) in descendants {
+        let handle = unsafe { OpenProcess(access, 0, pid) };
+        if handle.is_null() {
+            if unsafe { GetLastError() } == ERROR_INVALID_PARAMETER {
+                continue;
+            }
+            close_windows_handles(descendant_handles);
+            return Err(DesktopBoundaryError);
+        }
+        let Some(created_at) = windows_process_created_at(handle) else {
+            unsafe {
+                CloseHandle(handle);
+            }
+            close_windows_handles(descendant_handles);
+            return Err(DesktopBoundaryError);
+        };
+        if created_at > snapshot_epoch_millis {
+            unsafe {
+                CloseHandle(handle);
+            }
+            close_windows_handles(descendant_handles);
+            return Err(DesktopBoundaryError);
+        }
+        descendant_handles.push(handle);
+    }
+
+    let mut root_handles = Vec::with_capacity(roots.len());
+    for root in roots {
+        let handle = unsafe { OpenProcess(access, 0, root.pid) };
+        if handle.is_null()
+            || windows_process_created_at(handle) != Some(root.started_at_epoch_millis)
+        {
+            if !handle.is_null() {
+                unsafe {
+                    CloseHandle(handle);
+                }
+            }
+            close_windows_handles(descendant_handles);
+            close_windows_handles(root_handles);
+            return Err(DesktopBoundaryError);
+        }
+        root_handles.push(handle);
+    }
+
+    let mut failed = false;
+    for handle in descendant_handles.iter().chain(root_handles.iter()) {
+        let terminated = unsafe { TerminateProcess(*handle, 1) } != 0;
+        if !terminated && unsafe { WaitForSingleObject(*handle, 0) } != WAIT_OBJECT_0 {
+            failed = true;
+        }
+    }
+    close_windows_handles(descendant_handles);
+    close_windows_handles(root_handles);
+    if failed {
+        Err(DesktopBoundaryError)
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn process_tree_depth(
+    pid: u32,
+    parents: &std::collections::HashMap<u32, u32>,
+    roots: &HashSet<u32>,
+) -> Option<usize> {
+    let mut current = pid;
+    let mut visited = HashSet::new();
+    let mut depth = 0;
+    while visited.insert(current) {
+        let parent = *parents.get(&current)?;
+        depth += 1;
+        if roots.contains(&parent) {
+            return Some(depth);
+        }
+        if parent == 0 {
+            return None;
+        }
+        current = parent;
+    }
+    None
+}
+
+#[cfg(windows)]
+fn windows_process_created_at(handle: windows_sys::Win32::Foundation::HANDLE) -> Option<u64> {
+    use windows_sys::Win32::System::Threading::GetProcessTimes;
+
+    let mut created = unsafe { std::mem::zeroed() };
+    let mut exited = unsafe { std::mem::zeroed() };
+    let mut kernel = unsafe { std::mem::zeroed() };
+    let mut user = unsafe { std::mem::zeroed() };
+    (unsafe { GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) } != 0)
+        .then(|| windows_file_time_epoch_millis(created))
 }
 
 #[cfg(windows)]
@@ -569,4 +840,38 @@ fn windows_file_time_epoch_millis(created: windows_sys::Win32::Foundation::FILET
         .checked_div(10_000)
         .and_then(|milliseconds| milliseconds.checked_sub(11_644_473_600_000))
         .unwrap_or_default()
+}
+
+fn is_desktop_close_window_class(class_name: &str) -> bool {
+    class_name == "Chrome_WidgetWin_1"
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(windows)]
+    use std::collections::{HashMap, HashSet};
+
+    use super::is_desktop_close_window_class;
+    #[cfg(windows)]
+    use super::process_tree_depth;
+
+    #[test]
+    fn only_the_electron_main_window_is_a_close_target() {
+        assert!(is_desktop_close_window_class("Chrome_WidgetWin_1"));
+        assert!(!is_desktop_close_window_class("Chrome_WidgetWin_0"));
+        assert!(!is_desktop_close_window_class("IME"));
+        assert!(!is_desktop_close_window_class("SoPY_Status"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn process_tree_depth_includes_only_descendants_of_the_confirmed_roots() {
+        let parents = HashMap::from([(10, 1), (11, 10), (12, 11), (20, 1), (21, 20)]);
+        let roots = HashSet::from([10]);
+
+        assert_eq!(process_tree_depth(11, &parents, &roots), Some(1));
+        assert_eq!(process_tree_depth(12, &parents, &roots), Some(2));
+        assert_eq!(process_tree_depth(20, &parents, &roots), None);
+        assert_eq!(process_tree_depth(21, &parents, &roots), None);
+    }
 }

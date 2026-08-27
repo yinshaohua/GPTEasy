@@ -27,7 +27,6 @@ export type DiagnosticConfigStatus =
 
 export type DiagnosticConsumerStatus = "running" | "stopped" | "unknown";
 export type DiagnosticLoginStatus = "logged_in" | "not_logged_in" | "unavailable";
-export type DiagnosticExportFormat = "json" | "markdown";
 export type DiagnosticRepairStatus =
   | "succeeded"
   | "not_modified"
@@ -108,6 +107,18 @@ export interface DiagnosticAssistantResult {
   providerId: string;
   providerName: string;
   explanation: string;
+  repairPlan: DiagnosticRepairPlanItem[];
+}
+
+export interface DiagnosticConversationMessage {
+  role: "user" | "assistant" | "system";
+  content: string;
+}
+
+export interface DiagnosticChatResult {
+  providerId: string;
+  providerName: string;
+  reply: string;
   repairPlan: DiagnosticRepairPlanItem[];
 }
 
@@ -192,19 +203,54 @@ export function analyzeDiagnosticReport(providerId: string): Promise<DiagnosticA
   return invoke<DiagnosticAssistantResult>("analyze_diagnostic_report", { providerId });
 }
 
-export function chooseDiagnosticExportDestination(
-  format: DiagnosticExportFormat,
-): Promise<string | null> {
-  if (isBrowserPreview()) return Promise.resolve(null);
-  return invoke<string | null>("choose_diagnostic_export_destination", { format });
+export function chatDiagnosticAssistant(
+  providerId: string,
+  message: string,
+  history: DiagnosticConversationMessage[],
+): Promise<DiagnosticChatResult> {
+  if (isBrowserPreview()) {
+    return Promise.resolve({
+      providerId,
+      providerName: "浏览器预览供应商",
+      reply: "我已读取脱敏诊断。请先查看诊断详情；如果存在可执行修复，我会先展示修复计划，确认后才会修改配置。",
+      repairPlan: browserDiagnosticReport.repairPreview
+        ? [{
+            id: "repair-custom-provider",
+            findingCode: "model_provider_missing_definition",
+            title: "补回 custom 供应商定义",
+            description: "依据已验证的本机证据补回兼容 provider 定义。",
+            action: "repair_custom_provider",
+            previewId: browserDiagnosticReport.repairPreview.previewId,
+            requiresConfirmation: true,
+          }]
+        : [],
+    });
+  }
+  return invoke<DiagnosticChatResult>("chat_diagnostic_assistant", {
+    providerId,
+    message,
+    history,
+  });
 }
 
-export function exportDiagnosticReport(
-  format: DiagnosticExportFormat,
-  destination: string,
+export function chooseDiagnosticExportDestination(): Promise<string | null> {
+  if (isBrowserPreview()) return Promise.resolve(null);
+  return invoke<string | null>("choose_diagnostic_export_destination");
+}
+
+export function copyDiagnosticBundle(
+  conversation: DiagnosticConversationMessage[],
 ): Promise<void> {
   if (isBrowserPreview()) return Promise.resolve();
-  return invoke<void>("export_diagnostic_report", { format, destination });
+  return invoke<void>("copy_diagnostic_bundle", { conversation });
+}
+
+export function exportDiagnosticBundle(
+  destination: string,
+  conversation: DiagnosticConversationMessage[],
+): Promise<void> {
+  if (isBrowserPreview()) return Promise.resolve();
+  return invoke<void>("export_diagnostic_bundle", { destination, conversation });
 }
 
 export type FrontendFailureEvent =

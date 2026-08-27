@@ -108,8 +108,8 @@ export default function DesktopControl() {
           {busy
             ? <LoaderCircle className="is-spinning" size={16} aria-hidden="true" />
             : action === "restart"
-              ? <RotateCw size={16} aria-hidden="true" />
-              : <Play size={16} aria-hidden="true" />}
+              ? <RotateCw className="button-icon is-orange" size={16} aria-hidden="true" />
+              : <Play className="button-icon is-green" size={16} aria-hidden="true" />}
           {actionLabel}
         </button>
       </div>

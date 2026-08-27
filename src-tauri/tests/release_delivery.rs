@@ -257,7 +257,7 @@ fn windows_uat_covers_trusted_desktop_control_without_script_process_control() {
     assert!(!script.contains("desktopCodexVersion"));
     assert!(!script.contains("desktopPublisherId"));
     assert!(script.contains("desktop_status_and_start"));
-    assert!(script.contains("desktop_confirmed_graceful_restart"));
+    assert!(script.contains("desktop_confirmed_tree_restart"));
     assert!(script.contains("desktop_cli_isolation"));
     assert!(!script.contains("Stop-Process"));
     assert!(!script.contains("taskkill"));
@@ -316,7 +316,7 @@ fn windows_release_contract_is_the_unique_issue_28_uat_schema() {
     assert_eq!(contract["issue"], 28);
     assert_eq!(
         contract["desktopConsumerControl"],
-        "trusted_start_confirmed_restart"
+        "trusted_start_confirmed_tree_restart"
     );
 
     let checks = contract["requiredUatChecks"]
@@ -343,7 +343,7 @@ fn windows_release_contract_is_the_unique_issue_28_uat_schema() {
             "passivePendingRestart",
             "pendingRestartAutoClear",
             "trustedDesktopStart",
-            "gracefulDesktopRestart",
+            "confirmedDesktopTreeRestart",
             "cliLifecycleIsolation",
             "defaultLayout",
             "minimumLayout",
@@ -378,7 +378,7 @@ fn windows_release_contract_covers_issue_39_session_management() {
 }
 
 #[test]
-fn release_contract_gate_rejects_forceful_desktop_control() {
+fn release_contract_gate_rejects_unconfirmed_desktop_termination() {
     let root = repository_root();
     let temp = TempDir::new().expect("contract fixture");
     let contract = windows_release_contract();
@@ -415,7 +415,7 @@ fn release_contract_gate_rejects_forceful_desktop_control() {
 
     let ui_contract = temp.path().join("docs/ui/UI-SPEC.md");
     let mut contents = fs::read_to_string(&ui_contract).expect("read UI contract fixture");
-    contents.push_str("\nGPTEasy 允许强制终止 ChatGPT/Codex 桌面版。\n");
+    contents.push_str("\nGPTEasy 无需确认即可结束 ChatGPT/Codex 桌面版。\n");
     fs::write(ui_contract, contents).expect("add contradictory statement");
 
     let output = Command::new("powershell.exe")

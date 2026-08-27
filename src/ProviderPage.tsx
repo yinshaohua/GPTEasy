@@ -24,6 +24,7 @@ import ProviderValidationDialog, {
   type ProviderValidationSource,
 } from "./ProviderValidationDialog";
 import DesktopControl from "./DesktopControl";
+import DiagnosticReportControl from "./DiagnosticReportControl";
 import type { OpenAiSidebarAction } from "./AppSidebar";
 
 import {
@@ -68,6 +69,7 @@ import {
   asEnvironmentFailure,
   asWslFailure,
   getEnvironmentSnapshot,
+  forceApplyEnvironmentProvider,
   listWslEnvironments,
   refreshWslEnvironment,
   switchToOpenAiLogin,
@@ -122,7 +124,8 @@ type LinuxExportStep = "shell" | "success" | null;
 type ConfigChangeRequest =
   | { kind: "provider"; provider: ProviderSummary; firstSaved?: boolean }
   | { kind: "openai" }
-  | { kind: "provider_update"; validationId: string; provider: ProviderSummary; name: string };
+  | { kind: "provider_update"; validationId: string; provider: ProviderSummary; name: string }
+  | { kind: "force"; provider: ProviderSummary };
 
 const DAYWAY_NAME = "DayWay";
 const DAYWAY_BASE_URL = "https://dayway.site/v1";
@@ -153,6 +156,9 @@ export default function ProviderPage({
   const [environmentFailure, setEnvironmentFailure] = useState<EnvironmentFailure | null>(null);
   const [switchingMode, setSwitchingMode] = useState(false);
   const [switchingProviderId, setSwitchingProviderId] = useState<string | null>(null);
+  const [forceDialogOpen, setForceDialogOpen] = useState(false);
+  const [forceProviderId, setForceProviderId] = useState<string | null>(null);
+  const [forceSettingProviderId, setForceSettingProviderId] = useState<string | null>(null);
   const [view, setView] = useState<PageView>("catalog");
   const [confirmation, setConfirmation] = useState<Confirmation>(null);
   const [configChangeRequest, setConfigChangeRequest] = useState<ConfigChangeRequest | null>(null);
@@ -522,6 +528,67 @@ export default function ProviderPage({
     }
   }
 
+  async function runForceValidation(provider: ProviderSummary) {
+    discardReceipt("models_confirmed");
+    const requestId = createRequestId();
+    activeRequest.current = requestId;
+    setForceDialogOpen(false);
+    setForceProviderId(null);
+    setOperation("revalidating");
+    setFailure(null);
+    setValidationSession(createValidationSession({ kind: "force", providerName: provider.name }));
+    try {
+      const result = await revalidateProvider(requestId, provider.id);
+      replaceProvider(result.provider);
+      if (result.validationReceipt) {
+        setCatalogFeedback(`${provider.name} 的地址需要确认并保存后才能强制设置。`);
+      } else {
+        setForceProviderId(result.provider.id);
+      }
+      setOperation("idle");
+      setValidationStage("complete");
+      setValidationSession((current) => current
+        ? { ...current, status: "succeeded", stage: "tool_round_trip" }
+        : current);
+    } catch (error) {
+      const providerFailure = asProviderFailure(error);
+      setFailure(providerFailure);
+      setOperation("idle");
+      setValidationSession((current) => current
+        ? { ...current, status: "failed", failure: providerFailure }
+        : current);
+    } finally {
+      activeRequest.current = null;
+    }
+  }
+
+  async function forceSetProvider(provider: ProviderSummary, confirmRebuild = false) {
+    if (!environment) return;
+    setForceSettingProviderId(provider.id);
+    setEnvironmentFailure(null);
+    try {
+      const updated = await forceApplyEnvironmentProvider(
+        provider.id,
+        environment.revision,
+        confirmRebuild,
+      );
+      applyEnvironmentSnapshot(updated);
+      setCatalogFeedback([
+        providerMessages.forceSetSucceeded(provider.name),
+        updated.pendingRestart ? providerMessages.configChangePendingRestart : "",
+      ].filter(Boolean).join(" "));
+    } catch (error) {
+      const environmentError = asEnvironmentFailure(error);
+      if (environmentError.messageId === "environment.force_rebuild_confirmation_required") {
+        setConfigChangeRequest({ kind: "force", provider });
+      } else {
+        setEnvironmentFailure(environmentError);
+      }
+    } finally {
+      setForceSettingProviderId(null);
+    }
+  }
+
   async function cancelCurrentRequest() {
     if (activeRequest.current) await cancelProviderRequest(activeRequest.current);
   }
@@ -536,6 +603,11 @@ export default function ProviderPage({
         ? `${validationSession.source.providerName} 重新验证成功。`
         : `${validationSession.source.providerName} 最近验证失败。`);
       setFailure(null);
+    }
+    if (validationSession.source.kind === "force" && validationSession.status === "succeeded") {
+      const provider = providers.find((item) => item.id === forceProviderId);
+      setForceProviderId(null);
+      if (provider) void forceSetProvider(provider);
     }
     setValidationSession(null);
     if (shouldContinueSave && !addressSuggestion && receipt) {
@@ -847,6 +919,7 @@ export default function ProviderPage({
   }
 
   async function executeConfigChange(request: ConfigChangeRequest) {
+    if (request.kind === "force") return;
     if (!environment) return;
     setConfigChangeRequest(null);
     if (request.kind === "provider") setSwitchingProviderId(request.provider.id);
@@ -1012,14 +1085,17 @@ export default function ProviderPage({
   }, [environment, onOpenAiActionChange, openAiCurrent, openAiDisabled, openAiReason, switchingMode]);
 
   useEffect(() => {
-    onCurrentProviderNameChange?.(openAiCurrent ? "OpenAI 登录模式" : environment?.currentProvider?.name ?? null);
+    onCurrentProviderNameChange?.(openAiCurrent ? "OpenAI 登录" : environment?.currentProvider?.name ?? null);
   }, [environment, onCurrentProviderNameChange, openAiCurrent]);
 
   return (
     <main className="main-content">
       <header className="page-header">
         <h1>{providerMessages.pageTitle}</h1>
-        <DesktopControl />
+        <div className="page-header-actions">
+          <DesktopControl />
+          <DiagnosticReportControl />
+        </div>
       </header>
 
       {view === "catalog" ? (
@@ -1031,15 +1107,35 @@ export default function ProviderPage({
               <h2 id="provider-catalog-heading">{providerMessages.catalogTitle}</h2>
               <span>{providerMessages.catalogCount(providers.length)}</span>
             </div>
-            <button
-              className="command-button compact"
-              type="button"
-              onClick={() => resetEditor("detail")}
-              disabled={busy}
-            >
-              <Plus size={17} aria-hidden="true" />
-              {providerMessages.newProvider}
-            </button>
+            <div className="catalog-heading-actions">
+              <button
+                className="secondary-button compact catalog-heading-button"
+                type="button"
+                onClick={openLinuxExport}
+                disabled={busy || linuxExportBusy || providers.length === 0}
+              >
+                <Download className="button-icon is-teal" size={16} aria-hidden="true" />
+                {providerMessages.exportLinuxScript}
+              </button>
+              <button
+                className="secondary-button compact catalog-heading-button"
+                type="button"
+                onClick={() => setForceDialogOpen(true)}
+                disabled={busy || forceSettingProviderId !== null || providers.length === 0}
+              >
+                <ShieldCheck className="button-icon is-amber" size={16} aria-hidden="true" />
+                {providerMessages.forceSetProvider}
+              </button>
+              <button
+                className="command-button compact catalog-heading-button"
+                type="button"
+                onClick={() => resetEditor("detail")}
+                disabled={busy}
+              >
+                <Plus size={16} aria-hidden="true" />
+                {providerMessages.newProvider}
+              </button>
+            </div>
           </div>
           {listState === "loading" && <p className="pane-note">{providerMessages.loadingCatalog}</p>}
           {listState === "error" && <p className="inline-error">{providerMessages.catalogUnavailable}</p>}
@@ -1162,19 +1258,14 @@ export default function ProviderPage({
               <p className="empty-catalog-note">{providerMessages.emptyCatalog}</p>
             )}
           </div>
-          {environment?.state === "conflict" && environment.takeoverAvailable === false && (
-            <p className="inline-error">无法安全解析当前配置，不能强制覆盖。</p>
-          )}
           {catalogFeedback && <p className="catalog-feedback" role="status">{catalogFeedback}</p>}
         </section>
         <section className="environment-tools" aria-label={providerMessages.environmentActions}>
           <WslActions
             environments={wslEnvironments}
-            providers={providers}
             state={wslState}
             busy={busy || wslBusy || linuxExportBusy}
             onOpen={() => void openWslDialog()}
-            onExport={openLinuxExport}
           />
           {environmentFailure && (
             <p className="inline-error environment-tool-error" role="alert">
@@ -1393,16 +1484,38 @@ export default function ProviderPage({
       )}
       {configChangeRequest && (
         <ConfirmationDialog
-          title={configChangeRequest.kind === "provider" && configChangeRequest.firstSaved
+          title={configChangeRequest.kind === "force"
+            ? providerMessages.forceSetRebuildingTitle
+            : configChangeRequest.kind === "provider" && configChangeRequest.firstSaved
             ? providerMessages.firstProviderApplyTitle
             : providerMessages.configChangeTitle}
-          message={configChangeMessage(configChangeRequest)}
-          primaryLabel={configChangeRequest.kind === "provider" && configChangeRequest.firstSaved
+          message={configChangeRequest.kind === "force"
+            ? providerMessages.forceSetRebuildingMessage
+            : configChangeMessage(configChangeRequest)}
+          primaryLabel={configChangeRequest.kind === "force"
+            ? providerMessages.forceSetRebuildingConfirm
+            : configChangeRequest.kind === "provider" && configChangeRequest.firstSaved
             ? providerMessages.applyProvider
             : providerMessages.configChangePrimary}
           secondaryLabel={providerMessages.configChangeCancel}
-          onPrimary={() => void executeConfigChange(configChangeRequest)}
+          onPrimary={() => {
+            if (configChangeRequest.kind === "force") {
+              const target = configChangeRequest.provider;
+              setConfigChangeRequest(null);
+              void forceSetProvider(target, true);
+              return;
+            }
+            void executeConfigChange(configChangeRequest);
+          }}
           onSecondary={() => setConfigChangeRequest(null)}
+        />
+      )}
+      {forceDialogOpen && (
+        <ForceProviderDialog
+          providers={providers}
+          busy={operation === "revalidating" || forceSettingProviderId !== null}
+          onSelect={(provider) => void runForceValidation(provider)}
+          onClose={() => setForceDialogOpen(false)}
         />
       )}
       {validationSession && (
@@ -1502,18 +1615,14 @@ function RecommendedBadge({ onVisit }: { onVisit: () => Promise<void> }) {
 
 function WslActions({
   environments,
-  providers,
   state,
   busy,
   onOpen,
-  onExport,
 }: {
   environments: WslEnvironmentSummary[];
-  providers: ProviderSummary[];
   state: "loading" | "ready" | "error";
   busy: boolean;
   onOpen: () => void;
-  onExport: () => void;
 }) {
   const manageable = environments.some(isManageableWslEnvironment);
   const currentProvider = environments.find(isManageableWslEnvironment)?.currentProvider ?? null;
@@ -1534,7 +1643,7 @@ function WslActions({
         disabled={busy || state === "loading"}
         aria-description={description}
       >
-        <Server size={17} aria-hidden="true" />
+        <Server className="button-icon is-blue" size={17} aria-hidden="true" />
         {providerMessages.chooseWslProvider}
       </button>
         {currentProvider ? (
@@ -1556,18 +1665,47 @@ function WslActions({
           <span className="wsl-provider-empty">{providerMessages.wslNoProvider}</span>
         )}
       </div>
-      <div className="environment-action-row">
-        <button
-          className="secondary-button environment-command"
-          type="button"
-          onClick={onExport}
-          disabled={busy || providers.length === 0}
-        >
-          <Download size={17} aria-hidden="true" />
-          {providerMessages.exportLinuxScript}
-        </button>
-      </div>
     </>
+  );
+}
+
+function ForceProviderDialog({
+  providers,
+  busy,
+  onSelect,
+  onClose,
+}: {
+  providers: ProviderSummary[];
+  busy: boolean;
+  onSelect: (provider: ProviderSummary) => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="dialog-backdrop">
+      <section className="confirmation-dialog force-provider-dialog" role="dialog" aria-modal="true" aria-labelledby="force-provider-title">
+        <header className="dialog-heading">
+          <div>
+            <h2 id="force-provider-title">{providerMessages.forceSetTitle}</h2>
+            <p>{providerMessages.forceSetSubtitle}</p>
+          </div>
+          <button className="field-icon-button" type="button" onClick={onClose} disabled={busy} aria-label={providerMessages.linuxExportCancel}>
+            <X size={17} aria-hidden="true" />
+          </button>
+        </header>
+        <div className="force-provider-list" aria-label={providerMessages.verifiedProviders}>
+          {providers.length === 0 ? <p className="pane-note">{providerMessages.forceSetEmpty}</p> : providers.map((provider) => (
+            <button key={provider.id} className="force-provider-option" type="button" onClick={() => onSelect(provider)} disabled={busy}>
+              <ShieldCheck className="button-icon is-amber" size={17} aria-hidden="true" />
+              <span><strong>{provider.name}</strong><small>{provider.baseUrl} · {provider.defaultModel}</small></span>
+              {busy ? <LoaderCircle className="is-spinning" size={16} aria-hidden="true" /> : <Check size={16} aria-hidden="true" />}
+            </button>
+          ))}
+        </div>
+        <div className="dialog-actions">
+          <button className="secondary-button" type="button" onClick={onClose} disabled={busy}>{providerMessages.configChangeCancel}</button>
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -1860,14 +1998,15 @@ function openAiLoginReason(snapshot: EnvironmentSnapshot | null): string {
           ? providerMessages.openAiLoginUnconfirmed
           : providerMessages.alreadyOpenAiLogin
       : snapshot.loginStatus === "not_logged_in"
-        ? providerMessages.openAiLoginRequired
+        ? providerMessages.openAiLoginMissingSwitch
         : snapshot.loginStatus === "unavailable"
-          ? providerMessages.openAiLoginBlocked
+          ? providerMessages.openAiLoginUnconfirmedSwitch
           : providerMessages.openAiLoginAvailable;
   return openAiReason;
 }
 
 function configChangeMessage(request: ConfigChangeRequest): string {
+  if (request.kind === "force") return providerMessages.forceSetRebuildingMessage;
   const risk = providerMessages.configChangeConsumerRisk;
   if (request.kind === "provider") {
     if (request.firstSaved) {

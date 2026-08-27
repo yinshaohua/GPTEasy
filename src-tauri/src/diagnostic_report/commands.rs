@@ -4,11 +4,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
+use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::DialogExt;
 
 use super::{DiagnosticApplication, DiagnosticRepairStatus, DiagnosticReport};
-use crate::commands::{IssueLogRuntime, ProviderRuntime};
-use crate::diagnostic_assistant::{self, DiagnosticAssistantResult};
+use crate::commands::{EnvironmentRuntime, IssueLogRuntime, ProviderRuntime};
+use crate::diagnostic_assistant::{
+    self, DiagnosticAssistantResult, DiagnosticChatResult, DiagnosticConversationMessage,
+    DiagnosticManagementContext,
+};
 use crate::diagnostics::{IssueLogLevel, IssueLogRecord};
 
 const DIAGNOSTIC_LOG_WINDOW_SECONDS: i64 = 30 * 24 * 60 * 60;
@@ -21,36 +25,6 @@ pub(crate) struct DiagnosticRuntime {
 impl DiagnosticRuntime {
     pub(crate) fn new(application: DiagnosticApplication) -> Self {
         Self { application }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum DiagnosticExportFormat {
-    Json,
-    Markdown,
-}
-
-impl DiagnosticExportFormat {
-    fn file_name(self) -> &'static str {
-        match self {
-            Self::Json => "gpteasy-diagnostic-report.json",
-            Self::Markdown => "gpteasy-diagnostic-report.md",
-        }
-    }
-
-    fn dialog_filter(self) -> (&'static str, &'static [&'static str]) {
-        match self {
-            Self::Json => ("JSON", &["json"]),
-            Self::Markdown => ("Markdown", &["md"]),
-        }
-    }
-
-    fn render(self, report: &DiagnosticReport) -> String {
-        match self {
-            Self::Json => report.redacted_json(),
-            Self::Markdown => report.redacted_markdown(),
-        }
     }
 }
 
@@ -88,6 +62,7 @@ pub(crate) async fn get_diagnostic_report(
 pub(crate) async fn analyze_diagnostic_report(
     runtime: State<'_, DiagnosticRuntime>,
     providers: State<'_, ProviderRuntime>,
+    environment: State<'_, EnvironmentRuntime>,
     logs: State<'_, IssueLogRuntime>,
     provider_id: String,
 ) -> Result<DiagnosticAssistantResult, DiagnosticFailure> {
@@ -104,6 +79,7 @@ pub(crate) async fn analyze_diagnostic_report(
         .map_err(|_| DiagnosticFailure {
             message_id: "diagnostics.assistant_failed",
         })?;
+    let management = diagnostic_management_context(&providers, &environment);
     let result = diagnostic_assistant::analyze(
         provider.id.clone(),
         provider.name,
@@ -111,12 +87,56 @@ pub(crate) async fn analyze_diagnostic_report(
         api_key,
         provider.default_model,
         &report,
+        &management,
     )
     .await
     .map_err(|failure| DiagnosticFailure {
         message_id: failure.message_id,
     });
     log_diagnostic_failure(&logs, "diagnostics.assistant", &result);
+    result
+}
+
+#[tauri::command]
+pub(crate) async fn chat_diagnostic_assistant(
+    runtime: State<'_, DiagnosticRuntime>,
+    providers: State<'_, ProviderRuntime>,
+    environment: State<'_, EnvironmentRuntime>,
+    logs: State<'_, IssueLogRuntime>,
+    provider_id: String,
+    message: String,
+    history: Vec<DiagnosticConversationMessage>,
+) -> Result<DiagnosticChatResult, DiagnosticFailure> {
+    let (provider, api_key) =
+        providers
+            .assistant_provider(&provider_id)
+            .map_err(|_| DiagnosticFailure {
+                message_id: "diagnostics.assistant_provider_unavailable",
+            })?;
+    let application = runtime.application.clone();
+    let records = recent_error_logs(&logs);
+    let report = tauri::async_runtime::spawn_blocking(move || application.inspect(&records))
+        .await
+        .map_err(|_| DiagnosticFailure {
+            message_id: "diagnostics.assistant_failed",
+        })?;
+    let management = diagnostic_management_context(&providers, &environment);
+    let result = diagnostic_assistant::chat(
+        provider.id.clone(),
+        provider.name,
+        provider.base_url,
+        api_key,
+        provider.default_model,
+        &report,
+        &management,
+        message,
+        &history,
+    )
+    .await
+    .map_err(|failure| DiagnosticFailure {
+        message_id: failure.message_id,
+    });
+    log_diagnostic_failure(&logs, "diagnostics.assistant.chat", &result);
     result
 }
 
@@ -149,14 +169,12 @@ pub(crate) async fn repair_diagnostic_custom_provider(
 pub(crate) fn choose_diagnostic_export_destination(
     app: AppHandle,
     logs: State<'_, IssueLogRuntime>,
-    format: DiagnosticExportFormat,
 ) -> Result<Option<String>, DiagnosticFailure> {
-    let (filter_name, extensions) = format.dialog_filter();
     let selected = app
         .dialog()
         .file()
-        .set_file_name(format.file_name())
-        .add_filter(filter_name, extensions)
+        .set_file_name("gpteasy-diagnostic-report.md")
+        .add_filter("Markdown", &["md"])
         .blocking_save_file();
     let result = selected
         .map(|path| {
@@ -171,18 +189,30 @@ pub(crate) fn choose_diagnostic_export_destination(
     result
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DiagnosticBundleMessage {
+    role: String,
+    content: String,
+}
+
 #[tauri::command]
-pub(crate) async fn export_diagnostic_report(
+pub(crate) async fn export_diagnostic_bundle(
     runtime: State<'_, DiagnosticRuntime>,
+    providers: State<'_, ProviderRuntime>,
+    environment: State<'_, EnvironmentRuntime>,
     logs: State<'_, IssueLogRuntime>,
-    format: DiagnosticExportFormat,
     destination: String,
+    conversation: Vec<DiagnosticBundleMessage>,
 ) -> Result<(), DiagnosticFailure> {
     let application = runtime.application.clone();
     let records = recent_error_logs(&logs);
+    let management = diagnostic_management_context(&providers, &environment);
+    let conversation = sanitize_bundle_conversation(conversation);
     let result = tauri::async_runtime::spawn_blocking(move || {
         let report = application.inspect(&records);
-        fs::write(destination, format.render(&report)).map_err(|_| DiagnosticFailure {
+        let body = render_diagnostic_bundle_markdown(&report, &management, &conversation);
+        fs::write(destination, body).map_err(|_| DiagnosticFailure {
             message_id: "diagnostics.export_failed",
         })
     })
@@ -191,8 +221,93 @@ pub(crate) async fn export_diagnostic_report(
         message_id: "diagnostics.export_failed",
     })
     .and_then(|result| result);
-    log_diagnostic_failure(&logs, "diagnostics.export_report", &result);
+    log_diagnostic_failure(&logs, "diagnostics.export_bundle", &result);
     result
+}
+
+#[tauri::command]
+pub(crate) async fn copy_diagnostic_bundle(
+    app: AppHandle,
+    runtime: State<'_, DiagnosticRuntime>,
+    providers: State<'_, ProviderRuntime>,
+    environment: State<'_, EnvironmentRuntime>,
+    logs: State<'_, IssueLogRuntime>,
+    conversation: Vec<DiagnosticBundleMessage>,
+) -> Result<(), DiagnosticFailure> {
+    let application = runtime.application.clone();
+    let records = recent_error_logs(&logs);
+    let management = diagnostic_management_context(&providers, &environment);
+    let conversation = sanitize_bundle_conversation(conversation);
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let report = application.inspect(&records);
+        render_diagnostic_bundle_markdown(&report, &management, &conversation)
+    })
+    .await
+    .map_err(|_| DiagnosticFailure {
+        message_id: "diagnostics.copy_failed",
+    })
+    .and_then(|body| {
+        app.clipboard()
+            .write_text(body)
+            .map_err(|_| DiagnosticFailure {
+                message_id: "diagnostics.copy_failed",
+            })
+    });
+    log_diagnostic_failure(&logs, "diagnostics.copy_bundle", &result);
+    result
+}
+
+fn sanitize_bundle_conversation(
+    conversation: Vec<DiagnosticBundleMessage>,
+) -> Vec<DiagnosticBundleMessage> {
+    conversation
+        .into_iter()
+        .take(100)
+        .filter_map(|message| match message.role.as_str() {
+            "user" | "assistant" | "system" => Some(DiagnosticBundleMessage {
+                role: message.role,
+                content: diagnostic_assistant::redact_user_text(&message.content),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+fn render_diagnostic_bundle_markdown(
+    report: &DiagnosticReport,
+    management: &DiagnosticManagementContext,
+    conversation: &[DiagnosticBundleMessage],
+) -> String {
+    let mut output = report.redacted_markdown();
+    output.push('\n');
+    output.push_str(&management.redacted_markdown());
+    output.push_str("\n## 诊断助手对话\n\n");
+    if conversation.is_empty() {
+        output.push_str("未导出对话。\n");
+    } else {
+        for message in conversation {
+            output.push_str(&format!(
+                "- **{}**：{}\n",
+                message.role,
+                markdown_bundle_text(&message.content)
+            ));
+        }
+    }
+    output
+}
+
+fn diagnostic_management_context(
+    providers: &ProviderRuntime,
+    environment: &EnvironmentRuntime,
+) -> DiagnosticManagementContext {
+    DiagnosticManagementContext::inspect(
+        environment.inspect().map_err(|failure| failure.message_id),
+        providers.list().map_err(|failure| failure.message_id),
+    )
+}
+
+fn markdown_bundle_text(value: &str) -> String {
+    value.replace('|', "\\|").replace(['\r', '\n'], " ")
 }
 
 fn recent_error_logs(logs: &IssueLogRuntime) -> Vec<IssueLogRecord> {

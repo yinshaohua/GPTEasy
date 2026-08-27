@@ -12,7 +12,6 @@ import {
 import { useEffect, useRef, useState } from "react";
 
 import type { UpdateSnapshot } from "./contracts/update";
-import DiagnosticReportControl from "./DiagnosticReportControl";
 
 export interface UpdateSidebarState {
   snapshot: UpdateSnapshot;
@@ -50,7 +49,6 @@ export default function AppSidebar({
     <aside className="sidebar" aria-label="应用导航">
       <Brand />
       <nav className="sidebar-nav" aria-label="主要菜单">
-        <DiagnosticReportControl />
         <button
           className="nav-item"
           type="button"
@@ -88,7 +86,7 @@ function SidebarFooter({
 }) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const settingsWrapRef = useRef<HTMLDivElement>(null);
-  const providerLabel = currentProviderName || (openAiAction?.current ? "OpenAI 登录模式" : "未选择供应商");
+  const providerLabel = currentProviderName || (openAiAction?.current ? "OpenAI 登录" : "未选择供应商");
 
   useEffect(() => {
     if (!settingsOpen) return;
@@ -132,7 +130,7 @@ function SidebarFooter({
                 title={openAiAction?.description ?? "正在读取 Codex 登录状态。"}
               >
                 {openAiAction?.busy ? <LoaderCircle className="is-spinning" size={15} aria-hidden="true" /> : <LogIn size={15} aria-hidden="true" />}
-                返回 OpenAI 登录模式
+                返回 OpenAI 登录
               </button>
               {update && (
                 <button type="button" role="menuitem" onClick={() => { setSettingsOpen(false); update.onOpen(); }}>

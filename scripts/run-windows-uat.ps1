@@ -302,7 +302,7 @@ Confirm-UatStep $checks 'switch_success_updates_current_provider' '保持至少�
 Confirm-UatStep $checks 'switch_failure_refreshes_environment' '通过外部并发修改制造一次安全失败的供应商切换，确认界面重新读取环境实际状态、不保留请求前的过期当前供应商，且不自动重试或覆盖外部修改；随后按界面流程恢复可继续验收的受管状态。'
 Confirm-UatStep $checks 'pending_restart_passive' '确认供应商切换本身只产生被动待重启状态，不自动启动、关闭或重启任何消费者。'
 Confirm-UatStep $checks 'desktop_status_and_start' '退出 ChatGPT/Codex 桌面版，确认顶部显示“启动 Codex”；点击后只启动已安装的 OpenAI 官方桌面版，并在观察到新桌面进程后显示运行中。'
-Confirm-UatStep $checks 'desktop_confirmed_graceful_restart' '点击“重启 Codex”，确认先出现二次确认；确认后桌面版优先正常退出并启动新进程，取消或无法确认成功时不显示假成功。'
+Confirm-UatStep $checks 'desktop_confirmed_tree_restart' '点击“重启 Codex”，确认二次确认明确说明任务中断风险；确认后桌面版优先正常退出，仍驻留时结束同一可信桌面进程树并启动新进程，取消或无法确认成功时不显示假成功。'
 Confirm-UatStep $checks 'desktop_cli_isolation' '保持独立 Codex CLI 任务运行并执行一次桌面启动/重启，确认 CLI 的 PID、终端和任务均未被 GPTEasy 启动、关闭、终止或重启。'
 Confirm-UatStep $checks 'pending_restart_auto_clear' '从原入口自然退出所有切换前消费者，确认待重启状态自动清除；顶部桌面操作不自动执行。'
 Confirm-UatStep $checks 'cli_new_process_read' '启动新的真实 Codex CLI 进程，并确认真实请求使用目标供应商和凭据载体。'

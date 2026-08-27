@@ -1,15 +1,16 @@
 # “返回 OpenAI 登录模式”流程问题分析
 
-日期：2026-08-25  
+日期：2026-08-25，2026-08-27 补充
 范围：分析用户在 Windows PowerShell 环境中的 Codex Desktop、Codex CLI 与 GPTEasy 交互，并记录已实施的修复；不发布版本。
 
 ## 结论摘要
 
 问题确认是 GPTEasy 不能依赖供应商模式下当前 `auth.json` 持续保留 ChatGPT token。Codex 0.149 及后续版本可能按自身逻辑将它重写成纯 API Key 凭据；此前返回流程因此拒绝切换，保留了代理配置，Desktop 继续报告“已通过 API 秘钥登录”。已实施的设计是：
 
-- OpenAI 登录模式与 API Key 供应商模式互斥。前者必须对应 ChatGPT 账户凭据，不能把“已通过 API 秘钥登录”当作 OpenAI 账户登录。
+- OpenAI 登录模式与 API Key 供应商模式互斥。它可以已登录或等待用户登录，但不能把“已通过 API 秘钥登录”当作 OpenAI 账户登录。
 - 从 ChatGPT 账户进入供应商模式前，GPTEasy 在当前用户 Codex 目录写入一个临时、私有的完整凭据恢复快照。该快照不进入普通配置备份或诊断输出，返回成功即删除、失败则回滚保留。
 - 返回切换把 `config.toml` 和必要的 `auth.json` 作为一个可回滚事务；存在当前 token 或恢复快照 token 时，恢复 `auth_mode: "chatgpt"`、删除供应商 `OPENAI_API_KEY`，并保留 token、刷新元数据和未知字段。GPTEasy 不负责远程登录、刷新或注销。
+- 2026-08-27 补充：没有当前 token 或恢复快照不再阻止退出供应商模式。事务会移除纯供应商凭据，使 Codex 下次启动进入未登录流程，由用户自行完成 ChatGPT 登录。
 - 运行中的 Desktop/CLI 仍不会被 GPTEasy 重启，必须从原入口退出并重新运行后才会读取新配置；但这不是本事件中 API Key 状态残留的唯一解释。
 
 “Token exchange failed ... 403 ... Country, region, or territory not supported” 是 OpenAI 登录 token endpoint 返回的地区限制错误。它发生在浏览器登录回调的 token 交换阶段，通常不是 GPTEasy 对供应商配置写入造成的；但它会使 Codex 的 OpenAI 登录凭据无法建立或刷新，从而导致返回 OpenAI 模式后仍不可用。
@@ -42,7 +43,7 @@ GPTEasy 不实现 Codex Desktop 的退出登录动作，因此该错误应归属
 
 ## 目前流程中不应期待的行为
 
-“切换到 OpenAI 登录模式”不应被理解为把当前 API Key 供应商转换成一个可显示名称的 OpenAI 账户，也不应自动完成远程登录。正确语义是：复用本机当前或切换前临时恢复快照中的 ChatGPT token，并将本地凭据恢复为 Codex 可识别的 ChatGPT 形态；没有有效或可恢复凭据时，应先在 Codex 官方登录流程中完成登录。对于修复安装前已丢失 token 的历史环境，本地程序不能伪造或找回账户。
+“切换到 OpenAI 登录模式”不应被理解为把当前 API Key 供应商转换成一个可显示名称的 OpenAI 账户，也不应自动完成远程登录。正确语义是：退出 GPTEasy 供应商配置；有可恢复 ChatGPT token 时恢复为 Codex 可识别的 ChatGPT 形态，没有时进入未登录状态并由用户随后从 Codex 官方入口登录。对于修复安装前已丢失 token 的历史环境，本地程序不能伪造或找回账户。
 
 ## PowerShell 环境建议采集的证据
 

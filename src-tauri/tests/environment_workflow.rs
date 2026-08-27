@@ -1218,30 +1218,14 @@ fn logged_in_user_can_switch_to_openai_while_preserving_tokens_and_clearing_api_
 }
 
 #[test]
-fn missing_or_unknown_openai_login_never_changes_any_artifact_or_state() {
-    for (status, expected_category) in [
-        (
-            LoginStatus::NotLoggedIn,
-            EnvironmentFailureCategory::OpenAiLoginRequired,
-        ),
-        (
-            LoginStatus::Unavailable,
-            EnvironmentFailureCategory::OpenAiLoginUnavailable,
-        ),
-    ] {
+fn missing_or_unavailable_openai_login_still_exits_provider_mode() {
+    for status in [LoginStatus::NotLoggedIn, LoginStatus::Unavailable] {
         let (temp, store, application) = fixture();
         let codex_home = temp.path().join(".codex");
         application
             .apply_provider(PROVIDER_ID, true)
             .expect("establish provider mode");
-        let original_config = fs::read(codex_home.join("config.toml")).expect("read config");
-        let original_credentials =
-            fs::read(codex_home.join("auth.json")).expect("read credentials");
-        let original_database =
-            fs::read(store.paths().database()).expect("read state database bytes");
-        let original_backups = fs::read_dir(codex_home.join(".gpteasy-backups"))
-            .expect("read backup directory")
-            .count();
+        assert!(!codex_home.join(".gpteasy-openai-login.json").exists());
         let application = EnvironmentApplication::with_login_probe(
             store.clone(),
             &codex_home,
@@ -1249,32 +1233,30 @@ fn missing_or_unknown_openai_login_never_changes_any_artifact_or_state() {
         );
         let before = application
             .inspect()
-            .expect("inspect before rejected switch");
+            .expect("inspect before unauthenticated switch");
 
-        let failure = application
+        let switched = application
             .switch_to_openai_login(true, &before.revision)
-            .expect_err("invalid login evidence must reject the switch");
+            .expect("missing login must not trap the user in provider mode");
 
-        assert_eq!(failure.category, expected_category);
-        assert_eq!(
-            fs::read(codex_home.join("config.toml")).expect("read unchanged config"),
-            original_config
-        );
-        assert_eq!(
-            fs::read(codex_home.join("auth.json")).expect("read unchanged credentials"),
-            original_credentials
-        );
-        assert_eq!(
-            fs::read(store.paths().database()).expect("read unchanged database"),
-            original_database
-        );
-        assert_eq!(
-            fs::read_dir(codex_home.join(".gpteasy-backups"))
-                .expect("read unchanged backup directory")
-                .count(),
-            original_backups
-        );
-        assert!(!format!("{failure:?}").contains(API_KEY));
+        assert_eq!(switched.state, EnvironmentState::Managed);
+        assert_eq!(switched.mode, Some(AuthenticationMode::OpenaiLogin));
+        assert_eq!(switched.login_status, status);
+        assert!(switched.current_provider.is_none());
+        let config = fs::read_to_string(codex_home.join("config.toml")).expect("read config");
+        assert!(!config.contains("GPTEasy managed provider"));
+        assert!(!codex_home.join("auth.json").exists());
+        assert!(!codex_home.join(".gpteasy-openai-login.json").exists());
+        let connection = Connection::open(store.paths().database()).expect("open state database");
+        let (mode, provider_id): (String, Option<String>) = connection
+            .query_row(
+                "SELECT mode, provider_id FROM last_applied_state WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read applied mode");
+        assert_eq!(mode, "openai_login");
+        assert_eq!(provider_id, None);
     }
 }
 
@@ -1400,7 +1382,7 @@ fn returning_to_openai_reactivates_preserved_chatgpt_credentials() {
 }
 
 #[test]
-fn api_key_login_does_not_qualify_as_openai_account_login() {
+fn api_key_login_exits_to_openai_mode_without_impersonating_chatgpt_login() {
     let (temp, store, _) = fixture();
     let codex_home = temp.path().join(".codex");
     fs::create_dir_all(&codex_home).expect("create Codex fixture");
@@ -1417,19 +1399,20 @@ fn api_key_login_does_not_qualify_as_openai_account_login() {
     let before = application.inspect().expect("inspect API key login");
     assert_eq!(before.login_status, LoginStatus::NotLoggedIn);
 
-    let failure = application
+    let switched = application
         .switch_to_openai_login(true, &before.revision)
-        .expect_err("API key login must not satisfy OpenAI account mode");
+        .expect("API key login must not trap the user outside OpenAI mode");
 
+    assert_eq!(switched.state, EnvironmentState::Managed);
+    assert_eq!(switched.mode, Some(AuthenticationMode::OpenaiLogin));
+    assert_eq!(switched.login_status, LoginStatus::NotLoggedIn);
+    assert!(switched.current_provider.is_none());
     assert_eq!(
-        failure.category,
-        EnvironmentFailureCategory::OpenAiLoginRequired
-    );
-    assert_eq!(
-        fs::read(codex_home.join("config.toml")).expect("read unchanged config"),
+        fs::read(codex_home.join("config.toml")).expect("read preserved config"),
         b"cli_auth_credentials_store = 'keyring'\ncustom_flag = true\n"
     );
-    assert!(!codex_home.join(".gpteasy-backups").exists());
+    assert!(!codex_home.join("auth.json").exists());
+    assert!(codex_home.join(".gpteasy-backups").exists());
 }
 
 #[test]
@@ -1575,6 +1558,35 @@ fn external_provider_configuration_replaces_openai_mode_without_becoming_a_confl
         Some("https://external.example/v1"),
         "inactive external definitions must be preserved"
     );
+}
+
+#[test]
+fn externally_restored_chatgpt_credentials_override_stale_provider_history() {
+    let (temp, _store, application) = fixture();
+    let codex_home = temp.path().join(".codex");
+    application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("establish provider history");
+    fs::write(
+        codex_home.join("config.toml"),
+        b"model = 'gpt-5.4'\nmodel_reasoning_effort = 'high'\n",
+    )
+    .expect("simulate externally restored OpenAI config");
+    fs::write(
+        codex_home.join("auth.json"),
+        br#"{"auth_mode":"chatgpt","tokens":{"access_token":"private"}}"#,
+    )
+    .expect("simulate externally restored ChatGPT credentials");
+
+    let snapshot = application
+        .inspect()
+        .expect("inspect externally restored OpenAI login");
+
+    assert_eq!(snapshot.state, EnvironmentState::External);
+    assert_eq!(snapshot.mode, Some(AuthenticationMode::OpenaiLogin));
+    assert_eq!(snapshot.message_id, "environment.external_openai_login");
+    assert!(snapshot.current_provider.is_none());
+    assert!(snapshot.takeover_available);
 }
 
 #[test]
@@ -2367,6 +2379,73 @@ fn malformed_managed_markers_stop_before_backup_or_write() {
         original
     );
     assert!(!codex_home.join(".gpteasy-backups").exists());
+}
+
+#[test]
+fn force_application_rebuilds_unreadable_artifacts_after_confirmation_and_keeps_backups() {
+    let (temp, _, application) = fixture();
+    let codex_home = temp.path().join(".codex");
+    fs::create_dir_all(&codex_home).expect("create Codex fixture");
+    let original_config = [0xff, 0xfe, b'=', b'1'];
+    let original_credentials = b"{not valid JSON}";
+    fs::write(codex_home.join("config.toml"), original_config).expect("write unreadable config");
+    fs::write(codex_home.join("auth.json"), original_credentials)
+        .expect("write unreadable credentials");
+
+    let preview = application
+        .inspect()
+        .expect("inspect unreadable artifacts as conflict");
+    let confirmation = application
+        .force_apply_provider_at_revision(PROVIDER_ID, &preview.revision, false)
+        .expect_err("force recovery must require an explicit rebuild confirmation");
+    assert_eq!(
+        confirmation.category,
+        EnvironmentFailureCategory::ForceRebuildConfirmationRequired
+    );
+    assert!(!codex_home.join(".gpteasy-backups").exists());
+
+    let applied = application
+        .force_apply_provider_at_revision(PROVIDER_ID, &preview.revision, true)
+        .expect("confirmed force recovery rebuilds the Codex artifacts");
+
+    assert_eq!(applied.state, EnvironmentState::Managed);
+    let config = fs::read_to_string(codex_home.join("config.toml")).expect("read rebuilt config");
+    let document = config
+        .parse::<toml_edit::DocumentMut>()
+        .expect("rebuilt config is valid TOML");
+    assert_eq!(document["model_provider"].as_str(), Some(PROVIDER_ID));
+    let credentials: Value = serde_json::from_slice(
+        &fs::read(codex_home.join("auth.json")).expect("read rebuilt credentials"),
+    )
+    .expect("rebuilt credentials are JSON");
+    assert_eq!(credentials["auth_mode"], "apikey");
+    assert_eq!(credentials["OPENAI_API_KEY"], API_KEY);
+
+    let sidecar = fs::read_dir(&codex_home)
+        .expect("read Codex home")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("config.toml.") && name.ends_with(".bak"))
+        })
+        .expect("force recovery creates a timestamped config sidecar backup");
+    assert_eq!(
+        fs::read(sidecar).expect("read sidecar backup"),
+        original_config
+    );
+
+    let transaction_backup = latest_backup_path(&codex_home);
+    assert_eq!(
+        fs::read(transaction_backup.join("config.toml")).expect("read transaction config backup"),
+        original_config
+    );
+    assert_eq!(
+        fs::read(transaction_backup.join("auth.json"))
+            .expect("read transaction credentials backup"),
+        original_credentials
+    );
 }
 
 #[test]

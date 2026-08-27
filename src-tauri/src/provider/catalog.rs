@@ -386,6 +386,7 @@ pub(super) fn replace_provider(
     original_name: &str,
     original_fingerprint: &str,
     candidate: &VerifiedCandidate,
+    allow_recorded_current: bool,
 ) -> Result<ProviderSummary, ProviderFailure> {
     let mut connection = open_catalog(state_store)?;
     let transaction = connection
@@ -398,7 +399,7 @@ pub(super) fn replace_provider(
             "provider.recommended_name_reserved",
         ));
     }
-    if record.summary.is_current {
+    if record.summary.is_current && !allow_recorded_current {
         return Err(ProviderFailure::new(
             ProviderFailureCategory::SaveAndApplyRequired,
             "provider.save_and_apply_required",

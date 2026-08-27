@@ -47,9 +47,9 @@ export const updateMessages = {
     incomplete: (version: string | null) => string;
   },
   errors: {
-    check_failed: "暂时无法检查应用更新，将在后台自动重试；也可以立即重试。",
+    check_failed: "暂时无法检查应用更新，请手动重试。",
     manifest_invalid: "更新清单无效，已停止本次更新。",
-    download_failed: "应用更新下载失败，将在后台自动重试；也可以立即重试。",
+    download_failed: "应用更新下载失败，请手动重试。",
     signature_invalid: "应用更新未通过签名验证，已拒绝使用。",
     no_pending_update: "当前没有可安装的更新，请重新检查。",
     busy: "当前有操作正在进行，请先完成或取消后再安装更新。",
@@ -107,7 +107,7 @@ export const loginStatusMessages: Record<LoginStatus, string> = {
 
 export const authenticationModeMessages: Record<AuthenticationMode, string> = {
   provider: "供应商模式",
-  openai_login: "OpenAI 登录模式",
+  openai_login: "OpenAI 登录",
 };
 
 export const environmentStateMessages: Record<EnvironmentState, string> = {
@@ -266,6 +266,14 @@ export const providerMessages = {
   catalogTitle: "供应商目录",
   catalogCount: (count: number) => `${count} 个已验证供应商`,
   newProvider: "添加供应商",
+  forceSetProvider: "强制设置",
+  forceSetTitle: "强制设置供应商",
+  forceSetSubtitle: "选择后会重新验证供应商；验证成功才会写入当前 Codex 环境。",
+  forceSetEmpty: "尚无可用于强制设置的已验证供应商。",
+  forceSetRebuildingTitle: "重建 Codex 配置？",
+  forceSetRebuildingMessage: "当前配置无法安全迁移。GPTEasy 将先在配置目录创建带时间戳的备份，再重建最小可用配置并设置所选供应商。",
+  forceSetRebuildingConfirm: "备份并重建",
+  forceSetSucceeded: (name: string) => `已强制设置“${name}”为当前供应商。`,
   verifiedProviders: "已验证供应商",
   loadingCatalog: "正在读取供应商目录",
   catalogUnavailable: "无法读取供应商目录。",
@@ -293,13 +301,13 @@ export const providerMessages = {
   environmentUnavailable: "环境状态不可用。",
   openAiLoginExpired: "OpenAI 登录已在外部失效；当前模式保持不变。",
   openAiLoginUnconfirmed: "无法确认 OpenAI 登录状态；当前模式保持不变。",
-  alreadyOpenAiLogin: "当前已是 OpenAI 登录模式。",
-  openAiLoginRequired: "请先在 Codex 中完成 ChatGPT 账户登录。",
-  openAiLoginBlocked: "无法确认 Codex 登录状态，已阻止切换。",
+  alreadyOpenAiLogin: "当前已使用 OpenAI 登录。",
+  openAiLoginMissingSwitch: "退出供应商模式后，可在 Codex 中登录 ChatGPT。",
+  openAiLoginUnconfirmedSwitch: "无法确认当前登录状态；仍可退出供应商模式。",
   openAiLoginAvailable: "使用或恢复 Codex 已有的 ChatGPT 账户登录。",
   restoringConfiguration: "正在恢复上次配置。",
   restoreConfiguration: "恢复上次配置",
-  switchToOpenAiLogin: "OpenAI 登录模式",
+  switchToOpenAiLogin: "OpenAI 登录",
   chooseWslProvider: "选择 WSL2 供应商",
   exportLinuxScript: "导出 Linux 脚本",
   linuxExportShellSubtitle: "为目标 Linux shell 生成独立的静态供应商快照。",
@@ -364,7 +372,7 @@ export const providerMessages = {
     "运行中的 ChatGPT/Codex 桌面版或 Codex CLI 可能继续使用旧配置，直到它们自然退出。",
   configChangePendingRestart:
     "配置已保存并成为当前使用目标。运行中的 Codex 消费者可能继续使用旧配置，请重启 Codex 桌面版或 CLI 后读取新配置。",
-  configChangeOpenAiTarget: "将切换到 OpenAI 登录模式。",
+  configChangeOpenAiTarget: "将切换到 OpenAI 登录。",
   configChangeProviderTarget: (name: string) => `将切换到“${name}”。`,
   configChangeProviderUpdateTarget: (name: string) =>
     `将保存并应用“${name}”的已验证更新。`,
@@ -447,7 +455,7 @@ export const desktopMessages = {
   start: "启动 Codex",
   restart: "重启 Codex",
   restartTitle: "确认重启 Codex",
-  restartConfirmation: "GPTEasy 将先请求 Codex 正常退出，再从已验证的 OpenAI 桌面安装重新启动。正在运行的任务可能中断。",
+  restartConfirmation: "GPTEasy 将先请求 Codex 正常退出；若它仍在运行，将结束 Codex 桌面进程及其中任务，再从已验证的 OpenAI 桌面安装重新启动。",
   cliIsolation: "Codex CLI 不会被启动、关闭或重启。",
   cancel: "取消",
   confirmRestart: "确认重启",
@@ -456,6 +464,8 @@ export const desktopMessages = {
   failures: {
     "desktop.close_timed_out": "Codex 未能正常退出，未重新启动。",
     "desktop.close_failed": "无法请求 Codex 正常退出，未重新启动。",
+    "desktop.termination_failed": "无法安全结束 Codex 桌面版，未重新启动。",
+    "desktop.termination_timed_out": "结束 Codex 桌面版后仍检测到原进程，未重新启动。",
     "desktop.identity_changed": "Codex 运行状态已变化，请重试。",
     "desktop.activation_failed": "无法从已验证安装启动 Codex。",
     "desktop.launch_not_observed": "未能确认 Codex 已启动。",
@@ -474,11 +484,12 @@ export const environmentFailureMessages: Record<string, string> = {
   "environment.managed_conflict": "管理区块已被外部修改，当前操作已停止。",
   "environment.config_invalid": "config.toml 无法安全迁移。",
   "environment.credentials_invalid": "auth.json 无法安全保留字段。",
+  "environment.force_rebuild_confirmation_required": "当前配置需要备份并重建后才能设置供应商。",
   "environment.restore_unavailable": "当前没有可安全恢复的最近配置。",
   "environment.restore_conflict": "受管工件已发生外部变化，恢复已停止。",
   "environment.backup_invalid": "最近一次配置备份不完整，无法安全恢复。",
-  "environment.openai_login_required": "请先在 Codex 中完成 ChatGPT 账户登录。",
-  "environment.openai_login_unavailable": "无法确认 Codex 登录状态，已阻止切换。",
+  "environment.openai_login_required": "当前没有可恢复的 ChatGPT 登录凭据。",
+  "environment.openai_login_unavailable": "无法确认 Codex 登录状态；当前模式保持不变。",
 };
 
 export const environmentFailureFallback = "Codex 环境未发生变化，请重试。";
