@@ -113,6 +113,30 @@ test("Gitee 附件上传遇到 429 时有限重试后再推进清单", async () 
   }
 });
 
+test("Gitee Release 查询遇到瞬时 503 时有限重试", async () => {
+  const adapter = await startAdapter({ transientGiteeReleaseFailures: 2 });
+  try {
+    const result = await runSync(adapter.baseUrl);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(adapter.state.giteeReleaseAttempts, 3);
+    assert.equal(adapter.state.manifests.length, 1);
+  } finally {
+    await adapter.close();
+  }
+});
+
+test("GitHub Release 附件下载遇到瞬时 503 时有限重试", async () => {
+  const adapter = await startAdapter({ transientGithubAssetFailures: 1 });
+  try {
+    const result = await runSync(adapter.baseUrl);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(adapter.state.githubAssetAttempts.get(INSTALLER), 2);
+    assert.equal(adapter.state.manifests.length, 1);
+  } finally {
+    await adapter.close();
+  }
+});
+
 test("Gitee 错误响应中的认证 Token 会被脱敏", async () => {
   const adapter = await startAdapter({ failGiteeRequestWithToken: true });
   try {
@@ -317,6 +341,7 @@ async function runSync(baseUrl) {
       GITEE_RAW_BASE_URL: baseUrl,
       GITEE_SYNC_TEST_MODE: "1",
       GITEE_SYNC_ANONYMOUS_ATTEMPTS: "3",
+      GITEE_SYNC_REQUEST_ATTEMPTS: "3",
       GITEE_SYNC_RETRY_DELAY_MS: "0",
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -337,6 +362,10 @@ async function startAdapter(options = {}) {
     uploadAttempts: new Map(),
     transientUploadFailures: options.transientUploadFailures ?? new Map(),
     transientUploadStatus: options.transientUploadStatus ?? 502,
+    transientGiteeReleaseFailures: options.transientGiteeReleaseFailures ?? 0,
+    transientGithubAssetFailures: options.transientGithubAssetFailures ?? 0,
+    giteeReleaseAttempts: 0,
+    githubAssetAttempts: new Map(),
     failGiteeRequestWithToken: options.failGiteeRequestWithToken ?? false,
     failAnonymousName: options.failAnonymousName,
     currentManifest: options.currentManifest,
@@ -381,6 +410,9 @@ async function startAdapter(options = {}) {
     if (url.pathname.startsWith("/github-assets/")) {
       assert.equal(authorization, "Bearer github-test-token");
       const name = decodeURIComponent(url.pathname.slice("/github-assets/".length));
+      const attempts = (state.githubAssetAttempts.get(name) ?? 0) + 1;
+      state.githubAssetAttempts.set(name, attempts);
+      if (attempts <= state.transientGithubAssetFailures) return bytes(response, 503, Buffer.from("temporary"));
       return bytes(response, 200, name === INSTALLER ? INSTALLER_BYTES : Buffer.from(SIGNATURE_TEXT));
     }
     if (url.pathname.startsWith("/gitee/")) {
@@ -388,6 +420,8 @@ async function startAdapter(options = {}) {
     }
     if (request.method === "GET" && url.pathname.endsWith(`/releases/tags/${TAG}`)) {
       if (state.failGiteeRequestWithToken) return json(response, 500, { message: `token=${state.giteeToken ?? "gitee-test-token"}` });
+      state.giteeReleaseAttempts += 1;
+      if (state.giteeReleaseAttempts <= state.transientGiteeReleaseFailures) return json(response, 503, { message: "temporary" });
       if (!state.releaseExists) return json(response, 404, { message: "not found" });
       return json(response, 200, releaseResponse(state, server));
     }

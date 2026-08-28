@@ -148,6 +148,9 @@ async function loadConfiguration() {
     giteeRawBase,
     formalManifestPath,
     testMode,
+    requestAttempts: testMode ? Number(process.env.GITEE_SYNC_REQUEST_ATTEMPTS ?? "3") : 3,
+    requestDelayMs: testMode ? Number(process.env.GITEE_SYNC_RETRY_DELAY_MS ?? "0") : 5000,
+    requestTimeoutMs: testMode ? Number(process.env.GITEE_SYNC_REQUEST_TIMEOUT_MS ?? "1000") : 30000,
     anonymousAttempts: testMode ? Number(process.env.GITEE_SYNC_ANONYMOUS_ATTEMPTS ?? "1") : 40,
     anonymousDelayMs: testMode ? Number(process.env.GITEE_SYNC_RETRY_DELAY_MS ?? "0") : 5000,
     uploadAttempts: testMode ? Number(process.env.GITEE_SYNC_UPLOAD_ATTEMPTS ?? "3") : 3,
@@ -157,15 +160,15 @@ async function loadConfiguration() {
 }
 
 async function githubRequest(endpoint) {
-  const response = await fetch(`${configuration.githubApiBase}${endpoint}`, {
+  const response = await fetchWithRetry(`${configuration.githubApiBase}${endpoint}`, {
     headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${configuration.githubToken}` },
-  });
+  }, "GitHub");
   return parseJsonResponse(response, "GitHub");
 }
 
 async function giteeRequest(endpoint, options = {}) {
   const method = options.method ?? "GET";
-  const response = await fetch(`${configuration.giteeApiBase}${endpoint}`, {
+  const response = await fetchWithRetry(`${configuration.giteeApiBase}${endpoint}`, {
     ...options,
     headers: {
       Accept: "application/json",
@@ -174,9 +177,38 @@ async function giteeRequest(endpoint, options = {}) {
       Authorization: `Bearer ${configuration.giteeToken}`,
       ...(options.headers ?? {}),
     },
-  });
+  }, "Gitee", method === "GET");
   if (response.status === 404 && method === "GET") return null;
   return parseJsonResponse(response, "Gitee");
+}
+
+async function fetchWithRetry(url, options, service, allowNotFound = false) {
+  const method = options.method ?? "GET";
+  const retryable = ["GET", "PATCH", "PUT"].includes(method);
+  let lastError;
+  for (let attempt = 1; attempt <= configuration.requestAttempts; attempt += 1) {
+    try {
+      const response = await fetch(url, {
+        ...options,
+        signal: options.signal ?? AbortSignal.timeout(configuration.requestTimeoutMs),
+      });
+      if (allowNotFound && response.status === 404) return response;
+      if (response.ok || !retryable || attempt >= configuration.requestAttempts || !isRetryableApiStatus(response.status)) {
+        return response;
+      }
+      await response.arrayBuffer();
+    } catch (error) {
+      lastError = error;
+      if (!retryable || attempt >= configuration.requestAttempts) throw error;
+    }
+    process.stderr.write(`${service} ${method} request failed transiently; retrying\n`);
+    await new Promise((resolve) => setTimeout(resolve, configuration.requestDelayMs));
+  }
+  throw lastError;
+}
+
+function isRetryableApiStatus(status) {
+  return [408, 425, 429, 500, 502, 503, 504].includes(status);
 }
 
 async function parseJsonResponse(response, service) {
@@ -268,9 +300,9 @@ function selectArtifacts(assets, version) {
 }
 
 async function downloadGithubAsset(asset, target, token) {
-  const response = await fetch(asset.url ?? asset.browser_download_url, {
+  const response = await fetchWithRetry(asset.url ?? asset.browser_download_url, {
     headers: { Accept: "application/octet-stream", Authorization: `Bearer ${token}` },
-  });
+  }, "GitHub");
   if (!response.ok) throw new Error(`GitHub asset ${asset.name} download failed with HTTP ${response.status}`);
   await writeFile(target, Buffer.from(await response.arrayBuffer()));
 }
