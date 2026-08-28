@@ -55,6 +55,18 @@ for (const viewport of [{ width: 680, height: 520 }, { width: 1120, height: 800 
     await expect(sessionToolbar.getByRole("tab", { name: "已归档" })).toBeVisible();
     await expect(sessionToolbar.getByRole("button", { name: "刷新会话列表" })).toBeVisible();
     await expectChildrenNotToOverlap(sessionToolbar, "[role='tab'], .session-list-actions > button");
+    await sessionToolbar.getByRole("tab", { name: "已归档" }).focus();
+    await page.keyboard.press("Enter");
+    await expect(sessionToolbar.getByRole("tab", { name: "已归档" })).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByRole("button", { name: /打开会话/ }).first()).toBeVisible();
+    await page.getByRole("button", { name: /打开会话/ }).first().click();
+    const detailToolbar = page.locator("header.session-detail-header[aria-label='会话详情工具栏']");
+    await expect(detailToolbar).toBeVisible();
+    await expect(detailToolbar.getByRole("button", { name: "返回会话列表" })).toBeVisible();
+    await expectChildrenNotToOverlap(detailToolbar, ":scope > button, :scope > h2, :scope > .session-detail-actions > button");
+    await detailToolbar.getByRole("button", { name: "返回会话列表" }).focus();
+    await page.keyboard.press("Enter");
+    await expect(sessionToolbar).toBeVisible();
     await expectChildrenNotToOverlap(page.getByLabel("会话筛选"), ":scope > label");
     await expectNoHorizontalOverflow(page, viewport.width);
 

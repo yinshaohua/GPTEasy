@@ -141,7 +141,7 @@ function SidebarFooter({
               )}
               <button type="button" role="menuitem" onClick={() => { setSettingsOpen(false); onOpenLogs?.(); }}>
                 <ScrollText size={15} aria-hidden="true" />
-                问题日志
+                {appPageTitles.logs}
               </button>
             </div>
           )}
