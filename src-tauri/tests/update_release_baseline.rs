@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use base64::Engine;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 const PUBLIC_KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXkgRTc2MjBGMTg0MkI0RTgxRgpSV1FmNkxSQ0dBOWk1M21sWWVjTzRJelQ1MVRHUHB2V3VjTlNDaDFDQk0wUVRhTG43M1k3R0ZPMw==";
@@ -651,6 +652,8 @@ fn gitee_smoke_declares_authenticated_writes_and_anonymous_reads() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake Gitee server");
     let address = listener.local_addr().expect("fake Gitee address");
     let fixture = "GPTEasy Gitee distribution smoke fixture\n".to_owned();
+    let fixture_size = fixture.len();
+    let fixture_sha256 = format!("{:x}", Sha256::digest(fixture.as_bytes()));
     let fixture_relative = PathBuf::from("src-tauri/target/gitee-smoke-fixture.txt");
     let fixture_for_bash = fixture_relative.to_string_lossy().replace('\\', "/");
     let fixture_path = repository_root().join(&fixture_relative);
@@ -707,20 +710,34 @@ fn gitee_smoke_declares_authenticated_writes_and_anonymous_reads() {
                     authorization,
                 });
 
-            let (status, content_type, response) = if method == "POST"
+            let (status, content_type, response, extra_headers) = if method == "POST"
                 && path.ends_with("/releases")
             {
-                (201, "application/json", "{\"id\":42}".to_owned())
+                (
+                    201,
+                    "application/json",
+                    "{\"id\":42}".to_owned(),
+                    String::new(),
+                )
             } else if method == "POST" && path.ends_with("/releases/42/attach_files") {
-                (201, "application/json", "{\"id\":7}".to_owned())
+                (
+                    201,
+                    "application/json",
+                    "{\"id\":7}".to_owned(),
+                    String::new(),
+                )
             } else if method == "GET" && path.ends_with("/download") {
                 attachment_downloads += 1;
-                let body = if attachment_downloads == 1 {
-                    fixture[..1].to_owned()
+                if attachment_downloads == 1 {
+                    (
+                        206,
+                        "text/plain",
+                        fixture[..1].to_owned(),
+                        format!("Content-Range: bytes 0-0/{}\r\n", fixture.len()),
+                    )
                 } else {
-                    fixture.clone()
-                };
-                (200, "text/plain", body)
+                    (200, "text/plain", fixture.clone(), String::new())
+                }
             } else if method == "POST" && path.contains("/contents/smoke/") {
                 let body = &request[header_end..header_end + content_length];
                 let body = String::from_utf8_lossy(body);
@@ -734,7 +751,7 @@ fn gitee_smoke_declares_authenticated_writes_and_anonymous_reads() {
                     .decode(content)
                     .expect("decode test manifest");
                 raw_manifest = String::from_utf8(decoded).expect("test manifest UTF-8");
-                (201, "application/json", "{}".to_owned())
+                (201, "application/json", "{}".to_owned(), String::new())
             } else if method == "GET"
                 && path.contains("/contents/smoke/")
                 && path.ends_with("?ref=main")
@@ -745,23 +762,31 @@ fn gitee_smoke_declares_authenticated_writes_and_anonymous_reads() {
                     format!(
                         "{{\"download_url\":\"http://{address}/raw/blobs/fixture/smoke/smoke-42-1.md\"}}"
                     ),
+                    String::new(),
                 )
             } else if method == "GET" && path.starts_with("/raw/blobs/") {
                 raw_downloads += 1;
                 if raw_downloads == 1 {
-                    (403, "text/plain", "not propagated".to_owned())
+                    (
+                        403,
+                        "text/plain",
+                        "not propagated".to_owned(),
+                        String::new(),
+                    )
                 } else {
-                    (200, "application/json", raw_manifest.clone())
+                    (200, "application/json", raw_manifest.clone(), String::new())
                 }
             } else {
                 (
                     404,
                     "application/json",
                     "{\"message\":\"not found\"}".to_owned(),
+                    String::new(),
                 )
             };
             let reason = match status {
                 200 => "OK",
+                206 => "Partial Content",
                 201 => "Created",
                 403 => "Forbidden",
                 418 => "I'm a teapot",
@@ -769,7 +794,7 @@ fn gitee_smoke_declares_authenticated_writes_and_anonymous_reads() {
             };
             write!(
                 stream,
-                "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",
+                "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n{extra_headers}Connection: close\r\n\r\n{response}",
                 response.len()
             )
             .expect("write fake response");
@@ -803,6 +828,21 @@ fn gitee_smoke_declares_authenticated_writes_and_anonymous_reads() {
     assert_eq!(report["formalManifestAdvanced"], false);
     assert_eq!(report["tag"], "smoke-42-1");
     assert_eq!(report["releaseId"], 42);
+    assert_eq!(
+        report["anonymousRange"],
+        json!({
+            "status": 206,
+            "bytes": 1,
+            "contentRange": format!("bytes 0-0/{fixture_size}")
+        })
+    );
+    assert_eq!(
+        report["anonymousFullDownload"],
+        json!({
+            "size": fixture_size,
+            "sha256": fixture_sha256
+        })
+    );
 
     let records = records.lock().expect("read request records");
     assert_eq!(records.len(), 8);
@@ -845,11 +885,17 @@ fn gitee_smoke_cleanup_removes_the_exact_manifest_before_the_release() {
     let server_records = Arc::clone(&records);
     let server = thread::spawn(move || {
         let mut last_request = Instant::now();
+        let mut received_request = false;
         loop {
             let (mut stream, _) = match listener.accept() {
                 Ok(connection) => connection,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    if last_request.elapsed() > Duration::from_millis(500) {
+                    let idle_budget = if received_request {
+                        Duration::from_millis(500)
+                    } else {
+                        Duration::from_secs(10)
+                    };
+                    if last_request.elapsed() > idle_budget {
                         break;
                     }
                     thread::sleep(Duration::from_millis(10));
@@ -858,6 +904,10 @@ fn gitee_smoke_cleanup_removes_the_exact_manifest_before_the_release() {
                 Err(error) => panic!("accept fake Gitee request: {error}"),
             };
             last_request = Instant::now();
+            received_request = true;
+            stream
+                .set_nonblocking(false)
+                .expect("make accepted Gitee connection blocking");
             let mut request = Vec::new();
             let mut buffer = [0_u8; 8192];
             let header_end;

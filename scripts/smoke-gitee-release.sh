@@ -54,6 +54,8 @@ else
   dd if=/dev/zero of="$ASSET_PATH" bs=1M count="${SMOKE_ASSET_SIZE_MB:-4}" status=none
 fi
 ASSET_SHA256=$(sha256sum "$ASSET_PATH" | cut -d ' ' -f 1)
+ASSET_SIZE=$(wc -c < "$ASSET_PATH")
+ASSET_SIZE=$((ASSET_SIZE))
 CURL_ASSET_PATH="$ASSET_PATH"
 if command -v cygpath >/dev/null 2>&1; then
   CURL_ASSET_PATH=$(cygpath -w "$ASSET_PATH")
@@ -117,11 +119,24 @@ DOWNLOAD_PATH="$WORK_DIR/downloaded.txt"
 DOWNLOAD_URL="https://gitee.com/$GITEE_REPOSITORY/releases/download/$SMOKE_TAG/$ASSET_NAME"
 if [[ "${GITEE_SMOKE_TEST_MODE:-0}" == "1" ]]; then DOWNLOAD_URL="$API_BASE/repos/$GITEE_REPOSITORY/releases/$RELEASE_ID/attach_files/$ATTACHMENT_ID/download"; fi
 RANGE_PATH="$WORK_DIR/range.bin"
-RANGE_STATUS=$(curl --silent --show-error --location --range 0-0 --output "$RANGE_PATH" --write-out '%{http_code}' "$DOWNLOAD_URL")
-[[ "$RANGE_STATUS" =~ ^2[0-9][0-9]$ ]] || { printf 'anonymous attachment range download failed: HTTP %s\n' "$RANGE_STATUS" >&2; exit 1; }
-[[ -s "$RANGE_PATH" ]] || { printf 'anonymous attachment range download returned no bytes\n' >&2; exit 1; }
+RANGE_HEADERS="$WORK_DIR/range-headers.txt"
+RANGE_RESULT=$(curl --silent --show-error --location --range 0-0 \
+  --dump-header "$RANGE_HEADERS" --output "$RANGE_PATH" --write-out '%{http_code} %{size_download}' "$DOWNLOAD_URL")
+RANGE_STATUS=${RANGE_RESULT%% *}
+RANGE_BYTES=${RANGE_RESULT#* }
+RANGE_BYTES=${RANGE_BYTES%%.*}
+RANGE_CONTENT=$(tr -d '\r' < "$RANGE_HEADERS" | awk 'tolower($1) == "content-range:" { value=$2 " " $3 } END { print value }')
+[[ "$RANGE_STATUS" == 206 ]] || { printf 'anonymous attachment range download failed: expected HTTP 206, got %s\n' "$RANGE_STATUS" >&2; exit 1; }
+[[ "$RANGE_BYTES" == 1 && $(wc -c < "$RANGE_PATH") -eq 1 ]] || { printf 'anonymous attachment range download did not return exactly one byte\n' >&2; exit 1; }
+[[ "$RANGE_CONTENT" == "bytes 0-0/$ASSET_SIZE" ]] || { printf 'anonymous attachment range response was %s\n' "${RANGE_CONTENT:-<missing>}" >&2; exit 1; }
 download_anonymously "$DOWNLOAD_URL" "$DOWNLOAD_PATH" 'anonymous attachment download'
 DOWNLOADED_SHA256=$(sha256sum "$DOWNLOAD_PATH" | cut -d ' ' -f 1)
+DOWNLOADED_SIZE=$(wc -c < "$DOWNLOAD_PATH")
+DOWNLOADED_SIZE=$((DOWNLOADED_SIZE))
+if [[ "$DOWNLOADED_SIZE" -ne "$ASSET_SIZE" ]]; then
+  printf 'anonymous attachment size does not match uploaded content\n' >&2
+  exit 1
+fi
 if [[ "$DOWNLOADED_SHA256" != "$ASSET_SHA256" ]]; then
   printf 'anonymous attachment SHA-256 does not match uploaded content\n' >&2
   exit 1
@@ -144,4 +159,5 @@ RAW_MANIFEST_URL=$(node "$JSON_TOOL" download-url "$CONTENT_READ_RESPONSE" "$RAW
 RAW_RESULT="$WORK_DIR/raw.json"
 download_anonymously "$RAW_MANIFEST_URL" "$RAW_RESULT" 'anonymous Raw manifest download'
 node "$JSON_TOOL" verify-manifest "$RAW_RESULT" "$SMOKE_TAG" "$ASSET_SHA256"
-node "$JSON_TOOL" report "$SMOKE_TAG" "$RELEASE_ID" "$DOWNLOAD_URL" "$RAW_MANIFEST_URL"
+node "$JSON_TOOL" report "$SMOKE_TAG" "$RELEASE_ID" "$DOWNLOAD_URL" "$RAW_MANIFEST_URL" \
+  "$RANGE_STATUS" "$RANGE_BYTES" "$RANGE_CONTENT" "$DOWNLOADED_SIZE" "$DOWNLOADED_SHA256"

@@ -93,6 +93,8 @@ test("Gitee 附件上传遇到瞬时 5xx 时有限重试后再推进清单", asy
     assert.equal(adapter.state.uploads.get(INSTALLER)?.equals(INSTALLER_BYTES), true);
     assert.equal(adapter.state.manifests.length, 1);
     assert.equal(adapter.state.records.at(-1).operation, "manifest-write");
+    assert.match(result.stderr, /service=Gitee method=POST stage=attachment-upload status=HTTP-502 attempt=1\/3/);
+    assert.match(result.stderr, /service=Gitee method=POST stage=attachment-upload status=HTTP-502 attempt=2\/3/);
   } finally {
     await adapter.close();
   }
@@ -120,6 +122,8 @@ test("Gitee Release 查询遇到瞬时 503 时有限重试", async () => {
     assert.equal(result.code, 0, result.stderr);
     assert.equal(adapter.state.giteeReleaseAttempts, 3);
     assert.equal(adapter.state.manifests.length, 1);
+    assert.match(result.stderr, /service=Gitee method=GET stage=api status=HTTP-503 attempt=1\/3/);
+    assert.match(result.stderr, /service=Gitee method=GET stage=api status=HTTP-503 attempt=2\/3/);
   } finally {
     await adapter.close();
   }
@@ -132,6 +136,7 @@ test("GitHub Release 附件下载遇到瞬时 503 时有限重试", async () => 
     assert.equal(result.code, 0, result.stderr);
     assert.equal(adapter.state.githubAssetAttempts.get(INSTALLER), 2);
     assert.equal(adapter.state.manifests.length, 1);
+    assert.match(result.stderr, /service=GitHub method=GET stage=api status=HTTP-503 attempt=1\/3/);
   } finally {
     await adapter.close();
   }
@@ -144,6 +149,7 @@ test("匿名附件连接中断后会在超时预算内重试", async () => {
     assert.equal(result.code, 0, result.stderr);
     assert.equal(adapter.state.anonymousNetworkFailures, 0);
     assert.equal(adapter.state.manifests.length, 1);
+    assert.match(result.stderr, /service=Gitee method=GET stage=attachment-download status=network-error attempt=1\/3/);
   } finally {
     await adapter.close();
   }

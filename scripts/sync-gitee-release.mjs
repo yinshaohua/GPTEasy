@@ -187,6 +187,7 @@ async function fetchWithRetry(url, options, service, allowNotFound = false) {
   const retryable = ["GET", "PATCH", "PUT"].includes(method);
   let lastError;
   for (let attempt = 1; attempt <= configuration.requestAttempts; attempt += 1) {
+    let retryStatus;
     try {
       const response = await fetch(url, {
         ...options,
@@ -196,15 +197,23 @@ async function fetchWithRetry(url, options, service, allowNotFound = false) {
       if (response.ok || !retryable || attempt >= configuration.requestAttempts || !isRetryableApiStatus(response.status)) {
         return response;
       }
+      retryStatus = `HTTP-${response.status}`;
       await response.arrayBuffer();
     } catch (error) {
       lastError = error;
       if (!retryable || attempt >= configuration.requestAttempts) throw error;
+      retryStatus = "network-error";
     }
-    process.stderr.write(`${service} ${method} request failed transiently; retrying\n`);
+    writeRetryLog(service, method, "api", retryStatus, attempt, configuration.requestAttempts);
     await new Promise((resolve) => setTimeout(resolve, configuration.requestDelayMs));
   }
   throw lastError;
+}
+
+function writeRetryLog(service, method, stage, status, attempt, total) {
+  process.stderr.write(
+    `retry service=${service} method=${method} stage=${stage} status=${status} attempt=${attempt}/${total}\n`,
+  );
 }
 
 function isRetryableApiStatus(status) {
@@ -355,13 +364,27 @@ async function uploadAsset(releaseId, asset) {
       if (attempt >= configuration.uploadAttempts || !isRetryableUploadStatus(response.status)) {
         throw new Error(`Gitee upload failed for ${asset.name} with HTTP ${response.status}`);
       }
-      process.stderr.write(`Gitee upload for ${asset.name} returned HTTP ${response.status}; retrying\n`);
+      writeRetryLog(
+        "Gitee",
+        "POST",
+        "attachment-upload",
+        `HTTP-${response.status}`,
+        attempt,
+        configuration.uploadAttempts,
+      );
     } catch (error) {
       if (attempt >= configuration.uploadAttempts
         || (error instanceof Error && error.message.startsWith("Gitee upload failed"))) {
         throw error;
       }
-      process.stderr.write(`Gitee upload for ${asset.name} failed before a response; retrying\n`);
+      writeRetryLog(
+        "Gitee",
+        "POST",
+        "attachment-upload",
+        "network-error",
+        attempt,
+        configuration.uploadAttempts,
+      );
     }
     await new Promise((resolve) => setTimeout(resolve, configuration.uploadDelayMs));
   }
@@ -409,6 +432,14 @@ async function verifyAnonymous(url, asset) {
       });
     } catch (error) {
       if (attempt >= configuration.anonymousAttempts) throw error;
+      writeRetryLog(
+        "Gitee",
+        "GET",
+        "attachment-download",
+        "network-error",
+        attempt,
+        configuration.anonymousAttempts,
+      );
       await new Promise((resolve) => setTimeout(resolve, configuration.anonymousDelayMs));
       continue;
     }
@@ -421,6 +452,14 @@ async function verifyAnonymous(url, asset) {
       return;
     }
     if (attempt < configuration.anonymousAttempts && [403, 404, 418, 429, 500, 502, 503, 504].includes(response.status)) {
+      writeRetryLog(
+        "Gitee",
+        "GET",
+        "attachment-download",
+        `HTTP-${response.status}`,
+        attempt,
+        configuration.anonymousAttempts,
+      );
       await new Promise((resolve) => setTimeout(resolve, configuration.anonymousDelayMs));
       continue;
     }
@@ -445,7 +484,14 @@ async function fetchAnonymousFromCandidates(urls, description, consume = (respon
     } catch (error) {
       lastError = error;
       if (index < candidates.length - 1) {
-        process.stderr.write(`${description} primary URL failed; trying Gitee fallback (${error.message})\n`);
+        writeRetryLog(
+          "Gitee",
+          "GET",
+          "anonymous-fallback",
+          "primary-failed",
+          index + 1,
+          candidates.length,
+        );
       }
     }
   }
@@ -464,6 +510,7 @@ async function fetchAnonymousWithAttempts(url, description, attempts, consume) {
       });
     } catch (error) {
       if (attempt >= attempts) throw error;
+      writeRetryLog("Gitee", "GET", "anonymous-download", "network-error", attempt, attempts);
       await new Promise((resolve) => setTimeout(resolve, configuration.anonymousDelayMs));
       continue;
     }
@@ -473,11 +520,20 @@ async function fetchAnonymousWithAttempts(url, description, attempts, consume) {
         return await consume(response);
       } catch (error) {
         if (attempt >= attempts) throw error;
+        writeRetryLog("Gitee", "GET", "anonymous-download", "content-error", attempt, attempts);
         await new Promise((resolve) => setTimeout(resolve, configuration.anonymousDelayMs));
         continue;
       }
     }
     if (attempt < attempts && isRetryableAnonymousStatus(response.status)) {
+      writeRetryLog(
+        "Gitee",
+        "GET",
+        "anonymous-download",
+        `HTTP-${response.status}`,
+        attempt,
+        attempts,
+      );
       await new Promise((resolve) => setTimeout(resolve, configuration.anonymousDelayMs));
       continue;
     }

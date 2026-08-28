@@ -71,7 +71,7 @@ switch (command) {
     break;
   }
   case "report": {
-    const [tag, releaseId, attachment, manifest] = args;
+    const [tag, releaseId, attachment, manifest, rangeStatus, rangeBytes, contentRange, size, sha256] = args;
     process.stdout.write(
       `${JSON.stringify({
         passed: true,
@@ -80,6 +80,15 @@ switch (command) {
         releaseId: Number(releaseId),
         anonymousAttachment: attachment,
         anonymousRawManifest: manifest,
+        anonymousRange: {
+          status: Number(rangeStatus),
+          bytes: Number(rangeBytes),
+          contentRange,
+        },
+        anonymousFullDownload: {
+          size: Number(size),
+          sha256,
+        },
       })}\n`,
     );
     break;
