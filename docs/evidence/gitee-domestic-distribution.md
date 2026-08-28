@@ -23,4 +23,6 @@ GitHub Actions 工作流 [33138532094](https://github.com/yinshaohua/GPTEasy/act
 - 匿名 Raw 清单：`https://gitee.com/ericshaohua/gpteasy-releases/raw/main/smoke/smoke-33138532094-1.md`；
 - 报告明确记录 `formalManifestAdvanced: false`，公开仓库中 `latest.md` 仍为 HTTP 404，未推进正式版本。
 
-人工无登录浏览器点击尚未执行，不记录为通过。人工点击前保留上述成功资源；两次排障运行还保留 `926296` / `smoke-33138000733-1`（无 smoke 清单）和 `926354` / `smoke-33138270992-1`（有 smoke 清单）。完成点击后须按精确 ID 和 tag 清理这些非正式资源，并在本记录补充点击与清理结果。
+维护者随后在无登录浏览器上下文中打开上述 Gitee Release 页面并点击附件，附件可以直接下载，没有图形验证，也没有要求注册或登录；人工匿名点击通过。
+
+非正式资源清理尚未执行。成功资源为 `926420` / `smoke-33138532094-1`；两次排障运行还保留 `926296` / `smoke-33138000733-1`（无 smoke 清单）和 `926354` / `smoke-33138270992-1`（有 smoke 清单）。须按精确 ID 和 tag 清理这些资源，并在本记录补充清理结果。
