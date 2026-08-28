@@ -137,6 +137,18 @@ test("GitHub Release 附件下载遇到瞬时 503 时有限重试", async () => 
   }
 });
 
+test("匿名附件连接中断后会在超时预算内重试", async () => {
+  const adapter = await startAdapter({ transientAnonymousNetworkFailures: 1 });
+  try {
+    const result = await runSync(adapter.baseUrl);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(adapter.state.anonymousNetworkFailures, 0);
+    assert.equal(adapter.state.manifests.length, 1);
+  } finally {
+    await adapter.close();
+  }
+});
+
 test("Gitee 错误响应中的认证 Token 会被脱敏", async () => {
   const adapter = await startAdapter({ failGiteeRequestWithToken: true });
   try {
@@ -364,6 +376,8 @@ async function startAdapter(options = {}) {
     transientUploadStatus: options.transientUploadStatus ?? 502,
     transientGiteeReleaseFailures: options.transientGiteeReleaseFailures ?? 0,
     transientGithubAssetFailures: options.transientGithubAssetFailures ?? 0,
+    transientAnonymousNetworkFailures: options.transientAnonymousNetworkFailures ?? 0,
+    anonymousNetworkFailures: options.transientAnonymousNetworkFailures ?? 0,
     giteeReleaseAttempts: 0,
     githubAssetAttempts: new Map(),
     failGiteeRequestWithToken: options.failGiteeRequestWithToken ?? false,
@@ -463,6 +477,11 @@ async function startAdapter(options = {}) {
     if (request.method === "GET" && url.pathname.startsWith(`/releases/download/${TAG}/`)) {
       assert.equal(authorization, undefined);
       const name = decodeURIComponent(url.pathname.slice(`/releases/download/${TAG}/`.length));
+      if (state.anonymousNetworkFailures > 0) {
+        state.anonymousNetworkFailures -= 1;
+        request.socket.destroy();
+        return;
+      }
       state.records.push({ ...record, operation: "anonymous-download" });
       if (state.failAnonymousName === name) return bytes(response, 403, Buffer.from("forbidden"));
       return bytes(response, state.uploads.has(name) ? 200 : 404, state.uploads.get(name) ?? Buffer.from("missing"));

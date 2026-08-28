@@ -246,11 +246,12 @@ async function readCurrentManifest() {
   const validTestUrl = configuration.testMode && url.protocol === "http:" && url.hostname === "127.0.0.1";
   if (!validOrigin && !validTestUrl) throw new Error("Gitee returned an unexpected manifest download URL");
   const branchUrl = branchRawUrl(configuration.formalManifestPath);
-  const response = await fetchAnonymousFromCandidates(
+  const content = await fetchAnonymousFromCandidates(
     [branchUrl, url],
     "Anonymous current manifest download",
+    (response) => response.text(),
   );
-  const manifest = parseManifest(await response.text());
+  const manifest = parseManifest(content);
   validateManifest(manifest);
   return { manifest, sha: typeof metadata.sha === "string" ? metadata.sha : undefined };
 }
@@ -282,11 +283,12 @@ async function verifyRawBaseline() {
   const validTestUrl = configuration.testMode && url.protocol === "http:" && url.hostname === "127.0.0.1";
   if (!validOrigin && !validTestUrl) throw new Error("Gitee returned an unexpected README download URL");
   const branchUrl = branchRawUrl("README.md");
-  const response = await fetchAnonymousFromCandidates(
+  const content = await fetchAnonymousFromCandidates(
     [branchUrl, url],
     "Anonymous Gitee Raw baseline download",
+    (response) => response.text(),
   );
-  if (!(await response.text()).trim()) throw new Error("Anonymous Gitee Raw baseline download returned an empty response");
+  if (!content.trim()) throw new Error("Anonymous Gitee Raw baseline download returned an empty response");
 }
 
 function selectArtifacts(assets, version) {
@@ -398,10 +400,18 @@ function urlEncodedForm(values) {
 async function verifyAnonymous(url, asset) {
   let lastStatus = 0;
   for (let attempt = 1; attempt <= configuration.anonymousAttempts; attempt += 1) {
-    const response = await fetch(url, {
-      redirect: "follow",
-      headers: { "user-agent": "Mozilla/5.0 (compatible; GPTEasy release sync)" },
-    });
+    let response;
+    try {
+      response = await fetch(url, {
+        redirect: "follow",
+        headers: { "user-agent": "Mozilla/5.0 (compatible; GPTEasy release sync)" },
+        signal: AbortSignal.timeout(configuration.requestTimeoutMs),
+      });
+    } catch (error) {
+      if (attempt >= configuration.anonymousAttempts) throw error;
+      await new Promise((resolve) => setTimeout(resolve, configuration.anonymousDelayMs));
+      continue;
+    }
     lastStatus = response.status;
     if (response.ok) {
       const bytes = Buffer.from(await response.arrayBuffer());
@@ -419,7 +429,7 @@ async function verifyAnonymous(url, asset) {
   throw new Error(`Anonymous download failed for ${asset.name} with HTTP ${lastStatus}`);
 }
 
-async function fetchAnonymousFromCandidates(urls, description) {
+async function fetchAnonymousFromCandidates(urls, description, consume = (response) => response) {
   const candidates = urls.filter((candidate, index) => candidate && urls.indexOf(candidate) === index);
   let lastError;
   for (const [index, url] of candidates.entries()) {
@@ -430,6 +440,7 @@ async function fetchAnonymousFromCandidates(urls, description) {
         url,
         description,
         index === 0 ? Math.min(3, configuration.anonymousAttempts) : configuration.anonymousAttempts,
+        consume,
       );
     } catch (error) {
       lastError = error;
@@ -441,15 +452,31 @@ async function fetchAnonymousFromCandidates(urls, description) {
   throw lastError;
 }
 
-async function fetchAnonymousWithAttempts(url, description, attempts) {
+async function fetchAnonymousWithAttempts(url, description, attempts, consume) {
   let lastStatus = 0;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    const response = await fetch(url, {
-      redirect: "follow",
-      headers: { "user-agent": "Mozilla/5.0 (compatible; GPTEasy release sync)" },
-    });
+    let response;
+    try {
+      response = await fetch(url, {
+        redirect: "follow",
+        headers: { "user-agent": "Mozilla/5.0 (compatible; GPTEasy release sync)" },
+        signal: AbortSignal.timeout(configuration.requestTimeoutMs),
+      });
+    } catch (error) {
+      if (attempt >= attempts) throw error;
+      await new Promise((resolve) => setTimeout(resolve, configuration.anonymousDelayMs));
+      continue;
+    }
     lastStatus = response.status;
-    if (response.ok) return response;
+    if (response.ok) {
+      try {
+        return await consume(response);
+      } catch (error) {
+        if (attempt >= attempts) throw error;
+        await new Promise((resolve) => setTimeout(resolve, configuration.anonymousDelayMs));
+        continue;
+      }
+    }
     if (attempt < attempts && isRetryableAnonymousStatus(response.status)) {
       await new Promise((resolve) => setTimeout(resolve, configuration.anonymousDelayMs));
       continue;
