@@ -192,8 +192,11 @@ fn package_keeps_issue_28_gate_and_adds_parallel_issue_35_commands() {
     let combined_runner =
         fs::read_to_string(repository_root().join("scripts/run-all-acceptance-gates.ps1"))
             .expect("read combined acceptance runner");
+    assert!(combined_runner.contains("[string]$LinuxWslMode = 'Automated'"));
     assert!(combined_runner.contains("[string]$CodexPath"));
     assert!(combined_runner.contains("$linuxArguments += @('-CodexPath', $CodexPath)"));
+    assert!(combined_runner.contains("if ($ConfirmDisposableWsl)"));
+    assert!(combined_runner.contains("$linuxArguments += '-ConfirmDisposableWsl'"));
 }
 
 #[cfg(windows)]

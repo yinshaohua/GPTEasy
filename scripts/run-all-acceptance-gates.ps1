@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [ValidateSet('Automated', 'Full')]
-    [string]$LinuxWslMode = 'Full',
+    [string]$LinuxWslMode = 'Automated',
     [string]$WslDistribution = 'Ubuntu',
     [string]$Bash44Path,
     [string]$BashCurrentPath = 'bash',
