@@ -46,6 +46,17 @@ test("首次同步兼容 Gitee 以 HTTP 200 空数组表示清单不存在", asy
   }
 });
 
+test("正式附件上传复用真实冒烟验证过的 curl multipart 路径", async () => {
+  const adapter = await startAdapter({ requireCurlUpload: true });
+  try {
+    const result = await runSync(adapter.baseUrl);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(adapter.state.uploads.size, 3);
+  } finally {
+    await adapter.close();
+  }
+});
+
 test("Release 正文中的字面量转义换行会规范化为 Markdown 换行", async () => {
   const adapter = await startAdapter({
     releasePatch: { body: "第一行\\n\\n### 更新\\n- 第二行" },
@@ -403,6 +414,7 @@ async function startAdapter(options = {}) {
     failAnonymousName: options.failAnonymousName,
     currentManifest: options.currentManifest,
     missingManifestAsEmptyArray: options.missingManifestAsEmptyArray ?? false,
+    requireCurlUpload: options.requireCurlUpload ?? false,
     releasePatch: options.releasePatch ?? {},
     releaseResponsePatch: options.releaseResponsePatch ?? {},
     releaseAssets: options.releaseAssets,
@@ -419,7 +431,13 @@ async function startAdapter(options = {}) {
     const url = new URL(request.url, "http://127.0.0.1");
     const body = await requestBody(request);
     const authorization = request.headers.authorization;
-    const record = { method: request.method, path: url.pathname, authorization, contentType: request.headers["content-type"] };
+    const record = {
+      method: request.method,
+      path: url.pathname,
+      authorization,
+      contentType: request.headers["content-type"],
+      userAgent: request.headers["user-agent"],
+    };
 
     if (url.pathname === `/github/repos/source/project/releases/tags/${TAG}`) {
       assert.equal(authorization, "Bearer github-test-token");
@@ -487,6 +505,9 @@ async function startAdapter(options = {}) {
     }
     if (request.method === "POST" && /\/releases\/42\/attach_files$/.test(url.pathname)) {
       assert.match(record.contentType, /^multipart\/form-data; boundary=/);
+      if (state.requireCurlUpload && !record.userAgent?.startsWith("curl/")) {
+        return json(response, 408, { message: "verified curl multipart client required" });
+      }
       const name = multipartFilename(body);
       const attempts = (state.uploadAttempts.get(name) ?? 0) + 1;
       state.uploadAttempts.set(name, attempts);

@@ -1,5 +1,6 @@
 /* global AbortSignal, Buffer, URL, fetch, process, setTimeout */
 
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -351,16 +352,14 @@ async function uploadAsset(releaseId, asset) {
   }
   for (let attempt = 1; attempt <= configuration.uploadAttempts; attempt += 1) {
     try {
-      const body = new FormData();
-      body.append("file", new Blob([asset.bytes]), asset.name);
-      const response = await fetch(endpoint, {
-        method: "POST",
-        headers: { Accept: "application/json", Authorization: `Bearer ${configuration.giteeToken}` },
-        body,
-        redirect: "follow",
-        signal: AbortSignal.timeout(configuration.uploadTimeoutMs),
-      });
-      if (response.ok) return await response.json();
+      const response = await curlUpload(endpoint, asset);
+      if (response.status >= 200 && response.status < 300) {
+        try {
+          return JSON.parse(response.body);
+        } catch {
+          throw new Error(`Gitee upload returned invalid JSON for ${asset.name}`);
+        }
+      }
       if (attempt >= configuration.uploadAttempts || !isRetryableUploadStatus(response.status)) {
         throw new Error(`Gitee upload failed for ${asset.name} with HTTP ${response.status}`);
       }
@@ -388,6 +387,42 @@ async function uploadAsset(releaseId, asset) {
     }
     await new Promise((resolve) => setTimeout(resolve, configuration.uploadDelayMs));
   }
+}
+
+async function curlUpload(endpoint, asset) {
+  const timeoutSeconds = Math.max(1, Math.ceil(configuration.uploadTimeoutMs / 1000));
+  // Gitee accepts the smoke-tested curl multipart request but stalls on Node fetch FormData uploads.
+  const child = spawn("curl", [
+    "--silent",
+    "--show-error",
+    "--location",
+    "--request", "POST",
+    "--header", "Accept: application/json",
+    "--header", "@-",
+    "--form", `file=@${asset.path};filename=${asset.name}`,
+    "--max-time", String(timeoutSeconds),
+    "--output", "-",
+    "--write-out", "\n%{http_code}",
+    endpoint,
+  ], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
+  child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk; });
+  child.stdin.end(`Authorization: Bearer ${configuration.giteeToken}\n`);
+
+  const code = await new Promise((resolve, reject) => {
+    child.on("error", reject);
+    child.on("close", resolve);
+  });
+  if (code !== 0) {
+    const detail = redact(stderr.trim().slice(0, 300));
+    throw new Error(`Gitee upload transport failed for ${asset.name} with curl exit ${code}${detail ? `: ${detail}` : ""}`);
+  }
+  const match = stdout.match(/\n(\d{3})$/);
+  if (!match) throw new Error(`Gitee upload returned no HTTP status for ${asset.name}`);
+  return { status: Number(match[1]), body: stdout.slice(0, -match[0].length) };
 }
 
 function isRetryableUploadStatus(status) {
