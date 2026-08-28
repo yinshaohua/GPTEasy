@@ -95,6 +95,78 @@ fn init_release_repository() -> TempDir {
     temp
 }
 
+fn create_trust_root_fixture() -> TempDir {
+    let temp = TempDir::new().expect("trust root fixture");
+    fs::create_dir_all(temp.path().join("src-tauri")).expect("create Tauri directory");
+    fs::create_dir_all(temp.path().join(".github/workflows")).expect("create workflow directory");
+    fs::create_dir_all(temp.path().join("scripts")).expect("create script directory");
+    fs::write(
+        temp.path().join("scripts/gitee-distribution.json"),
+        serde_json::to_vec_pretty(&json!({
+            "schemaVersion": 1,
+            "issue": 55,
+            "apiBaseUrl": "https://api.gitee.com/api/v5",
+            "rawBaseUrl": "https://gitee.com",
+            "defaultBranch": "main",
+            "formalManifestPath": "latest.md",
+            "smokeManifestPrefix": "smoke/",
+            "platform": "windows-x86_64",
+            "repositoryVariable": "GITEE_REPOSITORY",
+            "branchVariable": "GITEE_DEFAULT_BRANCH",
+            "tokenSecret": "GITEE_TOKEN"
+        }))
+        .expect("distribution contract JSON"),
+    )
+    .expect("write distribution contract");
+    fs::write(
+        temp.path().join("src-tauri/tauri.conf.json"),
+        serde_json::to_vec_pretty(&json!({
+            "bundle": { "createUpdaterArtifacts": true },
+            "plugins": {
+                "updater": {
+                    "endpoints": ["https://gitee.com/ericshaohua/gpteasy-releases/raw/main/latest.md"],
+                    "pubkey": PUBLIC_KEY
+                }
+            }
+        }))
+        .expect("Tauri trust root JSON"),
+    )
+    .expect("write Tauri trust root");
+    for (path, content) in [
+        (
+            ".github/workflows/gitee-smoke.yml",
+            "GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}\nGITEE_REPOSITORY: ${{ vars.GITEE_REPOSITORY }}\n",
+        ),
+        (
+            ".github/workflows/gitee-sync.yml",
+            "types: [published]\nGITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}\nGITEE_REPOSITORY: ${{ vars.GITEE_REPOSITORY }}\n",
+        ),
+        (
+            "scripts/smoke-gitee-release.sh",
+            "gitee-distribution.json\nAuthorization: Bearer $GITEE_TOKEN\n--range 0-0\nprerelease=true\n",
+        ),
+        (
+            "scripts/sync-gitee-release.mjs",
+            "Authorization: `Bearer ${configuration.giteeToken}`\nnew FormData()\nnew URLSearchParams()\nnumericReleaseId()\n",
+        ),
+        (
+            "scripts/setup-gitee-distribution.sh",
+            "ask_secret GITEE_TOKEN\nset_secret \"$TOKEN_SECRET_NAME\"\nunset GITEE_TOKEN\n",
+        ),
+    ] {
+        fs::write(temp.path().join(path), content).expect("write trust root dependency");
+    }
+    for arguments in [vec!["init", "-b", "main"], vec!["add", "."]] {
+        let output = Command::new("git")
+            .args(arguments)
+            .current_dir(temp.path())
+            .output()
+            .expect("initialize trust root repository");
+        assert!(output.status.success());
+    }
+    temp
+}
+
 fn read_json(path: impl AsRef<Path>) -> Value {
     serde_json::from_slice(&fs::read(path).expect("read JSON")).expect("parse JSON")
 }
@@ -292,79 +364,7 @@ fn updater_signature_verifier_rejects_changed_artifact() {
 
 #[test]
 fn trust_root_gate_allows_only_public_inputs_and_rejects_tracked_private_keys() {
-    let temp = TempDir::new().expect("trust root fixture");
-    fs::create_dir_all(temp.path().join("src-tauri")).expect("create Tauri directory");
-    fs::create_dir_all(temp.path().join(".github/workflows")).expect("create workflow directory");
-    fs::create_dir_all(temp.path().join("scripts")).expect("create script directory");
-    fs::write(
-        temp.path().join("scripts/gitee-distribution.json"),
-        serde_json::to_vec_pretty(&json!({
-            "schemaVersion": 1,
-            "issue": 55,
-            "apiBaseUrl": "https://api.gitee.com/api/v5",
-            "rawBaseUrl": "https://gitee.com",
-            "defaultBranch": "main",
-            "formalManifestPath": "latest.md",
-            "smokeManifestPrefix": "smoke/",
-            "platform": "windows-x86_64",
-            "repositoryVariable": "GITEE_REPOSITORY",
-            "branchVariable": "GITEE_DEFAULT_BRANCH",
-            "tokenSecret": "GITEE_TOKEN"
-        }))
-        .expect("distribution contract JSON"),
-    )
-    .expect("write distribution contract");
-    fs::write(
-        temp.path().join("src-tauri/tauri.conf.json"),
-        serde_json::to_vec_pretty(&json!({
-            "bundle": { "createUpdaterArtifacts": true },
-            "plugins": {
-                "updater": {
-                    "endpoints": ["https://gitee.com/example/releases/raw/main/latest.md"],
-                    "pubkey": PUBLIC_KEY
-                }
-            }
-        }))
-        .expect("Tauri trust root JSON"),
-    )
-    .expect("write Tauri trust root");
-    fs::write(
-        temp.path().join(".github/workflows/gitee-smoke.yml"),
-        "env:\n  GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}\n  GITEE_REPOSITORY: ${{ vars.GITEE_REPOSITORY }}\n",
-    )
-    .expect("write workflow");
-    fs::write(
-        temp.path().join(".github/workflows/gitee-sync.yml"),
-        "on:\n  release:\n    types: [published]\nenv:\n  GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}\n  GITEE_REPOSITORY: ${{ vars.GITEE_REPOSITORY }}\n",
-    )
-    .expect("write sync workflow");
-    fs::write(
-        temp.path().join("scripts/smoke-gitee-release.sh"),
-        "#!/usr/bin/env bash\n# gitee-distribution.json\nAuthorization: Bearer $GITEE_TOKEN\n--range 0-0\nprerelease=true\n",
-    )
-    .expect("write smoke script");
-    fs::write(
-        temp.path().join("scripts/sync-gitee-release.mjs"),
-        "const headers = { Authorization: `Bearer ${configuration.giteeToken}` };\nnew FormData();\nnew URLSearchParams();\nnumericReleaseId();\n",
-    )
-    .expect("write sync script");
-    fs::write(
-        temp.path().join("scripts/setup-gitee-distribution.sh"),
-        "#!/usr/bin/env bash\nask_secret GITEE_TOKEN\nset_secret \"$TOKEN_SECRET_NAME\"\nunset GITEE_TOKEN\n",
-    )
-    .expect("write setup wizard");
-    let init = Command::new("git")
-        .args(["init", "-b", "main"])
-        .current_dir(temp.path())
-        .output()
-        .expect("initialize trust root repository");
-    assert!(init.status.success());
-    let add = Command::new("git")
-        .args(["add", "."])
-        .current_dir(temp.path())
-        .output()
-        .expect("track public trust inputs");
-    assert!(add.status.success());
+    let temp = create_trust_root_fixture();
 
     let run = || {
         run_powershell(
@@ -395,6 +395,53 @@ fn trust_root_gate_allows_only_public_inputs_and_rejects_tracked_private_keys() 
     assert!(
         !run().status.success(),
         "tracked updater private key passed gate"
+    );
+}
+
+#[test]
+fn trust_root_gate_rejects_any_endpoint_outside_the_canonical_gitee_raw_manifest() {
+    let temp = create_trust_root_fixture();
+
+    let run = || {
+        run_powershell(
+            "scripts/test-update-trust-root.ps1",
+            &[Path::new("-RepositoryRoot"), temp.path()],
+        )
+    };
+    assert!(run().status.success(), "canonical Gitee endpoint must pass");
+    for endpoint in [
+        "https://gitee.com/another/repository/raw/main/latest.md",
+        "https://gitcode.com/ericyin99/GPTEasy-Releases/raw/main/latest.md",
+    ] {
+        fs::write(
+            temp.path().join("src-tauri/tauri.conf.json"),
+            serde_json::to_vec_pretty(&json!({
+                "bundle": { "createUpdaterArtifacts": true },
+                "plugins": { "updater": { "endpoints": [endpoint], "pubkey": PUBLIC_KEY } }
+            }))
+            .expect("invalid Tauri trust root JSON"),
+        )
+        .expect("write invalid Tauri trust root");
+        assert!(
+            !run().status.success(),
+            "accepted untrusted endpoint {endpoint}"
+        );
+    }
+    fs::write(
+        temp.path().join("src-tauri/tauri.conf.json"),
+        serde_json::to_vec_pretty(&json!({
+            "bundle": { "createUpdaterArtifacts": true },
+            "plugins": { "updater": { "endpoints": [
+                "https://gitee.com/ericshaohua/gpteasy-releases/raw/main/latest.md",
+                "https://gitee.com/ericshaohua/gpteasy-releases/raw/main/fallback.md"
+            ], "pubkey": PUBLIC_KEY } }
+        }))
+        .expect("multi-endpoint Tauri trust root JSON"),
+    )
+    .expect("write multi-endpoint Tauri trust root");
+    assert!(
+        !run().status.success(),
+        "accepted multiple updater endpoints"
     );
 }
 

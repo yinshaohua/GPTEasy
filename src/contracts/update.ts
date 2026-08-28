@@ -42,7 +42,7 @@ export const initialUpdateSnapshot: UpdateSnapshot = {
   progressPercent: null,
   failureCategory: null,
   errorMessage: null,
-  manualDownloadUrl: "https://github.com/yinshaohua/GPTEasy/releases/latest",
+  manualDownloadUrl: "https://gitee.com/ericshaohua/gpteasy-releases/releases",
   releaseNotesUrl: null,
 };
 

@@ -49,6 +49,7 @@ try {
 
 $endpoint = ''
 $publicKey = ''
+$expectedEndpoint = 'https://gitee.com/ericshaohua/gpteasy-releases/raw/main/latest.md'
 if ($null -ne $config) {
     if ($config.bundle.createUpdaterArtifacts -ne $true) {
         Add-TrustError 'Tauri updater artifact creation must be enabled.'
@@ -58,13 +59,8 @@ if ($null -ne $config) {
         Add-TrustError 'The application must contain exactly one updater endpoint.'
     } else {
         $endpoint = [string]$endpoints[0]
-        $uri = $null
-        if (-not [Uri]::TryCreate($endpoint, [UriKind]::Absolute, [ref]$uri) -or
-            $uri.Scheme -cne 'https' -or
-            $uri.Host -cne 'gitee.com' -or
-            -not $uri.AbsolutePath.EndsWith("/$([string]$distribution.formalManifestPath)", [StringComparison]::Ordinal) -or
-            $uri.Query) {
-            Add-TrustError 'The updater endpoint must be one HTTPS gitee.com Markdown manifest URL.'
+        if ($endpoint -cne $expectedEndpoint) {
+            Add-TrustError 'The updater endpoint must be the canonical Gitee Raw manifest URL.'
         }
     }
     $publicKey = [string]$config.plugins.updater.pubkey

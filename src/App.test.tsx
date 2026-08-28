@@ -424,7 +424,7 @@ describe("应用更新", () => {
       progressPercent: 100,
       failureCategory: null,
       errorMessage: null,
-      manualDownloadUrl: "https://github.com/yinshaohua/GPTEasy/releases/latest",
+      manualDownloadUrl: "https://gitee.com/ericshaohua/gpteasy-releases/releases",
       releaseNotesUrl: "https://gitee.com/ericshaohua/gpteasy-releases/releases/tag/v1.1.0",
     };
     const failedUpdate = {
@@ -455,6 +455,8 @@ describe("应用更新", () => {
     expect(invoke).toHaveBeenCalledWith("open_update_release_notes", {
       url: readyUpdate.releaseNotesUrl,
     });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Gitee 手工下载" }));
+    expect(invoke).toHaveBeenCalledWith("open_update_manual_download");
     expect(within(dialog).getByRole("button", { name: "稍后" })).toBeInTheDocument();
     const installButton = within(dialog).getByRole("button", { name: "重启并更新" });
     const checkButton = within(dialog).getByRole("button", { name: "检查更新" });
@@ -480,7 +482,7 @@ describe("应用更新", () => {
       progressPercent: 100,
       failureCategory: null,
       errorMessage: null,
-      manualDownloadUrl: "https://github.com/yinshaohua/GPTEasy/releases/latest",
+      manualDownloadUrl: "https://gitee.com/ericshaohua/gpteasy-releases/releases",
       releaseNotesUrl: "https://gitee.com/ericshaohua/gpteasy-releases/releases/tag/v1.1.0",
     };
     invoke.mockImplementation((command: string) => {
@@ -526,7 +528,7 @@ describe("应用更新", () => {
       progressPercent: null,
       failureCategory: null,
       errorMessage: null,
-      manualDownloadUrl: "https://github.com/yinshaohua/GPTEasy/releases/latest",
+      manualDownloadUrl: "https://gitee.com/ericshaohua/gpteasy-releases/releases",
       releaseNotesUrl: null,
     };
     const currentUpdate = {
@@ -564,7 +566,7 @@ describe("应用更新", () => {
       progressPercent: null,
       failureCategory: null,
       errorMessage: null,
-      manualDownloadUrl: "https://github.com/yinshaohua/GPTEasy/releases/latest",
+      manualDownloadUrl: "https://gitee.com/ericshaohua/gpteasy-releases/releases",
       releaseNotesUrl: null,
     };
     invoke.mockImplementation((command: string) => {
@@ -582,7 +584,7 @@ describe("应用更新", () => {
     const dialog = screen.getByRole("dialog", { name: "GPTEasy 更新" });
     expect(dialog).toHaveTextContent("上次确认的更新尚未完成");
     expect(within(dialog).getByRole("button", { name: "重新下载" })).toBeInTheDocument();
-    expect(within(dialog).getByRole("button", { name: "GitHub 手工下载" })).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Gitee 手工下载" })).toBeInTheDocument();
     expect(within(dialog).queryByRole("button", { name: "重启并更新" })).not.toBeInTheDocument();
   });
 
@@ -599,7 +601,7 @@ describe("应用更新", () => {
       progressPercent: 100,
       failureCategory: null,
       errorMessage: null,
-      manualDownloadUrl: "https://github.com/yinshaohua/GPTEasy/releases/latest",
+      manualDownloadUrl: "https://gitee.com/ericshaohua/gpteasy-releases/releases",
       releaseNotesUrl: null,
     };
     invoke.mockImplementation((command: string) => {

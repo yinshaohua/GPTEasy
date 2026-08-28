@@ -20,7 +20,7 @@ export const updateMessages = {
   neverChecked: "尚未检查",
   pendingNote: "更新已下载并通过签名验证，下一步安装需要用户确认。",
   incompleteNote: "上次确认的更新尚未完成，当前仍是旧版本。可以重新下载或手工安装。",
-  manualDownload: "GitHub 手工下载",
+  manualDownload: "Gitee 手工下载",
   releaseNotes: "查看 Gitee 完整发布说明",
   later: "稍后",
   install: "重启并更新",

@@ -627,9 +627,12 @@ fn is_valid_update_release_notes_url(url: &str) -> bool {
     };
     let parts = version.split('.').collect::<Vec<_>>();
     parts.len() == 3
-        && parts
-            .iter()
-            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+        && parts.iter().all(|part| {
+            !part.is_empty()
+                && (part == &"0" || !part.starts_with('0'))
+                && part.bytes().all(|byte| byte.is_ascii_digit())
+                && part.parse::<u64>().is_ok()
+        })
 }
 
 #[cfg(test)]
@@ -650,6 +653,8 @@ mod update_release_notes_tests {
             "https://gitee.com/ericshaohua/gpteasy-releases/releases/tag/v1.1",
             "https://gitee.com/ericshaohua/gpteasy-releases/releases/tag/v1.1.4/notes",
             "https://gitee.com/ericshaohua/gpteasy-releases/releases/tag/v1.1.4?next=evil",
+            "https://gitee.com/ericshaohua/gpteasy-releases/releases/tag/v01.1.4",
+            "https://gitee.com/ericshaohua/gpteasy-releases/releases/tag/v1.1.4-beta",
         ] {
             assert!(!is_valid_update_release_notes_url(url), "accepted {url}");
         }

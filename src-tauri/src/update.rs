@@ -10,9 +10,8 @@ use minisign_verify::{PublicKey, Signature};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-pub const MANUAL_DOWNLOAD_URL: &str = "https://github.com/yinshaohua/GPTEasy/releases/latest";
-pub const GITEE_RELEASES_URL: &str =
-    "https://gitee.com/ericshaohua/gpteasy-releases/releases/tag";
+pub const MANUAL_DOWNLOAD_URL: &str = "https://gitee.com/ericshaohua/gpteasy-releases/releases";
+pub const GITEE_RELEASES_URL: &str = "https://gitee.com/ericshaohua/gpteasy-releases/releases/tag";
 pub const CHECK_INTERVAL_SECONDS: u64 = 24 * 60 * 60;
 const NSIS_INSTALL_ARGUMENTS: [&str; 2] = ["/P", "/R"];
 
@@ -791,6 +790,7 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
     use std::thread;
     use tempfile::TempDir;
 
@@ -799,6 +799,14 @@ mod tests {
 
     struct ScriptedHttpServer {
         base_url: String,
+        requests: Arc<Mutex<Vec<HttpRequest>>>,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct HttpRequest {
+        method: String,
+        path: String,
+        authorization: Option<String>,
     }
 
     impl ScriptedHttpServer {
@@ -811,11 +819,34 @@ mod tests {
             let address = listener.local_addr().expect("update server address");
             let base_url = format!("http://{address}");
             let responses = build_responses(&base_url);
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let server_requests = Arc::clone(&requests);
             thread::spawn(move || {
                 for (status, body) in responses {
                     let (mut stream, _) = listener.accept().expect("accept update request");
                     let mut request = [0_u8; 4096];
-                    let _ = stream.read(&mut request);
+                    let read = stream.read(&mut request).expect("read update request");
+                    let headers = String::from_utf8_lossy(&request[..read]);
+                    let mut request_parts = headers
+                        .lines()
+                        .next()
+                        .expect("request line")
+                        .split_whitespace();
+                    let method = request_parts.next().expect("request method").to_owned();
+                    let path = request_parts.next().expect("request path").to_owned();
+                    let authorization = headers.lines().find_map(|line| {
+                        line.strip_prefix("Authorization: ")
+                            .or_else(|| line.strip_prefix("authorization: "))
+                            .map(str::to_owned)
+                    });
+                    server_requests
+                        .lock()
+                        .expect("update request records")
+                        .push(HttpRequest {
+                            method,
+                            path,
+                            authorization,
+                        });
                     let reason = if status == 200 {
                         "OK"
                     } else {
@@ -829,11 +860,18 @@ mod tests {
                     .expect("write update response");
                 }
             });
-            Self { base_url }
+            Self { base_url, requests }
         }
 
         fn url(&self, path: &str) -> String {
             format!("{}{path}", self.base_url)
+        }
+
+        fn requests(&self) -> Vec<HttpRequest> {
+            self.requests
+                .lock()
+                .expect("update request records")
+                .clone()
         }
     }
 
@@ -849,6 +887,14 @@ mod tests {
         assert_eq!(
             snapshot.failure_category,
             Some(UpdateFailureCategory::CheckFailed)
+        );
+        assert_eq!(
+            server.requests(),
+            vec![HttpRequest {
+                method: "GET".to_owned(),
+                path: "/latest.md".to_owned(),
+                authorization: None,
+            }]
         );
     }
 
@@ -910,6 +956,48 @@ mod tests {
         assert_eq!(
             snapshot.failure_category,
             Some(UpdateFailureCategory::DownloadFailed)
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_download_signature_is_rejected_before_an_update_becomes_ready() {
+        let server = ScriptedHttpServer::start_with(|base_url| {
+            let manifest = serde_json::json!({
+                "version": "1.1.6",
+                "platforms": {
+                    "windows-x86_64": {
+                        "url": format!("{base_url}/setup.exe"),
+                        "signature": "invalid signature"
+                    }
+                }
+            })
+            .to_string();
+            vec![(200, manifest), (200, "installer bytes".to_owned())]
+        });
+        let coordinator =
+            UpdateCoordinator::with_endpoint("1.1.5", server.url("/latest.md"), TEST_PUBLIC_KEY);
+
+        let snapshot = coordinator.check_and_download(|_| {}).await;
+
+        assert_eq!(snapshot.state, UpdateState::Failed);
+        assert_eq!(
+            snapshot.failure_category,
+            Some(UpdateFailureCategory::SignatureInvalid)
+        );
+        assert_eq!(
+            server.requests(),
+            vec![
+                HttpRequest {
+                    method: "GET".to_owned(),
+                    path: "/latest.md".to_owned(),
+                    authorization: None,
+                },
+                HttpRequest {
+                    method: "GET".to_owned(),
+                    path: "/setup.exe".to_owned(),
+                    authorization: None,
+                },
+            ]
         );
     }
 
@@ -1015,6 +1103,16 @@ mod tests {
         assert_eq!(
             coordinator.snapshot().release_notes_url.as_deref(),
             Some("https://gitee.com/ericshaohua/gpteasy-releases/releases/tag/v1.1.0")
+        );
+    }
+
+    #[test]
+    fn update_snapshots_offer_gitee_releases_for_manual_downloads() {
+        let coordinator = UpdateCoordinator::with_endpoint("1.0.0", "http://127.0.0.1", "key");
+
+        assert_eq!(
+            coordinator.snapshot().manual_download_url,
+            "https://gitee.com/ericshaohua/gpteasy-releases/releases"
         );
     }
 
