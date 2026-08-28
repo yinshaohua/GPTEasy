@@ -145,11 +145,11 @@ fn create_trust_root_fixture() -> TempDir {
         ),
         (
             "scripts/smoke-gitee-release.sh",
-            "gitee-distribution.json\nAuthorization: Bearer $GITEE_TOKEN\n--range 0-0\nprerelease=true\n",
+            "gitee-distribution.json\nAuthorization: Bearer $GITEE_TOKEN\n--range 0-0\nprerelease=true\ntarget_commitish=$GITEE_DEFAULT_BRANCH\n",
         ),
         (
             "scripts/sync-gitee-release.mjs",
-            "Authorization: `Bearer ${configuration.giteeToken}`\nnew FormData()\nnew URLSearchParams()\nnumericReleaseId()\n",
+            "Authorization: `Bearer ${configuration.giteeToken}`\nnew FormData()\nnew URLSearchParams()\nnumericReleaseId()\ntarget_commitish: config.giteeBranch\n",
         ),
         (
             "scripts/setup-gitee-distribution.sh",
