@@ -84,12 +84,11 @@ export default function IssueLogPage({ active = true }: { active?: boolean }) {
 
   return (
     <main className="main-content issue-log-page">
-      <header className="page-header">
-        <div>
-          <p className="eyebrow">诊断</p>
-          <h1>问题日志</h1>
-        </div>
-        <div className="page-header-actions">
+      <section className="issue-log-toolbar" aria-label="问题日志筛选与操作">
+        <label>时间范围<select value={days} onChange={(event) => setDays(event.target.value)}><option value="1">近 1 天</option><option value="7">近 7 天</option><option value="30">近 30 天</option><option value="3650">全部</option></select></label>
+        <label>级别<select value={level} onChange={(event) => setLevel(event.target.value as IssueLogLevel | "all")}><option value="all">全部</option><option value="error">错误</option><option value="warn">警告</option><option value="info">信息</option></select></label>
+        <label className="issue-log-search">关键词<div className="input-with-icon"><Search size={16} aria-hidden="true" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="事件或内容" /></div></label>
+        <div className="issue-log-actions">
           <button className="secondary-button compact" type="button" onClick={() => void refresh()} disabled={loading} title="重新读取日志">
             {loading ? <LoaderCircle className="is-spinning" size={16} aria-hidden="true" /> : <RefreshCw size={16} aria-hidden="true" />}
             刷新
@@ -104,11 +103,6 @@ export default function IssueLogPage({ active = true }: { active?: boolean }) {
             <Download size={16} aria-hidden="true" />导出全部
           </button>
         </div>
-      </header>
-      <section className="issue-log-toolbar" aria-label="日志筛选">
-        <label>时间范围<select value={days} onChange={(event) => setDays(event.target.value)}><option value="1">近 1 天</option><option value="7">近 7 天</option><option value="30">近 30 天</option><option value="3650">全部</option></select></label>
-        <label>级别<select value={level} onChange={(event) => setLevel(event.target.value as IssueLogLevel | "all")}><option value="all">全部</option><option value="error">错误</option><option value="warn">警告</option><option value="info">信息</option></select></label>
-        <label className="issue-log-search">关键词<div className="input-with-icon"><Search size={16} aria-hidden="true" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="事件或内容" /></div></label>
       </section>
       {feedback && <p className="inline-feedback" role="status">{feedback}</p>}
       <section className="issue-log-list" aria-live="polite">

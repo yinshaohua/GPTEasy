@@ -10,6 +10,8 @@ import AppSidebar, { type OpenAiSidebarAction, type UpdateSidebarState } from ".
 import ProviderPage from "./ProviderPage";
 import SessionPage from "./SessionPage";
 import IssueLogPage from "./IssueLogPage";
+import DesktopControl from "./DesktopControl";
+import DiagnosticReportControl from "./DiagnosticReportControl";
 import {
   getStartupSnapshot,
   refreshStartupSnapshot,
@@ -121,29 +123,34 @@ export default function App() {
         currentProviderName={currentProviderName}
         update={updateSidebar}
       >
-        {state.kind === "loading" && <LoadingState />}
-        {state.kind === "error" && <UnavailableState onRetry={() => void load(true)} />}
-        {state.kind === "loaded" && (
-          <BlockedState snapshot={state.snapshot} onRetry={() => void load(true)} />
+        {page === "logs" ? (
+          <IssueLogPage active />
+        ) : (
+          <main className="main-content">
+            {state.kind === "loading" && <LoadingState />}
+            {state.kind === "error" && <UnavailableState onRetry={() => void load(true)} />}
+            {state.kind === "loaded" && (
+              <BlockedState snapshot={state.snapshot} onRetry={() => void load(true)} />
+            )}
+          </main>
         )}
       </Shell>
     );
   }
 
   return (
-    <div className="app-shell">
-      <AppSidebar
-        activeView={page}
-        onOpenProviders={() => setPage("providers")}
-        onOpenSessions={() => {
-          setSessionVisited(true);
-          setPage("sessions");
-        }}
-        onOpenLogs={() => setPage("logs")}
-        openAiAction={openAiAction}
-        currentProviderName={currentProviderName}
-        update={updateSidebar}
-      />
+    <Shell
+      page={page}
+      onOpenProviders={() => setPage("providers")}
+      onOpenSessions={() => {
+        setSessionVisited(true);
+        setPage("sessions");
+      }}
+      onOpenLogs={() => setPage("logs")}
+      openAiAction={openAiAction}
+      currentProviderName={currentProviderName}
+      update={updateSidebar}
+    >
       <div className="app-view" hidden={page !== "providers"}>
         <ProviderPage
           onOpenAiActionChange={setOpenAiAction}
@@ -175,7 +182,7 @@ export default function App() {
           onInstall={handleInstall}
         />
       )}
-    </div>
+    </Shell>
   );
 }
 
@@ -209,10 +216,28 @@ function Shell({
         currentProviderName={currentProviderName}
         update={update}
       />
-      <main className="main-content">
-        {page === "logs" ? <IssueLogPage active /> : children}
-      </main>
+      <div className="app-workspace">
+        <AppHeader page={page} />
+        {children}
+      </div>
     </div>
+  );
+}
+
+function AppHeader({ page }: { page: "providers" | "sessions" | "logs" }) {
+  const title = page === "providers"
+    ? "供应商管理"
+    : page === "sessions"
+      ? "会话管理"
+      : "问题日志";
+  return (
+    <header className="app-header" aria-label="全局标题栏">
+      <h1>{title}</h1>
+      <div className="app-header-actions">
+        <DesktopControl />
+        <DiagnosticReportControl />
+      </div>
+    </header>
   );
 }
 

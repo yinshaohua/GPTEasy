@@ -83,7 +83,7 @@ describe("会话管理页面", () => {
   it("分页去重，查询变化重置 cursor，查看详情后保留列表范围", async () => {
     render(<SessionPage onOpenProviders={() => undefined} />);
 
-    expect(await screen.findByRole("heading", { name: "会话管理" })).toBeInTheDocument();
+    expect(await screen.findByRole("region", { name: "会话列表工具栏" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "会话" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByRole("tab", { name: "已归档" })).toHaveAttribute("aria-selected", "false");
     expect(await screen.findByRole("button", { name: "打开会话：登录修复" })).toBeInTheDocument();
@@ -94,6 +94,7 @@ describe("会话管理页面", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "打开会话：登录修复" }));
     expect(await screen.findByRole("heading", { name: "登录修复" })).toBeInTheDocument();
+    expect(screen.getByRole("banner", { name: "会话详情工具栏" })).toBeInTheDocument();
     expect(screen.getByText("请修复登录")).toBeInTheDocument();
     expect(screen.getByText("登录流程已修复。")).toBeInTheDocument();
     const activity = screen.getByText("命令").closest("details");
@@ -137,7 +138,9 @@ describe("会话管理页面", () => {
 
     await screen.findByRole("button", { name: "打开会话：登录修复" });
     expect(sessionContract.listSessions).toHaveBeenCalledTimes(1);
-    fireEvent.click(screen.getByRole("button", { name: "刷新会话列表" }));
+    const toolbar = screen.getByRole("region", { name: "会话列表工具栏" });
+    expect(within(toolbar).getByRole("tablist", { name: "会话范围" })).toBeInTheDocument();
+    fireEvent.click(within(toolbar).getByRole("button", { name: "刷新会话列表" }));
 
     await waitFor(() => expect(sessionContract.listSessions).toHaveBeenCalledTimes(2));
   });
@@ -227,11 +230,11 @@ describe("会话管理页面", () => {
     fireEvent.click(await screen.findByRole("button", { name: "打开会话：登录修复" }));
     expect(screen.getByRole("button", { name: "返回会话列表" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "返回会话列表" }));
-    expect(screen.getByRole("heading", { name: "会话管理" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "会话列表工具栏" })).toBeInTheDocument();
 
     resolveDetail?.({ ...firstSession, entries: [] });
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "会话管理" })).toBeInTheDocument();
+      expect(screen.getByRole("region", { name: "会话列表工具栏" })).toBeInTheDocument();
       expect(screen.queryByRole("button", { name: "返回会话列表" })).not.toBeInTheDocument();
     });
   });
@@ -431,7 +434,7 @@ describe("会话管理页面", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "永久删除会话" }));
     await waitFor(() => expect(sessionContract.deleteSession).toHaveBeenCalledWith("thread-1"));
     expect(screen.queryByRole("dialog", { name: "永久删除会话" })).not.toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "会话管理" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "会话列表工具栏" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "打开会话：登录修复" })).not.toBeInTheDocument();
   });
 

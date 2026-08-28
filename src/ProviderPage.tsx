@@ -23,8 +23,6 @@ import ProviderValidationDialog, {
   type ProviderValidationSession,
   type ProviderValidationSource,
 } from "./ProviderValidationDialog";
-import DesktopControl from "./DesktopControl";
-import DiagnosticReportControl from "./DiagnosticReportControl";
 import type { OpenAiSidebarAction } from "./AppSidebar";
 
 import {
@@ -1090,14 +1088,6 @@ export default function ProviderPage({
 
   return (
     <main className="main-content">
-      <header className="page-header">
-        <h1>{providerMessages.pageTitle}</h1>
-        <div className="page-header-actions">
-          <DesktopControl />
-          <DiagnosticReportControl />
-        </div>
-      </header>
-
       {view === "catalog" ? (
         <>
         <EnvironmentReadNotice state={environmentState} />

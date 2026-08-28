@@ -658,31 +658,32 @@ function SessionList({
     : sessionMessages.mutationBlocked.unavailable;
   return (
     <>
-      <header className="page-header">
-        <h1>{sessionMessages.pageTitle}</h1>
-        <button
-          className="icon-button"
-          type="button"
-          aria-label={sessionMessages.refreshList}
-          title={sessionMessages.refreshList}
-          onClick={onRefresh}
-          disabled={listState === "initial_loading" || listState === "loading_more"}
-        >
-          <RefreshCw
-            className={listState === "initial_loading" ? "is-spinning" : undefined}
-            size={17}
-            aria-hidden="true"
-          />
-        </button>
-      </header>
-      <div className="session-tabs" role="tablist" aria-label="会话范围">
-        <button type="button" role="tab" aria-selected={tab === "active"} onClick={() => setTab("active")}>
-          {sessionMessages.activeTab}
-        </button>
-        <button type="button" role="tab" aria-selected={tab === "archived"} onClick={() => setTab("archived")}>
-          {sessionMessages.archivedTab}
-        </button>
-      </div>
+      <section className="session-list-toolbar" aria-label="会话列表工具栏">
+        <div className="session-tabs" role="tablist" aria-label="会话范围">
+          <button type="button" role="tab" aria-selected={tab === "active"} onClick={() => setTab("active")}>
+            {sessionMessages.activeTab}
+          </button>
+          <button type="button" role="tab" aria-selected={tab === "archived"} onClick={() => setTab("archived")}>
+            {sessionMessages.archivedTab}
+          </button>
+        </div>
+        <div className="session-list-actions">
+          <button
+            className="icon-button"
+            type="button"
+            aria-label={sessionMessages.refreshList}
+            title={sessionMessages.refreshList}
+            onClick={onRefresh}
+            disabled={listState === "initial_loading" || listState === "loading_more"}
+          >
+            <RefreshCw
+              className={listState === "initial_loading" ? "is-spinning" : undefined}
+              size={17}
+              aria-hidden="true"
+            />
+          </button>
+        </div>
+      </section>
       <div className="session-filters" aria-label="会话筛选">
         <label className="session-search">
           <span className="visually-hidden">{sessionMessages.searchLabel}</span>
@@ -915,11 +916,11 @@ function SessionDetailView({
     : sessionMessages.mutationBlocked.unavailable;
   return (
     <>
-      <header className="page-header session-detail-header">
+      <header className="page-header session-detail-header" aria-label="会话详情工具栏">
         <button className="icon-button" type="button" aria-label={sessionMessages.backToList} title={sessionMessages.backToList} onClick={onBack}>
           <ArrowLeft size={18} aria-hidden="true" />
         </button>
-        <h1>{summary.title}</h1>
+        <h2>{summary.title}</h2>
         {state.kind === "loaded" && (
           <div className="session-detail-actions">
             <button className="command-button compact" type="button" onClick={() => onExport(state.detail)} disabled={exportState === "exporting"}>
