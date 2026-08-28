@@ -36,6 +36,7 @@ $activeRoadmapEntries = @(
 
 $archiveProgressReferences = [System.Collections.Generic.List[string]]::new()
 $active88ItemReferences = [System.Collections.Generic.List[string]]::new()
+$legacyDomesticDistributionEntries = [System.Collections.Generic.List[string]]::new()
 foreach ($relativePath in $trackedFiles) {
     if ($relativePath.StartsWith('docs/archive/') -or $relativePath.StartsWith('docs/adr/')) {
         continue
@@ -60,6 +61,25 @@ foreach ($relativePath in $trackedFiles) {
     if ($content -match '88\s*\u9879|88-item') {
         $active88ItemReferences.Add($relativePath)
     }
+
+    $isActiveDistributionSurface = $relativePath -in @('AGENTS.md', 'README.md', 'package.json') -or
+        $relativePath.StartsWith('.github/workflows/') -or
+        $relativePath.StartsWith('scripts/') -or
+        $relativePath.StartsWith('src/') -or
+        $relativePath.StartsWith('src-tauri/src/') -or
+        $relativePath -eq 'src-tauri/tauri.conf.json'
+    if ($isActiveDistributionSurface -and
+        ($relativePath -match '(?i)gitcode' -or
+         $content -match '(?i)GITCODE_(TOKEN|REPOSITORY|DEFAULT_BRANCH)|gitcode-(distribution|readme|smoke|sync|upload)|(?:setup|smoke|sync)-gitcode|\u53d1\u5e03\u5230 GitCode')) {
+        $legacyDomesticDistributionEntries.Add($relativePath)
+    }
+
+    $isRuntimeSurface = $relativePath.StartsWith('src/') -or
+        $relativePath.StartsWith('src-tauri/src/') -or
+        $relativePath -eq 'src-tauri/tauri.conf.json'
+    if ($isRuntimeSurface -and $content -match '(?i)https://(?:raw\.)?gitcode\.com/') {
+        $legacyDomesticDistributionEntries.Add($relativePath)
+    }
 }
 
 $activeRoadmapEntries = @(
@@ -67,16 +87,19 @@ $activeRoadmapEntries = @(
     $active88ItemReferences
 ) | Sort-Object -Unique
 $archiveProgressReferences = @($archiveProgressReferences) | Sort-Object -Unique
+$legacyDomesticDistributionEntries = @($legacyDomesticDistributionEntries) | Sort-Object -Unique
 
 $passed = $legacySourceEntries.Count -eq 0 -and
     $activeRoadmapEntries.Count -eq 0 -and
-    $archiveProgressReferences.Count -eq 0
+    $archiveProgressReferences.Count -eq 0 -and
+    $legacyDomesticDistributionEntries.Count -eq 0
 $report = [ordered]@{
     passed = $passed
     trackedFileCount = $trackedFiles.Count
     legacySourceEntries = @($legacySourceEntries | Sort-Object -Unique)
     activeRoadmapEntries = @($activeRoadmapEntries)
     archiveProgressReferences = @($archiveProgressReferences)
+    legacyDomesticDistributionEntries = @($legacyDomesticDistributionEntries)
 }
 
 $report | ConvertTo-Json -Depth 5

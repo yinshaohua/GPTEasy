@@ -204,6 +204,10 @@ fn release_tree_gate_accepts_the_active_repository() {
     assert_eq!(report["legacySourceEntries"], serde_json::json!([]));
     assert_eq!(report["activeRoadmapEntries"], serde_json::json!([]));
     assert_eq!(report["archiveProgressReferences"], serde_json::json!([]));
+    assert_eq!(
+        report["legacyDomesticDistributionEntries"],
+        serde_json::json!([])
+    );
 }
 
 #[test]

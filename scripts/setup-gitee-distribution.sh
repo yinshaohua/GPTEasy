@@ -212,6 +212,7 @@ stage "创建最小权限 Token"
 open_url "https://gitee.com/setting/token-classic"
 step "创建仅能维护该公开仓库 Release 与仓库内容的 Token；不要授予账户管理权限。"
 step "复制 Token。页面关闭后通常无法再次查看。"
+step "把 Gitee Token 保存到密码管理器，供冒烟资源清理和后续轮换使用；不要写入仓库或 .release.env。"
 ask_secret GITEE_TOKEN "粘贴 Gitee Token（输入不会显示）："
 [[ -n "$GITEE_TOKEN" ]] || { warn "Token 不能为空"; exit 1; }
 set_secret "$TOKEN_SECRET_NAME" "$GITEE_TOKEN"

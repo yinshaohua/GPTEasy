@@ -42,6 +42,20 @@ switch (command) {
     }
     break;
   }
+  case "cleanup-metadata": {
+    const [metadataPath, tag] = args;
+    const metadata = JSON.parse(await readFile(metadataPath, "utf8"));
+    if (typeof metadata.sha !== "string" || !metadata.sha) {
+      throw new Error("Gitee smoke manifest metadata is missing its blob SHA");
+    }
+    const encoded = String(metadata.content ?? "").replaceAll(/\s/g, "");
+    const manifest = JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
+    if (manifest.kind !== "gitee-api-smoke" || manifest.tag !== tag) {
+      throw new Error("Gitee smoke manifest does not match the cleanup tag");
+    }
+    process.stdout.write(metadata.sha);
+    break;
+  }
   case "download-url": {
     const [metadataPath, expectedRawBase] = args;
     const metadata = JSON.parse(await readFile(metadataPath, "utf8"));

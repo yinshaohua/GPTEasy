@@ -2,9 +2,10 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use serde_json::{Value, json};
@@ -581,8 +582,25 @@ fn repository_declares_repeatable_gitee_setup_without_formal_smoke_manifest_writ
     assert_eq!(repository_variable, "GITEE_REPOSITORY");
     assert_eq!(branch_variable, "GITEE_DEFAULT_BRANCH");
     assert!(wizard.contains("离线备份"));
+    assert!(wizard.contains("把 Gitee Token 保存到密码管理器"));
     assert_eq!(wizard.matches("ask_secret GITEE_TOKEN").count(), 1);
     assert!(wizard.contains("gh workflow run gitee-smoke.yml"));
+
+    let operations = fs::read_to_string(root.join("docs/release/gitee-distribution.md"))
+        .expect("read Gitee distribution operations");
+    for required in [
+        "scripts/cleanup-gitee-release.sh",
+        "gh secret delete GITCODE_TOKEN",
+        "gh variable delete GITCODE_REPOSITORY",
+        "gh variable delete GITCODE_DEFAULT_BRANCH",
+        "撤销 GitCode Token",
+        "不删除 GitCode 公开仓库、Tag、历史 Release 或附件",
+    ] {
+        assert!(
+            operations.contains(required),
+            "Gitee migration operations miss {required}"
+        );
+    }
 
     let workflow = fs::read_to_string(root.join(".github/workflows/gitee-smoke.yml"))
         .expect("read Gitee smoke workflow");
@@ -806,4 +824,163 @@ fn gitee_smoke_declares_authenticated_writes_and_anonymous_reads() {
     assert_eq!(records[0].method, "POST");
     assert_eq!(records[1].method, "POST");
     assert_eq!(records[7].method, "GET");
+}
+
+#[test]
+fn gitee_smoke_cleanup_removes_the_exact_manifest_before_the_release() {
+    #[derive(Debug)]
+    struct RequestRecord {
+        method: String,
+        path: String,
+        authorization: Option<String>,
+        body: String,
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake Gitee server");
+    listener
+        .set_nonblocking(true)
+        .expect("make fake Gitee server nonblocking");
+    let address = listener.local_addr().expect("fake Gitee address");
+    let records = Arc::new(Mutex::new(Vec::<RequestRecord>::new()));
+    let server_records = Arc::clone(&records);
+    let server = thread::spawn(move || {
+        let mut last_request = Instant::now();
+        loop {
+            let (mut stream, _) = match listener.accept() {
+                Ok(connection) => connection,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if last_request.elapsed() > Duration::from_millis(500) {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                Err(error) => panic!("accept fake Gitee request: {error}"),
+            };
+            last_request = Instant::now();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 8192];
+            let header_end;
+            loop {
+                let read = stream.read(&mut buffer).expect("read fake request");
+                assert!(read > 0, "request closed before headers");
+                request.extend_from_slice(&buffer[..read]);
+                if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                    header_end = index + 4;
+                    break;
+                }
+            }
+            let headers = String::from_utf8_lossy(&request[..header_end]).into_owned();
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    line.strip_prefix("Content-Length: ")
+                        .or_else(|| line.strip_prefix("content-length: "))
+                })
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            while request.len() < header_end + content_length {
+                let read = stream.read(&mut buffer).expect("read fake request body");
+                assert!(read > 0, "request closed before body");
+                request.extend_from_slice(&buffer[..read]);
+            }
+            let request_line = headers.lines().next().expect("request line");
+            let mut request_parts = request_line.split_whitespace();
+            let method = request_parts.next().expect("request method").to_owned();
+            let path = request_parts.next().expect("request path").to_owned();
+            let authorization = headers.lines().find_map(|line| {
+                line.strip_prefix("Authorization: ")
+                    .or_else(|| line.strip_prefix("authorization: "))
+                    .map(str::to_owned)
+            });
+            let body = String::from_utf8_lossy(&request[header_end..header_end + content_length])
+                .into_owned();
+            server_records
+                .lock()
+                .expect("request records")
+                .push(RequestRecord {
+                    method: method.clone(),
+                    path: path.clone(),
+                    authorization,
+                    body,
+                });
+
+            let manifest = base64::engine::general_purpose::STANDARD.encode(
+                r#"{"schemaVersion":1,"kind":"gitee-api-smoke","tag":"smoke-42-1","asset":"fixture.bin","sha256":"abc"}"#,
+            );
+            let (status, reason, response) = if method == "GET" && path.ends_with("/releases/42") {
+                (200, "OK", r#"{"id":42,"tag_name":"smoke-42-1"}"#.to_owned())
+            } else if method == "GET" && path.contains("/contents/smoke/smoke-42-1.md?ref=main") {
+                (
+                    200,
+                    "OK",
+                    format!(r#"{{"sha":"manifest-sha","content":"{manifest}"}}"#),
+                )
+            } else if method == "DELETE" && path.contains("/contents/smoke/smoke-42-1.md") {
+                (204, "No Content", String::new())
+            } else if method == "DELETE" && path.ends_with("/releases/42") {
+                (204, "No Content", String::new())
+            } else {
+                (404, "Not Found", r#"{"message":"not found"}"#.to_owned())
+            };
+            write!(
+                stream,
+                "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",
+                response.len()
+            )
+            .expect("write fake response");
+        }
+    });
+
+    let mut child = Command::new(git_bash())
+        .arg("scripts/cleanup-gitee-release.sh")
+        .args(["42", "smoke-42-1"])
+        .env("GITEE_TOKEN", "test-token")
+        .env("GITEE_REPOSITORY", "example/releases")
+        .env("GITEE_DEFAULT_BRANCH", "main")
+        .env("GITEE_API_BASE_URL", format!("http://{address}/api/v5"))
+        .current_dir(repository_root())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run Gitee smoke cleanup against fake server");
+    child
+        .stdin
+        .as_mut()
+        .expect("cleanup stdin")
+        .write_all(b"smoke-42-1\n")
+        .expect("confirm exact smoke tag");
+    let output = child.wait_with_output().expect("wait for cleanup command");
+    server.join().expect("fake Gitee server");
+    assert!(
+        output.status.success(),
+        "Gitee cleanup failed: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let records = records.lock().expect("read cleanup requests");
+    let sequence = records
+        .iter()
+        .map(|record| format!("{} {}", record.method, record.path))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        sequence,
+        vec![
+            "GET /api/v5/repos/example/releases/releases/42",
+            "GET /api/v5/repos/example/releases/contents/smoke/smoke-42-1.md?ref=main",
+            "DELETE /api/v5/repos/example/releases/contents/smoke/smoke-42-1.md",
+            "DELETE /api/v5/repos/example/releases/releases/42",
+        ]
+    );
+    assert!(
+        records
+            .iter()
+            .all(|record| { record.authorization.as_deref() == Some("Bearer test-token") })
+    );
+    let manifest_delete = &records[2].body;
+    assert!(manifest_delete.contains("manifest-sha"));
+    assert!(manifest_delete.contains("main"));
+    assert!(manifest_delete.contains("smoke-42-1"));
 }

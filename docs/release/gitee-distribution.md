@@ -54,6 +54,23 @@ bash scripts/setup-gitee-distribution.sh
 
 冒烟命令不包含正式清单路径，因此不能推进正式稳定版本。失败时只报告操作与公开错误，不输出 Token。
 
+### 人工匿名验收与冒烟清理
+
+工作流成功后先保留冒烟 Release。维护者必须新建无登录浏览器上下文，直接进入报告中 `tag` 对应的 Gitee Release 页面，点击附件并确认最多出现图形验证、不要求注册或登录。记录工作流 URL、数值 `releaseId`、`tag`、页面点击结果，以及工作流报告中的匿名 Range、完整下载大小、SHA-256 和 Raw 清单结果；未实际观察到的项目不得记录为通过。
+
+人工点击完成后，在 Git Bash 或 WSL2 中从密码管理器隐藏读取 Gitee Token，再按报告中的精确 ID 和 tag 同时删除 `smoke/<tag>.md` 与 prerelease：
+
+```bash
+read -rs GITEE_TOKEN && printf '\n'
+export GITEE_TOKEN
+export GITEE_REPOSITORY=ericshaohua/gpteasy-releases
+export GITEE_DEFAULT_BRANCH=main
+bash scripts/cleanup-gitee-release.sh <releaseId> <tag>
+unset GITEE_TOKEN
+```
+
+脚本会先核对数值 Release ID、tag、测试清单类型和 blob SHA，再要求输入完整 tag 二次确认；它先删除测试清单，后删除 Release。若 Release 删除失败，可用同一命令重跑，已经删除的测试清单按可恢复状态处理。不得在人工点击前清理，也不得把 Token 放入命令行参数、`.release.env`、日志或验收记录。
+
 本地 adapter 与应用内 HTTP 测试只证明协议实现，不能替代真实平台冒烟；两类证据的边界和真实验收字段见 `docs/evidence/gitee-domestic-distribution.md`。
 
 ## 正式同步
@@ -68,11 +85,32 @@ bash scripts/setup-gitee-distribution.sh
 
 正式清单只包含 `windows-x86_64`，签名字段保存 `.sig` 正文。任何附件、匿名下载或版本门禁失败都不会写入清单，也不会修改或删除 GitHub Release。可控 HTTP adapter 测试通过 `npm run test:gitee-sync` 运行。
 
+### 失败恢复
+
+- 首次设置可重复运行；向导复用仓库外 updater 密钥，重新校验公开仓库并覆盖同名 Actions Secret/Variables。不得因设置重跑而生成或轮换 updater 密钥。
+- 冒烟失败时保留已创建资源。tag 固定为 `smoke-<GitHub run-id>-<attempt>`；从失败日志或 Gitee Release API 按该 tag 取得数值 ID，排障并完成必要证据后运行精确清理命令。不要自动删除无法核实身份的资源。
+- 正式同步失败时旧 `latest.md` 保持不变。修复临时平台故障后，对同一 GitHub Tag 手工触发 `gitee-sync.yml`；同步器只补齐缺失且一致的附件，同名内容冲突不得覆盖。
+- Token 泄露、到期或权限错误时，先在 Gitee 创建替代 Token并覆盖 GitHub Secret，验证冒烟成功后撤销旧 Token。Token 轮换不改变公开仓库坐标、清单端点或 updater 密钥。
+
 ## 已知限制与后续优化
 
 迁移前，GitCode 的稳定分支 Raw 地址曾被 WAF 返回 HTTP 403；同一仓库的公开 Contents API、不可变 blob 和 Release 附件仍可正常读取。该历史现象不是 Gitee 已知结论。Gitee 的真实 Raw 可用性必须由本次冒烟在公开仓库上验证；在此之前，不能将本地 adapter 结果或 GitCode 历史记录表述为 Gitee 平台通过。
 
 ADR-0045 已取代 GitCode 的更新源和 #53 的 GitCode Contents API 回退计划；当前客户端只读取 Gitee Raw。
+
+## 迁移收口
+
+只有真实 Gitee 冒烟、无登录页面点击、自动门禁和证据记录全部完成后，才删除不再使用的 GitCode Actions 配置：
+
+```bash
+gh secret delete GITCODE_TOKEN --repo yinshaohua/GPTEasy
+gh variable delete GITCODE_REPOSITORY --repo yinshaohua/GPTEasy
+gh variable delete GITCODE_DEFAULT_BRANCH --repo yinshaohua/GPTEasy
+```
+
+随后由维护者登录 GitCode 设置页撤销 GitCode Token，并复核 GitHub Actions 中只保留活动 Gitee 分发配置。凭据删除后，在 #53 评论 Gitee 替代证据，移除 `ready-for-agent`、添加 `wontfix`，再以 not planned 关闭。
+
+迁移收口不删除 GitCode 公开仓库、Tag、历史 Release 或附件，也不修改历史发布归档。它不授权打 Tag、创建正式 GitHub/Gitee Release、执行 Windows 人工测试或记录发布授权。
 
 ## 发布准备
 
