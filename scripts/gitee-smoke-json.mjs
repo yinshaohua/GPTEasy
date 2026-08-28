@@ -45,6 +45,7 @@ switch (command) {
   case "cleanup-metadata": {
     const [metadataPath, tag] = args;
     const metadata = JSON.parse(await readFile(metadataPath, "utf8"));
+    if (Array.isArray(metadata) && metadata.length === 0) break;
     if (typeof metadata.sha !== "string" || !metadata.sha) {
       throw new Error("Gitee smoke manifest metadata is missing its blob SHA");
     }
