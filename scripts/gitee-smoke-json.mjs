@@ -60,10 +60,12 @@ switch (command) {
     const [metadataPath, expectedRawBase] = args;
     const metadata = JSON.parse(await readFile(metadataPath, "utf8"));
     const downloadUrl = new URL(metadata.download_url);
-    const expectedOrigin = new URL(expectedRawBase).origin;
+    const expectedBase = new URL(expectedRawBase);
+    const expectedPath = expectedBase.pathname.replace(/\/$/, "");
     if (
-      downloadUrl.origin !== expectedOrigin ||
-      !downloadUrl.pathname.includes("/blobs/")
+      downloadUrl.origin !== expectedBase.origin ||
+      !downloadUrl.pathname.startsWith(`${expectedPath}/`) ||
+      downloadUrl.search
     ) {
       throw new Error("Gitee content metadata returned an unexpected Raw URL");
     }
