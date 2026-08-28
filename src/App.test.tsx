@@ -3186,7 +3186,7 @@ describe("WSL2 供应商选择", () => {
       verifiedAtEpochSeconds: 1_786_140_000,
       isCurrent: false,
     };
-    invoke.mockImplementation((command: string) => {
+    invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
       if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
       if (command === "list_providers") return Promise.resolve([provider]);
       if (command === "get_environment_snapshot") {
@@ -3229,6 +3229,7 @@ describe("WSL2 供应商选择", () => {
             ...current,
             environmentId: "{33333333-3333-4333-8333-333333333333}",
             displayName: "Debian conflict",
+            running: false,
             currentProvider: null,
             actualProviderId: null,
             configurationState: "conflict",
@@ -3238,7 +3239,7 @@ describe("WSL2 供应商选择", () => {
               scope: "preserve_unrelated_toml",
               fullConfigBackup: true,
               authJsonUnchanged: true,
-              temporarilyStartsDistribution: false,
+              temporarilyStartsDistribution: true,
             },
           },
           {
@@ -3250,7 +3251,16 @@ describe("WSL2 供应商选择", () => {
           },
         ]);
       }
+      if (command === "revalidate_provider") {
+        return Promise.resolve({ provider, validationReceipt: null });
+      }
       if (command === "reclaim_wsl_provider") {
+        if (args?.confirmReclaim === false) {
+          return Promise.reject({
+            category: "invalid_environment",
+            messageId: "wsl.reclaim_confirmation_required",
+          });
+        }
         return Promise.resolve({
           environment: {
             environmentId: "{33333333-3333-4333-8333-333333333333}",
@@ -3302,17 +3312,35 @@ describe("WSL2 供应商选择", () => {
     expect(dialog).toHaveTextContent("完整配置备份");
     expect(screen.getByRole("button", { name: "应用到 WSL2" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "备份并重新接管" }));
-    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("再次确认"));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("revalidate_provider", {
+      requestId: expect.any(String),
+      providerId: provider.id,
+      auditContext: "wsl_reclaim",
+    }));
+    expect(invoke.mock.calls.some(([command]) => command === "reclaim_wsl_provider")).toBe(false);
+    expect(await screen.findByText("验证通过")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "完成" }));
+    await waitFor(() => expect(confirm).toHaveBeenCalledWith(expect.stringContaining("自然停止")));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("reclaim_wsl_provider", {
       environmentId: "{33333333-3333-4333-8333-333333333333}",
       providerId: provider.id,
       expectedRevision: "wsl-revision",
+      authorizeStart: true,
+      confirmReclaim: false,
+    }));
+    await waitFor(() => expect(confirm).toHaveBeenCalledWith(expect.stringContaining("再次确认")));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("reclaim_wsl_provider", {
+      environmentId: "{33333333-3333-4333-8333-333333333333}",
+      providerId: provider.id,
+      expectedRevision: "wsl-revision",
+      authorizeStart: true,
       confirmReclaim: true,
     }));
-    fireEvent.change(distribution, {
+    fireEvent.change(screen.getByLabelText("WSL2 发行版"), {
       target: { value: "{44444444-4444-4444-8444-444444444444}" },
     });
-    expect(dialog).toHaveTextContent("正在被其他操作占用");
+    const reopenedDialog = screen.getByRole("dialog", { name: "选择 WSL2 供应商" });
+    expect(reopenedDialog).toHaveTextContent("正在被其他操作占用");
     expect(screen.getByRole("button", { name: "应用到 WSL2" })).toBeDisabled();
   });
 

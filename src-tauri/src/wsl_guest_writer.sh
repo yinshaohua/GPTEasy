@@ -51,13 +51,18 @@ incoming_config=$(mktemp "$TMP_DIR/.config.XXXXXX")
 incoming_credential=$(mktemp "$TMP_DIR/.credential.XXXXXX")
 config_candidate=''
 credential_candidate=''
+rollback_candidate=''
 credential_created=false
 config_replaced=false
+backup_path=''
+original_missing=false
+original_config_mode=''
 CREDENTIAL=''
 cleanup() {
   rm -f "$incoming_config" "$incoming_credential"
   [ -z "$config_candidate" ] || rm -f "$config_candidate"
   [ -z "$credential_candidate" ] || rm -f "$credential_candidate"
+  [ -z "$rollback_candidate" ] || rm -f "$rollback_candidate"
   [ "$credential_created" = false ] || [ "$config_replaced" = true ] || rm -f "$CREDENTIAL"
 }
 trap cleanup EXIT HUP INT TERM
@@ -148,6 +153,19 @@ hash_file() {
 [ "$(hash_file "$CONFIG_TARGET")" = "$EXPECTED_CONFIG" ] || fail concurrent_change 41
 
 config_parent=${CONFIG_TARGET%/*}
+rollback_config() {
+  if [ "$original_missing" = true ]; then
+    rm -f "$CONFIG_TARGET" || return 1
+  else
+    rollback_candidate=$(mktemp "$config_parent/.config.gpteasy.rollback.XXXXXX") || return 1
+    cat "$backup_path" >"$rollback_candidate" || return 1
+    chmod "$original_config_mode" "$rollback_candidate" || return 1
+    sync -f "$rollback_candidate" || return 1
+    mv "$rollback_candidate" "$CONFIG_TARGET" || return 1
+    rollback_candidate=''
+  fi
+  sync -f "$config_parent"
+}
 config_candidate=$(mktemp "$config_parent/.config.gpteasy.XXXXXX")
 cat "$incoming_config" >"$config_candidate"
 if [ -f "$CONFIG_TARGET" ]; then chmod --reference="$CONFIG_TARGET" "$config_candidate"; else chmod 600 "$config_candidate"; fi
@@ -178,12 +196,18 @@ fi
 
 stamp=$(date -u +%Y%m%dT%H%M%S%N)-$$
 if [ -f "$CONFIG_TARGET" ]; then
-  cp -p "$CONFIG_TARGET" "$BACKUP_DIR/config-$stamp.toml"
-  chmod 600 "$BACKUP_DIR/config-$stamp.toml"
+  backup_path="$BACKUP_DIR/config-$stamp.toml"
+  original_config_mode=$(stat -c '%a' "$CONFIG_TARGET")
+  cp -p "$CONFIG_TARGET" "$backup_path"
+  chmod 600 "$backup_path"
 else
-  printf 'missing\n' >"$BACKUP_DIR/config-$stamp.missing"
-  chmod 600 "$BACKUP_DIR/config-$stamp.missing"
+  original_missing=true
+  backup_path="$BACKUP_DIR/config-$stamp.missing"
+  printf 'missing\n' >"$backup_path"
+  chmod 600 "$backup_path"
 fi
+sync -f "$backup_path"
+sync -f "$BACKUP_DIR"
 sync -f "$config_candidate"
 validate_config_target || fail concurrent_change 41
 if [ "$(hash_file "$CONFIG_TARGET")" != "$EXPECTED_CONFIG" ]; then
@@ -196,8 +220,14 @@ if ! mv "$config_candidate" "$CONFIG_TARGET"; then
 fi
 config_candidate=''
 config_replaced=true
-sync -f "$config_parent"
+if ! sync -f "$config_parent"; then
+  if rollback_config; then
+    config_replaced=false
+    fail write_failed 44
+  fi
+  fail rollback_failed 45
+fi
 
 find "$BACKUP_DIR" -maxdepth 1 -type f \( -name 'config-*.toml' -o -name 'config-*.missing' \) -printf '%f\n' |
-  sort -r | awk 'NR > 5 { print }' | while IFS= read -r stale; do rm -f "$BACKUP_DIR/$stale"; done
-printf '%s\n' '{"status":"written","helper":"gpteasy-wsl-guest-writer-v2"}'
+  sort -r | awk 'NR > 5 { print }' | while IFS= read -r stale; do rm -f "$BACKUP_DIR/$stale"; done || true
+printf '%s\n' '{"status":"written","helper":"gpteasy-wsl-guest-writer-v2"}' || true

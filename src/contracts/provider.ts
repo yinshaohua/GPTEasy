@@ -175,9 +175,12 @@ export function validateProviderUpdate(
 export function revalidateProvider(
   requestId: string,
   providerId: string,
+  auditContext?: "wsl_reclaim",
 ): Promise<ProviderRevalidationResult> {
   if (isBrowserPreview()) return Promise.reject(previewFailure);
-  return invoke<ProviderRevalidationResult>("revalidate_provider", { requestId, providerId });
+  return invoke<ProviderRevalidationResult>("revalidate_provider", auditContext
+    ? { requestId, providerId, auditContext }
+    : { requestId, providerId });
 }
 
 export function confirmProviderValidationBaseUrl(

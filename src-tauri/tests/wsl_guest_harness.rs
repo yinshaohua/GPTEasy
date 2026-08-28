@@ -954,6 +954,171 @@ mv "$HOME/.codex/legacy.toml" "$HOME/.codex/config.toml""##,
         migrated_refreshed.actual_provider_id.as_deref(),
         Some(provider_id)
     );
+
+    checked_output(
+        &distribution,
+        &[
+            "/usr/bin/env",
+            &shell_home,
+            "/bin/sh",
+            "-c",
+            r##"awk '
+BEGIN { print "custom_reclaim_setting = true" }
+$0 == "# GPTEasy schema-version: 1" { print "# GPTEasy schema-version: 9"; next }
+{ print }
+' "$HOME/.codex/config.toml" >"$HOME/.codex/reclaim.toml"
+chmod 600 "$HOME/.codex/reclaim.toml"
+mv "$HOME/.codex/reclaim.toml" "$HOME/.codex/config.toml""##,
+        ],
+        &[],
+    );
+    let reclaim_conflict = recovered_application
+        .list()
+        .expect("desktop recognizes the real guest unknown schema")
+        .into_iter()
+        .find(|environment| {
+            environment.running && environment.display_name.eq_ignore_ascii_case(&distribution)
+        })
+        .expect("selected WSL environment");
+    assert_eq!(
+        reclaim_conflict.configuration_state,
+        WslConfigurationState::Conflict
+    );
+    assert_eq!(
+        reclaim_conflict.message_id.as_deref(),
+        Some("wsl.schema_unknown")
+    );
+    let before_confirmation = read_file(".codex/config.toml");
+    let confirmation = recovered_application
+        .reclaim_provider(
+            &reclaim_conflict.environment_id,
+            provider_id,
+            &reclaim_conflict.revision,
+            false,
+            false,
+        )
+        .expect_err("real guest reclaim requires a second confirmation");
+    assert_eq!(confirmation.message_id, "wsl.reclaim_confirmation_required");
+    assert_eq!(read_file(".codex/config.toml"), before_confirmation);
+    let reclaimed = recovered_application
+        .reclaim_provider(
+            &reclaim_conflict.environment_id,
+            provider_id,
+            &reclaim_conflict.revision,
+            false,
+            true,
+        )
+        .expect("confirmed real guest reclaim");
+    assert_eq!(
+        reclaimed.environment.configuration_state,
+        WslConfigurationState::Current
+    );
+    let reclaimed_config = read_file(".codex/config.toml");
+    let reclaimed_text = String::from_utf8(reclaimed_config.clone()).expect("reclaimed UTF-8");
+    assert!(reclaimed_text.contains("custom_reclaim_setting = true"));
+    assert!(reclaimed_text.contains("# GPTEasy schema-version: 1"));
+    assert!(!reclaimed_text.contains("# GPTEasy schema-version: 9"));
+    assert!(read_file(".codex/auth.json") == br#"{"login":"unchanged"}"#);
+    checked_output(
+        &distribution,
+        &[
+            "/usr/bin/env",
+            &shell_home,
+            "/bin/sh",
+            "-c",
+            "grep -l '# GPTEasy schema-version: 9' \"$HOME\"/.codex/.gpteasy-shell/desktop-backups/config-*.toml >/dev/null",
+        ],
+        &[],
+    );
+
+    let rollback_token = "desktop-rollback-token";
+    checked_output(
+        &distribution,
+        &[
+            "/usr/bin/env",
+            &shell_home,
+            "/bin/sh",
+            &format!("{home}/lock"),
+            "acquire",
+            rollback_token,
+            "reclaim",
+        ],
+        &[],
+    );
+    checked_output(
+        &distribution,
+        &[
+            "/usr/bin/env",
+            &shell_home,
+            "/bin/sh",
+            "-c",
+            r#"mkdir -p "$HOME/fault-bin"
+cat >"$HOME/fault-bin/sync" <<'SYNC'
+#!/bin/sh
+count_file="$HOME/sync-count"
+count=0
+[ ! -f "$count_file" ] || count=$(cat "$count_file")
+count=$((count + 1))
+printf '%s\n' "$count" >"$count_file"
+[ "$count" -ne 5 ] || exit 1
+exec /usr/bin/sync "$@"
+SYNC
+chmod 700 "$HOME/fault-bin/sync"
+rm -f "$HOME/sync-count""#,
+        ],
+        &[],
+    );
+    let expected_hash = String::from_utf8(checked_output(
+        &distribution,
+        &[
+            "/usr/bin/env",
+            &shell_home,
+            "/bin/sh",
+            "-c",
+            "sha256sum \"$HOME/.codex/config.toml\" | awk '{print $1}'",
+        ],
+        &[],
+    ))
+    .expect("config hash is UTF-8")
+    .trim()
+    .to_owned();
+    let failed_candidate = reclaimed_text
+        .replace(
+            "custom_reclaim_setting = true",
+            "custom_reclaim_setting = false",
+        )
+        .into_bytes();
+    let rollback_path = format!("PATH={home}/fault-bin:/usr/bin:/bin");
+    let rollback = wsl_output(
+        &distribution,
+        &[
+            "/usr/bin/env",
+            &shell_home,
+            &rollback_path,
+            "/bin/sh",
+            &format!("{home}/writer"),
+            rollback_token,
+            &expected_hash,
+        ],
+        &bundle(
+            &failed_candidate,
+            acceptance_key("GPTEASY_ACCEPTANCE_KEY_A", "wsl-harness-secret").as_bytes(),
+        ),
+    );
+    assert_eq!(rollback.status.code(), Some(44));
+    assert_eq!(read_file(".codex/config.toml"), reclaimed_config);
+    checked_output(
+        &distribution,
+        &[
+            "/usr/bin/env",
+            &shell_home,
+            "/bin/sh",
+            &format!("{home}/lock"),
+            "release",
+            rollback_token,
+        ],
+        &[],
+    );
     for canary in [
         acceptance_key("GPTEASY_ACCEPTANCE_KEY_A", "wsl-harness-secret"),
         acceptance_key("GPTEASY_ACCEPTANCE_KEY_B", "shell-harness-secret"),
@@ -1076,6 +1241,202 @@ chmod 700 "$home/bin/codex"
     assert!(
         wait_for_distribution_to_stop(&distribution, Duration::from_secs(60)),
         "the explicitly started distribution must stop naturally after the operation",
+    );
+
+    checked_output(
+        &distribution,
+        &[
+            "/usr/bin/env",
+            &format!("HOME={home}"),
+            "/bin/sh",
+            "-c",
+            r##"awk '
+$0 == "# GPTEasy schema-version: 1" { next }
+index($0, "# GPTEasy source-id:") == 1 { next }
+index($0, "# GPTEasy credential-file:") == 1 { next }
+index($0, "model_providers.gpteasy.auth.") == 1 { next }
+{ print }
+' "$HOME/.codex/config.toml" >"$HOME/.codex/stopped-legacy.toml"
+chmod 600 "$HOME/.codex/stopped-legacy.toml"
+mv "$HOME/.codex/stopped-legacy.toml" "$HOME/.codex/config.toml""##,
+        ],
+        &[],
+    );
+    assert!(
+        wait_for_distribution_to_stop(&distribution, Duration::from_secs(60)),
+        "the legacy setup session must stop naturally",
+    );
+    wrapper.set_stopped(Some(3));
+    let stopped_before_legacy_refresh = application
+        .list()
+        .expect("read the stopped environment before legacy refresh")
+        .into_iter()
+        .find(|environment| {
+            environment.availability == WslAvailability::Manageable
+                && environment.display_name.eq_ignore_ascii_case(&distribution)
+        })
+        .expect("selected stopped WSL environment");
+    let legacy = application
+        .refresh_environment(
+            &stopped_before_legacy_refresh.environment_id,
+            &stopped_before_legacy_refresh.revision,
+            true,
+        )
+        .expect("authorized refresh recognizes the stopped legacy block");
+    assert_eq!(
+        legacy.environment.configuration_state,
+        WslConfigurationState::Legacy
+    );
+    assert_eq!(
+        legacy.lifecycle_outcome,
+        WslLifecycleOutcome::StoppedNaturally
+    );
+    let migrated = application
+        .apply_provider(
+            &legacy.environment.environment_id,
+            "22222222-2222-4222-8222-222222222222",
+            &legacy.environment.revision,
+            true,
+        )
+        .expect("ordinary apply migrates the stopped legacy block");
+    assert_eq!(
+        migrated.environment.configuration_state,
+        WslConfigurationState::Current
+    );
+    assert_eq!(
+        migrated.lifecycle_outcome,
+        WslLifecycleOutcome::StoppedNaturally
+    );
+    assert!(
+        wait_for_distribution_to_stop(&distribution, Duration::from_secs(60)),
+        "the legacy migration session must stop naturally",
+    );
+    let migrated_config = checked_output(
+        &distribution,
+        &[
+            "/usr/bin/env",
+            &format!("HOME={home}"),
+            "/bin/sh",
+            "-c",
+            "cat \"$HOME/.codex/config.toml\"",
+        ],
+        &[],
+    );
+    let migrated_text = String::from_utf8(migrated_config).expect("migrated config is UTF-8");
+    assert!(migrated_text.contains("# GPTEasy schema-version: 1"));
+    assert_eq!(
+        checked_output(
+            &distribution,
+            &[
+                "/usr/bin/env",
+                &format!("HOME={home}"),
+                "/bin/sh",
+                "-c",
+                "cat \"$HOME/.codex/auth.json\"",
+            ],
+            &[],
+        ),
+        br#"{"login":"unchanged"}"#,
+    );
+    assert!(
+        wait_for_distribution_to_stop(&distribution, Duration::from_secs(60)),
+        "the legacy verification session must stop naturally",
+    );
+
+    checked_output(
+        &distribution,
+        &[
+            "/usr/bin/env",
+            &format!("HOME={home}"),
+            "/bin/sh",
+            "-c",
+            r##"awk '
+BEGIN { print "stopped_reclaim_setting = true" }
+$0 == "# GPTEasy schema-version: 1" { print "# GPTEasy schema-version: 9"; next }
+{ print }
+' "$HOME/.codex/config.toml" >"$HOME/.codex/stopped-reclaim.toml"
+chmod 600 "$HOME/.codex/stopped-reclaim.toml"
+mv "$HOME/.codex/stopped-reclaim.toml" "$HOME/.codex/config.toml""##,
+        ],
+        &[],
+    );
+    assert!(
+        wait_for_distribution_to_stop(&distribution, Duration::from_secs(60)),
+        "the conflict setup session must stop naturally",
+    );
+    wrapper.set_stopped(Some(3));
+    let stopped_conflict = application
+        .list()
+        .expect("read the stopped environment before reclaim")
+        .into_iter()
+        .find(|environment| {
+            environment.availability == WslAvailability::Manageable
+                && environment.display_name.eq_ignore_ascii_case(&distribution)
+        })
+        .expect("selected stopped WSL environment");
+    assert!(!stopped_conflict.running);
+    let confirmation = application
+        .reclaim_provider(
+            &stopped_conflict.environment_id,
+            "22222222-2222-4222-8222-222222222222",
+            &stopped_conflict.revision,
+            true,
+            false,
+        )
+        .expect_err("stopped reclaim needs a second confirmation");
+    assert_eq!(confirmation.message_id, "wsl.reclaim_confirmation_required");
+    assert_eq!(
+        confirmation.lifecycle_outcome,
+        Some(WslLifecycleOutcome::StoppedNaturally)
+    );
+    let reclaimed = application
+        .reclaim_provider(
+            &stopped_conflict.environment_id,
+            "22222222-2222-4222-8222-222222222222",
+            &stopped_conflict.revision,
+            true,
+            true,
+        )
+        .expect("confirmed reclaim of a stopped real guest");
+    assert_eq!(
+        reclaimed.lifecycle_outcome,
+        WslLifecycleOutcome::StoppedNaturally
+    );
+    assert!(!reclaimed.environment.running);
+    assert!(
+        wait_for_distribution_to_stop(&distribution, Duration::from_secs(60)),
+        "the reclaimed distribution must stop naturally",
+    );
+    let reclaimed_config = checked_output(
+        &distribution,
+        &[
+            "/usr/bin/env",
+            &format!("HOME={home}"),
+            "/bin/sh",
+            "-c",
+            "cat \"$HOME/.codex/config.toml\"",
+        ],
+        &[],
+    );
+    let reclaimed_text = String::from_utf8(reclaimed_config).expect("reclaimed config is UTF-8");
+    assert!(reclaimed_text.contains("stopped_reclaim_setting = true"));
+    assert!(reclaimed_text.contains("# GPTEasy schema-version: 1"));
+    assert!(!reclaimed_text.contains("# GPTEasy schema-version: 9"));
+    let auth = checked_output(
+        &distribution,
+        &[
+            "/usr/bin/env",
+            &format!("HOME={home}"),
+            "/bin/sh",
+            "-c",
+            "cat \"$HOME/.codex/auth.json\"",
+        ],
+        &[],
+    );
+    assert_eq!(auth, br#"{"login":"unchanged"}"#);
+    assert!(
+        wait_for_distribution_to_stop(&distribution, Duration::from_secs(60)),
+        "the verification session must stop naturally",
     );
 
     let _user_workload = RunningGuest::start(&distribution);

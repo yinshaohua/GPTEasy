@@ -6,7 +6,7 @@ use std::time::Duration;
 use crate::diagnostic_report::DiagnosticReport;
 use crate::environment::{AuthenticationMode, EnvironmentSnapshot, EnvironmentState};
 use crate::provider::ProviderSummary;
-use crate::wsl::{WslAvailability, WslConfigurationState, WslEnvironmentSummary};
+use crate::wsl::{WslEnvironmentSummary, summarize_wsl_inventory};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -121,31 +121,15 @@ impl DiagnosticManagementContext {
         };
         let wsl_inspection = match wsl {
             Ok(environments) => {
-                let state_count = |state| {
-                    environments
-                        .iter()
-                        .filter(|environment| environment.configuration_state == state)
-                        .count()
-                };
+                let stats = summarize_wsl_inventory(&environments);
                 DiagnosticWslInspection {
                     status: "available",
-                    environment_count: environments.len(),
-                    manageable_count: environments
-                        .iter()
-                        .filter(|environment| {
-                            matches!(
-                                environment.availability,
-                                WslAvailability::Manageable | WslAvailability::DefaultUserChanged
-                            )
-                        })
-                        .count(),
-                    running_count: environments
-                        .iter()
-                        .filter(|environment| environment.running)
-                        .count(),
-                    legacy_count: state_count(WslConfigurationState::Legacy),
-                    conflict_count: state_count(WslConfigurationState::Conflict),
-                    busy_count: state_count(WslConfigurationState::Busy),
+                    environment_count: stats.environment_count,
+                    manageable_count: stats.manageable_count,
+                    running_count: stats.running_count,
+                    legacy_count: stats.legacy_count,
+                    conflict_count: stats.conflict_count,
+                    busy_count: stats.busy_count,
                     message_ids: environments
                         .iter()
                         .filter_map(|environment| environment.message_id.clone())

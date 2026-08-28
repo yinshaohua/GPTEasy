@@ -74,6 +74,7 @@ import {
   switchToOpenAiLogin,
   type EnvironmentFailure,
   type EnvironmentSnapshot,
+  type WslApplyResult,
   type WslEnvironmentSummary,
   type WslLifecycleOutcome,
   type WslLifecycleResult,
@@ -120,6 +121,7 @@ const linuxShellPresentation: Record<LinuxShell, {
 type PageView = "catalog" | "detail";
 type Confirmation = "discard" | "validation" | null;
 type LinuxExportStep = "shell" | "success" | null;
+type PendingWslReclaim = { environmentId: string; providerId: string };
 type ConfigChangeRequest =
   | { kind: "provider"; provider: ProviderSummary; firstSaved?: boolean }
   | { kind: "openai" }
@@ -158,6 +160,7 @@ export default function ProviderPage({
   const [forceDialogOpen, setForceDialogOpen] = useState(false);
   const [forceProviderId, setForceProviderId] = useState<string | null>(null);
   const [forceSettingProviderId, setForceSettingProviderId] = useState<string | null>(null);
+  const [pendingWslReclaim, setPendingWslReclaim] = useState<PendingWslReclaim | null>(null);
   const [view, setView] = useState<PageView>("catalog");
   const [confirmation, setConfirmation] = useState<Confirmation>(null);
   const [configChangeRequest, setConfigChangeRequest] = useState<ConfigChangeRequest | null>(null);
@@ -608,6 +611,12 @@ export default function ProviderPage({
       setForceProviderId(null);
       if (provider) void forceSetProvider(provider);
     }
+    if (validationSession.source.kind === "wsl_reclaim" && validationSession.status === "succeeded") {
+      const request = pendingWslReclaim;
+      const provider = providers.find((item) => item.id === request?.providerId);
+      setPendingWslReclaim(null);
+      if (request && provider) void executeWslReclaim(request.environmentId, provider);
+    }
     setValidationSession(null);
     if (shouldContinueSave && !addressSuggestion && receipt) {
       saveAfterValidation.current = false;
@@ -840,17 +849,92 @@ export default function ProviderPage({
     const target = wslEnvironments.find((item) => item.environmentId === wslEnvironmentId);
     if (!target?.reclaimPreview || !wslProviderId) return;
     const provider = providers.find((item) => item.id === wslProviderId);
-    if (!provider || !window.confirm(providerMessages.wslReclaimConfirmation)) return;
+    if (!provider) return;
+    discardReceipt("models_confirmed");
+    const requestId = createRequestId();
+    activeRequest.current = requestId;
+    setWslDialogOpen(false);
+    setPendingWslReclaim({
+      environmentId: target.environmentId,
+      providerId: provider.id,
+    });
+    setOperation("revalidating");
+    setFailure(null);
+    setValidationSession(createValidationSession({
+      kind: "wsl_reclaim",
+      providerName: provider.name,
+    }));
+    try {
+      const result = await revalidateProvider(requestId, provider.id, "wsl_reclaim");
+      replaceProvider(result.provider);
+      if (result.validationReceipt) {
+        setPendingWslReclaim(null);
+        setCatalogFeedback(`${provider.name} 的地址需要确认并保存后才能重新接管 WSL2。`);
+      }
+      setOperation("idle");
+      setValidationStage("complete");
+      setValidationSession((current) => current
+        ? { ...current, status: "succeeded", stage: "tool_round_trip" }
+        : current);
+    } catch (error) {
+      setPendingWslReclaim(null);
+      const providerFailure = asProviderFailure(error);
+      setFailure(providerFailure);
+      setOperation("idle");
+      setValidationSession((current) => current
+        ? { ...current, status: "failed", failure: providerFailure }
+        : current);
+    } finally {
+      activeRequest.current = null;
+    }
+  }
+
+  async function executeWslReclaim(environmentId: string, provider: ProviderSummary) {
+    setWslDialogOpen(true);
     setWslAction("reclaiming");
     setWslFailure(null);
     setWslFeedback("");
     try {
-      const result = await reclaimWslProvider(
-        target.environmentId,
-        provider.id,
-        target.revision,
-        true,
-      );
+      const latestItems = await listWslEnvironments();
+      setWslEnvironments(latestItems);
+      const target = latestItems.find((item) =>
+        item.environmentId === environmentId && isManageableWslEnvironment(item));
+      if (!target) {
+        throw { category: "environment_changed", messageId: "wsl.environment_changed" };
+      }
+      setWslEnvironmentId(target.environmentId);
+      setWslProviderId(provider.id);
+      const authorizeStart = target.running
+        || window.confirm(providerMessages.wslStoppedWarning);
+      if (!authorizeStart) return;
+      let result: WslApplyResult;
+      try {
+        result = await reclaimWslProvider(
+          target.environmentId,
+          provider.id,
+          target.revision,
+          authorizeStart,
+          false,
+        );
+      } catch (error) {
+        const failure = asWslFailure(error);
+        if (failure.messageId !== "wsl.reclaim_confirmation_required") throw error;
+        const items = await listWslEnvironments();
+        setWslEnvironments(items);
+        const refreshedTarget = items.find((item) => item.environmentId === target.environmentId);
+        if (!refreshedTarget?.reclaimPreview) {
+          setWslFailure(failure);
+          return;
+        }
+        if (!window.confirm(providerMessages.wslReclaimConfirmation)) return;
+        result = await reclaimWslProvider(
+          refreshedTarget.environmentId,
+          provider.id,
+          refreshedTarget.revision,
+          authorizeStart,
+          true,
+        );
+      }
       setWslEnvironments((current) => current.map((item) =>
         item.environmentId === result.environment.environmentId ? result.environment : item));
       setWslProviderId(provider.id);

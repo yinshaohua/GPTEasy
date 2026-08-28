@@ -85,6 +85,44 @@ pub struct WslEnvironmentSummary {
     pub reclaim_preview: Option<WslReclaimPreview>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WslInventoryStats {
+    pub environment_count: usize,
+    pub manageable_count: usize,
+    pub running_count: usize,
+    pub legacy_count: usize,
+    pub conflict_count: usize,
+    pub busy_count: usize,
+}
+
+pub(crate) fn summarize_wsl_inventory(environments: &[WslEnvironmentSummary]) -> WslInventoryStats {
+    let state_count = |state| {
+        environments
+            .iter()
+            .filter(|environment| environment.configuration_state == state)
+            .count()
+    };
+    WslInventoryStats {
+        environment_count: environments.len(),
+        manageable_count: environments
+            .iter()
+            .filter(|environment| {
+                matches!(
+                    environment.availability,
+                    WslAvailability::Manageable | WslAvailability::DefaultUserChanged
+                )
+            })
+            .count(),
+        running_count: environments
+            .iter()
+            .filter(|environment| environment.running)
+            .count(),
+        legacy_count: state_count(WslConfigurationState::Legacy),
+        conflict_count: state_count(WslConfigurationState::Conflict),
+        busy_count: state_count(WslConfigurationState::Busy),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WslReclaimScope {
@@ -284,14 +322,22 @@ pub struct WslApplication {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WslApplyMode {
     Apply,
-    Reclaim,
+    Reclaim { confirmed: bool },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WslReclaimProgress {
+    RebuildRequired,
+    Prepared,
+    ArtifactsReplaced,
+    StateCommitted,
 }
 
 impl WslApplyMode {
     fn lock_operation(self) -> &'static str {
         match self {
             Self::Apply => "switch",
-            Self::Reclaim => "reclaim",
+            Self::Reclaim { .. } => "reclaim",
         }
     }
 }
@@ -945,7 +991,9 @@ impl WslApplication {
             environment_id,
             provider_id,
             expected_revision,
+            true,
             WslApplyMode::Apply,
+            &mut |_| {},
         )
     }
 
@@ -954,19 +1002,37 @@ impl WslApplication {
         environment_id: &str,
         provider_id: &str,
         expected_revision: &str,
+        authorize_start: bool,
         confirm_reclaim: bool,
     ) -> Result<WslApplyResult, WslFailure> {
-        if !confirm_reclaim {
-            return Err(WslFailure::new(
-                WslFailureCategory::InvalidEnvironment,
-                "wsl.reclaim_confirmation_required",
-            ));
-        }
+        self.reclaim_provider_with_progress(
+            environment_id,
+            provider_id,
+            expected_revision,
+            authorize_start,
+            confirm_reclaim,
+            &mut |_| {},
+        )
+    }
+
+    pub(crate) fn reclaim_provider_with_progress(
+        &self,
+        environment_id: &str,
+        provider_id: &str,
+        expected_revision: &str,
+        authorize_start: bool,
+        confirm_reclaim: bool,
+        progress: &mut dyn FnMut(WslReclaimProgress),
+    ) -> Result<WslApplyResult, WslFailure> {
         self.apply_provider_with_mode(
             environment_id,
             provider_id,
             expected_revision,
-            WslApplyMode::Reclaim,
+            authorize_start,
+            WslApplyMode::Reclaim {
+                confirmed: confirm_reclaim,
+            },
+            progress,
         )
     }
 
@@ -975,7 +1041,9 @@ impl WslApplication {
         environment_id: &str,
         provider_id: &str,
         expected_revision: &str,
+        authorize_start: bool,
         mode: WslApplyMode,
+        progress: &mut dyn FnMut(WslReclaimProgress),
     ) -> Result<WslApplyResult, WslFailure> {
         let _guard = self
             .operation_lock
@@ -1032,6 +1100,12 @@ impl WslApplication {
         let active_probe = if originally_running {
             probe.clone()
         } else {
+            if !authorize_start {
+                return Err(WslFailure::new(
+                    WslFailureCategory::InvalidEnvironment,
+                    "wsl.reclaim_start_authorization_required",
+                ));
+            }
             let pre_start = self
                 .runtime
                 .probe()?
@@ -1090,6 +1164,7 @@ impl WslApplication {
             &provider,
             originally_running,
             mode,
+            progress,
         );
         if originally_running
             || matches!(&result, Err(failure) if failure.category == WslFailureCategory::Interrupted)
@@ -1133,12 +1208,23 @@ impl WslApplication {
         provider: &WslProvider,
         originally_running: bool,
         mode: WslApplyMode,
+        progress: &mut dyn FnMut(WslReclaimProgress),
     ) -> Result<WslApplyResult, WslFailure> {
+        let mode = if matches!(mode, WslApplyMode::Reclaim { confirmed: false }) {
+            if self.reclaim_check_requires_confirmation(connection, probe, progress)? {
+                return Err(WslFailure::new(
+                    WslFailureCategory::InvalidEnvironment,
+                    "wsl.reclaim_confirmation_required",
+                ));
+            }
+            WslApplyMode::Apply
+        } else {
+            mode
+        };
         self.runtime.check_codex_version(probe)?;
         if let Some(pending) = load_pending_operation(connection, &probe.environment_id)? {
             self.reconcile_pending_for_probe(connection, &pending, probe, false)?;
         }
-        self.runtime.ensure_helper(probe)?;
         let token = Uuid::new_v4().to_string();
         let operation_id = Uuid::new_v4().to_string();
         let old_provider_id = connection
@@ -1196,6 +1282,7 @@ impl WslApplication {
             &operation_id,
             &token,
             mode,
+            progress,
         );
         if matches!(&result, Err(failure) if failure.category == WslFailureCategory::Interrupted) {
             return Err(result.expect_err("matched interrupted failure"));
@@ -1216,6 +1303,62 @@ impl WslApplication {
         self.load_apply_result(connection, probe, originally_running)
     }
 
+    fn reclaim_check_requires_confirmation(
+        &self,
+        connection: &Connection,
+        probe: &WslProbe,
+        progress: &mut dyn FnMut(WslReclaimProgress),
+    ) -> Result<bool, WslFailure> {
+        self.runtime.check_codex_version(probe)?;
+        if let Some(pending) = load_pending_operation(connection, &probe.environment_id)? {
+            self.reconcile_pending_for_probe(connection, &pending, probe, false)?;
+        }
+        self.recover_refresh_lock(connection, probe)?;
+        let token = Uuid::new_v4().to_string();
+        set_refresh_lock_token(connection, &probe.environment_id, Some(&token))?;
+        if let Err(failure) = self.runtime.acquire_lock(probe, &token, "reclaim-check") {
+            set_refresh_lock_token(connection, &probe.environment_id, None)?;
+            return Err(failure);
+        }
+        let inspection = (|| {
+            let current_probe = self
+                .runtime
+                .probe()?
+                .into_iter()
+                .find(|item| item.environment_id == probe.environment_id)
+                .ok_or_else(|| {
+                    WslFailure::new(
+                        WslFailureCategory::EnvironmentNotFound,
+                        "wsl.environment_disappeared",
+                    )
+                })?;
+            if current_probe.availability != WslAvailability::Manageable
+                || !current_probe.running
+                || !same_environment_identity(&current_probe, probe)
+            {
+                return Err(WslFailure::new(
+                    WslFailureCategory::EnvironmentChanged,
+                    "wsl.environment_changed",
+                ));
+            }
+            let artifacts = self.runtime.read_artifacts(&current_probe)?;
+            Ok(matches!(
+                inspect_actual_managed_state(
+                    artifacts.config.as_deref(),
+                    artifacts.credentials.as_deref(),
+                ),
+                ActualManagedState::Conflict { .. }
+            ))
+        })();
+        self.runtime.release_lock(probe, &token)?;
+        set_refresh_lock_token(connection, &probe.environment_id, None)?;
+        let requires_confirmation = inspection?;
+        if requires_confirmation {
+            progress(WslReclaimProgress::RebuildRequired);
+        }
+        Ok(requires_confirmation)
+    }
+
     fn apply_started_locked(
         &self,
         connection: &mut Connection,
@@ -1225,6 +1368,7 @@ impl WslApplication {
         operation_id: &str,
         lock_token: &str,
         mode: WslApplyMode,
+        progress: &mut dyn FnMut(WslReclaimProgress),
     ) -> Result<(), WslFailure> {
         let current_probe = self
             .runtime
@@ -1251,28 +1395,27 @@ impl WslApplication {
             original.config.as_deref(),
             original.credentials.as_deref(),
         );
-        match (mode, &actual_state) {
+        let reclaim_conflict = match (mode, &actual_state) {
             (WslApplyMode::Apply, ActualManagedState::Conflict { message_id }) => {
                 return Err(WslFailure::new(
                     WslFailureCategory::NeedsAttention,
                     message_id,
                 ));
             }
-            (WslApplyMode::Reclaim, ActualManagedState::Conflict { .. }) => {}
-            (WslApplyMode::Reclaim, _) => {
-                return Err(WslFailure::new(
-                    WslFailureCategory::InvalidEnvironment,
-                    "wsl.reclaim_not_required",
-                ));
+            (WslApplyMode::Reclaim { confirmed: false }, ActualManagedState::Conflict { .. }) => {
+                unreachable!("unconfirmed reclaim is resolved before a pending Saga is created")
             }
-            (WslApplyMode::Apply, _) => {}
-        }
+            (WslApplyMode::Reclaim { confirmed: true }, ActualManagedState::Conflict { .. }) => {
+                true
+            }
+            (WslApplyMode::Apply | WslApplyMode::Reclaim { .. }, _) => false,
+        };
+        self.runtime.ensure_helper(&current_probe)?;
         let source_id = format!("desktop-{operation_id}");
-        let config = match mode {
-            WslApplyMode::Apply => render_config(original.config.as_deref(), provider, &source_id)?,
-            WslApplyMode::Reclaim => {
-                render_reclaimed_config(original.config.as_deref(), provider, &source_id)?
-            }
+        let config = if reclaim_conflict {
+            render_reclaimed_config(original.config.as_deref(), provider, &source_id)?
+        } else {
+            render_config(original.config.as_deref(), provider, &source_id)?
         };
         let credentials = render_credentials(&provider.api_key)?;
         let old_config_hash = hash_optional(original.config.as_deref());
@@ -1299,6 +1442,9 @@ impl WslApplication {
             )
             .map_err(|_| state_unavailable())?;
         transaction.commit().map_err(|_| state_unavailable())?;
+        if matches!(mode, WslApplyMode::Reclaim { confirmed: true }) {
+            progress(WslReclaimProgress::Prepared);
+        }
         self.faults.check(WslFailurePoint::AfterPrepared)?;
 
         let bundle = bundle_bytes(&config, &credentials);
@@ -1336,6 +1482,9 @@ impl WslApplication {
                 [current_probe.environment_id.as_str()],
             )
             .map_err(|_| state_unavailable())?;
+        if matches!(mode, WslApplyMode::Reclaim { confirmed: true }) {
+            progress(WslReclaimProgress::ArtifactsReplaced);
+        }
         self.faults.check(WslFailurePoint::AfterArtifactsReplaced)?;
         let latest = self
             .runtime
@@ -1405,6 +1554,9 @@ impl WslApplication {
             )
             .map_err(|_| state_unavailable())?;
         transaction.commit().map_err(|_| state_unavailable())?;
+        if matches!(mode, WslApplyMode::Reclaim { confirmed: true }) {
+            progress(WslReclaimProgress::StateCommitted);
+        }
         self.faults.check(WslFailurePoint::AfterStateCommitted)?;
         self.runtime
             .cleanup_credentials(&current_probe, lock_token)?;
@@ -2004,10 +2156,7 @@ fn inspect_actual_managed_state(
                 .get("model_providers")
                 .and_then(|value| value.get("gpteasy"))
                 .is_some();
-        if text.contains(start)
-            || text.contains(end)
-            || has_managed_metadata
-            || has_managed_fields
+        if text.contains(start) || text.contains(end) || has_managed_metadata || has_managed_fields
         {
             return managed_conflict("wsl.markers_invalid");
         }
@@ -2043,9 +2192,6 @@ fn inspect_actual_managed_state(
     if sources.len() != 1 || credential_files.len() != 1 {
         return managed_conflict("wsl.managed_metadata_invalid");
     }
-    if credential.is_none() {
-        return managed_conflict("wsl.credentials_invalid");
-    }
     let Some(schema_variant) = schema_v1_block_variant(block) else {
         return managed_conflict("wsl.schema_unknown");
     };
@@ -2057,6 +2203,9 @@ fn inspect_actual_managed_state(
         || credential_relative_from_config(config) != Some(expected_credential.as_str())
     {
         return managed_conflict("wsl.credential_reference_invalid");
+    }
+    if credential.is_none() {
+        return managed_conflict("wsl.credentials_invalid");
     }
     let Some(model) = document.get("model").and_then(|value| value.as_str()) else {
         return managed_conflict("wsl.managed_fields_invalid");
@@ -3017,6 +3166,7 @@ impl WslRuntime for SystemWslRuntime {
                     WslFailureCategory::RecoveryPending,
                     "wsl.lock_recovery_required",
                 ),
+                Some(45) => (WslFailureCategory::RecoveryPending, "wsl.rollback_failed"),
                 Some(46) => (
                     WslFailureCategory::InvalidEnvironment,
                     "wsl.credential_conflict",
@@ -4381,7 +4531,16 @@ model_providers.{provider_id}.requires_openai_auth = true\n\
 
         assert!(matches!(
             inspect_actual_managed_state(Some(&config), Some(b"secret")),
-            ActualManagedState::Conflict { .. }
+            ActualManagedState::Conflict {
+                message_id: "wsl.credential_reference_invalid"
+            }
+        ));
+
+        assert!(matches!(
+            inspect_actual_managed_state(Some(&config), None),
+            ActualManagedState::Conflict {
+                message_id: "wsl.credential_reference_invalid"
+            }
         ));
     }
 
@@ -4527,6 +4686,118 @@ model_providers.{provider_id}.requires_openai_auth = true\n\
     }
 
     #[test]
+    fn stopped_reclaim_without_start_authorization_has_no_side_effects() {
+        let provider_id = "22222222-2222-4222-8222-222222222222";
+        let original = WslArtifacts {
+            config: Some(b"custom = true\n".to_vec()),
+            credentials: Some(b"old-secret".to_vec()),
+        };
+        let runtime = Arc::new(FakeRuntime::new(probe(), original.clone()));
+        let (_temp, store, application) = application(runtime.clone());
+        let environment = application
+            .list()
+            .expect("list stopped environment")
+            .remove(0);
+
+        let failure = application
+            .reclaim_provider(
+                &environment.environment_id,
+                provider_id,
+                &environment.revision,
+                false,
+                false,
+            )
+            .expect_err("stopped reclaim requires explicit start authorization");
+
+        assert_eq!(
+            failure.message_id,
+            "wsl.reclaim_start_authorization_required"
+        );
+        assert_eq!(runtime.starts.load(Ordering::SeqCst), 0);
+        assert_eq!(runtime.writes.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            runtime.artifacts.lock().expect("artifacts").clone().config,
+            original.config
+        );
+        let connection = Connection::open(store.paths().database()).expect("state database");
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM wsl_pending_operation", [], |row| row
+                    .get::<_, i64>(
+                    0
+                ))
+                .expect("pending count"),
+            0
+        );
+        assert!(
+            connection
+                .query_row(
+                    "SELECT refresh_lock_token FROM wsl_environments WHERE environment_id = ?1",
+                    [&environment.environment_id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .expect("refresh lock token")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn unconfirmed_reclaim_uses_the_safe_apply_path_when_there_is_no_conflict() {
+        let provider_id = "22222222-2222-4222-8222-222222222222";
+        let mut running_probe = probe();
+        running_probe.running = true;
+        let runtime = Arc::new(FakeRuntime::new(
+            running_probe,
+            WslArtifacts {
+                config: Some(b"custom = true\n".to_vec()),
+                credentials: None,
+            },
+        ));
+        let (_temp, store, application) = application(runtime.clone());
+        let environment = application
+            .list()
+            .expect("list unmanaged environment")
+            .remove(0);
+
+        let result = application
+            .reclaim_provider(
+                &environment.environment_id,
+                provider_id,
+                &environment.revision,
+                false,
+                false,
+            )
+            .expect("safe apply does not require reclaim confirmation");
+
+        assert_eq!(
+            result.environment.configuration_state,
+            WslConfigurationState::Current
+        );
+        assert_eq!(runtime.starts.load(Ordering::SeqCst), 0);
+        assert_eq!(runtime.writes.load(Ordering::SeqCst), 1);
+        let connection = Connection::open(store.paths().database()).expect("state database");
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM wsl_pending_operation", [], |row| row
+                    .get::<_, i64>(
+                    0
+                ))
+                .expect("pending count"),
+            0
+        );
+        assert!(
+            connection
+                .query_row(
+                    "SELECT refresh_lock_token FROM wsl_environments WHERE environment_id = ?1",
+                    [&environment.environment_id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .expect("refresh lock token")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn confirmed_reclaim_backs_up_and_replaces_an_unknown_schema_without_losing_unrelated_toml() {
         let provider_id = "22222222-2222-4222-8222-222222222222";
         let mut running_probe = probe();
@@ -4548,16 +4819,48 @@ model_providers.{provider_id}.requires_openai_auth = true\n\
         let (_temp, store, application) = application(runtime.clone());
         let environment = application.list().expect("list conflict").remove(0);
 
+        let mut denied_progress = Vec::new();
         let denied = application
-            .reclaim_provider(
+            .reclaim_provider_with_progress(
                 &environment.environment_id,
                 provider_id,
                 &environment.revision,
                 false,
+                false,
+                &mut |phase| denied_progress.push(phase),
             )
             .expect_err("reclaim requires a second confirmation");
         assert_eq!(denied.message_id, "wsl.reclaim_confirmation_required");
+        assert_eq!(denied_progress, vec![WslReclaimProgress::RebuildRequired]);
         assert_eq!(runtime.writes.load(Ordering::SeqCst), 0);
+        assert!(
+            runtime
+                .active_locks
+                .lock()
+                .expect("active locks")
+                .is_empty()
+        );
+        let connection = Connection::open(store.paths().database()).expect("state database");
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM wsl_pending_operation", [], |row| row
+                    .get::<_, i64>(
+                    0
+                ))
+                .expect("pending count before confirmation"),
+            0
+        );
+        assert!(
+            connection
+                .query_row(
+                    "SELECT refresh_lock_token FROM wsl_environments WHERE environment_id = ?1",
+                    [&environment.environment_id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .expect("refresh lock token after confirmation check")
+                .is_none()
+        );
+        drop(connection);
         assert_eq!(
             runtime
                 .artifacts
@@ -4568,14 +4871,26 @@ model_providers.{provider_id}.requires_openai_auth = true\n\
             Some(unknown_schema.as_slice())
         );
 
+        let mut confirmed_progress = Vec::new();
         let result = application
-            .reclaim_provider(
+            .reclaim_provider_with_progress(
                 &environment.environment_id,
                 provider_id,
                 &environment.revision,
+                false,
                 true,
+                &mut |phase| confirmed_progress.push(phase),
             )
             .expect("confirmed reclaim");
+
+        assert_eq!(
+            confirmed_progress,
+            vec![
+                WslReclaimProgress::Prepared,
+                WslReclaimProgress::ArtifactsReplaced,
+                WslReclaimProgress::StateCommitted,
+            ]
+        );
 
         assert_eq!(
             result.environment.configuration_state,
@@ -4632,6 +4947,7 @@ model_providers.{provider_id}.requires_openai_auth = true\n\
                 &environment.environment_id,
                 provider_id,
                 &environment.revision,
+                false,
                 true,
             )
             .expect("reclaim invalid config");
@@ -4670,16 +4986,20 @@ model_providers.{provider_id}.requires_openai_auth = true\n\
         let (_temp, store, application) = application(runtime.clone());
         let environment = application.list().expect("list conflict").remove(0);
 
+        let mut progress = Vec::new();
         let failure = application
-            .reclaim_provider(
+            .reclaim_provider_with_progress(
                 &environment.environment_id,
                 provider_id,
                 &environment.revision,
+                false,
                 true,
+                &mut |phase| progress.push(phase),
             )
             .expect_err("guest write failure");
 
         assert_eq!(failure.message_id, "wsl.guest_write_failed");
+        assert_eq!(progress, vec![WslReclaimProgress::Prepared]);
         let artifacts = runtime.artifacts.lock().expect("artifacts").clone();
         assert_eq!(artifacts.config, original.config);
         assert_eq!(artifacts.credentials, original.credentials);
@@ -4757,6 +5077,18 @@ model_providers.{provider_id}.requires_openai_auth = true\n\
             "[ \"$credential_created\" = false ] || [ \"$config_replaced\" = true ] || rm -f \"$CREDENTIAL\""
         ));
         assert!(script.contains("config_replaced=true"));
+    }
+
+    #[test]
+    fn guest_writer_rolls_back_an_atomic_replacement_when_directory_sync_fails() {
+        let script = std::str::from_utf8(GUEST_WRITER).expect("guest writer is UTF-8");
+
+        assert!(script.contains("rollback_config()"));
+        assert!(script.contains(".config.gpteasy.rollback.XXXXXX"));
+        assert!(script.contains("sync -f \"$backup_path\""));
+        assert!(script.contains("sync -f \"$BACKUP_DIR\""));
+        assert!(script.contains("if rollback_config; then"));
+        assert!(script.contains("fail rollback_failed 45"));
     }
 
     #[test]

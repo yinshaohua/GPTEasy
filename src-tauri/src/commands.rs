@@ -1,5 +1,5 @@
 use std::process::Command;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -31,7 +31,8 @@ use crate::update::{
 };
 use crate::wsl::{
     WslApplication, WslApplyResult, WslDeletionAuditError, WslEnvironmentSummary, WslFailure,
-    WslLifecycleOutcome, WslLifecycleResult, WslRefreshResult,
+    WslLifecycleOutcome, WslLifecycleResult, WslReclaimProgress, WslRefreshResult,
+    summarize_wsl_inventory,
 };
 
 pub(crate) struct StartupRuntime {
@@ -59,12 +60,14 @@ pub(crate) struct SessionRuntime {
 }
 
 pub(crate) struct IssueLogRuntime {
-    pub(crate) store: IssueLogStore,
+    pub(crate) store: Arc<IssueLogStore>,
 }
 
 impl IssueLogRuntime {
     pub(crate) fn new(store: IssueLogStore) -> Self {
-        Self { store }
+        Self {
+            store: Arc::new(store),
+        }
     }
 }
 
@@ -320,29 +323,89 @@ fn finish_command<T, E: IssueLoggableFailure>(
     result
 }
 
-fn wsl_inventory_details(provider_count: usize, environments: &[WslEnvironmentSummary]) -> String {
-    let state_count = |state| {
-        environments
-            .iter()
-            .filter(|environment| environment.configuration_state == state)
-            .count()
+#[derive(Debug, Clone, Copy)]
+enum WslReclaimAuditPhase {
+    Revalidated,
+    SafeApplyCheck,
+    RebuildRequired,
+    UserConfirmed,
+    Prepared,
+    ArtifactsReplaced,
+    StateCommitted,
+    Succeeded,
+}
+
+fn log_wsl_reclaim_phase(store: &IssueLogStore, phase: WslReclaimAuditPhase) {
+    let (message, details) = match phase {
+        WslReclaimAuditPhase::Revalidated => (
+            "wsl.reclaim_revalidated",
+            "phase=revalidated status=succeeded",
+        ),
+        WslReclaimAuditPhase::SafeApplyCheck => {
+            ("wsl.reclaim_safe_apply_check", "phase=safe_apply_check")
+        }
+        WslReclaimAuditPhase::RebuildRequired => {
+            ("wsl.reclaim_rebuild_required", "phase=rebuild_required")
+        }
+        WslReclaimAuditPhase::UserConfirmed => {
+            ("wsl.reclaim_user_confirmed", "phase=user_confirmed")
+        }
+        WslReclaimAuditPhase::Prepared => ("wsl.reclaim_prepared", "phase=prepared"),
+        WslReclaimAuditPhase::ArtifactsReplaced => (
+            "wsl.reclaim_artifacts_replaced",
+            "phase=backup_and_write status=completed",
+        ),
+        WslReclaimAuditPhase::StateCommitted => {
+            ("wsl.reclaim_state_committed", "phase=state_committed")
+        }
+        WslReclaimAuditPhase::Succeeded => {
+            ("wsl.reclaim_succeeded", "phase=result status=succeeded")
+        }
     };
+    store.append(
+        IssueLogLevel::Info,
+        "wsl.reclaim_provider",
+        message,
+        Some(details.to_owned()),
+    );
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ProviderRevalidationAuditContext {
+    WslReclaim,
+}
+
+fn audit_provider_revalidation_result(
+    store: &IssueLogStore,
+    context: Option<ProviderRevalidationAuditContext>,
+    result: &Result<ProviderRevalidationResult, ProviderFailure>,
+) {
+    if context == Some(ProviderRevalidationAuditContext::WslReclaim)
+        && matches!(result, Ok(revalidated) if revalidated.validation_receipt.is_none())
+    {
+        log_wsl_reclaim_phase(store, WslReclaimAuditPhase::Revalidated);
+    }
+}
+
+fn log_wsl_reclaim_progress(store: &IssueLogStore, progress: WslReclaimProgress) {
+    let phase = match progress {
+        WslReclaimProgress::RebuildRequired => WslReclaimAuditPhase::RebuildRequired,
+        WslReclaimProgress::Prepared => WslReclaimAuditPhase::Prepared,
+        WslReclaimProgress::ArtifactsReplaced => WslReclaimAuditPhase::ArtifactsReplaced,
+        WslReclaimProgress::StateCommitted => WslReclaimAuditPhase::StateCommitted,
+    };
+    log_wsl_reclaim_phase(store, phase);
+}
+
+fn wsl_inventory_details(provider_count: usize, environments: &[WslEnvironmentSummary]) -> String {
+    let stats = summarize_wsl_inventory(environments);
     let message_count = |message_id: &str| {
         environments
             .iter()
             .filter(|environment| environment.message_id.as_deref() == Some(message_id))
             .count()
     };
-    let manageable_count = environments
-        .iter()
-        .filter(|environment| {
-            matches!(
-                environment.availability,
-                crate::wsl::WslAvailability::Manageable
-                    | crate::wsl::WslAvailability::DefaultUserChanged
-            )
-        })
-        .count();
     format!(
         concat!(
             "provider_count={} environment_count={} manageable_count={} ",
@@ -351,11 +414,11 @@ fn wsl_inventory_details(provider_count: usize, environments: &[WslEnvironmentSu
             "invalid_credential_reference_count={} invalid_config_count={}"
         ),
         provider_count,
-        environments.len(),
-        manageable_count,
-        state_count(crate::wsl::WslConfigurationState::Legacy),
-        state_count(crate::wsl::WslConfigurationState::Conflict),
-        state_count(crate::wsl::WslConfigurationState::Busy),
+        stats.environment_count,
+        stats.manageable_count,
+        stats.legacy_count,
+        stats.conflict_count,
+        stats.busy_count,
         message_count("wsl.schema_unknown"),
         message_count("wsl.markers_invalid"),
         message_count("wsl.credential_reference_invalid"),
@@ -1274,6 +1337,7 @@ pub(crate) async fn reclaim_wsl_provider(
     environment_id: String,
     provider_id: String,
     expected_revision: String,
+    authorize_start: bool,
     confirm_reclaim: bool,
 ) -> Result<WslApplyResult, WslFailure> {
     let Some(_activity) = app
@@ -1290,13 +1354,20 @@ pub(crate) async fn reclaim_wsl_provider(
             )),
         );
     };
+    log_wsl_reclaim_phase(&logs.store, WslReclaimAuditPhase::SafeApplyCheck);
+    if confirm_reclaim {
+        log_wsl_reclaim_phase(&logs.store, WslReclaimAuditPhase::UserConfirmed);
+    }
     let application = state.application.clone();
+    let log_store = logs.store.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        application.reclaim_provider(
+        application.reclaim_provider_with_progress(
             &environment_id,
             &provider_id,
             &expected_revision,
+            authorize_start,
             confirm_reclaim,
+            &mut |progress| log_wsl_reclaim_progress(&log_store, progress),
         )
     })
     .await
@@ -1307,6 +1378,16 @@ pub(crate) async fn reclaim_wsl_provider(
         )
     })
     .and_then(|result| result);
+    if matches!(
+        &result,
+        Err(failure) if failure.message_id == "wsl.reclaim_confirmation_required"
+    ) {
+        return result;
+    }
+    match &result {
+        Ok(_) => log_wsl_reclaim_phase(&logs.store, WslReclaimAuditPhase::Succeeded),
+        Err(_) => {}
+    }
     finish_command(&logs.store, "wsl.reclaim_provider", result)
 }
 
@@ -1634,6 +1715,7 @@ pub(crate) async fn revalidate_provider(
     logs: State<'_, IssueLogRuntime>,
     request_id: String,
     provider_id: String,
+    audit_context: Option<ProviderRevalidationAuditContext>,
 ) -> Result<ProviderRevalidationResult, ProviderFailure> {
     let Some(_activity) = app
         .state::<UpdateRuntime>()
@@ -1672,6 +1754,7 @@ pub(crate) async fn revalidate_provider(
             }
         })
         .await;
+    audit_provider_revalidation_result(&logs.store, audit_context, &result);
     finish_command(&logs.store, "provider.revalidate", result)
 }
 
@@ -2090,10 +2173,13 @@ fn environment_task_failed() -> EnvironmentFailure {
 #[cfg(test)]
 mod tests {
     use super::{
-        DeleteProviderFailure, IssueLogLevel, IssueLogStore, UpdateFailureCategory,
-        UpdateInstallFailure, UpdateInstallFailureCategory, UpdateSnapshot, UpdateState,
-        finish_command, finish_command_with_desktop_restart, log_update_check_failure,
-        log_update_install_failure, wsl_inventory_details,
+        DeleteProviderFailure, IssueLogLevel, IssueLogStore, ProviderFailure,
+        ProviderFailureCategory, ProviderRevalidationAuditContext, ProviderRevalidationResult,
+        ProviderSummary, ProviderValidationReceipt, UpdateFailureCategory, UpdateInstallFailure,
+        UpdateInstallFailureCategory, UpdateSnapshot, UpdateState, WslReclaimAuditPhase,
+        audit_provider_revalidation_result, finish_command, finish_command_with_desktop_restart,
+        log_update_check_failure, log_update_install_failure, log_wsl_reclaim_phase,
+        wsl_inventory_details,
     };
     use crate::consumer::{ConsumerIdentity, ConsumerRole, ConsumerStatus};
     use crate::desktop::{DesktopAction, DesktopFailure, DesktopFailureCategory, DesktopSnapshot};
@@ -2191,6 +2277,109 @@ mod tests {
         assert!(!encoded.contains("api_key"));
         assert!(!encoded.contains("base_url"));
         assert!(!encoded.contains("provider_id"));
+    }
+
+    #[test]
+    fn wsl_reclaim_audit_records_each_non_sensitive_controlled_rebuild_phase() {
+        let directory = tempdir().expect("issue log directory");
+        let store = IssueLogStore::new(directory.path());
+
+        for phase in [
+            WslReclaimAuditPhase::Revalidated,
+            WslReclaimAuditPhase::SafeApplyCheck,
+            WslReclaimAuditPhase::RebuildRequired,
+            WslReclaimAuditPhase::UserConfirmed,
+            WslReclaimAuditPhase::Prepared,
+            WslReclaimAuditPhase::ArtifactsReplaced,
+            WslReclaimAuditPhase::StateCommitted,
+            WslReclaimAuditPhase::Succeeded,
+        ] {
+            log_wsl_reclaim_phase(&store, phase);
+        }
+
+        let records = store.list(0, Some(IssueLogLevel::Info), Some("wsl.reclaim_provider"));
+        assert_eq!(records.len(), 8);
+        assert_eq!(
+            records[0].details.as_deref(),
+            Some("phase=revalidated status=succeeded")
+        );
+        assert_eq!(
+            records[7].details.as_deref(),
+            Some("phase=result status=succeeded")
+        );
+        let encoded = serde_json::to_string(&records).expect("serialize reclaim audit");
+        assert!(!encoded.contains("provider_id"));
+        assert!(!encoded.contains("environment_id"));
+        assert!(!encoded.contains("api_key"));
+    }
+
+    #[test]
+    fn wsl_reclaim_revalidation_audit_requires_context_success_and_no_address_suggestion() {
+        let directory = tempdir().expect("issue log directory");
+        let store = IssueLogStore::new(directory.path());
+        let provider = ProviderSummary {
+            id: "provider-id".to_owned(),
+            name: "Sensitive Provider".to_owned(),
+            base_url: "https://provider.example/v1".to_owned(),
+            default_model: "model-a".to_owned(),
+            verified_at_epoch_seconds: 1,
+            is_current: false,
+            recommendation_id: None,
+            has_recommendation_update: false,
+            recommendation_template_base_url: None,
+        };
+        let success = Ok(ProviderRevalidationResult {
+            provider: provider.clone(),
+            validation_receipt: None,
+        });
+        audit_provider_revalidation_result(&store, None, &success);
+        let suggestion = Ok(ProviderRevalidationResult {
+            provider,
+            validation_receipt: Some(ProviderValidationReceipt {
+                validation_id: "validation-id".to_owned(),
+                requested_base_url: "https://requested.example/v1".to_owned(),
+                normalized_base_url: "https://normalized.example/v1".to_owned(),
+                default_model: "model-a".to_owned(),
+                combination_fingerprint: "fingerprint".to_owned(),
+                verified_at_epoch_seconds: 1,
+            }),
+        });
+        audit_provider_revalidation_result(
+            &store,
+            Some(ProviderRevalidationAuditContext::WslReclaim),
+            &suggestion,
+        );
+        let failure = Err(ProviderFailure::new(
+            ProviderFailureCategory::StateUnavailable,
+            "provider.state_unavailable",
+        ));
+        audit_provider_revalidation_result(
+            &store,
+            Some(ProviderRevalidationAuditContext::WslReclaim),
+            &failure,
+        );
+        assert!(
+            store
+                .list(0, Some(IssueLogLevel::Info), Some("wsl.reclaim_provider"))
+                .is_empty()
+        );
+
+        audit_provider_revalidation_result(
+            &store,
+            Some(ProviderRevalidationAuditContext::WslReclaim),
+            &success,
+        );
+        let records = store.list(0, Some(IssueLogLevel::Info), Some("wsl.reclaim_provider"));
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].message, "wsl.reclaim_revalidated");
+        assert_eq!(
+            records[0].details.as_deref(),
+            Some("phase=revalidated status=succeeded")
+        );
+        let encoded = serde_json::to_string(&records).expect("serialize revalidation audit");
+        assert!(!encoded.contains("provider-id"));
+        assert!(!encoded.contains("Sensitive Provider"));
+        assert!(!encoded.contains("provider.example"));
     }
 
     #[test]

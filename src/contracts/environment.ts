@@ -194,6 +194,7 @@ export function reclaimWslProvider(
   environmentId: string,
   providerId: string,
   expectedRevision: string,
+  authorizeStart: boolean,
   confirmReclaim: boolean,
 ): Promise<WslApplyResult> {
   if (isBrowserPreview()) return Promise.reject(previewFailure);
@@ -201,6 +202,7 @@ export function reclaimWslProvider(
     environmentId,
     providerId,
     expectedRevision,
+    authorizeStart,
     confirmReclaim,
   });
 }
