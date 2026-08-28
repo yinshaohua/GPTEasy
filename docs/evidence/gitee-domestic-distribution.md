@@ -27,4 +27,4 @@ GitHub Actions 工作流 [33138532094](https://github.com/yinshaohua/GPTEasy/act
 
 维护者使用精确 ID 和 tag 运行清理脚本后，匿名复核确认 `926296`、`926354`、`926420` 三个 Release 均返回 HTTP 404，对应的三个 smoke 清单均返回 Gitee 表示文件不存在的空数组，非正式资源清理完成。
 
-真实冒烟、人工匿名点击、清理和自动门禁全部完成后，GitHub Actions 中的 `GITCODE_TOKEN`、`GITCODE_REPOSITORY` 和 `GITCODE_DEFAULT_BRANCH` 已删除，只保留活动的 Gitee Secret/Variables。GitCode 站点 Token 的维护者撤销结果仍须单独确认；历史 GitCode 仓库、Tag、Release 和附件保持不变。
+真实冒烟、人工匿名点击、清理和自动门禁全部完成后，GitHub Actions 中的 `GITCODE_TOKEN`、`GITCODE_REPOSITORY` 和 `GITCODE_DEFAULT_BRANCH` 已删除，只保留活动的 Gitee Secret/Variables。维护者随后在 GitCode 设置页撤销了原 GitHub Actions 使用的旧 Token；历史 GitCode 仓库、Tag、Release 和附件保持不变。
