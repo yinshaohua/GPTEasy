@@ -242,7 +242,7 @@ function normalizeReleaseBody(body) {
 async function readCurrentManifest() {
   const endpoint = `/repos/${configuration.giteeRepository}/contents/${configuration.formalManifestPath}?ref=${encodeURIComponent(configuration.giteeBranch)}`;
   const metadata = await giteeRequest(endpoint);
-  if (!metadata) return null;
+  if (!metadata || (Array.isArray(metadata) && metadata.length === 0)) return null;
   const embedded = decodeApiContent(metadata);
   if (embedded !== null) {
     const manifest = parseManifest(embedded);

@@ -34,6 +34,18 @@ test("首次同步验证所有附件后最后推进正式清单", async () => {
   }
 });
 
+test("首次同步兼容 Gitee 以 HTTP 200 空数组表示清单不存在", async () => {
+  const adapter = await startAdapter({ missingManifestAsEmptyArray: true });
+  try {
+    const result = await runSync(adapter.baseUrl);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(adapter.state.manifests.length, 1);
+    assert.equal(adapter.state.records.at(-1).operation, "manifest-write");
+  } finally {
+    await adapter.close();
+  }
+});
+
 test("Release 正文中的字面量转义换行会规范化为 Markdown 换行", async () => {
   const adapter = await startAdapter({
     releasePatch: { body: "第一行\\n\\n### 更新\\n- 第二行" },
@@ -390,6 +402,7 @@ async function startAdapter(options = {}) {
     failGiteeRequestWithToken: options.failGiteeRequestWithToken ?? false,
     failAnonymousName: options.failAnonymousName,
     currentManifest: options.currentManifest,
+    missingManifestAsEmptyArray: options.missingManifestAsEmptyArray ?? false,
     releasePatch: options.releasePatch ?? {},
     releaseResponsePatch: options.releaseResponsePatch ?? {},
     releaseAssets: options.releaseAssets,
@@ -458,7 +471,11 @@ async function startAdapter(options = {}) {
       return json(response, 200, releaseResponse(state, server));
     }
     if (request.method === "GET" && url.pathname.endsWith("/contents/latest.md")) {
-      if (!state.currentManifest) return json(response, 404, { message: "not found" });
+      if (!state.currentManifest) {
+        return state.missingManifestAsEmptyArray
+          ? json(response, 200, [])
+          : json(response, 404, { message: "not found" });
+      }
       if (state.embeddedManifest) {
         const content = Buffer.from(`${JSON.stringify(state.currentManifest)}\n`).toString("base64");
         return json(response, 200, { sha: "manifest-sha", content, encoding: "base64" });
