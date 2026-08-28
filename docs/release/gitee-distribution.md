@@ -48,7 +48,7 @@ bash scripts/setup-gitee-distribution.sh
 
 1. 使用 form-data 与 Token 创建非正式 prerelease Release；
 2. 使用数值 Release ID 以 multipart/form-data 上传接近安装包体积的附件；
-3. 匿名下载附件并核对 SHA-256；
+3. 匿名发送 Range 下载探测；平台返回 `206` 时核对单字节和 `Content-Range`，忽略 Range 返回 `200` 时核对完整大小和 SHA-256；随后再次完整下载并核对 SHA-256；
 4. 写入 JSON 正文的 `smoke/<name>.md` 测试清单；
 5. 匿名读取 contents 元数据返回的官方 Gitee Raw blob，并核对字段；报告输出精确的 `tag` 和数值 `releaseId`，供维护者按需运行 `scripts/cleanup-gitee-release.sh <releaseId> <tag>` 二次确认清理。
 

@@ -127,9 +127,17 @@ RANGE_STATUS=${RANGE_RESULT%% *}
 RANGE_BYTES=${RANGE_RESULT#* }
 RANGE_BYTES=${RANGE_BYTES%%.*}
 RANGE_CONTENT=$(tr -d '\r' < "$RANGE_HEADERS" | awk 'tolower($1) == "content-range:" { value=$2 " " $3 } END { print value }')
-[[ "$RANGE_STATUS" == 206 ]] || { printf 'anonymous attachment range download failed: expected HTTP 206, got %s\n' "$RANGE_STATUS" >&2; exit 1; }
-[[ "$RANGE_BYTES" == 1 && $(wc -c < "$RANGE_PATH") -eq 1 ]] || { printf 'anonymous attachment range download did not return exactly one byte\n' >&2; exit 1; }
-[[ "$RANGE_CONTENT" == "bytes 0-0/$ASSET_SIZE" ]] || { printf 'anonymous attachment range response was %s\n' "${RANGE_CONTENT:-<missing>}" >&2; exit 1; }
+if [[ "$RANGE_STATUS" == 206 ]]; then
+  [[ "$RANGE_BYTES" == 1 && $(wc -c < "$RANGE_PATH") -eq 1 ]] || { printf 'anonymous attachment range download did not return exactly one byte\n' >&2; exit 1; }
+  [[ "$RANGE_CONTENT" == "bytes 0-0/$ASSET_SIZE" ]] || { printf 'anonymous attachment range response was %s\n' "${RANGE_CONTENT:-<missing>}" >&2; exit 1; }
+elif [[ "$RANGE_STATUS" == 200 ]]; then
+  RANGE_SHA256=$(sha256sum "$RANGE_PATH" | cut -d ' ' -f 1)
+  [[ "$RANGE_BYTES" == "$ASSET_SIZE" && $(wc -c < "$RANGE_PATH") -eq "$ASSET_SIZE" ]] || { printf 'anonymous Range fallback did not return the complete attachment\n' >&2; exit 1; }
+  [[ "$RANGE_SHA256" == "$ASSET_SHA256" ]] || { printf 'anonymous Range fallback SHA-256 does not match uploaded content\n' >&2; exit 1; }
+else
+  printf 'anonymous attachment range download failed: expected HTTP 206 or full HTTP 200, got %s\n' "$RANGE_STATUS" >&2
+  exit 1
+fi
 download_anonymously "$DOWNLOAD_URL" "$DOWNLOAD_PATH" 'anonymous attachment download'
 DOWNLOADED_SHA256=$(sha256sum "$DOWNLOAD_PATH" | cut -d ' ' -f 1)
 DOWNLOADED_SIZE=$(wc -c < "$DOWNLOAD_PATH")

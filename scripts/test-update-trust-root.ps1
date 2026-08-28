@@ -118,6 +118,10 @@ if (-not $sync.Contains('new FormData') -or -not $sync.Contains('new URLSearchPa
 if (-not $smoke.Contains('--range 0-0') -or -not $smoke.Contains('prerelease=true')) {
     Add-TrustError 'Gitee smoke must use a prerelease and anonymous Range download.'
 }
+if (-not $smoke.Contains('target_commitish=$GITEE_DEFAULT_BRANCH') -or
+    -not $sync.Contains('target_commitish: config.giteeBranch')) {
+    Add-TrustError 'Gitee Release creation must target the configured distribution branch.'
+}
 if (-not $wizard.Contains('ask_secret GITEE_TOKEN') -or
     -not $wizard.Contains('set_secret "$TOKEN_SECRET_NAME"') -or
     -not $wizard.Contains('unset GITEE_TOKEN')) {
