@@ -12,6 +12,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 
 import type { UpdateSnapshot } from "./contracts/update";
+import { appPageTitles, type AppPage } from "./appPages";
 
 export interface UpdateSidebarState {
   snapshot: UpdateSnapshot;
@@ -37,7 +38,7 @@ export default function AppSidebar({
   update,
   currentProviderName,
 }: {
-  activeView?: "providers" | "sessions" | "logs";
+  activeView?: AppPage;
   onOpenProviders?: () => void;
   onOpenSessions?: () => void;
   onOpenLogs?: () => void;
@@ -56,7 +57,7 @@ export default function AppSidebar({
           onClick={onOpenProviders}
         >
           <Server size={18} aria-hidden="true" />
-          供应商管理
+          {appPageTitles.providers}
         </button>
         <button
           className="nav-item"
@@ -65,7 +66,7 @@ export default function AppSidebar({
           onClick={onOpenSessions}
         >
           <MessageSquare size={18} aria-hidden="true" />
-          <span>会话管理</span>
+          <span>{appPageTitles.sessions}</span>
         </button>
       </nav>
       <SidebarFooter currentProviderName={currentProviderName} openAiAction={openAiAction} update={update} onOpenLogs={onOpenLogs} />

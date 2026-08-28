@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 
 import AppSidebar, { type OpenAiSidebarAction, type UpdateSidebarState } from "./AppSidebar";
+import { appPageTitles, type AppPage } from "./appPages";
 import ProviderPage from "./ProviderPage";
 import SessionPage from "./SessionPage";
 import IssueLogPage from "./IssueLogPage";
@@ -42,7 +43,7 @@ type ViewState =
 
 export default function App() {
   const [state, setState] = useState<ViewState>({ kind: "loading" });
-  const [page, setPage] = useState<"providers" | "sessions" | "logs">("providers");
+  const [page, setPage] = useState<AppPage>("providers");
   const [sessionVisited, setSessionVisited] = useState(false);
   const [openAiAction, setOpenAiAction] = useState<OpenAiSidebarAction>();
   const [update, setUpdate] = useState<UpdateSnapshot>(initialUpdateSnapshot);
@@ -197,7 +198,7 @@ function Shell({
   update,
 }: {
   children: React.ReactNode;
-  page: "providers" | "sessions" | "logs";
+  page: AppPage;
   onOpenProviders: () => void;
   onOpenSessions: () => void;
   onOpenLogs: () => void;
@@ -224,15 +225,10 @@ function Shell({
   );
 }
 
-function AppHeader({ page }: { page: "providers" | "sessions" | "logs" }) {
-  const title = page === "providers"
-    ? "供应商管理"
-    : page === "sessions"
-      ? "会话管理"
-      : "问题日志";
+function AppHeader({ page }: { page: AppPage }) {
   return (
     <header className="app-header" aria-label="全局标题栏">
-      <h1>{title}</h1>
+      <h1>{appPageTitles[page]}</h1>
       <div className="app-header-actions">
         <DesktopControl />
         <DiagnosticReportControl />

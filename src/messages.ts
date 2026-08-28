@@ -262,7 +262,6 @@ export const wslConfigurationStateMessages = {
 } as const;
 
 export const providerMessages = {
-  pageTitle: "供应商管理",
   catalogTitle: "供应商目录",
   catalogCount: (count: number) => `${count} 个已验证供应商`,
   newProvider: "添加供应商",
@@ -503,7 +502,6 @@ export const restoreAvailabilityMessages = {
 } as const;
 
 export const sessionMessages = {
-  pageTitle: "会话管理",
   activeTab: "会话",
   archivedTab: "已归档",
   searchLabel: "搜索标题或预览",
