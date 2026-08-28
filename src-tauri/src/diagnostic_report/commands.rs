@@ -8,7 +8,7 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::DialogExt;
 
 use super::{DiagnosticApplication, DiagnosticRepairStatus, DiagnosticReport};
-use crate::commands::{EnvironmentRuntime, IssueLogRuntime, ProviderRuntime};
+use crate::commands::{EnvironmentRuntime, IssueLogRuntime, ProviderRuntime, WslRuntime};
 use crate::diagnostic_assistant::{
     self, DiagnosticAssistantResult, DiagnosticChatResult, DiagnosticConversationMessage,
     DiagnosticManagementContext,
@@ -63,6 +63,7 @@ pub(crate) async fn analyze_diagnostic_report(
     runtime: State<'_, DiagnosticRuntime>,
     providers: State<'_, ProviderRuntime>,
     environment: State<'_, EnvironmentRuntime>,
+    wsl: State<'_, WslRuntime>,
     logs: State<'_, IssueLogRuntime>,
     provider_id: String,
 ) -> Result<DiagnosticAssistantResult, DiagnosticFailure> {
@@ -79,7 +80,7 @@ pub(crate) async fn analyze_diagnostic_report(
         .map_err(|_| DiagnosticFailure {
             message_id: "diagnostics.assistant_failed",
         })?;
-    let management = diagnostic_management_context(&providers, &environment);
+    let management = diagnostic_management_context(&providers, &environment, &wsl);
     let result = diagnostic_assistant::analyze(
         provider.id.clone(),
         provider.name,
@@ -102,6 +103,7 @@ pub(crate) async fn chat_diagnostic_assistant(
     runtime: State<'_, DiagnosticRuntime>,
     providers: State<'_, ProviderRuntime>,
     environment: State<'_, EnvironmentRuntime>,
+    wsl: State<'_, WslRuntime>,
     logs: State<'_, IssueLogRuntime>,
     provider_id: String,
     message: String,
@@ -120,7 +122,7 @@ pub(crate) async fn chat_diagnostic_assistant(
         .map_err(|_| DiagnosticFailure {
             message_id: "diagnostics.assistant_failed",
         })?;
-    let management = diagnostic_management_context(&providers, &environment);
+    let management = diagnostic_management_context(&providers, &environment, &wsl);
     let result = diagnostic_assistant::chat(
         provider.id.clone(),
         provider.name,
@@ -201,13 +203,14 @@ pub(crate) async fn export_diagnostic_bundle(
     runtime: State<'_, DiagnosticRuntime>,
     providers: State<'_, ProviderRuntime>,
     environment: State<'_, EnvironmentRuntime>,
+    wsl: State<'_, WslRuntime>,
     logs: State<'_, IssueLogRuntime>,
     destination: String,
     conversation: Vec<DiagnosticBundleMessage>,
 ) -> Result<(), DiagnosticFailure> {
     let application = runtime.application.clone();
     let records = recent_error_logs(&logs);
-    let management = diagnostic_management_context(&providers, &environment);
+    let management = diagnostic_management_context(&providers, &environment, &wsl);
     let conversation = sanitize_bundle_conversation(conversation);
     let result = tauri::async_runtime::spawn_blocking(move || {
         let report = application.inspect(&records);
@@ -231,12 +234,13 @@ pub(crate) async fn copy_diagnostic_bundle(
     runtime: State<'_, DiagnosticRuntime>,
     providers: State<'_, ProviderRuntime>,
     environment: State<'_, EnvironmentRuntime>,
+    wsl: State<'_, WslRuntime>,
     logs: State<'_, IssueLogRuntime>,
     conversation: Vec<DiagnosticBundleMessage>,
 ) -> Result<(), DiagnosticFailure> {
     let application = runtime.application.clone();
     let records = recent_error_logs(&logs);
-    let management = diagnostic_management_context(&providers, &environment);
+    let management = diagnostic_management_context(&providers, &environment, &wsl);
     let conversation = sanitize_bundle_conversation(conversation);
     let result = tauri::async_runtime::spawn_blocking(move || {
         let report = application.inspect(&records);
@@ -299,10 +303,12 @@ fn render_diagnostic_bundle_markdown(
 fn diagnostic_management_context(
     providers: &ProviderRuntime,
     environment: &EnvironmentRuntime,
+    wsl: &WslRuntime,
 ) -> DiagnosticManagementContext {
     DiagnosticManagementContext::inspect(
         environment.inspect().map_err(|failure| failure.message_id),
         providers.list().map_err(|failure| failure.message_id),
+        wsl.inspect().map_err(|failure| failure.message_id),
     )
 }
 

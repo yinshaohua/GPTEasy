@@ -3177,6 +3177,7 @@ describe("WSL2 供应商选择", () => {
   });
 
   it("展示 Running WSL2 的实际共同管理状态且不接收凭据", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
     const provider = {
       id: "22222222-2222-4222-8222-222222222222",
       name: "WSL Provider",
@@ -3232,7 +3233,13 @@ describe("WSL2 供应商选择", () => {
             actualProviderId: null,
             configurationState: "conflict",
             requiresAttention: true,
-            messageId: "wsl.managed_conflict",
+            messageId: "wsl.schema_unknown",
+            reclaimPreview: {
+              scope: "preserve_unrelated_toml",
+              fullConfigBackup: true,
+              authJsonUnchanged: true,
+              temporarilyStartsDistribution: false,
+            },
           },
           {
             ...current,
@@ -3242,6 +3249,28 @@ describe("WSL2 供应商选择", () => {
             messageId: "wsl.lock_busy",
           },
         ]);
+      }
+      if (command === "reclaim_wsl_provider") {
+        return Promise.resolve({
+          environment: {
+            environmentId: "{33333333-3333-4333-8333-333333333333}",
+            displayName: "Debian conflict",
+            commandName: "Debian conflict",
+            defaultUid: 1000,
+            running: true,
+            availability: "manageable",
+            currentProvider: provider,
+            actualProviderId: provider.id,
+            configurationState: "current",
+            requiresAttention: false,
+            pendingRestart: true,
+            revision: "wsl-revision",
+            messageId: null,
+            reclaimPreview: null,
+          },
+          pendingRestart: true,
+          lifecycleOutcome: "unchanged_running",
+        });
       }
       return Promise.resolve(undefined);
     });
@@ -3268,7 +3297,18 @@ describe("WSL2 供应商选择", () => {
       target: { value: "{33333333-3333-4333-8333-333333333333}" },
     });
     expect(dialog).toHaveTextContent("管理冲突");
+    expect(dialog).toHaveTextContent("未知的管理 schema");
+    expect(dialog).toHaveTextContent("保留管理区块外的 TOML 字段");
+    expect(dialog).toHaveTextContent("完整配置备份");
     expect(screen.getByRole("button", { name: "应用到 WSL2" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "备份并重新接管" }));
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("再次确认"));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("reclaim_wsl_provider", {
+      environmentId: "{33333333-3333-4333-8333-333333333333}",
+      providerId: provider.id,
+      expectedRevision: "wsl-revision",
+      confirmReclaim: true,
+    }));
     fireEvent.change(distribution, {
       target: { value: "{44444444-4444-4444-8444-444444444444}" },
     });

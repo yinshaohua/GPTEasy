@@ -82,6 +82,23 @@ pub struct WslEnvironmentSummary {
     pub pending_restart: bool,
     pub revision: String,
     pub message_id: Option<String>,
+    pub reclaim_preview: Option<WslReclaimPreview>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WslReclaimScope {
+    PreserveUnrelatedToml,
+    RebuildMinimalConfig,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WslReclaimPreview {
+    pub scope: WslReclaimScope,
+    pub full_config_backup: bool,
+    pub auth_json_unchanged: bool,
+    pub temporarily_starts_distribution: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -264,6 +281,21 @@ pub struct WslApplication {
     natural_stop_timeout: Duration,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WslApplyMode {
+    Apply,
+    Reclaim,
+}
+
+impl WslApplyMode {
+    fn lock_operation(self) -> &'static str {
+        match self {
+            Self::Apply => "switch",
+            Self::Reclaim => "reclaim",
+        }
+    }
+}
+
 struct DeletionAuditEnvironment {
     probe: WslProbe,
     originally_running: bool,
@@ -281,6 +313,15 @@ impl std::fmt::Debug for WslApplication {
 impl WslApplication {
     pub fn new(state_store: StateStore) -> Self {
         Self::with_runtime(state_store, Arc::new(SystemWslRuntime::default()))
+    }
+
+    pub fn verified_provider_count(&self) -> Result<usize, WslFailure> {
+        let connection = self.open_state()?;
+        connection
+            .query_row("SELECT count(*) FROM providers", [], |row| {
+                row.get::<_, usize>(0)
+            })
+            .map_err(|_| state_unavailable())
     }
 
     #[cfg(all(windows, feature = "wsl-guest-harness"))]
@@ -900,6 +941,42 @@ impl WslApplication {
                 "wsl.confirmation_required",
             ));
         }
+        self.apply_provider_with_mode(
+            environment_id,
+            provider_id,
+            expected_revision,
+            WslApplyMode::Apply,
+        )
+    }
+
+    pub fn reclaim_provider(
+        &self,
+        environment_id: &str,
+        provider_id: &str,
+        expected_revision: &str,
+        confirm_reclaim: bool,
+    ) -> Result<WslApplyResult, WslFailure> {
+        if !confirm_reclaim {
+            return Err(WslFailure::new(
+                WslFailureCategory::InvalidEnvironment,
+                "wsl.reclaim_confirmation_required",
+            ));
+        }
+        self.apply_provider_with_mode(
+            environment_id,
+            provider_id,
+            expected_revision,
+            WslApplyMode::Reclaim,
+        )
+    }
+
+    fn apply_provider_with_mode(
+        &self,
+        environment_id: &str,
+        provider_id: &str,
+        expected_revision: &str,
+        mode: WslApplyMode,
+    ) -> Result<WslApplyResult, WslFailure> {
         let _guard = self
             .operation_lock
             .lock()
@@ -1012,6 +1089,7 @@ impl WslApplication {
             &active_probe,
             &provider,
             originally_running,
+            mode,
         );
         if originally_running
             || matches!(&result, Err(failure) if failure.category == WslFailureCategory::Interrupted)
@@ -1054,6 +1132,7 @@ impl WslApplication {
         probe: &WslProbe,
         provider: &WslProvider,
         originally_running: bool,
+        mode: WslApplyMode,
     ) -> Result<WslApplyResult, WslFailure> {
         self.runtime.check_codex_version(probe)?;
         if let Some(pending) = load_pending_operation(connection, &probe.environment_id)? {
@@ -1090,7 +1169,10 @@ impl WslApplication {
             )
             .map_err(|_| state_unavailable())?;
         self.faults.check(WslFailurePoint::AfterPendingRegistered)?;
-        if let Err(failure) = self.runtime.acquire_lock(probe, &token, "switch") {
+        if let Err(failure) = self
+            .runtime
+            .acquire_lock(probe, &token, mode.lock_operation())
+        {
             connection
                 .execute(
                     "DELETE FROM wsl_pending_operation WHERE environment_id = ?1",
@@ -1113,6 +1195,7 @@ impl WslApplication {
             originally_running,
             &operation_id,
             &token,
+            mode,
         );
         if matches!(&result, Err(failure) if failure.category == WslFailureCategory::Interrupted) {
             return Err(result.expect_err("matched interrupted failure"));
@@ -1141,6 +1224,7 @@ impl WslApplication {
         originally_running: bool,
         operation_id: &str,
         lock_token: &str,
+        mode: WslApplyMode,
     ) -> Result<(), WslFailure> {
         let current_probe = self
             .runtime
@@ -1163,20 +1247,33 @@ impl WslApplication {
             ));
         }
         let original = self.runtime.read_artifacts(&current_probe)?;
-        if matches!(
-            inspect_actual_managed_state(
-                original.config.as_deref(),
-                original.credentials.as_deref()
-            ),
-            ActualManagedState::Conflict
-        ) {
-            return Err(WslFailure::new(
-                WslFailureCategory::NeedsAttention,
-                "wsl.managed_conflict",
-            ));
+        let actual_state = inspect_actual_managed_state(
+            original.config.as_deref(),
+            original.credentials.as_deref(),
+        );
+        match (mode, &actual_state) {
+            (WslApplyMode::Apply, ActualManagedState::Conflict { message_id }) => {
+                return Err(WslFailure::new(
+                    WslFailureCategory::NeedsAttention,
+                    message_id,
+                ));
+            }
+            (WslApplyMode::Reclaim, ActualManagedState::Conflict { .. }) => {}
+            (WslApplyMode::Reclaim, _) => {
+                return Err(WslFailure::new(
+                    WslFailureCategory::InvalidEnvironment,
+                    "wsl.reclaim_not_required",
+                ));
+            }
+            (WslApplyMode::Apply, _) => {}
         }
         let source_id = format!("desktop-{operation_id}");
-        let config = render_config(original.config.as_deref(), provider, &source_id)?;
+        let config = match mode {
+            WslApplyMode::Apply => render_config(original.config.as_deref(), provider, &source_id)?,
+            WslApplyMode::Reclaim => {
+                render_reclaimed_config(original.config.as_deref(), provider, &source_id)?
+            }
+        };
         let credentials = render_credentials(&provider.api_key)?;
         let old_config_hash = hash_optional(original.config.as_deref());
         let old_credentials_hash = hash_optional(original.credentials.as_deref());
@@ -1679,6 +1776,19 @@ fn load_summary(
             has_recommendation_update: false,
             recommendation_template_base_url: None,
         });
+    let configuration_state = parse_configuration_state(&row.6);
+    let message_id = probe.message_id.or(row.3.as_deref()).map(str::to_owned);
+    let reclaim_preview =
+        (configuration_state == WslConfigurationState::Conflict).then(|| WslReclaimPreview {
+            scope: if message_id.as_deref() == Some("wsl.config_invalid") {
+                WslReclaimScope::RebuildMinimalConfig
+            } else {
+                WslReclaimScope::PreserveUnrelatedToml
+            },
+            full_config_backup: true,
+            auth_json_unchanged: true,
+            temporarily_starts_distribution: !probe.running,
+        });
     Ok(WslEnvironmentSummary {
         environment_id: probe.environment_id.clone(),
         display_name: probe.display_name.clone(),
@@ -1688,11 +1798,12 @@ fn load_summary(
         availability: parse_availability(&row.4),
         current_provider,
         actual_provider_id: row.5,
-        configuration_state: parse_configuration_state(&row.6),
+        configuration_state,
         requires_attention: row.1 || parse_availability(&row.4) != WslAvailability::Manageable,
         pending_restart: row.2,
         revision: revision_for_probe(probe),
-        message_id: probe.message_id.or(row.3.as_deref()).map(str::to_owned),
+        message_id,
+        reclaim_preview,
     })
 }
 
@@ -1721,7 +1832,15 @@ enum ActualManagedState {
     Legacy {
         provider_id: String,
     },
-    Conflict,
+    Conflict {
+        message_id: &'static str,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SchemaV1Variant {
+    Current,
+    RequiresOpenAiAuthFalse,
 }
 
 fn reconcile_actual_state(
@@ -1747,8 +1866,8 @@ fn reconcile_actual_state(
     let (actual_provider_id, current_provider_id, state, requires_attention, message_id) =
         match observed {
             ActualManagedState::None => (None, None, "none", false, None),
-            ActualManagedState::Conflict => {
-                (None, None, "conflict", true, Some("wsl.managed_conflict"))
+            ActualManagedState::Conflict { message_id } => {
+                (None, None, "conflict", true, Some(message_id))
             }
             ActualManagedState::Legacy { provider_id } => {
                 let known = provider_exists(connection, &provider_id)?;
@@ -1849,7 +1968,10 @@ fn inspect_actual_managed_state(
         return ActualManagedState::None;
     };
     let Ok(text) = std::str::from_utf8(config) else {
-        return ActualManagedState::Conflict;
+        return managed_conflict("wsl.config_invalid");
+    };
+    let Ok(document) = text.parse::<toml_edit::DocumentMut>() else {
+        return managed_conflict("wsl.config_invalid");
     };
     let start = "# >>> GPTEasy managed provider >>>";
     let end = "# <<< GPTEasy managed provider <<<";
@@ -1868,10 +1990,31 @@ fn inspect_actual_managed_state(
         .filter(|(_, line)| **line == end)
         .collect::<Vec<_>>();
     if starts.is_empty() && ends.is_empty() {
+        let has_managed_metadata = lines.iter().any(|line| {
+            line.starts_with("# GPTEasy schema-version:")
+                || line.starts_with("# GPTEasy provider-id:")
+                || line.starts_with("# GPTEasy source-id:")
+                || line.starts_with("# GPTEasy credential-file:")
+        });
+        let has_managed_fields = document
+            .get("model_provider")
+            .and_then(|value| value.as_str())
+            == Some("gpteasy")
+            || document
+                .get("model_providers")
+                .and_then(|value| value.get("gpteasy"))
+                .is_some();
+        if text.contains(start)
+            || text.contains(end)
+            || has_managed_metadata
+            || has_managed_fields
+        {
+            return managed_conflict("wsl.markers_invalid");
+        }
         return ActualManagedState::None;
     }
     if starts.len() != 1 || ends.len() != 1 || starts[0].0 >= ends[0].0 {
-        return ActualManagedState::Conflict;
+        return managed_conflict("wsl.markers_invalid");
     }
     let block = &lines[starts[0].0..=ends[0].0];
     let metadata = |prefix: &str| {
@@ -1882,22 +2025,30 @@ fn inspect_actual_managed_state(
     };
     let provider_ids = metadata("# GPTEasy provider-id:");
     if provider_ids.len() != 1 || Uuid::parse_str(provider_ids[0]).is_err() {
-        return ActualManagedState::Conflict;
+        return managed_conflict("wsl.managed_metadata_invalid");
     }
     let provider_id = provider_ids[0].to_owned();
     let schemas = metadata("# GPTEasy schema-version:");
     if schemas.is_empty() {
-        return inspect_legacy_managed_state(text, provider_id);
-    }
-    if !schema_v1_block_has_expected_shape(block) {
-        return ActualManagedState::Conflict;
+        return inspect_legacy_managed_state(&document, provider_id);
     }
     let sources = metadata("# GPTEasy source-id:");
     let credential_files = metadata("# GPTEasy credential-file:");
-    if schemas != ["1"] || sources.len() != 1 || credential_files.len() != 1 || credential.is_none()
-    {
-        return ActualManagedState::Conflict;
+    if schemas.len() != 1 {
+        return managed_conflict("wsl.managed_metadata_invalid");
     }
+    if schemas != ["1"] {
+        return managed_conflict("wsl.schema_unknown");
+    }
+    if sources.len() != 1 || credential_files.len() != 1 {
+        return managed_conflict("wsl.managed_metadata_invalid");
+    }
+    if credential.is_none() {
+        return managed_conflict("wsl.credentials_invalid");
+    }
+    let Some(schema_variant) = schema_v1_block_variant(block) else {
+        return managed_conflict("wsl.schema_unknown");
+    };
     let expected_credential = format!(
         ".gpteasy-shell/credentials/{}/{}.token",
         sources[0], provider_id
@@ -1905,32 +2056,29 @@ fn inspect_actual_managed_state(
     if credential_files[0] != expected_credential
         || credential_relative_from_config(config) != Some(expected_credential.as_str())
     {
-        return ActualManagedState::Conflict;
+        return managed_conflict("wsl.credential_reference_invalid");
     }
-    let Ok(document) = text.parse::<toml_edit::DocumentMut>() else {
-        return ActualManagedState::Conflict;
-    };
     let Some(model) = document.get("model").and_then(|value| value.as_str()) else {
-        return ActualManagedState::Conflict;
+        return managed_conflict("wsl.managed_fields_invalid");
     };
     if document
         .get("model_provider")
         .and_then(|value| value.as_str())
         != Some("gpteasy")
     {
-        return ActualManagedState::Conflict;
+        return managed_conflict("wsl.managed_fields_invalid");
     }
     let Some(provider) = document
         .get("model_providers")
         .and_then(|value| value.get("gpteasy"))
     else {
-        return ActualManagedState::Conflict;
+        return managed_conflict("wsl.managed_fields_invalid");
     };
     let (Some(name), Some(base_url)) = (
         provider.get("name").and_then(|value| value.as_str()),
         provider.get("base_url").and_then(|value| value.as_str()),
     ) else {
-        return ActualManagedState::Conflict;
+        return managed_conflict("wsl.managed_fields_invalid");
     };
     let expected_auth_script =
         format!("cat -- \"${{CODEX_HOME:-$HOME/.codex}}/{expected_credential}\"");
@@ -1955,38 +2103,86 @@ fn inspect_actual_managed_state(
                     != Some(expected_auth_script.as_str())
         })
     {
-        return ActualManagedState::Conflict;
+        return managed_conflict("wsl.credential_reference_invalid");
     }
-    ActualManagedState::Current {
-        provider_id,
-        name: name.to_owned(),
-        base_url: base_url.to_owned(),
-        model: model.to_owned(),
+    match schema_variant {
+        SchemaV1Variant::Current => ActualManagedState::Current {
+            provider_id,
+            name: name.to_owned(),
+            base_url: base_url.to_owned(),
+            model: model.to_owned(),
+        },
+        SchemaV1Variant::RequiresOpenAiAuthFalse => ActualManagedState::Legacy { provider_id },
     }
 }
 
-fn schema_v1_block_has_expected_shape(block: &[&str]) -> bool {
-    const EXACT_LINES: [&str; 4] = [
-        "model_provider = \"gpteasy\"",
-        "model_providers.gpteasy.wire_api = \"responses\"",
-        "model_providers.gpteasy.supports_websockets = false",
-        "model_providers.gpteasy.auth.command = \"sh\"",
-    ];
-    const PREFIXES: [&str; 8] = [
+fn managed_conflict(message_id: &'static str) -> ActualManagedState {
+    ActualManagedState::Conflict { message_id }
+}
+
+fn schema_v1_block_variant(block: &[&str]) -> Option<SchemaV1Variant> {
+    const METADATA_PREFIXES: [&str; 4] = [
         "# GPTEasy schema-version:",
         "# GPTEasy provider-id:",
         "# GPTEasy source-id:",
         "# GPTEasy credential-file:",
-        "model = ",
-        "model_providers.gpteasy.name = ",
-        "model_providers.gpteasy.base_url = ",
-        "model_providers.gpteasy.auth.args = ",
     ];
+    let start = "# >>> GPTEasy managed provider >>>";
+    let end = "# <<< GPTEasy managed provider <<<";
+    if block.iter().any(|line| {
+        let trimmed = line.trim();
+        trimmed.starts_with('#')
+            && trimmed != start
+            && trimmed != end
+            && !METADATA_PREFIXES
+                .iter()
+                .any(|prefix| trimmed.starts_with(prefix))
+    }) {
+        return None;
+    }
 
-    block.len() == 14
-        && block[1..block.len() - 1].iter().all(|line| {
-            EXACT_LINES.contains(line) || PREFIXES.iter().any(|prefix| line.starts_with(prefix))
-        })
+    let document = block.join("\n").parse::<toml_edit::DocumentMut>().ok()?;
+    let root = document.as_table();
+    if root.len() != 3
+        || !root.contains_key("model")
+        || !root.contains_key("model_provider")
+        || !root.contains_key("model_providers")
+    {
+        return None;
+    }
+    let providers = root.get("model_providers")?.as_table_like()?;
+    if providers.len() != 1 || !providers.contains_key("gpteasy") {
+        return None;
+    }
+    let provider = providers.get("gpteasy")?.as_table_like()?;
+    let expected_provider_keys = [
+        "name",
+        "base_url",
+        "wire_api",
+        "supports_websockets",
+        "auth",
+    ];
+    if !expected_provider_keys
+        .iter()
+        .all(|key| provider.contains_key(key))
+    {
+        return None;
+    }
+    let auth = provider.get("auth")?.as_table_like()?;
+    if auth.len() != 2 || !auth.contains_key("command") || !auth.contains_key("args") {
+        return None;
+    }
+
+    match provider.get("requires_openai_auth") {
+        None if provider.len() == expected_provider_keys.len() => Some(SchemaV1Variant::Current),
+        Some(value)
+            if provider.len() == expected_provider_keys.len() + 1
+                && value.as_bool() == Some(false) =>
+        {
+            Some(SchemaV1Variant::RequiresOpenAiAuthFalse)
+        }
+        _ => None,
+    }
 }
 
 fn credential_relative_from_config(config: &[u8]) -> Option<&str> {
@@ -2021,10 +2217,10 @@ fn credential_relative_from_config(config: &[u8]) -> Option<&str> {
     Some(relative)
 }
 
-fn inspect_legacy_managed_state(text: &str, provider_id: String) -> ActualManagedState {
-    let Ok(document) = text.parse::<toml_edit::DocumentMut>() else {
-        return ActualManagedState::Conflict;
-    };
+fn inspect_legacy_managed_state(
+    document: &toml_edit::DocumentMut,
+    provider_id: String,
+) -> ActualManagedState {
     let provider_table = document
         .get("model_providers")
         .and_then(|value| value.get(&provider_id));
@@ -2043,7 +2239,7 @@ fn inspect_legacy_managed_state(text: &str, provider_id: String) -> ActualManage
     {
         ActualManagedState::Legacy { provider_id }
     } else {
-        ActualManagedState::Conflict
+        managed_conflict("wsl.managed_fields_invalid")
     }
 }
 
@@ -2411,6 +2607,69 @@ fn render_config(
         WslFailure::new(WslFailureCategory::InvalidEnvironment, "wsl.config_invalid")
     })?;
     Ok(rendered.into_bytes())
+}
+
+fn render_reclaimed_config(
+    original: Option<&[u8]>,
+    provider: &WslProvider,
+    source_id: &str,
+) -> Result<Vec<u8>, WslFailure> {
+    let Some(text) = original.and_then(|bytes| std::str::from_utf8(bytes).ok()) else {
+        return render_config(None, provider, source_id);
+    };
+    let start = "# >>> GPTEasy managed provider >>>";
+    let end = "# <<< GPTEasy managed provider <<<";
+    let lines = text.split_inclusive('\n').collect::<Vec<_>>();
+    let starts = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| trim_line_end(line) == start)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let ends = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| trim_line_end(line) == end)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let without_managed_block = if starts.len() == 1 && ends.len() == 1 && starts[0] < ends[0] {
+        lines
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index < starts[0] || *index > ends[0])
+            .map(|(_, line)| *line)
+            .collect::<String>()
+    } else {
+        lines
+            .iter()
+            .filter(|line| {
+                let line = trim_line_end(line);
+                line != start && line != end && !line.starts_with("# GPTEasy ")
+            })
+            .copied()
+            .collect::<String>()
+    };
+    let Ok(mut document) = without_managed_block.parse::<toml_edit::DocumentMut>() else {
+        return render_config(None, provider, source_id);
+    };
+    document.remove("model");
+    document.remove("model_provider");
+    let remove_providers = document
+        .get_mut("model_providers")
+        .and_then(toml_edit::Item::as_table_like_mut)
+        .is_some_and(|providers| {
+            providers.remove("gpteasy");
+            providers.is_empty()
+        });
+    if remove_providers {
+        document.remove("model_providers");
+    }
+    let preserved = document.to_string();
+    render_config(Some(preserved.as_bytes()), provider, source_id)
+}
+
+fn trim_line_end(line: &str) -> &str {
+    line.trim_end_matches(['\r', '\n'])
 }
 
 fn render_credentials(api_key: &str) -> Result<Vec<u8>, WslFailure> {
@@ -3217,6 +3476,7 @@ mod tests {
         probes: Mutex<Vec<WslProbe>>,
         artifacts: Mutex<WslArtifacts>,
         read_failure: Mutex<Option<WslFailure>>,
+        write_failure: Mutex<Option<WslFailure>>,
         starts: AtomicUsize,
         terminations: AtomicUsize,
         writes: AtomicUsize,
@@ -3244,6 +3504,7 @@ mod tests {
                 probes: Mutex::new(vec![probe]),
                 artifacts: Mutex::new(artifacts),
                 read_failure: Mutex::new(None),
+                write_failure: Mutex::new(None),
                 starts: AtomicUsize::new(0),
                 terminations: AtomicUsize::new(0),
                 writes: AtomicUsize::new(0),
@@ -3430,6 +3691,9 @@ mod tests {
             bundle: &[u8],
         ) -> Result<String, WslFailure> {
             self.writes.fetch_add(1, Ordering::SeqCst);
+            if let Some(failure) = self.write_failure.lock().expect("write failure").clone() {
+                return Err(failure);
+            }
             let (config, credentials) = decode_test_bundle(bundle);
             *self.artifacts.lock().expect("artifacts") = WslArtifacts {
                 config: Some(config),
@@ -3528,6 +3792,141 @@ model_providers.gpteasy.auth.command = \"sh\"\n\
 # <<< GPTEasy managed provider <<<\n"
         )
         .into_bytes()
+    }
+
+    #[test]
+    fn published_schema_v1_with_requires_openai_auth_is_a_known_legacy_block() {
+        let provider_id = "22222222-2222-4222-8222-222222222222";
+        let mut running_probe = probe();
+        running_probe.running = true;
+        let runtime = Arc::new(FakeRuntime::new(
+            running_probe,
+            WslArtifacts {
+                config: Some(
+                    include_bytes!(
+                        "../tests/fixtures/wsl/schema-v1-requires-openai-auth-false.toml"
+                    )
+                    .to_vec(),
+                ),
+                credentials: Some(b"secret".to_vec()),
+            },
+        ));
+        let (_temp, _store, application) = application(runtime);
+
+        let observed = application
+            .list()
+            .expect("list historical WSL config")
+            .remove(0);
+
+        assert_eq!(observed.configuration_state, WslConfigurationState::Legacy);
+        assert_eq!(observed.actual_provider_id.as_deref(), Some(provider_id));
+        assert_eq!(
+            observed
+                .current_provider
+                .as_ref()
+                .map(|provider| provider.id.as_str()),
+            Some(provider_id)
+        );
+        assert!(!observed.requires_attention);
+    }
+
+    #[test]
+    fn every_published_wsl_managed_block_fixture_keeps_its_provider_identity() {
+        let fixtures = [
+            (
+                include_bytes!("../tests/fixtures/wsl/schema-v1-current-desktop.toml").as_slice(),
+                false,
+            ),
+            (
+                include_bytes!("../tests/fixtures/wsl/schema-v1-current-linux-export.toml")
+                    .as_slice(),
+                false,
+            ),
+            (
+                include_bytes!("../tests/fixtures/wsl/schema-v1-requires-openai-auth-false.toml")
+                    .as_slice(),
+                true,
+            ),
+            (
+                include_bytes!("../tests/fixtures/wsl/legacy-provider-id-block.toml").as_slice(),
+                true,
+            ),
+        ];
+
+        for (fixture, legacy) in fixtures {
+            let observed = inspect_actual_managed_state(Some(fixture), Some(b"secret"));
+            match observed {
+                ActualManagedState::Current { provider_id, .. } if !legacy => {
+                    assert_eq!(provider_id, "22222222-2222-4222-8222-222222222222");
+                }
+                ActualManagedState::Legacy { provider_id } if legacy => {
+                    assert_eq!(provider_id, "22222222-2222-4222-8222-222222222222");
+                }
+                other => panic!("unexpected published fixture state: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_apply_migrates_a_published_schema_v1_block_and_preserves_unrelated_toml() {
+        let provider_id = "22222222-2222-4222-8222-222222222222";
+        let mut running_probe = probe();
+        running_probe.running = true;
+        let historical = format!(
+            "custom_setting = true\n{}",
+            String::from_utf8(
+                include_bytes!("../tests/fixtures/wsl/schema-v1-requires-openai-auth-false.toml")
+                    .to_vec(),
+            )
+            .expect("utf8")
+        )
+        .into_bytes();
+        let runtime = Arc::new(FakeRuntime::new(
+            running_probe,
+            WslArtifacts {
+                config: Some(historical),
+                credentials: Some(b"old-secret".to_vec()),
+            },
+        ));
+        let (_temp, store, application) = application(runtime.clone());
+        let environment = application
+            .list()
+            .expect("list historical config")
+            .remove(0);
+        assert_eq!(
+            environment.configuration_state,
+            WslConfigurationState::Legacy
+        );
+
+        let applied = application
+            .apply_provider(
+                &environment.environment_id,
+                provider_id,
+                &environment.revision,
+                true,
+            )
+            .expect("migrate historical config");
+
+        assert_eq!(
+            applied.environment.configuration_state,
+            WslConfigurationState::Current
+        );
+        let artifacts = runtime.artifacts.lock().expect("artifacts").clone();
+        let text = String::from_utf8(artifacts.config.expect("config")).expect("utf8");
+        assert!(text.contains("custom_setting = true"));
+        assert!(!text.contains("requires_openai_auth"));
+        assert_eq!(artifacts.credentials.as_deref(), Some(b"secret".as_slice()));
+        assert_eq!(runtime.writes.load(Ordering::SeqCst), 1);
+        let connection = Connection::open(store.paths().database()).expect("state database");
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM wsl_pending_operation", [], |row| row
+                    .get::<_, i64>(
+                    0
+                ))
+                .expect("pending count"),
+            0
+        );
     }
 
     #[test]
@@ -3956,6 +4355,12 @@ model_providers.{provider_id}.requires_openai_auth = true\n\
             WslConfigurationState::Conflict
         );
         assert!(conflict.requires_attention);
+        assert_eq!(conflict.message_id.as_deref(), Some("wsl.schema_unknown"));
+        let preview = conflict.reclaim_preview.expect("reclaim preview");
+        assert_eq!(preview.scope, WslReclaimScope::PreserveUnrelatedToml);
+        assert!(preview.full_config_backup);
+        assert!(preview.auth_json_unchanged);
+        assert!(!preview.temporarily_starts_distribution);
     }
 
     #[test]
@@ -3976,7 +4381,7 @@ model_providers.{provider_id}.requires_openai_auth = true\n\
 
         assert!(matches!(
             inspect_actual_managed_state(Some(&config), Some(b"secret")),
-            ActualManagedState::Conflict
+            ActualManagedState::Conflict { .. }
         ));
     }
 
@@ -3998,7 +4403,7 @@ model_providers.{provider_id}.requires_openai_auth = true\n\
             assert!(
                 matches!(
                     inspect_actual_managed_state(Some(&config), Some(b"secret")),
-                    ActualManagedState::Conflict
+                    ActualManagedState::Conflict { .. }
                 ),
                 "unknown schema v1 line must conflict: {unknown_line}",
             );
@@ -4108,7 +4513,7 @@ model_providers.{provider_id}.requires_openai_auth = true\n\
             )
             .expect_err("unknown schema must not be overwritten");
 
-        assert_eq!(failure.message_id, "wsl.managed_conflict");
+        assert_eq!(failure.message_id, "wsl.schema_unknown");
         assert_eq!(runtime.writes.load(Ordering::SeqCst), 0);
         assert_eq!(
             runtime
@@ -4118,6 +4523,182 @@ model_providers.{provider_id}.requires_openai_auth = true\n\
                 .config
                 .as_deref(),
             Some(unknown_schema.as_slice())
+        );
+    }
+
+    #[test]
+    fn confirmed_reclaim_backs_up_and_replaces_an_unknown_schema_without_losing_unrelated_toml() {
+        let provider_id = "22222222-2222-4222-8222-222222222222";
+        let mut running_probe = probe();
+        running_probe.running = true;
+        let unknown_schema = format!(
+            "custom_setting = true\n{}",
+            String::from_utf8(schema_v1_config(provider_id, "shell-export"))
+                .expect("utf8")
+                .replace("# GPTEasy schema-version: 1", "# GPTEasy schema-version: 9")
+        )
+        .into_bytes();
+        let runtime = Arc::new(FakeRuntime::new(
+            running_probe,
+            WslArtifacts {
+                config: Some(unknown_schema.clone()),
+                credentials: Some(b"old-secret".to_vec()),
+            },
+        ));
+        let (_temp, store, application) = application(runtime.clone());
+        let environment = application.list().expect("list conflict").remove(0);
+
+        let denied = application
+            .reclaim_provider(
+                &environment.environment_id,
+                provider_id,
+                &environment.revision,
+                false,
+            )
+            .expect_err("reclaim requires a second confirmation");
+        assert_eq!(denied.message_id, "wsl.reclaim_confirmation_required");
+        assert_eq!(runtime.writes.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            runtime
+                .artifacts
+                .lock()
+                .expect("artifacts")
+                .config
+                .as_deref(),
+            Some(unknown_schema.as_slice())
+        );
+
+        let result = application
+            .reclaim_provider(
+                &environment.environment_id,
+                provider_id,
+                &environment.revision,
+                true,
+            )
+            .expect("confirmed reclaim");
+
+        assert_eq!(
+            result.environment.configuration_state,
+            WslConfigurationState::Current
+        );
+        let artifacts = runtime.artifacts.lock().expect("artifacts").clone();
+        let config = String::from_utf8(artifacts.config.expect("written config")).expect("utf8");
+        assert!(config.contains("custom_setting = true"));
+        assert!(config.contains("# GPTEasy schema-version: 1"));
+        assert!(!config.contains("# GPTEasy schema-version: 9"));
+        assert!(!config.contains("requires_openai_auth"));
+        assert_eq!(artifacts.credentials.as_deref(), Some(b"secret".as_slice()));
+        let connection = Connection::open(store.paths().database()).expect("state database");
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM wsl_pending_operation", [], |row| row
+                    .get::<_, i64>(
+                    0
+                ))
+                .expect("pending count"),
+            0
+        );
+    }
+
+    #[test]
+    fn confirmed_reclaim_of_unparseable_config_builds_only_the_minimum_managed_config() {
+        let provider_id = "22222222-2222-4222-8222-222222222222";
+        let mut running_probe = probe();
+        running_probe.running = true;
+        let broken = b"custom = [\n# >>> GPTEasy managed provider >>>\n".to_vec();
+        let runtime = Arc::new(FakeRuntime::new(
+            running_probe,
+            WslArtifacts {
+                config: Some(broken),
+                credentials: None,
+            },
+        ));
+        let (_temp, _store, application) = application(runtime.clone());
+        let environment = application.list().expect("list invalid config").remove(0);
+        assert_eq!(
+            environment.message_id.as_deref(),
+            Some("wsl.config_invalid")
+        );
+        assert_eq!(
+            environment
+                .reclaim_preview
+                .as_ref()
+                .map(|preview| preview.scope),
+            Some(WslReclaimScope::RebuildMinimalConfig)
+        );
+
+        application
+            .reclaim_provider(
+                &environment.environment_id,
+                provider_id,
+                &environment.revision,
+                true,
+            )
+            .expect("reclaim invalid config");
+
+        let config = runtime
+            .artifacts
+            .lock()
+            .expect("artifacts")
+            .config
+            .clone()
+            .expect("written config");
+        let text = String::from_utf8(config).expect("utf8");
+        assert!(text.contains("# GPTEasy schema-version: 1"));
+        assert!(!text.contains("custom ="));
+        assert!(text.parse::<toml_edit::DocumentMut>().is_ok());
+    }
+
+    #[test]
+    fn failed_reclaim_keeps_old_artifacts_and_leaves_no_pending_saga() {
+        let provider_id = "22222222-2222-4222-8222-222222222222";
+        let mut running_probe = probe();
+        running_probe.running = true;
+        let unknown_schema = String::from_utf8(schema_v1_config(provider_id, "shell-export"))
+            .expect("utf8")
+            .replace("# GPTEasy schema-version: 1", "# GPTEasy schema-version: 9")
+            .into_bytes();
+        let original = WslArtifacts {
+            config: Some(unknown_schema),
+            credentials: Some(b"old-secret".to_vec()),
+        };
+        let runtime = Arc::new(FakeRuntime::new(running_probe, original.clone()));
+        *runtime.write_failure.lock().expect("write failure") = Some(WslFailure::new(
+            WslFailureCategory::GuestWriteFailed,
+            "wsl.guest_write_failed",
+        ));
+        let (_temp, store, application) = application(runtime.clone());
+        let environment = application.list().expect("list conflict").remove(0);
+
+        let failure = application
+            .reclaim_provider(
+                &environment.environment_id,
+                provider_id,
+                &environment.revision,
+                true,
+            )
+            .expect_err("guest write failure");
+
+        assert_eq!(failure.message_id, "wsl.guest_write_failed");
+        let artifacts = runtime.artifacts.lock().expect("artifacts").clone();
+        assert_eq!(artifacts.config, original.config);
+        assert_eq!(artifacts.credentials, original.credentials);
+        assert!(
+            runtime
+                .active_locks
+                .lock()
+                .expect("active locks")
+                .is_empty()
+        );
+        let connection = Connection::open(store.paths().database()).expect("state database");
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM wsl_pending_operation", [], |row| row
+                    .get::<_, i64>(
+                    0
+                ))
+                .expect("pending count"),
+            0
         );
     }
 
@@ -4292,6 +4873,24 @@ base_url = "https://legacy.example/v1"
         let failure = render_config(Some(original), &provider("provider-id"), "desktop-test")
             .expect_err("marker damage must stop");
         assert_eq!(failure.message_id, "wsl.managed_conflict");
+    }
+
+    #[test]
+    fn managed_metadata_without_either_marker_is_a_damaged_marker_conflict() {
+        let config = String::from_utf8(
+            include_bytes!("../tests/fixtures/wsl/schema-v1-current-desktop.toml").to_vec(),
+        )
+        .expect("utf8")
+        .replace("# >>> GPTEasy managed provider >>>\n", "")
+        .replace("# <<< GPTEasy managed provider <<<\n", "")
+        .into_bytes();
+
+        assert!(matches!(
+            inspect_actual_managed_state(Some(&config), Some(b"secret")),
+            ActualManagedState::Conflict {
+                message_id: "wsl.markers_invalid"
+            }
+        ));
     }
 
     #[test]

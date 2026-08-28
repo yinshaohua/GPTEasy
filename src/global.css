@@ -1371,6 +1371,24 @@ select:focus-visible {
   padding: 10px 20px 14px;
   background: var(--surface);
   border-top: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.wsl-state-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin-top: 8px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.wsl-state-summary > span,
+.wsl-reclaim-preview,
+.wsl-apply-blocker {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .wsl-dialog-fields {
@@ -1406,6 +1424,21 @@ select:focus-visible {
   line-height: 1.35;
 }
 
+.wsl-reclaim-preview {
+  display: grid;
+  gap: 2px;
+  margin-top: 4px;
+  padding-top: 5px;
+  border-top: 1px solid var(--border);
+}
+
+.wsl-apply-blocker {
+  margin: 10px 0 0;
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .wsl-provider-dialog .dialog-actions > button {
   flex: 0 0 auto;
   white-space: nowrap;
@@ -1420,6 +1453,10 @@ select:focus-visible {
 }
 
 .wsl-apply-button {
+  min-width: 152px;
+}
+
+.wsl-reclaim-button {
   min-width: 152px;
 }
 

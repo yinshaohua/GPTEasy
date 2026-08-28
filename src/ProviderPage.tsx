@@ -69,6 +69,7 @@ import {
   getEnvironmentSnapshot,
   forceApplyEnvironmentProvider,
   listWslEnvironments,
+  reclaimWslProvider,
   refreshWslEnvironment,
   switchToOpenAiLogin,
   type EnvironmentFailure,
@@ -183,7 +184,7 @@ export default function ProviderPage({
   const [wslDialogOpen, setWslDialogOpen] = useState(false);
   const [wslEnvironmentId, setWslEnvironmentId] = useState<string | null>(null);
   const [wslProviderId, setWslProviderId] = useState<string | null>(null);
-  const [wslAction, setWslAction] = useState<"idle" | "applying" | "refreshing">("idle");
+  const [wslAction, setWslAction] = useState<"idle" | "applying" | "reclaiming" | "refreshing">("idle");
   const [wslFailure, setWslFailure] = useState<{ messageId: string } | null>(null);
   const [wslFeedback, setWslFeedback] = useState("");
   const [linuxExportStep, setLinuxExportStep] = useState<LinuxExportStep>(null);
@@ -835,6 +836,38 @@ export default function ProviderPage({
     }
   }
 
+  async function reclaimWslSelection() {
+    const target = wslEnvironments.find((item) => item.environmentId === wslEnvironmentId);
+    if (!target?.reclaimPreview || !wslProviderId) return;
+    const provider = providers.find((item) => item.id === wslProviderId);
+    if (!provider || !window.confirm(providerMessages.wslReclaimConfirmation)) return;
+    setWslAction("reclaiming");
+    setWslFailure(null);
+    setWslFeedback("");
+    try {
+      const result = await reclaimWslProvider(
+        target.environmentId,
+        provider.id,
+        target.revision,
+        true,
+      );
+      setWslEnvironments((current) => current.map((item) =>
+        item.environmentId === result.environment.environmentId ? result.environment : item));
+      setWslProviderId(provider.id);
+      setWslFeedback([
+        providerMessages.wslReclaimed(provider.name, target.displayName),
+        result.pendingRestart ? providerMessages.wslPendingRestart : "",
+        lifecycleOutcomeMessage(result.lifecycleOutcome),
+      ].filter(Boolean).join(" "));
+    } catch (error) {
+      const failure = asWslFailure(error);
+      await refreshWslDialog();
+      setWslFailure(failure);
+    } finally {
+      setWslAction("idle");
+    }
+  }
+
   async function refreshSelectedWslActualState() {
     const target = wslEnvironments.find((item) => item.environmentId === wslEnvironmentId);
     if (!target || !isManageableWslEnvironment(target)) return;
@@ -1253,6 +1286,7 @@ export default function ProviderPage({
         <section className="environment-tools" aria-label={providerMessages.environmentActions}>
           <WslActions
             environments={wslEnvironments}
+            providerCount={providers.length}
             state={wslState}
             busy={busy || wslBusy || linuxExportBusy}
             onOpen={() => void openWslDialog()}
@@ -1548,6 +1582,7 @@ export default function ProviderPage({
           onRefresh={() => void refreshWslDialog()}
           onActualRefresh={() => void refreshSelectedWslActualState()}
           onApply={() => void applyWslSelection()}
+          onReclaim={() => void reclaimWslSelection()}
           onClose={() => {
             if (!wslBusy) setWslDialogOpen(false);
           }}
@@ -1605,17 +1640,23 @@ function RecommendedBadge({ onVisit }: { onVisit: () => Promise<void> }) {
 
 function WslActions({
   environments,
+  providerCount,
   state,
   busy,
   onOpen,
 }: {
   environments: WslEnvironmentSummary[];
+  providerCount: number;
   state: "loading" | "ready" | "error";
   busy: boolean;
   onOpen: () => void;
 }) {
   const manageable = environments.some(isManageableWslEnvironment);
-  const currentProvider = environments.find(isManageableWslEnvironment)?.currentProvider ?? null;
+  const selectedEnvironment = environments.find(isManageableWslEnvironment);
+  const currentProvider = selectedEnvironment?.currentProvider ?? null;
+  const blockReason = selectedEnvironment?.messageId
+    ? wslFailureMessages[selectedEnvironment.messageId] ?? wslFailureMessages["wsl.state_unavailable"]
+    : null;
   const description = state === "loading"
     ? "正在读取 WSL2 发行版状态。"
     : state === "error"
@@ -1652,8 +1693,14 @@ function WslActions({
             </div>
           </dl>
         ) : (
-          <span className="wsl-provider-empty">{providerMessages.wslNoProvider}</span>
+          <span className="wsl-provider-empty">
+            {providerCount === 0 ? providerMessages.wslNoProvider : providerMessages.wslNoCurrentProvider}
+          </span>
         )}
+      </div>
+      <div className="wsl-state-summary">
+        <span aria-label="WSL2 供应商目录">{providerMessages.wslCatalogCount(providerCount)}</span>
+        {blockReason && <span role="status">阻断原因：{blockReason}</span>}
       </div>
     </>
   );
@@ -1832,6 +1879,7 @@ function WslProviderDialog({
   onRefresh,
   onActualRefresh,
   onApply,
+  onReclaim,
   onClose,
 }: {
   environments: WslEnvironmentSummary[];
@@ -1840,7 +1888,7 @@ function WslProviderDialog({
   selectedEnvironmentId: string | null;
   selectedProviderId: string | null;
   busy: boolean;
-  action: "idle" | "applying" | "refreshing";
+  action: "idle" | "applying" | "reclaiming" | "refreshing";
   failure: { messageId: string } | null;
   feedback: string;
   onEnvironmentChange: (id: string) => void;
@@ -1848,6 +1896,7 @@ function WslProviderDialog({
   onRefresh: () => void;
   onActualRefresh: () => void;
   onApply: () => void;
+  onReclaim: () => void;
   onClose: () => void;
 }) {
   const manageableEnvironments = environments.filter(isManageableWslEnvironment);
@@ -1857,7 +1906,28 @@ function WslProviderDialog({
     && canApplyWslProvider(selectedEnvironment)
     && Boolean(selectedProviderId)
     && !busy;
+  const canReclaim = state === "ready"
+    && selectedEnvironment?.configurationState === "conflict"
+    && selectedEnvironment.reclaimPreview !== null
+    && Boolean(selectedProviderId)
+    && !busy;
   const failureMessage = failure ? wslFailureMessages[failure.messageId] ?? wslFailureMessages["wsl.state_unavailable"] : "";
+  const selectedBlockMessage = selectedEnvironment?.messageId
+    ? wslFailureMessages[selectedEnvironment.messageId] ?? wslFailureMessages["wsl.state_unavailable"]
+    : "";
+  const applyBlockMessage = state !== "ready"
+    ? providerMessages.wslReadFailed
+    : selectedEnvironment === null
+      ? providerMessages.wslNoManageable
+      : providers.length === 0
+        ? providerMessages.wslNoProvider
+        : !selectedProviderId
+          ? "请选择一个已验证供应商。"
+          : selectedEnvironment.configurationState === "conflict"
+            ? `${selectedBlockMessage} 请先核验实际状态，或预览后备份并重新接管。`
+            : selectedEnvironment.configurationState === "busy"
+              ? `${selectedBlockMessage} 请稍后刷新实际状态。`
+              : "";
   return (
     <div className="dialog-backdrop">
       <section className="confirmation-dialog wsl-provider-dialog" role="dialog" aria-modal="true" aria-labelledby="wsl-dialog-title">
@@ -1921,6 +1991,19 @@ function WslProviderDialog({
                 {selectedEnvironment.configurationState === "provider_missing" && selectedEnvironment.actualProviderId && (
                   <p>当前供应商 ID：<code>{selectedEnvironment.actualProviderId}</code></p>
                 )}
+                {selectedEnvironment.configurationState === "conflict" && selectedBlockMessage && (
+                  <p className="inline-error">{selectedBlockMessage}</p>
+                )}
+                {selectedEnvironment.reclaimPreview && (
+                  <div className="wsl-reclaim-preview">
+                    <p>{selectedEnvironment.reclaimPreview.scope === "rebuild_minimal_config"
+                      ? providerMessages.wslReclaimMinimal
+                      : providerMessages.wslReclaimPreserve}</p>
+                    <p>{providerMessages.wslReclaimProtection}</p>
+                    {selectedEnvironment.reclaimPreview.temporarilyStartsDistribution
+                      && <p>{providerMessages.wslStoppedWarning}</p>}
+                  </div>
+                )}
                 {selectedEnvironment.defaultUid !== null && <p>默认用户 UID：{selectedEnvironment.defaultUid}</p>}
                 {selectedEnvironment.running
                   ? <p>{providerMessages.wslRunningWarning}</p>
@@ -1932,6 +2015,7 @@ function WslProviderDialog({
             {feedback && <p className="catalog-feedback" role="status">{feedback}</p>}
           </>
         )}
+        {!canApply && applyBlockMessage && <p className="wsl-apply-blocker" role="status">{applyBlockMessage}</p>}
         <div className="dialog-actions">
           <button className="secondary-button wsl-back-button" type="button" onClick={onClose} disabled={busy}>{providerMessages.wslBack}</button>
           <button
@@ -1947,6 +2031,16 @@ function WslProviderDialog({
               ? providerMessages.wslRefreshingActual
               : providerMessages.wslRefreshActual}
           </button>
+          {selectedEnvironment?.reclaimPreview && (
+            <button
+              className="secondary-button wsl-reclaim-button"
+              type="button"
+              onClick={onReclaim}
+              disabled={!canReclaim}
+            >
+              {action === "reclaiming" ? providerMessages.wslReclaiming : providerMessages.wslReclaim}
+            </button>
+          )}
           <button className="command-button wsl-apply-button" type="button" onClick={onApply} disabled={!canApply}>
             {action === "applying" ? <LoaderCircle className="is-spinning" size={17} aria-hidden="true" /> : <Check size={17} aria-hidden="true" />}
             {action === "applying" ? providerMessages.wslApplying : providerMessages.wslApply}

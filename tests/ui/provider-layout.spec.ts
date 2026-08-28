@@ -39,9 +39,9 @@ const pendingUpdate = {
   releaseNotesUrl: "https://gitee.com/ericshaohua/gpteasy-releases/releases/tag/v1.2.0",
 };
 
-async function openProviderCatalog(page: Page, width: number, height: number) {
+async function openProviderCatalog(page: Page, width: number, height: number, wslConflict = false) {
   await page.setViewportSize({ width, height });
-  await page.addInitScript(({ catalog, updateSnapshot }) => {
+  await page.addInitScript(({ catalog, updateSnapshot, conflict }) => {
     let callbackId = 1;
     const callbacks = new Map<number, (...args: unknown[]) => void>();
     const tauri = {
@@ -98,13 +98,19 @@ async function openProviderCatalog(page: Page, width: number, height: number) {
             defaultUid: 1000,
             running: false,
             availability: "manageable",
-            currentProvider: catalog[1],
-            actualProviderId: catalog[1].id,
-            configurationState: "current",
-            requiresAttention: false,
+            currentProvider: conflict ? null : catalog[1],
+            actualProviderId: conflict ? null : catalog[1].id,
+            configurationState: conflict ? "conflict" : "current",
+            requiresAttention: conflict,
             pendingRestart: false,
             revision: "layout-wsl-revision",
-            messageId: null,
+            messageId: conflict ? "wsl.schema_unknown" : null,
+            reclaimPreview: conflict ? {
+              scope: "preserve_unrelated_toml",
+              fullConfigBackup: true,
+              authJsonUnchanged: true,
+              temporarilyStartsDistribution: true,
+            } : null,
           }];
         }
         if (command === "get_environment_snapshot") {
@@ -142,7 +148,7 @@ async function openProviderCatalog(page: Page, width: number, height: number) {
       },
     };
     Object.assign(window, { __TAURI_INTERNALS__: tauri });
-  }, { catalog: providers, updateSnapshot: pendingUpdate });
+  }, { catalog: providers, updateSnapshot: pendingUpdate, conflict: wslConflict });
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "供应商目录" })).toBeVisible();
   await expect(page.getByLabel("已验证供应商").getByText("Long Provider Name")).toBeVisible();
@@ -333,6 +339,29 @@ test("WSL2 供应商弹窗在最小窗口展示单发行版范围和生命周期
   expect(after.map(({ top }) => Math.round(top))).toEqual(before.map(({ top }) => Math.round(top)));
   expect(after.map(({ height }) => Math.round(height))).toEqual(before.map(({ height }) => Math.round(height)));
   await page.screenshot({ path: testInfo.outputPath("wsl-dialog-680x520.png"), fullPage: true });
+});
+
+test("WSL2 管理冲突在最小窗口展示原因和受控重新接管", async ({ page }, testInfo) => {
+  await openProviderCatalog(page, 680, 520, true);
+  await page.getByRole("button", { name: "选择 WSL2 供应商" }).click();
+
+  const dialog = page.getByRole("dialog", { name: "选择 WSL2 供应商" });
+  await expect(dialog).toContainText("未知的管理 schema");
+  await expect(dialog).toContainText("保留管理区块外的 TOML 字段");
+  const reclaim = dialog.getByRole("button", { name: "备份并重新接管" });
+  await reclaim.scrollIntoViewIfNeeded();
+  await expect(reclaim).toBeEnabled();
+  await expect(dialog.getByRole("button", { name: "应用到 WSL2" })).toBeDisabled();
+
+  const bounds = await dialog.boundingBox();
+  const reclaimBounds = await reclaim.boundingBox();
+  expect(bounds).not.toBeNull();
+  expect(reclaimBounds).not.toBeNull();
+  expect(bounds!.x).toBeGreaterThanOrEqual(0);
+  expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(680);
+  expect(reclaimBounds!.x).toBeGreaterThanOrEqual(bounds!.x);
+  expect(reclaimBounds!.x + reclaimBounds!.width).toBeLessThanOrEqual(bounds!.x + bounds!.width);
+  await page.screenshot({ path: testInfo.outputPath("wsl-conflict-dialog-680x520.png"), fullPage: true });
 });
 
 test("Linux 导出首屏说明凭据风险且成功用法逐行紧排", async ({ page }, testInfo) => {

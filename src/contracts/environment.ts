@@ -90,6 +90,12 @@ export interface WslEnvironmentSummary {
   pendingRestart: boolean;
   revision: string;
   messageId: string | null;
+  reclaimPreview: {
+    scope: "preserve_unrelated_toml" | "rebuild_minimal_config";
+    fullConfigBackup: boolean;
+    authJsonUnchanged: boolean;
+    temporarilyStartsDistribution: boolean;
+  } | null;
 }
 
 export interface WslApplyResult {
@@ -181,6 +187,21 @@ export function applyWslProvider(
     providerId,
     expectedRevision,
     confirm,
+  });
+}
+
+export function reclaimWslProvider(
+  environmentId: string,
+  providerId: string,
+  expectedRevision: string,
+  confirmReclaim: boolean,
+): Promise<WslApplyResult> {
+  if (isBrowserPreview()) return Promise.reject(previewFailure);
+  return invoke<WslApplyResult>("reclaim_wsl_provider", {
+    environmentId,
+    providerId,
+    expectedRevision,
+    confirmReclaim,
   });
 }
 

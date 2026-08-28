@@ -1,16 +1,19 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use crate::diagnostic_report::DiagnosticReport;
 use crate::environment::{AuthenticationMode, EnvironmentSnapshot, EnvironmentState};
 use crate::provider::ProviderSummary;
+use crate::wsl::{WslAvailability, WslConfigurationState, WslEnvironmentSummary};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DiagnosticManagementContext {
     environment_inspection: DiagnosticEnvironmentInspection,
     provider_catalog: DiagnosticProviderCatalog,
+    wsl_inspection: DiagnosticWslInspection,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -45,10 +48,25 @@ struct DiagnosticProviderCatalogEntry {
     verified_at_epoch_seconds: u64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiagnosticWslInspection {
+    status: &'static str,
+    environment_count: usize,
+    manageable_count: usize,
+    running_count: usize,
+    legacy_count: usize,
+    conflict_count: usize,
+    busy_count: usize,
+    message_ids: Vec<String>,
+    error_message_id: Option<String>,
+}
+
 impl DiagnosticManagementContext {
     pub(crate) fn inspect(
         environment: Result<EnvironmentSnapshot, &'static str>,
         providers: Result<Vec<ProviderSummary>, &'static str>,
+        wsl: Result<Vec<WslEnvironmentSummary>, &'static str>,
     ) -> Self {
         let environment_inspection = match environment {
             Ok(snapshot) => DiagnosticEnvironmentInspection {
@@ -101,9 +119,58 @@ impl DiagnosticManagementContext {
                 error_message_id: Some(message_id.to_owned()),
             },
         };
+        let wsl_inspection = match wsl {
+            Ok(environments) => {
+                let state_count = |state| {
+                    environments
+                        .iter()
+                        .filter(|environment| environment.configuration_state == state)
+                        .count()
+                };
+                DiagnosticWslInspection {
+                    status: "available",
+                    environment_count: environments.len(),
+                    manageable_count: environments
+                        .iter()
+                        .filter(|environment| {
+                            matches!(
+                                environment.availability,
+                                WslAvailability::Manageable | WslAvailability::DefaultUserChanged
+                            )
+                        })
+                        .count(),
+                    running_count: environments
+                        .iter()
+                        .filter(|environment| environment.running)
+                        .count(),
+                    legacy_count: state_count(WslConfigurationState::Legacy),
+                    conflict_count: state_count(WslConfigurationState::Conflict),
+                    busy_count: state_count(WslConfigurationState::Busy),
+                    message_ids: environments
+                        .iter()
+                        .filter_map(|environment| environment.message_id.clone())
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect(),
+                    error_message_id: None,
+                }
+            }
+            Err(message_id) => DiagnosticWslInspection {
+                status: "unavailable",
+                environment_count: 0,
+                manageable_count: 0,
+                running_count: 0,
+                legacy_count: 0,
+                conflict_count: 0,
+                busy_count: 0,
+                message_ids: Vec::new(),
+                error_message_id: Some(message_id.to_owned()),
+            },
+        };
         Self {
             environment_inspection,
             provider_catalog,
+            wsl_inspection,
         }
     }
 
@@ -114,6 +181,7 @@ impl DiagnosticManagementContext {
     pub(crate) fn redacted_markdown(&self) -> String {
         let environment = &self.environment_inspection;
         let catalog = &self.provider_catalog;
+        let wsl = &self.wsl_inspection;
         let entries = if catalog.entries.is_empty() {
             "无".to_owned()
         } else {
@@ -147,6 +215,11 @@ impl DiagnosticManagementContext {
                 "| 供应商目录检查 | {} |\n",
                 "| 供应商目录错误 | {} |\n",
                 "| 已验证供应商目录 | {} |\n\n",
+                "| WSL2 检查 | {} |\n",
+                "| WSL2 环境 / 可管理 / Running | {} / {} / {} |\n",
+                "| WSL2 旧格式 / 冲突 / 占用 | {} / {} / {} |\n",
+                "| WSL2 阻断消息 ID | {} |\n",
+                "| WSL2 检查错误 | {} |\n\n",
             ),
             environment.status,
             environment.state,
@@ -163,6 +236,19 @@ impl DiagnosticManagementContext {
             catalog.status,
             catalog.error_message_id.as_deref().unwrap_or("无"),
             entries,
+            wsl.status,
+            wsl.environment_count,
+            wsl.manageable_count,
+            wsl.running_count,
+            wsl.legacy_count,
+            wsl.conflict_count,
+            wsl.busy_count,
+            if wsl.message_ids.is_empty() {
+                "无".to_owned()
+            } else {
+                wsl.message_ids.join("、")
+            },
+            wsl.error_message_id.as_deref().unwrap_or("无"),
         )
     }
 }
@@ -535,6 +621,7 @@ mod tests {
     use crate::consumer::ConsumerStatus;
     use crate::diagnostic_report::{DiagnosticApplication, DiagnosticObservations};
     use crate::provider::ProviderSummary;
+    use crate::wsl::{WslAvailability, WslConfigurationState, WslEnvironmentSummary};
 
     #[test]
     fn parses_json_embedded_in_markdown() {
@@ -601,6 +688,22 @@ mod tests {
                 has_recommendation_update: false,
                 recommendation_template_base_url: None,
             }]),
+            Ok(vec![WslEnvironmentSummary {
+                environment_id: "{11111111-1111-1111-1111-111111111111}".to_owned(),
+                display_name: "Sensitive Ubuntu Name".to_owned(),
+                command_name: Some("Sensitive Ubuntu Name".to_owned()),
+                default_uid: Some(1000),
+                running: true,
+                availability: WslAvailability::Manageable,
+                current_provider: None,
+                actual_provider_id: None,
+                configuration_state: WslConfigurationState::Conflict,
+                requires_attention: true,
+                pending_restart: false,
+                revision: "secret-wsl-revision".to_owned(),
+                message_id: Some("wsl.schema_unknown".to_owned()),
+                reclaim_preview: None,
+            }]),
         );
         let prompt = build_prompt(&report, &management);
 
@@ -609,6 +712,9 @@ mod tests {
         assert!(prompt.contains("\"providerCatalog\""));
         assert!(prompt.contains("Saved Provider"));
         assert!(prompt.contains("environment.state_unavailable"));
+        assert!(prompt.contains("\"wslInspection\""));
+        assert!(prompt.contains("wsl.schema_unknown"));
+        assert!(prompt.contains("\"environmentCount\": 1"));
         assert!(prompt.contains("不要把登录状态未认证等同于供应商目录为空"));
         assert!(!prompt.contains("never-send-this-secret"));
         assert!(!prompt.contains("never-send-this-token"));
@@ -617,5 +723,8 @@ mod tests {
         assert!(!prompt.contains("repairPreview"));
         assert!(!prompt.contains("private-catalog.example"));
         assert!(!prompt.contains("private-catalog-model"));
+        assert!(!prompt.contains("Sensitive Ubuntu Name"));
+        assert!(!prompt.contains("11111111"));
+        assert!(!prompt.contains("secret-wsl-revision"));
     }
 }

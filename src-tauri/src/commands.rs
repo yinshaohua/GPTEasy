@@ -186,6 +186,10 @@ impl WslRuntime {
     pub(crate) fn new(application: WslApplication) -> Self {
         Self { application }
     }
+
+    pub(crate) fn inspect(&self) -> Result<Vec<WslEnvironmentSummary>, WslFailure> {
+        self.application.list()
+    }
 }
 
 impl SessionRuntime {
@@ -314,6 +318,49 @@ fn finish_command<T, E: IssueLoggableFailure>(
         );
     }
     result
+}
+
+fn wsl_inventory_details(provider_count: usize, environments: &[WslEnvironmentSummary]) -> String {
+    let state_count = |state| {
+        environments
+            .iter()
+            .filter(|environment| environment.configuration_state == state)
+            .count()
+    };
+    let message_count = |message_id: &str| {
+        environments
+            .iter()
+            .filter(|environment| environment.message_id.as_deref() == Some(message_id))
+            .count()
+    };
+    let manageable_count = environments
+        .iter()
+        .filter(|environment| {
+            matches!(
+                environment.availability,
+                crate::wsl::WslAvailability::Manageable
+                    | crate::wsl::WslAvailability::DefaultUserChanged
+            )
+        })
+        .count();
+    format!(
+        concat!(
+            "provider_count={} environment_count={} manageable_count={} ",
+            "legacy_count={} conflict_count={} busy_count={} ",
+            "unknown_schema_count={} invalid_markers_count={} ",
+            "invalid_credential_reference_count={} invalid_config_count={}"
+        ),
+        provider_count,
+        environments.len(),
+        manageable_count,
+        state_count(crate::wsl::WslConfigurationState::Legacy),
+        state_count(crate::wsl::WslConfigurationState::Conflict),
+        state_count(crate::wsl::WslConfigurationState::Busy),
+        message_count("wsl.schema_unknown"),
+        message_count("wsl.markers_invalid"),
+        message_count("wsl.credential_reference_invalid"),
+        message_count("wsl.config_invalid"),
+    )
 }
 
 fn finish_command_with_desktop_restart(
@@ -1159,15 +1206,28 @@ pub(crate) async fn list_wsl_environments(
     logs: State<'_, IssueLogRuntime>,
 ) -> Result<Vec<WslEnvironmentSummary>, WslFailure> {
     let application = state.application.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || application.list())
-        .await
-        .map_err(|_| {
-            WslFailure::new(
-                crate::wsl::WslFailureCategory::StateUnavailable,
-                "wsl.state_unavailable",
-            )
-        })
-        .and_then(|result| result);
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let environments = application.list()?;
+        let provider_count = application.verified_provider_count()?;
+        Ok((environments, provider_count))
+    })
+    .await
+    .map_err(|_| {
+        WslFailure::new(
+            crate::wsl::WslFailureCategory::StateUnavailable,
+            "wsl.state_unavailable",
+        )
+    })
+    .and_then(|result| result);
+    if let Ok((environments, provider_count)) = &result {
+        logs.store.append(
+            IssueLogLevel::Info,
+            "wsl.selection_state",
+            "wsl.selection_state_observed",
+            Some(wsl_inventory_details(*provider_count, environments)),
+        );
+    }
+    let result = result.map(|(environments, _)| environments);
     finish_command(&logs.store, "wsl.list", result)
 }
 
@@ -1204,6 +1264,50 @@ pub(crate) async fn apply_wsl_provider(
     })
     .and_then(|result| result);
     finish_command(&logs.store, "wsl.apply_provider", result)
+}
+
+#[tauri::command]
+pub(crate) async fn reclaim_wsl_provider(
+    app: AppHandle,
+    state: State<'_, WslRuntime>,
+    logs: State<'_, IssueLogRuntime>,
+    environment_id: String,
+    provider_id: String,
+    expected_revision: String,
+    confirm_reclaim: bool,
+) -> Result<WslApplyResult, WslFailure> {
+    let Some(_activity) = app
+        .state::<UpdateRuntime>()
+        .activity
+        .try_begin("WSL2 重新接管")
+    else {
+        return finish_command(
+            &logs.store,
+            "wsl.reclaim_provider",
+            Err(WslFailure::new(
+                crate::wsl::WslFailureCategory::StateUnavailable,
+                "update.installing",
+            )),
+        );
+    };
+    let application = state.application.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        application.reclaim_provider(
+            &environment_id,
+            &provider_id,
+            &expected_revision,
+            confirm_reclaim,
+        )
+    })
+    .await
+    .map_err(|_| {
+        WslFailure::new(
+            crate::wsl::WslFailureCategory::StateUnavailable,
+            "wsl.state_unavailable",
+        )
+    })
+    .and_then(|result| result);
+    finish_command(&logs.store, "wsl.reclaim_provider", result)
 }
 
 #[tauri::command]
@@ -1989,10 +2093,14 @@ mod tests {
         DeleteProviderFailure, IssueLogLevel, IssueLogStore, UpdateFailureCategory,
         UpdateInstallFailure, UpdateInstallFailureCategory, UpdateSnapshot, UpdateState,
         finish_command, finish_command_with_desktop_restart, log_update_check_failure,
-        log_update_install_failure,
+        log_update_install_failure, wsl_inventory_details,
     };
     use crate::consumer::{ConsumerIdentity, ConsumerRole, ConsumerStatus};
     use crate::desktop::{DesktopAction, DesktopFailure, DesktopFailureCategory, DesktopSnapshot};
+    use crate::wsl::{
+        WslAvailability, WslConfigurationState, WslEnvironmentSummary, WslReclaimPreview,
+        WslReclaimScope,
+    };
     use tempfile::tempdir;
 
     fn failed_update_snapshot(category: UpdateFailureCategory) -> UpdateSnapshot {
@@ -2083,6 +2191,40 @@ mod tests {
         assert!(!encoded.contains("api_key"));
         assert!(!encoded.contains("base_url"));
         assert!(!encoded.contains("provider_id"));
+    }
+
+    #[test]
+    fn wsl_inventory_log_distinguishes_safe_states_without_environment_identity() {
+        let environment = WslEnvironmentSummary {
+            environment_id: "{11111111-1111-1111-1111-111111111111}".to_owned(),
+            display_name: "Sensitive Ubuntu Name".to_owned(),
+            command_name: Some("Sensitive Ubuntu Name".to_owned()),
+            default_uid: Some(1000),
+            running: true,
+            availability: WslAvailability::Manageable,
+            current_provider: None,
+            actual_provider_id: None,
+            configuration_state: WslConfigurationState::Conflict,
+            requires_attention: true,
+            pending_restart: false,
+            revision: "secret-revision".to_owned(),
+            message_id: Some("wsl.schema_unknown".to_owned()),
+            reclaim_preview: Some(WslReclaimPreview {
+                scope: WslReclaimScope::PreserveUnrelatedToml,
+                full_config_backup: true,
+                auth_json_unchanged: true,
+                temporarily_starts_distribution: false,
+            }),
+        };
+
+        let details = wsl_inventory_details(2, &[environment]);
+
+        assert!(details.contains("provider_count=2"));
+        assert!(details.contains("environment_count=1"));
+        assert!(details.contains("unknown_schema_count=1"));
+        assert!(!details.contains("Sensitive Ubuntu Name"));
+        assert!(!details.contains("11111111"));
+        assert!(!details.contains("secret-revision"));
     }
 
     #[test]
