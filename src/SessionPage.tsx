@@ -916,7 +916,7 @@ function SessionDetailView({
     : sessionMessages.mutationBlocked.unavailable;
   return (
     <>
-      <header className="page-header session-detail-header" aria-label="会话详情工具栏">
+      <header className="page-header session-detail-header" role="toolbar" aria-label="会话详情工具栏">
         <button className="icon-button" type="button" aria-label={sessionMessages.backToList} title={sessionMessages.backToList} onClick={onBack}>
           <ArrowLeft size={18} aria-hidden="true" />
         </button>

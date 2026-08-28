@@ -94,7 +94,7 @@ describe("会话管理页面", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "打开会话：登录修复" }));
     expect(await screen.findByRole("heading", { name: "登录修复" })).toBeInTheDocument();
-    expect(screen.getByRole("banner", { name: "会话详情工具栏" })).toBeInTheDocument();
+    expect(screen.getByRole("toolbar", { name: "会话详情工具栏" })).toBeInTheDocument();
     expect(screen.getByText("请修复登录")).toBeInTheDocument();
     expect(screen.getByText("登录流程已修复。")).toBeInTheDocument();
     const activity = screen.getByText("命令").closest("details");
