@@ -44,6 +44,7 @@ test("Release 正文中的字面量转义换行会规范化为 Markdown 换行",
     assert.equal(adapter.state.manifests[0].notes, "第一行\n\n### 更新\n- 第二行");
     const releaseCreate = adapter.state.records.find((record) => record.operation === "release-create");
     assert.equal(new URLSearchParams(releaseCreate.body).get("body"), "第一行\n\n### 更新\n- 第二行");
+    assert.equal(new URLSearchParams(releaseCreate.body).get("target_commitish"), "main");
   } finally {
     await adapter.close();
   }

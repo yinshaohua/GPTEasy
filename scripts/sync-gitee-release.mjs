@@ -334,7 +334,7 @@ async function ensureGiteeRelease(release, config) {
   }
   return giteeRequest(`/repos/${config.giteeRepository}/releases`, {
     method: "POST",
-    body: urlEncodedForm(expected),
+    body: urlEncodedForm({ ...expected, target_commitish: config.giteeBranch }),
   });
 }
 

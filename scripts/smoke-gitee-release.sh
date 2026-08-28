@@ -103,7 +103,8 @@ download_anonymously() {
 RELEASE_RESPONSE="$WORK_DIR/release.json"
 request_form POST "$API_BASE/repos/$GITEE_REPOSITORY/releases" "$RELEASE_RESPONSE" \
   "tag_name=$SMOKE_TAG" "name=GPTEasy 分发冒烟 $SMOKE_TAG" \
-  'body=非正式 API 冒烟资源，不是 GPTEasy 正式版本。' "prerelease=true"
+  'body=非正式 API 冒烟资源，不是 GPTEasy 正式版本。' "prerelease=true" \
+  "target_commitish=$GITEE_DEFAULT_BRANCH"
 RELEASE_ID=$(node -e 'const r=require(process.argv[1]); const id=Number(r.id); if(!Number.isSafeInteger(id)||id<=0) process.exit(1); process.stdout.write(String(id))' "$RELEASE_RESPONSE")
 
 UPLOAD_RESPONSE="$WORK_DIR/upload.json"
