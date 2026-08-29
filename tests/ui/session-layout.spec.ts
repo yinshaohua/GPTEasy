@@ -112,6 +112,8 @@ for (const viewport of [{ width: 680, height: 520 }, { width: 1120, height: 800 
     await page.goto("/");
     await page.getByRole("button", { name: "会话管理" }).click();
 
+    await expect(page.getByRole("status", { name: "会话可见性自动修复状态" }))
+      .toContainText("安全时机自动修复");
     const toolbar = page.getByRole("region", { name: "会话列表工具栏" });
     const repair = toolbar.getByRole("button", { name: "修复会话" });
     await expect(repair).toBeVisible();

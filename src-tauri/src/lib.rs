@@ -28,16 +28,16 @@ use commands::{
     discover_provider_models, discover_provider_models_for_update, enter_session_management,
     execute_session_visibility, export_all_issue_logs, export_issue_logs, export_linux_script,
     export_session_markdown, force_apply_environment_provider, get_desktop_snapshot,
-    get_environment_snapshot, get_issue_log_path, get_startup_snapshot, get_update_snapshot,
-    install_update, leave_session_management, list_issue_logs, list_providers, list_sessions,
-    list_wsl_environments, open_dayway_website, open_update_manual_download,
-    open_update_release_notes, perform_update_check, preview_session_visibility, read_session,
-    reclaim_wsl_provider, record_frontend_failure, refresh_startup_snapshot,
-    refresh_wsl_environment, rename_provider, reorder_providers, restart_desktop_application,
-    restore_last_environment_config, revalidate_provider, reveal_provider_api_key,
-    save_and_apply_provider_update, save_dayway_provider, save_provider_update,
-    save_verified_provider, start_desktop_application, switch_to_openai_login, unarchive_sessions,
-    validate_provider, validate_provider_update,
+    get_environment_snapshot, get_issue_log_path, get_session_visibility_status,
+    get_startup_snapshot, get_update_snapshot, install_update, leave_session_management,
+    list_issue_logs, list_providers, list_sessions, list_wsl_environments, open_dayway_website,
+    open_update_manual_download, open_update_release_notes, perform_update_check,
+    preview_session_visibility, read_session, reclaim_wsl_provider, record_frontend_failure,
+    refresh_startup_snapshot, refresh_wsl_environment, rename_provider, reorder_providers,
+    restart_desktop_application, restore_last_environment_config, revalidate_provider,
+    reveal_provider_api_key, save_and_apply_provider_update, save_dayway_provider,
+    save_provider_update, save_verified_provider, start_desktop_application,
+    switch_to_openai_login, unarchive_sessions, validate_provider, validate_provider_update,
 };
 use desktop::DesktopApplication;
 use diagnostic_report::{
@@ -135,7 +135,8 @@ pub fn run() {
                 SessionVisibilityApplication::with_recovery_root(
                     &codex_home,
                     state_store.paths().root(),
-                ),
+                )
+                .with_pending_state(state_store.clone()),
             ));
             app.manage(ProviderRuntime::new(ProviderApplication::new(
                 state_store,
@@ -206,6 +207,7 @@ pub fn run() {
             enter_session_management,
             leave_session_management,
             list_sessions,
+            get_session_visibility_status,
             preview_session_visibility,
             execute_session_visibility,
             cancel_session_request,

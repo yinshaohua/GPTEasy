@@ -285,6 +285,91 @@ fn restart_requests_normal_close_then_observes_a_new_root() {
 }
 
 #[test]
+fn restart_checkpoint_runs_after_the_old_roots_exit_and_before_activation() {
+    let old = scan(ConsumerStatus::Running, &[(420, 8_000)], None);
+    let expected_roots = old.desktop_roots.clone();
+    let (application, activator, controller) = application(
+        vec![package()],
+        vec![
+            old,
+            scan(ConsumerStatus::Stopped, &[], None),
+            scan(ConsumerStatus::Running, &[(421, 9_100)], None),
+        ],
+        false,
+    );
+    let checkpoint_ran = Arc::new(AtomicBool::new(false));
+    let observed_checkpoint = checkpoint_ran.clone();
+    let observed_activator = activator.clone();
+    let observed_controller = controller.clone();
+
+    application
+        .restart_with_checkpoint(&expected_roots, move || {
+            assert_eq!(
+                observed_controller
+                    .requests
+                    .lock()
+                    .expect("controller fixture lock")
+                    .len(),
+                1,
+                "the trusted root has already received its close request",
+            );
+            assert!(
+                observed_activator
+                    .aumids
+                    .lock()
+                    .expect("activator fixture lock")
+                    .is_empty(),
+                "the replacement desktop must not be activated before coordination",
+            );
+            observed_checkpoint.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+        .expect("restart through checkpoint");
+
+    assert!(checkpoint_ran.load(Ordering::SeqCst));
+    assert_eq!(
+        activator
+            .aumids
+            .lock()
+            .expect("activator fixture lock")
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn restart_checkpoint_can_block_activation_after_a_confirmed_exit() {
+    let old = scan(ConsumerStatus::Running, &[(420, 8_000)], None);
+    let expected_roots = old.desktop_roots.clone();
+    let (application, activator, _) = application(
+        vec![package()],
+        vec![old, scan(ConsumerStatus::Stopped, &[], None)],
+        false,
+    );
+
+    let failure = application
+        .restart_with_checkpoint(&expected_roots, || {
+            Err(gpteasy_lib::desktop::DesktopFailure {
+                category: DesktopFailureCategory::ActionUnavailable,
+                message_id: "session_visibility.recovery_indeterminate",
+            })
+        })
+        .expect_err("indeterminate coordination blocks activation");
+
+    assert_eq!(
+        failure.message_id,
+        "session_visibility.recovery_indeterminate"
+    );
+    assert!(
+        activator
+            .aumids
+            .lock()
+            .expect("activator fixture lock")
+            .is_empty()
+    );
+}
+
+#[test]
 fn restart_starts_when_the_expected_desktop_has_already_exited() {
     let expected_roots = scan(ConsumerStatus::Running, &[(420, 8_000)], None).desktop_roots;
     let (application, activator, controller) = application(

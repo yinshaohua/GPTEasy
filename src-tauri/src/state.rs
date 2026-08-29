@@ -9,7 +9,7 @@ use rusqlite::backup::Backup;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction};
 use serde::Serialize;
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 8;
+pub const CURRENT_SCHEMA_VERSION: i64 = 9;
 const APPLICATION_ID: i64 = 0x4750_5445;
 const BACKUP_LIMIT: usize = 3;
 const INSTALLATION_MARKER_CONTENT: &[u8] = b"gpteasy-state-v1\n";
@@ -150,6 +150,21 @@ CREATE TABLE session_process_ownership (
 ) STRICT;
 "#;
 
+const SCHEMA_V9: &str = r#"
+CREATE TABLE pending_session_visibility (
+    singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
+    target_mode TEXT NOT NULL CHECK (target_mode IN ('provider', 'openai_login')),
+    model_provider TEXT NOT NULL CHECK (length(trim(model_provider)) > 0),
+    environment_revision TEXT NOT NULL CHECK (length(environment_revision) > 0),
+    status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'partial', 'blocked')),
+    succeeded INTEGER NOT NULL DEFAULT 0 CHECK (succeeded >= 0),
+    retryable INTEGER NOT NULL DEFAULT 0 CHECK (retryable >= 0),
+    diagnostic_stage TEXT NOT NULL DEFAULT 'mode_switch',
+    error_code TEXT NOT NULL DEFAULT 'none',
+    updated_at_epoch_seconds INTEGER NOT NULL
+) STRICT;
+"#;
+
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, SCHEMA_V1),
     (2, SCHEMA_V2),
@@ -159,6 +174,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (6, SCHEMA_V6),
     (7, SCHEMA_V7),
     (8, SCHEMA_V8),
+    (9, SCHEMA_V9),
 ];
 
 #[derive(Debug, Clone)]
@@ -281,6 +297,129 @@ impl StateStore {
                 [],
             )
             .is_ok_and(|changed| changed == 1)
+    }
+
+    pub fn record_pending_session_visibility(
+        &self,
+        target_mode: PendingSessionVisibilityTargetMode,
+        model_provider: &str,
+        environment_revision: &str,
+    ) -> Result<(), SessionVisibilityStateFailure> {
+        if model_provider.trim().is_empty() || environment_revision.is_empty() {
+            return Err(SessionVisibilityStateFailure);
+        }
+        let connection = self.session_visibility_connection()?;
+        connection
+            .execute(
+                "INSERT INTO pending_session_visibility (
+                    singleton, target_mode, model_provider, environment_revision, status,
+                    succeeded, retryable, diagnostic_stage, error_code, updated_at_epoch_seconds
+                 ) VALUES (1, ?1, ?2, ?3, 'pending', 0, 0, 'mode_switch', 'none', ?4)
+                 ON CONFLICT(singleton) DO UPDATE SET
+                    target_mode = excluded.target_mode,
+                    model_provider = excluded.model_provider,
+                    environment_revision = excluded.environment_revision,
+                    status = excluded.status,
+                    succeeded = excluded.succeeded,
+                    retryable = excluded.retryable,
+                    diagnostic_stage = excluded.diagnostic_stage,
+                    error_code = excluded.error_code,
+                    updated_at_epoch_seconds = excluded.updated_at_epoch_seconds",
+                rusqlite::params![
+                    target_mode.as_str(),
+                    model_provider,
+                    environment_revision,
+                    epoch_seconds(),
+                ],
+            )
+            .map(|_| ())
+            .map_err(|_| SessionVisibilityStateFailure)
+    }
+
+    pub fn pending_session_visibility(
+        &self,
+    ) -> Result<Option<PendingSessionVisibilitySnapshot>, SessionVisibilityStateFailure> {
+        let connection = self.session_visibility_connection()?;
+        connection
+            .query_row(
+                "SELECT target_mode, model_provider, environment_revision, status,
+                        succeeded, retryable, diagnostic_stage, error_code,
+                        updated_at_epoch_seconds
+                 FROM pending_session_visibility WHERE singleton = 1",
+                [],
+                |row| {
+                    let target_mode =
+                        PendingSessionVisibilityTargetMode::parse(&row.get::<_, String>(0)?)
+                            .ok_or(rusqlite::Error::InvalidQuery)?;
+                    let status = PendingSessionVisibilityStatus::parse(&row.get::<_, String>(3)?)
+                        .ok_or(rusqlite::Error::InvalidQuery)?;
+                    Ok(PendingSessionVisibilitySnapshot {
+                        target_mode,
+                        model_provider: row.get(1)?,
+                        environment_revision: row.get(2)?,
+                        status,
+                        succeeded: row.get(4)?,
+                        retryable: row.get(5)?,
+                        diagnostic_stage: row.get(6)?,
+                        error_code: row.get(7)?,
+                        updated_at_epoch_seconds: row.get(8)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|_| SessionVisibilityStateFailure)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_pending_session_visibility(
+        &self,
+        expected_revision: &str,
+        status: PendingSessionVisibilityStatus,
+        succeeded: u32,
+        retryable: u32,
+        diagnostic_stage: &str,
+        error_code: &str,
+    ) -> Result<bool, SessionVisibilityStateFailure> {
+        let connection = self.session_visibility_connection()?;
+        connection
+            .execute(
+                "UPDATE pending_session_visibility
+                 SET status = ?1, succeeded = ?2, retryable = ?3,
+                     diagnostic_stage = ?4, error_code = ?5,
+                     updated_at_epoch_seconds = ?6
+                 WHERE singleton = 1 AND environment_revision = ?7",
+                rusqlite::params![
+                    status.as_str(),
+                    i64::from(succeeded),
+                    i64::from(retryable),
+                    diagnostic_stage,
+                    error_code,
+                    epoch_seconds(),
+                    expected_revision,
+                ],
+            )
+            .map(|changed| changed == 1)
+            .map_err(|_| SessionVisibilityStateFailure)
+    }
+
+    pub fn clear_pending_session_visibility(
+        &self,
+        expected_revision: &str,
+    ) -> Result<bool, SessionVisibilityStateFailure> {
+        let connection = self.session_visibility_connection()?;
+        connection
+            .execute(
+                "DELETE FROM pending_session_visibility
+                 WHERE singleton = 1 AND environment_revision = ?1",
+                [expected_revision],
+            )
+            .map(|changed| changed == 1)
+            .map_err(|_| SessionVisibilityStateFailure)
+    }
+
+    fn session_visibility_connection(&self) -> Result<Connection, SessionVisibilityStateFailure> {
+        self.open_existing_database()
+            .ok_or(SessionVisibilityStateFailure)
     }
 
     pub fn record_session_capability(
@@ -735,6 +874,77 @@ pub struct DatabaseContentsSnapshot {
     pub(crate) last_applied_mode: Option<AppliedMode>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingSessionVisibilityTargetMode {
+    Provider,
+    OpenaiLogin,
+}
+
+impl PendingSessionVisibilityTargetMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Provider => "provider",
+            Self::OpenaiLogin => "openai_login",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "provider" => Some(Self::Provider),
+            "openai_login" => Some(Self::OpenaiLogin),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingSessionVisibilityStatus {
+    Pending,
+    Running,
+    Partial,
+    Blocked,
+}
+
+impl PendingSessionVisibilityStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Running => "running",
+            Self::Partial => "partial",
+            Self::Blocked => "blocked",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "pending" => Some(Self::Pending),
+            "running" => Some(Self::Running),
+            "partial" => Some(Self::Partial),
+            "blocked" => Some(Self::Blocked),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingSessionVisibilitySnapshot {
+    pub target_mode: PendingSessionVisibilityTargetMode,
+    pub model_provider: String,
+    pub environment_revision: String,
+    pub status: PendingSessionVisibilityStatus,
+    pub succeeded: u32,
+    pub retryable: u32,
+    pub diagnostic_stage: String,
+    pub error_code: String,
+    pub updated_at_epoch_seconds: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionVisibilityStateFailure;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PendingConfigOperationSnapshot {
@@ -1047,6 +1257,15 @@ fn timestamp_nonce() -> u128 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos()
+}
+
+fn epoch_seconds() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .try_into()
+        .unwrap_or(i64::MAX)
 }
 
 #[cfg(test)]

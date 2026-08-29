@@ -536,6 +536,13 @@ export const sessionMessages = {
   refreshList: "刷新会话列表",
   repairSessions: "修复会话",
   visibility: {
+    auto: {
+      label: "会话可见性自动修复状态",
+      pending: "模式已切换，会话可见性将在安全时机自动修复。",
+      running: "正在自动修复会话可见性。",
+      partial: (succeeded: number, retryable: number) => `已修复 ${succeeded} 个会话，仍有 ${retryable} 个待重试。`,
+      blocked: "会话可见性状态无法判定，Codex 重新启动已阻止。",
+    },
     title: "会话可见性检查",
     scanning: "正在扫描会话可见性",
     scanFailed: "无法完成会话可见性检查，Codex 数据未发生变化。",

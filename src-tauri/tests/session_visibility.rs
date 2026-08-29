@@ -6,9 +6,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use gpteasy_lib::session_visibility::{
     SessionVisibilityApplication, VisibilityAppServerCapability, VisibilityConsumerState,
-    VisibilityExecutionRequest, VisibilityExecutionRuntime, VisibilityFailurePoint,
-    VisibilityFaultInjector, VisibilityScanContext, VisibilityTarget, VisibilityTargetMode,
-    VisibilityThreadView,
+    VisibilityCoordinationStatus, VisibilityExecutionRequest, VisibilityExecutionRuntime,
+    VisibilityFailurePoint, VisibilityFaultInjector, VisibilityScanContext, VisibilityTarget,
+    VisibilityTargetMode, VisibilityThreadView,
+};
+use gpteasy_lib::state::{
+    PendingSessionVisibilityStatus, PendingSessionVisibilityTargetMode, StatePaths, StateStore,
 };
 use rusqlite::{Connection, params};
 use serde_json::json;
@@ -28,16 +31,21 @@ async fn confirmed_repair_atomically_changes_only_the_runtime_provider_and_verif
         true,
     );
     fixture.index(&rollout, "old-provider", "cli", true, false);
+    let state_store = fixture.state_store();
     let application =
-        SessionVisibilityApplication::with_recovery_root(fixture.codex_home(), fixture.root());
+        SessionVisibilityApplication::with_recovery_root(fixture.codex_home(), fixture.root())
+            .with_pending_state(state_store.clone());
     let preview = application
         .scan(executable_context("revision-atomic"))
         .expect("scan visibility");
     let before = fs::read(&rollout).expect("read rollout before repair");
     let runtime = VisibilityRuntimeFixture::new(fixture.codex_home());
+    application
+        .record_pending(&preview.target)
+        .expect("record pending visibility");
 
     let result = application
-        .execute(
+        .execute_pending(
             VisibilityExecutionRequest {
                 confirmation_id: preview.confirmation_id.clone(),
                 target: preview.target.clone(),
@@ -52,6 +60,13 @@ async fn confirmed_repair_atomically_changes_only_the_runtime_provider_and_verif
     assert_eq!(result.retryable, 0);
     assert!(!result.block_codex_restart);
     assert_eq!(runtime.shutdowns(), 1);
+    assert!(
+        state_store
+            .pending_session_visibility()
+            .expect("read completed pending state")
+            .is_none(),
+        "complete repair clears the independently persisted pending state",
+    );
     assert_eq!(
         runtime.starts(),
         2,
@@ -131,6 +146,125 @@ async fn execution_rejects_changed_candidates_consumers_and_revision_without_wri
 }
 
 #[tokio::test]
+async fn automatic_coordination_defers_cli_and_unknown_consumers_without_starting_or_writing() {
+    for (consumer, expected_code) in [
+        (
+            VisibilityConsumerState::CliRunning,
+            "session_visibility.cli_running",
+        ),
+        (
+            VisibilityConsumerState::Unknown,
+            "session_visibility.consumer_unknown",
+        ),
+    ] {
+        let fixture = VisibilityFixture::new();
+        let rollout = fixture.indexed_candidate("automatic-consumer-gate.jsonl");
+        let state_store = fixture.state_store();
+        let application =
+            SessionVisibilityApplication::with_recovery_root(fixture.codex_home(), fixture.root())
+                .with_pending_state(state_store.clone());
+        let context = executable_context("revision-automatic-consumer-gate");
+        application
+            .record_pending(&context.target)
+            .expect("record pending target");
+        let before = fs::read(&rollout).expect("read rollout before automatic gate");
+        let runtime = VisibilityRuntimeFixture::with_state(
+            fixture.codex_home(),
+            consumer,
+            "revision-automatic-consumer-gate",
+            None,
+        );
+
+        let outcome = application
+            .coordinate_pending(context, &runtime)
+            .await
+            .expect("consumer deferral is a normal coordination result");
+
+        assert_eq!(outcome.status, VisibilityCoordinationStatus::Deferred);
+        assert!(!outcome.block_codex_restart);
+        assert_eq!(outcome.error_code, expected_code);
+        assert_eq!(runtime.starts(), 0);
+        assert_eq!(runtime.shutdowns(), 0);
+        assert_eq!(fs::read(&rollout).expect("read rollout after gate"), before);
+        let pending = state_store
+            .pending_session_visibility()
+            .expect("read deferred pending state")
+            .expect("deferred state remains pending");
+        assert_eq!(pending.status, PendingSessionVisibilityStatus::Pending);
+        assert_eq!(pending.error_code, expected_code);
+    }
+}
+
+#[tokio::test]
+async fn automatic_coordination_repairs_an_openai_target_when_no_consumers_are_running() {
+    let fixture = VisibilityFixture::new();
+    let rollout = fixture.indexed_candidate("automatic-openai.jsonl");
+    let state_store = fixture.state_store();
+    let application =
+        SessionVisibilityApplication::with_recovery_root(fixture.codex_home(), fixture.root())
+            .with_pending_state(state_store.clone());
+    let context = openai_context("revision-automatic-openai");
+    application
+        .record_pending(&context.target)
+        .expect("record OpenAI pending target");
+    let runtime = VisibilityRuntimeFixture::with_state(
+        fixture.codex_home(),
+        VisibilityConsumerState::NoConsumers,
+        "revision-automatic-openai",
+        None,
+    )
+    .with_target(VisibilityTargetMode::OpenaiLogin, "openai");
+
+    let outcome = application
+        .coordinate_pending(context, &runtime)
+        .await
+        .expect("coordinate OpenAI target");
+
+    assert_eq!(outcome.status, VisibilityCoordinationStatus::Complete);
+    assert_eq!(provider_in_rollout(&rollout), "openai");
+    assert!(
+        state_store
+            .pending_session_visibility()
+            .expect("read completed OpenAI state")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn automatic_coordination_repairs_a_provider_target_when_no_consumers_are_running() {
+    let fixture = VisibilityFixture::new();
+    let rollout = fixture.indexed_candidate("automatic-provider.jsonl");
+    let state_store = fixture.state_store();
+    let application =
+        SessionVisibilityApplication::with_recovery_root(fixture.codex_home(), fixture.root())
+            .with_pending_state(state_store.clone());
+    let context = executable_context("revision-automatic-provider");
+    application
+        .record_pending(&context.target)
+        .expect("record provider pending target");
+    let runtime = VisibilityRuntimeFixture::with_state(
+        fixture.codex_home(),
+        VisibilityConsumerState::NoConsumers,
+        "revision-automatic-provider",
+        None,
+    );
+
+    let outcome = application
+        .coordinate_pending(context, &runtime)
+        .await
+        .expect("coordinate provider target");
+
+    assert_eq!(outcome.status, VisibilityCoordinationStatus::Complete);
+    assert_eq!(provider_in_rollout(&rollout), TARGET_PROVIDER);
+    assert!(
+        state_store
+            .pending_session_visibility()
+            .expect("read completed provider state")
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn execution_rejects_a_candidate_identity_change_before_stopping_the_app_server() {
     let fixture = VisibilityFixture::new();
     let rollout = fixture.indexed_candidate("identity.jsonl");
@@ -164,11 +298,13 @@ async fn rollout_failures_are_isolated_and_the_latest_manifest_is_compact_and_re
         fixture.indexed_rollout("second.jsonl", "22222222-2222-4222-8222-222222222222", true);
     let faults =
         FailingVisibilityWrites::before_replace_for("22222222-2222-4222-8222-222222222222");
+    let state_store = fixture.state_store();
     let application = SessionVisibilityApplication::with_fault_injector(
         fixture.codex_home(),
         fixture.root(),
         faults,
-    );
+    )
+    .with_pending_state(state_store.clone());
     let preview = application
         .scan(executable_context("revision-partial"))
         .expect("scan visibility");
@@ -178,9 +314,12 @@ async fn rollout_failures_are_isolated_and_the_latest_manifest_is_compact_and_re
         "revision-partial",
         None,
     );
+    application
+        .record_pending(&preview.target)
+        .expect("record pending visibility");
 
     let result = application
-        .execute(execution_request(&preview), &runtime)
+        .execute_pending(execution_request(&preview), &runtime)
         .await
         .expect("execute partial repair");
 
@@ -188,6 +327,18 @@ async fn rollout_failures_are_isolated_and_the_latest_manifest_is_compact_and_re
     assert_eq!((result.succeeded, result.retryable), (1, 1));
     assert_eq!(result.diagnostic_stage, "rollout_replace");
     assert_eq!(result.error_code, "session_visibility.write_failed");
+    let pending = state_store
+        .pending_session_visibility()
+        .expect("read partial pending state")
+        .expect("partial repair remains pending");
+    assert_eq!(pending.status, PendingSessionVisibilityStatus::Partial);
+    assert_eq!(
+        pending.target_mode,
+        PendingSessionVisibilityTargetMode::Provider
+    );
+    assert_eq!((pending.succeeded, pending.retryable), (1, 1));
+    assert_eq!(pending.diagnostic_stage, "rollout_replace");
+    assert_eq!(pending.error_code, "session_visibility.write_failed");
     assert_eq!(provider_in_rollout(&first), TARGET_PROVIDER);
     assert_eq!(provider_in_rollout(&second), "old-provider");
     let manifest_path = fixture.root().join("session-visibility-recovery.json");
@@ -660,11 +811,13 @@ async fn an_invalid_provider_field_is_skipped_without_aborting_other_sessions() 
 async fn an_interrupted_replace_is_retryable_until_the_file_matches_neither_known_hash() {
     let fixture = VisibilityFixture::new();
     let rollout = fixture.indexed_candidate("interrupted.jsonl");
+    let state_store = fixture.state_store();
     let application = SessionVisibilityApplication::with_fault_injector(
         fixture.codex_home(),
         fixture.root(),
         FailingVisibilityWrites::after_replace_once(),
-    );
+    )
+    .with_pending_state(state_store.clone());
     let preview = application
         .scan(executable_context("revision-interrupted"))
         .expect("scan visibility");
@@ -674,9 +827,12 @@ async fn an_interrupted_replace_is_retryable_until_the_file_matches_neither_know
         "revision-interrupted",
         None,
     );
+    application
+        .record_pending(&preview.target)
+        .expect("record pending visibility");
 
     let failure = application
-        .execute(execution_request(&preview), &runtime)
+        .execute_pending(execution_request(&preview), &runtime)
         .await
         .expect_err("fault simulates an interrupted process");
 
@@ -695,10 +851,19 @@ async fn an_interrupted_replace_is_retryable_until_the_file_matches_neither_know
     assert!(assessment.block_codex_restart);
 
     let next = application
-        .execute(execution_request(&preview), &runtime)
+        .execute_pending(execution_request(&preview), &runtime)
         .await
         .expect("public execution reports an indeterminate recovery state");
     assert_eq!(next.status, "indeterminate");
+    assert!(next.block_codex_restart);
+    assert_eq!(
+        state_store
+            .pending_session_visibility()
+            .expect("read blocked pending state")
+            .expect("indeterminate state remains pending")
+            .status,
+        PendingSessionVisibilityStatus::Blocked,
+    );
     assert!(next.block_codex_restart);
     assert_eq!(
         runtime.shutdowns(),
@@ -845,6 +1010,19 @@ fn executable_context(revision: &str) -> VisibilityScanContext {
     }
 }
 
+fn openai_context(revision: &str) -> VisibilityScanContext {
+    VisibilityScanContext {
+        target: VisibilityTarget {
+            mode: VisibilityTargetMode::OpenaiLogin,
+            model_provider: "openai".to_owned(),
+            environment_revision: revision.to_owned(),
+        },
+        codex_version: Some("codex-cli fixture".to_owned()),
+        app_server: VisibilityAppServerCapability::Available,
+        execution_blockers: Vec::new(),
+    }
+}
+
 struct VisibilityRuntimeFixture {
     codex_home: PathBuf,
     shutdowns: AtomicUsize,
@@ -854,6 +1032,8 @@ struct VisibilityRuntimeFixture {
     revision_after_shutdown: Option<String>,
     verification: VerificationFixture,
     coordinated_rollout: Option<PathBuf>,
+    target_mode: VisibilityTargetMode,
+    target_provider: String,
 }
 
 #[derive(Clone, Copy)]
@@ -890,7 +1070,15 @@ impl VisibilityRuntimeFixture {
             revision_after_shutdown: revision_after_shutdown.map(str::to_owned),
             verification: VerificationFixture::Normal,
             coordinated_rollout: None,
+            target_mode: VisibilityTargetMode::Provider,
+            target_provider: TARGET_PROVIDER.to_owned(),
         }
+    }
+
+    fn with_target(mut self, mode: VisibilityTargetMode, model_provider: &str) -> Self {
+        self.target_mode = mode;
+        self.target_provider = model_provider.to_owned();
+        self
     }
 
     fn with_verification(mut self, verification: VerificationFixture) -> Self {
@@ -960,8 +1148,8 @@ impl VisibilityExecutionRuntime for VisibilityRuntimeFixture {
         &self,
     ) -> Result<VisibilityTarget, gpteasy_lib::session_visibility::VisibilityFailure> {
         Ok(VisibilityTarget {
-            mode: VisibilityTargetMode::Provider,
-            model_provider: TARGET_PROVIDER.to_owned(),
+            mode: self.target_mode,
+            model_provider: self.target_provider.clone(),
             environment_revision: self.revision.lock().expect("revision lock").clone(),
         })
     }
@@ -1630,6 +1818,12 @@ impl VisibilityFixture {
 
     fn root(&self) -> &Path {
         self._temp.path()
+    }
+
+    fn state_store(&self) -> StateStore {
+        let store = StateStore::new(StatePaths::from_root(self.root().join("gpteasy-state")));
+        assert!(store.bootstrap().is_ready());
+        store
     }
 
     fn rollout(

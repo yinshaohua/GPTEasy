@@ -12,7 +12,14 @@ use gpteasy_lib::environment::{
     EnvironmentFailureCategory, EnvironmentFailurePoint, EnvironmentFaultInjector,
     EnvironmentRecovery, EnvironmentState, OpenAiLoginProbe, RestoreAvailability,
 };
-use gpteasy_lib::state::{StatePaths, StateStore};
+use gpteasy_lib::session_visibility::{
+    SessionVisibilityApplication, VisibilityConsumerState, VisibilityExecutionRequest,
+    VisibilityExecutionRuntime, VisibilityFailure, VisibilityRuntimeFuture, VisibilityTarget,
+    VisibilityTargetMode, VisibilityVerificationViews,
+};
+use gpteasy_lib::state::{
+    PendingSessionVisibilityStatus, PendingSessionVisibilityTargetMode, StatePaths, StateStore,
+};
 use rusqlite::{Connection, params};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -45,6 +52,46 @@ impl ConsumerScanner for StoppedConsumers {
             identities: Vec::new(),
             desktop_roots: Vec::new(),
         }
+    }
+}
+
+struct TargetOnlyVisibilityRuntime(VisibilityTarget);
+
+impl VisibilityExecutionRuntime for TargetOnlyVisibilityRuntime {
+    fn current_target(&self) -> Result<VisibilityTarget, VisibilityFailure> {
+        Ok(self.0.clone())
+    }
+
+    fn baseline_views<'a>(
+        &'a self,
+        _target_provider: &'a str,
+    ) -> VisibilityRuntimeFuture<'a, VisibilityVerificationViews> {
+        Box::pin(async {
+            Ok(VisibilityVerificationViews {
+                all_providers: Vec::new(),
+                target_provider: Vec::new(),
+            })
+        })
+    }
+
+    fn shutdown_owned_app_server(&self) -> VisibilityRuntimeFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn consumers(&self, _exclude_owned_app_server: bool) -> VisibilityConsumerState {
+        VisibilityConsumerState::NoConsumers
+    }
+
+    fn verification_views<'a>(
+        &'a self,
+        _target_provider: &'a str,
+    ) -> VisibilityRuntimeFuture<'a, VisibilityVerificationViews> {
+        Box::pin(async {
+            Ok(VisibilityVerificationViews {
+                all_providers: Vec::new(),
+                target_provider: Vec::new(),
+            })
+        })
     }
 }
 
@@ -191,8 +238,13 @@ fn missing_codex_artifacts_are_previewed_without_being_created() {
 
 #[test]
 fn session_visibility_context_resolves_provider_and_openai_targets() {
-    let (temp, _, application) = fixture();
+    let (temp, store, application) = fixture();
     let codex_home = temp.path().join(".codex");
+    let visibility = SessionVisibilityApplication::with_recovery_root(
+        &codex_home,
+        temp.path().join("visibility-recovery"),
+    )
+    .with_pending_state(store.clone());
     let provider = application
         .apply_provider(PROVIDER_ID, true)
         .expect("establish provider mode");
@@ -206,6 +258,21 @@ fn session_visibility_context_resolves_provider_and_openai_targets() {
     assert_eq!(provider_context.provider_id.as_deref(), Some(PROVIDER_ID));
     assert_eq!(provider_context.revision, provider.revision);
     assert!(!provider_context.pending_operation);
+    visibility
+        .record_pending(&VisibilityTarget {
+            mode: VisibilityTargetMode::Provider,
+            model_provider: PROVIDER_ID.to_owned(),
+            environment_revision: provider_context.revision.clone(),
+        })
+        .expect("persist provider visibility target after mode switch");
+    assert_eq!(
+        store
+            .pending_session_visibility()
+            .expect("read provider visibility state")
+            .expect("provider visibility state")
+            .target_mode,
+        PendingSessionVisibilityTargetMode::Provider,
+    );
 
     let openai = application
         .switch_to_openai_login(true, &provider.revision)
@@ -219,7 +286,70 @@ fn session_visibility_context_resolves_provider_and_openai_targets() {
     assert!(openai_context.provider_id.is_none());
     assert_eq!(openai_context.revision, openai.revision);
     assert!(!openai_context.pending_operation);
+    visibility
+        .record_pending(&VisibilityTarget {
+            mode: VisibilityTargetMode::OpenaiLogin,
+            model_provider: "openai".to_owned(),
+            environment_revision: openai_context.revision.clone(),
+        })
+        .expect("persist OpenAI visibility target after mode switch");
+    let pending = store
+        .pending_session_visibility()
+        .expect("read OpenAI visibility state")
+        .expect("OpenAI visibility state");
+    assert_eq!(
+        pending.target_mode,
+        PendingSessionVisibilityTargetMode::OpenaiLogin,
+    );
+    assert_eq!(pending.environment_revision, openai.revision);
     assert!(codex_home.exists());
+}
+
+#[tokio::test]
+async fn visibility_repair_failure_after_mode_switch_does_not_roll_back_the_environment() {
+    let (temp, store, application) = fixture();
+    let codex_home = temp.path().join(".codex");
+    let switched = application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("switch provider mode before visibility repair");
+    let target = VisibilityTarget {
+        mode: VisibilityTargetMode::Provider,
+        model_provider: PROVIDER_ID.to_owned(),
+        environment_revision: switched.revision.clone(),
+    };
+    let visibility = SessionVisibilityApplication::with_recovery_root(
+        &codex_home,
+        temp.path().join("visibility-recovery"),
+    )
+    .with_pending_state(store.clone());
+    visibility
+        .record_pending(&target)
+        .expect("record visibility repair after successful switch");
+
+    let failure = visibility
+        .execute_pending(
+            VisibilityExecutionRequest {
+                confirmation_id: "stale-confirmation".to_owned(),
+                target: target.clone(),
+            },
+            &TargetOnlyVisibilityRuntime(target),
+        )
+        .await
+        .expect_err("stale confirmation is an ordinary determinate repair failure");
+
+    assert_eq!(failure.message_id, "session_visibility.rescan_required");
+    let after = application
+        .inspect_for_session_visibility()
+        .expect("inspect environment after failed visibility repair");
+    assert_eq!(after.mode, Some(AuthenticationMode::Provider));
+    assert_eq!(after.provider_id.as_deref(), Some(PROVIDER_ID));
+    assert_eq!(after.revision, switched.revision);
+    let pending = store
+        .pending_session_visibility()
+        .expect("read retryable visibility state")
+        .expect("failed repair remains pending");
+    assert_eq!(pending.status, PendingSessionVisibilityStatus::Pending);
+    assert_eq!(pending.error_code, "session_visibility.rescan_required",);
 }
 
 #[test]

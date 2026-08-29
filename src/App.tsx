@@ -12,6 +12,7 @@ import ProviderPage from "./ProviderPage";
 import SessionPage from "./SessionPage";
 import IssueLogPage from "./IssueLogPage";
 import DesktopControl from "./DesktopControl";
+import SessionVisibilityStatus from "./SessionVisibilityStatus";
 import DiagnosticReportControl from "./DiagnosticReportControl";
 import {
   getStartupSnapshot,
@@ -219,6 +220,7 @@ function Shell({
       />
       <div className="app-workspace">
         <AppHeader page={page} />
+        <SessionVisibilityStatus />
         {children}
       </div>
     </div>

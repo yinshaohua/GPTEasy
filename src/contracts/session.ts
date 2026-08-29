@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 import { isBrowserPreview } from "./browser-preview";
 
@@ -140,6 +141,34 @@ export interface SessionVisibilityExecutionResult {
   errorCode: string;
 }
 
+export type PendingSessionVisibilityStatus = "pending" | "running" | "partial" | "blocked";
+
+export interface PendingSessionVisibility {
+  targetMode: "provider" | "openai_login";
+  modelProvider: string;
+  environmentRevision: string;
+  status: PendingSessionVisibilityStatus;
+  succeeded: number;
+  retryable: number;
+  diagnosticStage: string;
+  errorCode: string;
+  updatedAtEpochSeconds: number;
+}
+
+export function getSessionVisibilityStatus(): Promise<PendingSessionVisibility | null> {
+  if (isBrowserPreview()) return Promise.resolve(previewPendingVisibility);
+  return invoke<PendingSessionVisibility | null>("get_session_visibility_status");
+}
+
+export function listenSessionVisibilityStatus(
+  handler: (status: PendingSessionVisibility | null) => void,
+): Promise<() => void> {
+  if (isBrowserPreview()) return Promise.resolve(() => undefined);
+  return listen<PendingSessionVisibility | null>("session-visibility-status-changed", (event) => {
+    handler(event.payload);
+  });
+}
+
 export function enterSessionManagement(leaseId: string): Promise<SessionAvailability> {
   if (isBrowserPreview()) return Promise.resolve(previewAvailability);
   return invoke<SessionAvailability>("enter_session_management", { leaseId });
@@ -279,6 +308,18 @@ const previewVisibility: SessionVisibilityPreview = {
     { code: "excluded_exec", count: 1 },
     { code: "encrypted_content", count: 1 },
   ],
+};
+
+const previewPendingVisibility: PendingSessionVisibility = {
+  targetMode: "provider",
+  modelProvider: "preview-provider",
+  environmentRevision: "preview-revision",
+  status: "pending",
+  succeeded: 0,
+  retryable: 0,
+  diagnosticStage: "mode_switch",
+  errorCode: "session_visibility.desktop_running",
+  updatedAtEpochSeconds: 1_786_140_000,
 };
 
 const previewSessions: Array<SessionSummary & { archived: boolean }> = [

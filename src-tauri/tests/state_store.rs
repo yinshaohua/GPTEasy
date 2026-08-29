@@ -5,7 +5,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use gpteasy_lib::state::{
-    CURRENT_SCHEMA_VERSION, DatabaseBlockReason, DatabaseStatus, StatePaths, StateStore,
+    CURRENT_SCHEMA_VERSION, DatabaseBlockReason, DatabaseStatus, PendingSessionVisibilityStatus,
+    PendingSessionVisibilityTargetMode, StatePaths, StateStore,
 };
 use rusqlite::Connection;
 use tempfile::TempDir;
@@ -56,6 +57,7 @@ fn fresh_install_initializes_only_the_minimum_schema() {
             "app_state",
             "last_applied_state",
             "pending_config_operation",
+            "pending_session_visibility",
             "providers",
             "session_capability",
             "session_process_ownership",
@@ -84,6 +86,109 @@ fn first_close_notice_check_does_not_create_a_missing_database() {
     assert!(!store.should_show_first_close_notice());
     assert!(!store.mark_first_close_notice_seen());
     assert!(!store.paths().database().exists());
+}
+
+#[test]
+fn session_visibility_pending_state_is_revision_fenced_and_cleared_independently() {
+    let temp = TempDir::new().expect("temp dir");
+    let store = store_in(&temp);
+    assert!(store.bootstrap().is_ready());
+
+    store
+        .record_pending_session_visibility(
+            PendingSessionVisibilityTargetMode::Provider,
+            "provider-1",
+            "provider-revision",
+        )
+        .expect("record provider target");
+    assert_eq!(
+        store
+            .pending_session_visibility()
+            .expect("read provider target")
+            .expect("pending provider target")
+            .status,
+        PendingSessionVisibilityStatus::Pending,
+    );
+
+    assert!(
+        !store
+            .update_pending_session_visibility(
+                "stale-revision",
+                PendingSessionVisibilityStatus::Running,
+                0,
+                0,
+                "consumer_recheck",
+                "none",
+            )
+            .expect("fence stale update")
+    );
+    assert!(
+        store
+            .update_pending_session_visibility(
+                "provider-revision",
+                PendingSessionVisibilityStatus::Partial,
+                2,
+                1,
+                "app_server_verify",
+                "session_visibility.verification_invariant_failed",
+            )
+            .expect("record partial result")
+    );
+
+    let partial = store
+        .pending_session_visibility()
+        .expect("read partial state")
+        .expect("partial state remains");
+    assert_eq!(
+        partial.target_mode,
+        PendingSessionVisibilityTargetMode::Provider
+    );
+    assert_eq!(partial.model_provider, "provider-1");
+    assert_eq!(partial.environment_revision, "provider-revision");
+    assert_eq!(partial.status, PendingSessionVisibilityStatus::Partial);
+    assert_eq!(partial.succeeded, 2);
+    assert_eq!(partial.retryable, 1);
+    assert_eq!(partial.diagnostic_stage, "app_server_verify");
+    assert_eq!(
+        partial.error_code,
+        "session_visibility.verification_invariant_failed",
+    );
+
+    store
+        .record_pending_session_visibility(
+            PendingSessionVisibilityTargetMode::OpenaiLogin,
+            "openai",
+            "openai-revision",
+        )
+        .expect("replace with OpenAI target");
+    let openai = store
+        .pending_session_visibility()
+        .expect("read OpenAI target")
+        .expect("pending OpenAI target");
+    assert_eq!(
+        openai.target_mode,
+        PendingSessionVisibilityTargetMode::OpenaiLogin
+    );
+    assert_eq!(openai.status, PendingSessionVisibilityStatus::Pending);
+    assert_eq!(openai.succeeded, 0);
+    assert_eq!(openai.retryable, 0);
+
+    assert!(
+        !store
+            .clear_pending_session_visibility("provider-revision")
+            .expect("fence stale clear")
+    );
+    assert!(
+        store
+            .clear_pending_session_visibility("openai-revision")
+            .expect("clear completed target")
+    );
+    assert!(
+        store
+            .pending_session_visibility()
+            .expect("read cleared state")
+            .is_none()
+    );
 }
 
 #[test]
@@ -166,6 +271,9 @@ fn recommendation_migration_never_claims_or_overwrites_an_existing_dayway_name()
     let store = store_in(&temp);
     assert!(store.bootstrap().is_ready());
     let connection = Connection::open(store.paths().database()).expect("open state database");
+    connection
+        .execute("DROP TABLE pending_session_visibility", [])
+        .expect("remove v9 pending visibility table");
     connection
         .execute("DROP TABLE wsl_pending_operation", [])
         .expect("remove v5 pending operation table");

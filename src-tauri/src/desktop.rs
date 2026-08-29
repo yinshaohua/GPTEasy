@@ -194,10 +194,26 @@ impl DesktopApplication {
         &self,
         expected_roots: &[ConsumerIdentity],
     ) -> Result<DesktopSnapshot, DesktopFailure> {
+        self.restart_with_checkpoint(expected_roots, || Ok(()))
+    }
+
+    pub fn restart_with_checkpoint<F>(
+        &self,
+        expected_roots: &[ConsumerIdentity],
+        checkpoint: F,
+    ) -> Result<DesktopSnapshot, DesktopFailure>
+    where
+        F: FnOnce() -> Result<(), DesktopFailure>,
+    {
         let package = self.discover_package().map_err(action_unavailable)?;
         let before = self.scan_for_package(&package);
         if before.desktop == ConsumerStatus::Stopped {
-            return self.activate_and_observe(&package, expected_roots, "desktop.running");
+            return self.activate_after_checkpoint(
+                &package,
+                expected_roots,
+                "desktop.running",
+                checkpoint,
+            );
         }
         if before.desktop != ConsumerStatus::Running
             || before.desktop_roots.is_empty()
@@ -213,19 +229,21 @@ impl DesktopApplication {
             .request_close(&before.desktop_roots)
             .is_ok();
         if close_requested && self.wait_for_roots_to_exit(&package, expected_roots) {
-            return self.activate_and_observe(
+            return self.activate_after_checkpoint(
                 &package,
                 expected_roots,
                 "desktop.restarted_after_normal_exit",
+                checkpoint,
             );
         }
 
         let before_termination = self.scan_for_package(&package);
         if before_termination.desktop == ConsumerStatus::Stopped {
-            return self.activate_and_observe(
+            return self.activate_after_checkpoint(
                 &package,
                 expected_roots,
                 "desktop.restarted_after_normal_exit",
+                checkpoint,
             );
         }
         if before_termination.desktop != ConsumerStatus::Running
@@ -250,11 +268,26 @@ impl DesktopApplication {
                 "desktop.termination_timed_out",
             ));
         }
-        self.activate_and_observe(
+        self.activate_after_checkpoint(
             &package,
             expected_roots,
             "desktop.restarted_after_termination",
+            checkpoint,
         )
+    }
+
+    fn activate_after_checkpoint<F>(
+        &self,
+        package: &DesktopPackage,
+        previous_roots: &[ConsumerIdentity],
+        success_message_id: &'static str,
+        checkpoint: F,
+    ) -> Result<DesktopSnapshot, DesktopFailure>
+    where
+        F: FnOnce() -> Result<(), DesktopFailure>,
+    {
+        checkpoint()?;
+        self.activate_and_observe(package, previous_roots, success_message_id)
     }
 
     fn discover_package(&self) -> Result<DesktopPackage, &'static str> {

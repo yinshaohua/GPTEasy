@@ -426,6 +426,33 @@ select {
   top: calc(100% + 6px);
 }
 
+.session-visibility-global-status {
+  min-width: 0;
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px clamp(22px, 3vw, 38px);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-muted);
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.session-visibility-global-status svg {
+  flex: 0 0 auto;
+}
+
+.session-visibility-global-status.is-partial {
+  color: var(--warning);
+}
+
+.session-visibility-global-status.is-blocked {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
 .visually-hidden {
   position: absolute;
   width: 1px;
@@ -2876,6 +2903,10 @@ select:focus-visible {
   .app-header {
     min-height: 64px;
     padding: 12px 18px;
+  }
+
+  .session-visibility-global-status {
+    padding-inline: 18px;
   }
 
   .session-filters {

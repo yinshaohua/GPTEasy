@@ -27,11 +27,13 @@ use crate::session::{
 };
 use crate::session_visibility::{
     SessionVisibilityApplication, SessionVisibilityPreview, VisibilityAppServerCapability,
-    VisibilityConsumerState, VisibilityExecutionRequest, VisibilityExecutionResult,
-    VisibilityExecutionRuntime, VisibilityFailure, VisibilityRuntimeFuture, VisibilityScanContext,
-    VisibilityTarget, VisibilityTargetMode, VisibilityThreadView, VisibilityVerificationViews,
+    VisibilityConsumerState, VisibilityCoordinationOutcome, VisibilityCoordinationStatus,
+    VisibilityExecutionRequest, VisibilityExecutionResult, VisibilityExecutionRuntime,
+    VisibilityFailure, VisibilityRuntimeFuture, VisibilityScanContext, VisibilityTarget,
+    VisibilityTargetMode, VisibilityThreadView, VisibilityVerificationViews,
 };
 use crate::startup::{StartupCoordinator, StartupSnapshot};
+use crate::state::PendingSessionVisibilitySnapshot;
 use crate::tray;
 use crate::update::{
     UpdateActivityGate, UpdateCoordinator, UpdateFailureCategory, UpdateInstallFailure,
@@ -582,11 +584,22 @@ pub(crate) async fn get_desktop_snapshot(
 
 #[tauri::command]
 pub(crate) async fn start_desktop_application(
+    app: AppHandle,
     state: State<'_, DesktopRuntime>,
     sessions: State<'_, SessionRuntime>,
+    environment: State<'_, EnvironmentRuntime>,
     logs: State<'_, IssueLogRuntime>,
 ) -> Result<DesktopSnapshot, DesktopFailure> {
     ensure_session_visibility_restart_allowed(&sessions.visibility, &logs.store)?;
+    let coordination = coordinate_pending_session_visibility(
+        Some(&app),
+        &sessions.application,
+        &sessions.visibility,
+        &environment.application,
+        &logs.store,
+    )
+    .await;
+    ensure_coordination_allows_restart(coordination, &sessions.visibility)?;
     let application = state.application.clone();
     let result = tauri::async_runtime::spawn_blocking(move || application.start())
         .await
@@ -596,16 +609,33 @@ pub(crate) async fn start_desktop_application(
 
 #[tauri::command]
 pub(crate) async fn restart_desktop_application(
+    app: AppHandle,
     state: State<'_, DesktopRuntime>,
     sessions: State<'_, SessionRuntime>,
+    environment: State<'_, EnvironmentRuntime>,
     logs: State<'_, IssueLogRuntime>,
     expected_roots: Vec<crate::consumer::ConsumerIdentity>,
 ) -> Result<DesktopSnapshot, DesktopFailure> {
     ensure_session_visibility_restart_allowed(&sessions.visibility, &logs.store)?;
     let application = state.application.clone();
+    let session_application = sessions.application.clone();
+    let visibility = sessions.visibility.clone();
+    let environment_application = environment.application.clone();
+    let checkpoint_app = app.clone();
+    let checkpoint_logs = logs.store.clone();
     let expected_root_count = expected_roots.len();
     let (result, observed_after_failure) = tauri::async_runtime::spawn_blocking(move || {
-        let result = application.restart(&expected_roots);
+        let result = application.restart_with_checkpoint(&expected_roots, move || {
+            let coordination =
+                tauri::async_runtime::block_on(coordinate_pending_session_visibility(
+                    Some(&checkpoint_app),
+                    &session_application,
+                    &visibility,
+                    &environment_application,
+                    &checkpoint_logs,
+                ));
+            ensure_coordination_allows_restart(coordination, &visibility)
+        });
         let observed_after_failure = result.is_err().then(|| application.inspect());
         (result, observed_after_failure)
     })
@@ -617,6 +647,32 @@ pub(crate) async fn restart_desktop_application(
         expected_root_count,
         observed_after_failure.as_ref(),
     )
+}
+
+fn ensure_coordination_allows_restart(
+    coordination: Result<VisibilityCoordinationOutcome, VisibilityFailure>,
+    visibility: &SessionVisibilityApplication,
+) -> Result<(), DesktopFailure> {
+    match coordination {
+        Ok(outcome) if outcome.block_codex_restart => Err(visibility_restart_blocked()),
+        Ok(_) => Ok(()),
+        Err(_) => {
+            let recovery = visibility.assess_recovery();
+            if recovery.is_err() || recovery.is_ok_and(|assessment| assessment.block_codex_restart)
+            {
+                Err(visibility_restart_blocked())
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+fn visibility_restart_blocked() -> DesktopFailure {
+    DesktopFailure {
+        category: DesktopFailureCategory::ActionUnavailable,
+        message_id: "session_visibility.recovery_indeterminate",
+    }
 }
 
 fn ensure_session_visibility_restart_allowed(
@@ -951,6 +1007,311 @@ pub(crate) async fn enter_session_management(
 }
 
 #[tauri::command]
+pub(crate) fn get_session_visibility_status(
+    state: State<'_, SessionRuntime>,
+    logs: State<'_, IssueLogRuntime>,
+) -> Result<Option<PendingSessionVisibilitySnapshot>, VisibilityFailure> {
+    finish_command(
+        &logs.store,
+        "session_visibility.status",
+        state.visibility.pending_status(),
+    )
+}
+
+fn visibility_target_from_environment(
+    context: &EnvironmentVisibilityContext,
+) -> Result<VisibilityTarget, VisibilityFailure> {
+    if context.state != crate::environment::EnvironmentState::Managed || context.pending_operation {
+        return Err(VisibilityFailure {
+            message_id: "session_visibility.environment_unavailable",
+            stage: "target_snapshot",
+        });
+    }
+    let (mode, model_provider) = match (&context.mode, &context.provider_id) {
+        (Some(crate::environment::AuthenticationMode::OpenaiLogin), _) => {
+            (VisibilityTargetMode::OpenaiLogin, "openai".to_owned())
+        }
+        (Some(crate::environment::AuthenticationMode::Provider), Some(provider_id)) => {
+            (VisibilityTargetMode::Provider, provider_id.clone())
+        }
+        _ => {
+            return Err(VisibilityFailure {
+                message_id: "session_visibility.environment_unavailable",
+                stage: "target_snapshot",
+            });
+        }
+    };
+    Ok(VisibilityTarget {
+        mode,
+        model_provider,
+        environment_revision: context.revision.clone(),
+    })
+}
+
+async fn record_and_coordinate_mode_switch(app: &AppHandle, logs: &IssueLogStore) {
+    let sessions = app.state::<SessionRuntime>();
+    let environment = app.state::<EnvironmentRuntime>();
+    if record_mode_switch_pending_visibility(&environment.application, &sessions.visibility, logs)
+        .is_err()
+    {
+        return;
+    }
+    emit_session_visibility_status(app, &sessions.visibility, logs);
+    let _ = coordinate_pending_session_visibility(
+        Some(app),
+        &sessions.application,
+        &sessions.visibility,
+        &environment.application,
+        logs,
+    )
+    .await;
+}
+
+fn record_mode_switch_pending_visibility(
+    environment: &EnvironmentApplication,
+    visibility: &SessionVisibilityApplication,
+    logs: &IssueLogStore,
+) -> Result<VisibilityTarget, VisibilityFailure> {
+    let result = environment
+        .inspect_for_session_visibility()
+        .map_err(|_| VisibilityFailure {
+            message_id: "session_visibility.environment_unavailable",
+            stage: "mode_switch",
+        })
+        .and_then(|context| visibility_target_from_environment(&context))
+        .and_then(|target| {
+            visibility.record_pending(&target)?;
+            Ok(target)
+        });
+    match &result {
+        Ok(_) => log_visibility_pending_recorded(logs),
+        Err(failure) => log_visibility_coordination_failure(logs, failure),
+    }
+    result
+}
+
+async fn coordinate_pending_session_visibility(
+    app: Option<&AppHandle>,
+    session: &SessionApplication,
+    visibility: &SessionVisibilityApplication,
+    environment: &EnvironmentApplication,
+    logs: &IssueLogStore,
+) -> Result<VisibilityCoordinationOutcome, VisibilityFailure> {
+    let pending = match visibility.pending_status() {
+        Ok(pending) => pending,
+        Err(failure) => {
+            log_visibility_coordination_failure(logs, &failure);
+            return Err(failure);
+        }
+    };
+    if pending.is_none() {
+        return Ok(VisibilityCoordinationOutcome {
+            status: VisibilityCoordinationStatus::Idle,
+            block_codex_restart: false,
+            error_code: "none".to_owned(),
+            execution: None,
+        });
+    }
+    let environment_context = match environment.inspect_for_session_visibility() {
+        Ok(context) => context,
+        Err(_) => {
+            let failure = VisibilityFailure {
+                message_id: "session_visibility.environment_unavailable",
+                stage: "target_snapshot",
+            };
+            log_visibility_coordination_failure(logs, &failure);
+            return Err(failure);
+        }
+    };
+    let target = match visibility_target_from_environment(&environment_context) {
+        Ok(target) => target,
+        Err(failure) => {
+            log_visibility_coordination_failure(logs, &failure);
+            return Err(failure);
+        }
+    };
+    let runtime = CommandVisibilityRuntime {
+        session,
+        environment,
+    };
+    let consumer = runtime.consumers(true);
+    let mut availability = None;
+    let (app_server, codex_version) = if consumer == VisibilityConsumerState::NoConsumers {
+        let entered = session.enter("session-visibility-auto").await;
+        let active_version =
+            if entered.status == crate::session::SessionAvailabilityStatus::Available {
+                session.active_app_server_version().await
+            } else {
+                None
+            };
+        let capability = match (entered.status, active_version.as_ref()) {
+            (crate::session::SessionAvailabilityStatus::Available, Some(_)) => {
+                VisibilityAppServerCapability::Available
+            }
+            (crate::session::SessionAvailabilityStatus::Incompatible, _) => {
+                VisibilityAppServerCapability::Incompatible
+            }
+            _ => VisibilityAppServerCapability::Unavailable,
+        };
+        let version = active_version.or(entered.codex_version.clone());
+        availability = Some(entered);
+        (capability, version)
+    } else {
+        (VisibilityAppServerCapability::Unavailable, None)
+    };
+    if consumer == VisibilityConsumerState::NoConsumers
+        && app_server == VisibilityAppServerCapability::Available
+    {
+        if let Err(failure) = visibility.mark_pending_running(&target) {
+            session.leave("session-visibility-auto").await;
+            log_visibility_coordination_failure(logs, &failure);
+            return Err(failure);
+        }
+        if let Some(app) = app {
+            emit_session_visibility_status(app, visibility, logs);
+        }
+    }
+    let outcome = visibility
+        .coordinate_pending(
+            VisibilityScanContext {
+                target,
+                codex_version,
+                app_server,
+                execution_blockers: Vec::new(),
+            },
+            &runtime,
+        )
+        .await;
+    if availability.is_some() {
+        session.leave("session-visibility-auto").await;
+    }
+    match &outcome {
+        Ok(outcome) => {
+            log_visibility_coordination(logs, outcome);
+            if let Some(app) = app {
+                emit_session_visibility_status(app, visibility, logs);
+                if matches!(
+                    outcome.status,
+                    VisibilityCoordinationStatus::Partial | VisibilityCoordinationStatus::Blocked
+                ) {
+                    let body = if outcome.block_codex_restart {
+                        "会话可见性状态需要先确认，Codex 暂未重新启动"
+                    } else {
+                        "部分会话可见性仍需修复，可在会话管理中重试"
+                    };
+                    let _ = app
+                        .notification()
+                        .builder()
+                        .title("GPTEasy")
+                        .body(body)
+                        .show();
+                }
+            }
+        }
+        Err(failure) => {
+            log_visibility_coordination_failure(logs, failure);
+            if let Some(app) = app {
+                emit_session_visibility_status(app, visibility, logs);
+            }
+        }
+    }
+    outcome
+}
+
+fn log_visibility_coordination_failure(store: &IssueLogStore, failure: &VisibilityFailure) {
+    store.append(
+        IssueLogLevel::Error,
+        "session_visibility.auto",
+        failure.message_id,
+        Some(format!(
+            "stage={}; status=failed; error_codes={}",
+            failure.stage, failure.message_id
+        )),
+    );
+}
+
+fn log_visibility_pending_recorded(store: &IssueLogStore) {
+    store.append(
+        IssueLogLevel::Info,
+        "session_visibility.auto",
+        "session_visibility.pending_recorded",
+        Some("stage=mode_switch; status=pending; error_codes=none".to_owned()),
+    );
+}
+
+fn log_visibility_coordination(store: &IssueLogStore, outcome: &VisibilityCoordinationOutcome) {
+    let details = outcome.execution.as_ref().map_or_else(
+        || {
+            format!(
+                "stage=consumer_recheck; status={}; succeeded=0; retryable=0; \
+                 block_codex_restart={}; error_codes={}",
+                outcome.status.as_str(),
+                outcome.block_codex_restart,
+                outcome.error_code
+            )
+        },
+        VisibilityExecutionResult::diagnostic_details,
+    );
+    store.append(
+        if matches!(
+            outcome.status,
+            VisibilityCoordinationStatus::Complete | VisibilityCoordinationStatus::Idle
+        ) {
+            IssueLogLevel::Info
+        } else {
+            IssueLogLevel::Warn
+        },
+        "session_visibility.auto",
+        "session_visibility.coordinated",
+        Some(details),
+    );
+}
+
+fn log_visibility_status_event_failure(
+    store: &IssueLogStore,
+    message_id: &str,
+    category: &str,
+    stage: &str,
+) {
+    store.append(
+        IssueLogLevel::Error,
+        "session_visibility.status_event",
+        message_id,
+        Some(format!("category={category} stage={stage}")),
+    );
+}
+
+fn emit_session_visibility_status(
+    app: &AppHandle,
+    visibility: &SessionVisibilityApplication,
+    logs: &IssueLogStore,
+) {
+    let status = match visibility.pending_status() {
+        Ok(status) => status,
+        Err(failure) => {
+            log_visibility_status_event_failure(
+                logs,
+                failure.message_id,
+                "session_visibility",
+                "pending_state",
+            );
+            return;
+        }
+    };
+    if app
+        .emit("session-visibility-status-changed", status)
+        .is_err()
+    {
+        log_visibility_status_event_failure(
+            logs,
+            "runtime.event_unavailable",
+            "runtime",
+            "status_event",
+        );
+    }
+}
+
+#[tauri::command]
 pub(crate) async fn preview_session_visibility(
     state: State<'_, SessionRuntime>,
     environment: State<'_, EnvironmentRuntime>,
@@ -1231,7 +1592,7 @@ pub(crate) async fn execute_session_visibility(
     let result = finish_command(
         &logs.store,
         "session_visibility.execute",
-        state.visibility.execute(request, &runtime).await,
+        state.visibility.execute_pending(request, &runtime).await,
     );
     match &result {
         Ok(result) => {
@@ -1247,6 +1608,7 @@ pub(crate) async fn execute_session_visibility(
         }
         Err(_) => {}
     }
+    emit_session_visibility_status(&app, &state.visibility, &logs.store);
     result
 }
 
@@ -1899,6 +2261,7 @@ pub(crate) async fn apply_environment_provider(
                 snapshot.pending_restart
             )),
         );
+        record_and_coordinate_mode_switch(&app, &logs.store).await;
     }
     let result = refresh_environment_tray_after(&app, result);
     finish_command(&logs.store, "environment.apply_provider", result)
@@ -1938,6 +2301,9 @@ pub(crate) async fn force_apply_environment_provider(
     .await
     .map_err(|_| environment_task_failed())
     .and_then(|result| result);
+    if result.is_ok() {
+        record_and_coordinate_mode_switch(&app, &logs.store).await;
+    }
     finish_command(&logs.store, "environment.force_apply_provider", result)
 }
 
@@ -2001,6 +2367,7 @@ pub(crate) async fn switch_to_openai_login(
             "已切换到 OpenAI 登录",
             Some(format!("state={:?}", snapshot.state)),
         );
+        record_and_coordinate_mode_switch(&app, &logs.store).await;
     }
     let result = refresh_environment_tray_after(&app, result);
     finish_command(&logs.store, "environment.switch_to_openai_login", result)
@@ -2599,25 +2966,58 @@ mod tests {
         ProviderFailureCategory, ProviderRevalidationAuditContext, ProviderRevalidationResult,
         ProviderSummary, ProviderValidationReceipt, UpdateFailureCategory, UpdateInstallFailure,
         UpdateInstallFailureCategory, UpdateSnapshot, UpdateState, WslReclaimAuditPhase,
-        audit_provider_revalidation_result, ensure_session_visibility_restart_allowed,
-        finish_command, finish_command_with_desktop_restart,
-        log_session_visibility_execution_result, log_session_visibility_preview,
-        log_update_check_failure, log_update_install_failure, log_wsl_reclaim_phase,
-        wsl_inventory_details,
+        audit_provider_revalidation_result, ensure_coordination_allows_restart,
+        ensure_session_visibility_restart_allowed, finish_command,
+        finish_command_with_desktop_restart, log_session_visibility_execution_result,
+        log_session_visibility_preview, log_update_check_failure, log_update_install_failure,
+        log_visibility_coordination, log_visibility_coordination_failure,
+        log_visibility_pending_recorded, log_visibility_status_event_failure,
+        log_wsl_reclaim_phase, record_mode_switch_pending_visibility, wsl_inventory_details,
     };
-    use crate::consumer::{ConsumerIdentity, ConsumerRole, ConsumerStatus};
+    use crate::codex::{LoginInspection, LoginMethod, LoginStatus};
+    use crate::consumer::{
+        ConsumerIdentity, ConsumerRole, ConsumerScan, ConsumerScanner, ConsumerStatus,
+    };
     use crate::desktop::{DesktopAction, DesktopFailure, DesktopFailureCategory, DesktopSnapshot};
+    use crate::environment::{AuthenticationMode, EnvironmentApplication, OpenAiLoginProbe};
     use crate::session_visibility::{
         SessionVisibilityApplication, SessionVisibilityPreview, VisibilityAppServerCapability,
-        VisibilityExecutionBreakdown, VisibilityExecutionResult, VisibilityFailure,
-        VisibilityIndexPlan, VisibilityReason, VisibilitySchemaCapability, VisibilitySummary,
-        VisibilityTarget, VisibilityTargetMode,
+        VisibilityCoordinationOutcome, VisibilityCoordinationStatus, VisibilityExecutionBreakdown,
+        VisibilityExecutionResult, VisibilityFailure, VisibilityIndexPlan, VisibilityReason,
+        VisibilitySchemaCapability, VisibilitySummary, VisibilityTarget, VisibilityTargetMode,
     };
+    use crate::state::{PendingSessionVisibilityTargetMode, StatePaths, StateStore};
     use crate::wsl::{
         WslAvailability, WslConfigurationState, WslEnvironmentSummary, WslReclaimPreview,
         WslReclaimScope,
     };
+    use rusqlite::{Connection, params};
+    use std::sync::Arc;
     use tempfile::tempdir;
+
+    struct LoggedOutProbe;
+
+    impl OpenAiLoginProbe for LoggedOutProbe {
+        fn inspect(&self) -> LoginInspection {
+            LoginInspection {
+                status: LoginStatus::NotLoggedIn,
+                method: LoginMethod::Unknown,
+            }
+        }
+    }
+
+    struct StoppedConsumerScanner;
+
+    impl ConsumerScanner for StoppedConsumerScanner {
+        fn scan(&self) -> ConsumerScan {
+            ConsumerScan {
+                desktop: ConsumerStatus::Stopped,
+                cli: ConsumerStatus::Stopped,
+                identities: Vec::new(),
+                desktop_roots: Vec::new(),
+            }
+        }
+    }
 
     fn failed_update_snapshot(category: UpdateFailureCategory) -> UpdateSnapshot {
         UpdateSnapshot {
@@ -2787,6 +3187,237 @@ mod tests {
                 "stage=rollout_replace; status=partial; succeeded=1; retryable=2; encrypted_content_risk=1; index_app_server_coordinated=1; index_sqlite_fallback=1; index_schema_skipped=0; verification_failed=1; block_codex_restart=false; error_codes=session_visibility.write_failed"
             )
         );
+    }
+
+    #[test]
+    fn automatic_visibility_coordination_logs_early_failures_without_target_details() {
+        let directory = tempdir().expect("issue log directory");
+        let store = IssueLogStore::new(directory.path());
+        let failure = VisibilityFailure {
+            message_id: "session_visibility.environment_unavailable",
+            stage: "target_snapshot",
+        };
+
+        log_visibility_coordination_failure(&store, &failure);
+
+        let records = store.list(
+            0,
+            Some(IssueLogLevel::Error),
+            Some("session_visibility.auto"),
+        );
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].details.as_deref(),
+            Some(
+                "stage=target_snapshot; status=failed; error_codes=session_visibility.environment_unavailable"
+            )
+        );
+        let encoded = serde_json::to_string(&records[0]).expect("serialize issue log record");
+        assert!(!encoded.contains("sensitive-provider-id"));
+        assert!(!encoded.contains("sensitive-environment-revision"));
+    }
+
+    #[test]
+    fn production_mode_switch_seam_records_both_targets_and_never_rolls_back_on_failure() {
+        const PROVIDER_ID: &str = "9f319739-f219-48ee-be35-22e08d5402d7";
+        let directory = tempdir().expect("mode switch seam directory");
+        let store = StateStore::new(StatePaths::from_root(directory.path().join("state")));
+        assert!(store.bootstrap().is_ready());
+        Connection::open(store.paths().database())
+            .expect("open state database")
+            .execute(
+                "INSERT INTO providers (
+                    id, name, base_url, api_key, default_model, verified_at,
+                    verification_fingerprint
+                 ) VALUES (?1, 'Fixture Provider', 'https://fixture.example/v1',
+                           'test-key-not-real', 'fixture-model', '1775606400',
+                           'fixture-verification-fingerprint')",
+                params![PROVIDER_ID],
+            )
+            .expect("insert provider fixture");
+        let codex_home = directory.path().join(".codex");
+        let environment = EnvironmentApplication::with_runtime_probes(
+            store.clone(),
+            &codex_home,
+            Arc::new(LoggedOutProbe),
+            Arc::new(StoppedConsumerScanner),
+        );
+        let visibility = SessionVisibilityApplication::with_recovery_root(
+            &codex_home,
+            directory.path().join("visibility-recovery"),
+        )
+        .with_pending_state(store.clone());
+        let logs = IssueLogStore::new(directory.path().join("logs"));
+
+        let provider = environment
+            .apply_provider(PROVIDER_ID, true)
+            .expect("switch to provider mode");
+        let provider_target =
+            record_mode_switch_pending_visibility(&environment, &visibility, &logs)
+                .expect("run production provider follow-up seam");
+        assert_eq!(provider_target.mode, VisibilityTargetMode::Provider);
+        assert_eq!(provider_target.environment_revision, provider.revision);
+        assert_eq!(
+            store
+                .pending_session_visibility()
+                .expect("read provider pending state")
+                .expect("provider pending state")
+                .target_mode,
+            PendingSessionVisibilityTargetMode::Provider,
+        );
+
+        let openai = environment
+            .switch_to_openai_login(true, &provider.revision)
+            .expect("switch to OpenAI login mode");
+        let openai_target = record_mode_switch_pending_visibility(&environment, &visibility, &logs)
+            .expect("run production OpenAI follow-up seam");
+        assert_eq!(openai_target.mode, VisibilityTargetMode::OpenaiLogin);
+        assert_eq!(openai_target.environment_revision, openai.revision);
+        assert_eq!(
+            store
+                .pending_session_visibility()
+                .expect("read OpenAI pending state")
+                .expect("OpenAI pending state")
+                .target_mode,
+            PendingSessionVisibilityTargetMode::OpenaiLogin,
+        );
+
+        let switched_back = environment
+            .apply_provider(PROVIDER_ID, true)
+            .expect("switch back before follow-up failure");
+        let unavailable_visibility = SessionVisibilityApplication::with_recovery_root(
+            &codex_home,
+            directory.path().join("unavailable-visibility-recovery"),
+        );
+        record_mode_switch_pending_visibility(&environment, &unavailable_visibility, &logs)
+            .expect_err("persisting the independent follow-up state fails");
+        let after_failure = environment
+            .inspect_for_session_visibility()
+            .expect("inspect mode after follow-up failure");
+        assert_eq!(after_failure.mode, Some(AuthenticationMode::Provider));
+        assert_eq!(after_failure.provider_id.as_deref(), Some(PROVIDER_ID));
+        assert_eq!(after_failure.revision, switched_back.revision);
+    }
+
+    #[test]
+    fn every_successful_native_mode_switch_keeps_the_visibility_follow_up_hook() {
+        let source = include_str!("commands.rs");
+        let hook = [
+            "record_and_coordinate_mode_",
+            "switch(&app, &logs.store).await;",
+        ]
+        .concat();
+        assert_eq!(
+            source.matches(&hook).count(),
+            3,
+            "apply, force apply, and OpenAI login must all run the shared follow-up",
+        );
+        assert!(source.contains("record_mode_switch_pending_visibility("));
+        assert!(source.contains("coordinate_pending_session_visibility("));
+    }
+
+    #[test]
+    fn automatic_visibility_logs_cover_mode_switch_execution_deferral_and_status_events() {
+        let directory = tempdir().expect("issue log directory");
+        let store = IssueLogStore::new(directory.path());
+        log_visibility_pending_recorded(&store);
+        log_visibility_coordination(
+            &store,
+            &VisibilityCoordinationOutcome {
+                status: VisibilityCoordinationStatus::Complete,
+                block_codex_restart: false,
+                error_code: "none".to_owned(),
+                execution: Some(VisibilityExecutionResult {
+                    status: "complete",
+                    succeeded: 3,
+                    retryable: 0,
+                    encrypted_content_risk: 0,
+                    breakdown: VisibilityExecutionBreakdown {
+                        app_server_coordinated: 1,
+                        sqlite_fallback: 1,
+                        schema_skipped: 0,
+                        verification_failed: 0,
+                    },
+                    block_codex_restart: false,
+                    message_id: "session_visibility.repair_complete",
+                    diagnostic_stage: "verify",
+                    error_code: "none",
+                }),
+            },
+        );
+        log_visibility_coordination(
+            &store,
+            &VisibilityCoordinationOutcome {
+                status: VisibilityCoordinationStatus::Deferred,
+                block_codex_restart: false,
+                error_code: "session_visibility.cli_running".to_owned(),
+                execution: None,
+            },
+        );
+        log_visibility_status_event_failure(
+            &store,
+            "runtime.event_unavailable",
+            "runtime",
+            "status_event",
+        );
+
+        let automatic = store.list(0, None, Some("session_visibility.auto"));
+        assert_eq!(automatic.len(), 3);
+        assert!(automatic.iter().any(|record| {
+            record.message == "session_visibility.pending_recorded"
+                && record.details.as_deref()
+                    == Some("stage=mode_switch; status=pending; error_codes=none")
+        }));
+        assert!(automatic.iter().any(|record| {
+            record.details.as_deref()
+                == Some(
+                    "stage=verify; status=complete; succeeded=3; retryable=0; encrypted_content_risk=0; index_app_server_coordinated=1; index_sqlite_fallback=1; index_schema_skipped=0; verification_failed=0; block_codex_restart=false; error_codes=none",
+                )
+        }));
+        assert!(automatic.iter().any(|record| {
+            record.details.as_deref()
+                == Some(
+                    "stage=consumer_recheck; status=deferred; succeeded=0; retryable=0; block_codex_restart=false; error_codes=session_visibility.cli_running",
+                )
+        }));
+        let status_events = store.list(
+            0,
+            Some(IssueLogLevel::Error),
+            Some("session_visibility.status_event"),
+        );
+        assert_eq!(status_events.len(), 1);
+        assert_eq!(
+            status_events[0].details.as_deref(),
+            Some("category=runtime stage=status_event")
+        );
+        let encoded = serde_json::to_string(&(automatic, status_events))
+            .expect("serialize automatic visibility logs");
+        for sensitive in [
+            "sensitive-provider-id",
+            "sensitive-environment-revision",
+            "C:\\private\\rollout.jsonl",
+            "api-key-canary",
+        ] {
+            assert!(!encoded.contains(sensitive), "issue log leaked {sensitive}");
+        }
+    }
+
+    #[test]
+    fn ordinary_visibility_coordination_failure_does_not_block_desktop_restart() {
+        let directory = tempdir().expect("visibility recovery directory");
+        let visibility = SessionVisibilityApplication::with_recovery_root(
+            directory.path().join("codex-home"),
+            directory.path(),
+        );
+
+        ensure_coordination_allows_restart(
+            Err(VisibilityFailure {
+                message_id: "session_visibility.rescan_required",
+                stage: "consumer_recheck",
+            }),
+            &visibility,
+        )
+        .expect("a determinate coordination failure must not block restart");
     }
 
     #[test]

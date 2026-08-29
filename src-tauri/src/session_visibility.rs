@@ -13,6 +13,11 @@ use serde_json::value::RawValue;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::state::{
+    PendingSessionVisibilitySnapshot, PendingSessionVisibilityStatus,
+    PendingSessionVisibilityTargetMode, StateStore,
+};
+
 const STATE_DATABASE: &str = "state_5.sqlite";
 const SUPPORTED_THREADS_SCHEMA: &str = "CREATE TABLE threads (
     id TEXT PRIMARY KEY,
@@ -263,6 +268,37 @@ pub struct VisibilityExecutionBreakdown {
     pub verification_failed: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VisibilityCoordinationStatus {
+    Idle,
+    Deferred,
+    Complete,
+    Partial,
+    Blocked,
+}
+
+impl VisibilityCoordinationStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Deferred => "deferred",
+            Self::Complete => "complete",
+            Self::Partial => "partial",
+            Self::Blocked => "blocked",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VisibilityCoordinationOutcome {
+    pub status: VisibilityCoordinationStatus,
+    pub block_codex_restart: bool,
+    pub error_code: String,
+    pub execution: Option<VisibilityExecutionResult>,
+}
+
 impl VisibilityExecutionResult {
     pub fn diagnostic_details(&self) -> String {
         format!(
@@ -318,6 +354,7 @@ pub struct SessionVisibilityApplication {
     codex_home: PathBuf,
     recovery_root: PathBuf,
     faults: Arc<dyn VisibilityFaultInjector>,
+    pending_state: Option<StateStore>,
 }
 
 impl SessionVisibilityApplication {
@@ -327,6 +364,7 @@ impl SessionVisibilityApplication {
             recovery_root: codex_home.join(".gpteasy"),
             codex_home,
             faults: Arc::new(NoVisibilityFaults),
+            pending_state: None,
         }
     }
 
@@ -338,6 +376,7 @@ impl SessionVisibilityApplication {
             codex_home: codex_home.as_ref().to_path_buf(),
             recovery_root: recovery_root.as_ref().to_path_buf(),
             faults: Arc::new(NoVisibilityFaults),
+            pending_state: None,
         }
     }
 
@@ -350,7 +389,53 @@ impl SessionVisibilityApplication {
             codex_home: codex_home.as_ref().to_path_buf(),
             recovery_root: recovery_root.as_ref().to_path_buf(),
             faults: Arc::new(faults),
+            pending_state: None,
         }
+    }
+
+    pub fn with_pending_state(mut self, state_store: StateStore) -> Self {
+        self.pending_state = Some(state_store);
+        self
+    }
+
+    pub fn record_pending(&self, target: &VisibilityTarget) -> Result<(), VisibilityFailure> {
+        let Some(state_store) = &self.pending_state else {
+            return Err(pending_state_failure());
+        };
+        let target_mode = match target.mode {
+            VisibilityTargetMode::Provider => PendingSessionVisibilityTargetMode::Provider,
+            VisibilityTargetMode::OpenaiLogin => PendingSessionVisibilityTargetMode::OpenaiLogin,
+            VisibilityTargetMode::Unknown => return Err(pending_state_failure()),
+        };
+        state_store
+            .record_pending_session_visibility(
+                target_mode,
+                &target.model_provider,
+                &target.environment_revision,
+            )
+            .map_err(|_| pending_state_failure())
+    }
+
+    pub fn pending_status(
+        &self,
+    ) -> Result<Option<PendingSessionVisibilitySnapshot>, VisibilityFailure> {
+        let Some(state_store) = &self.pending_state else {
+            return Err(pending_state_failure());
+        };
+        state_store
+            .pending_session_visibility()
+            .map_err(|_| pending_state_failure())
+    }
+
+    pub fn mark_pending_running(&self, target: &VisibilityTarget) -> Result<(), VisibilityFailure> {
+        self.update_pending_for_target(
+            target,
+            PendingSessionVisibilityStatus::Running,
+            0,
+            0,
+            "consumer_recheck",
+            "none",
+        )
     }
 
     pub fn session_reference(id: &str) -> String {
@@ -796,6 +881,280 @@ impl SessionVisibilityApplication {
                 "session_visibility.repair_failed"
             },
         })
+    }
+
+    pub async fn execute_pending<R: VisibilityExecutionRuntime>(
+        &self,
+        request: VisibilityExecutionRequest,
+        runtime: &R,
+    ) -> Result<VisibilityExecutionResult, VisibilityFailure> {
+        self.update_pending_for_target(
+            &request.target,
+            PendingSessionVisibilityStatus::Running,
+            0,
+            0,
+            "consumer_recheck",
+            "none",
+        )?;
+        let result = self.execute(request.clone(), runtime).await;
+        match &result {
+            Ok(execution) => self.reconcile_pending_result(&request.target, execution)?,
+            Err(failure) => {
+                let blocked = match self.assess_recovery() {
+                    Ok(assessment) => assessment.block_codex_restart,
+                    Err(_) => true,
+                };
+                self.update_pending_for_target(
+                    &request.target,
+                    if blocked {
+                        PendingSessionVisibilityStatus::Blocked
+                    } else {
+                        PendingSessionVisibilityStatus::Pending
+                    },
+                    0,
+                    0,
+                    failure.stage,
+                    failure.message_id,
+                )?;
+            }
+        }
+        result
+    }
+
+    pub async fn coordinate_pending<R: VisibilityExecutionRuntime>(
+        &self,
+        context: VisibilityScanContext,
+        runtime: &R,
+    ) -> Result<VisibilityCoordinationOutcome, VisibilityFailure> {
+        let Some(pending) = self.pending_status()? else {
+            return Ok(coordination_outcome(
+                VisibilityCoordinationStatus::Idle,
+                false,
+                "none",
+                None,
+            ));
+        };
+        let current_target = match runtime.current_target() {
+            Ok(target) => target,
+            Err(failure) => {
+                self.update_pending_for_target(
+                    &context.target,
+                    PendingSessionVisibilityStatus::Pending,
+                    pending.succeeded,
+                    pending.retryable,
+                    failure.stage,
+                    failure.message_id,
+                )?;
+                return Ok(coordination_outcome(
+                    VisibilityCoordinationStatus::Deferred,
+                    false,
+                    failure.message_id,
+                    None,
+                ));
+            }
+        };
+        if !pending_snapshot_matches_target(&pending, &context.target)
+            || current_target != context.target
+        {
+            self.update_pending_for_target(
+                &context.target,
+                PendingSessionVisibilityStatus::Pending,
+                pending.succeeded,
+                pending.retryable,
+                "target_recheck",
+                "session_visibility.rescan_required",
+            )?;
+            return Ok(coordination_outcome(
+                VisibilityCoordinationStatus::Deferred,
+                false,
+                "session_visibility.rescan_required",
+                None,
+            ));
+        }
+        let consumer = runtime.consumers(true);
+        if consumer != VisibilityConsumerState::NoConsumers {
+            let error_code = consumer_error_code(consumer);
+            self.update_pending_for_target(
+                &context.target,
+                PendingSessionVisibilityStatus::Pending,
+                pending.succeeded,
+                pending.retryable,
+                "consumer_recheck",
+                error_code,
+            )?;
+            return Ok(coordination_outcome(
+                VisibilityCoordinationStatus::Deferred,
+                false,
+                error_code,
+                None,
+            ));
+        }
+        let preview = match self.scan(context.clone()) {
+            Ok(preview) => preview,
+            Err(failure) => {
+                self.update_pending_for_target(
+                    &context.target,
+                    PendingSessionVisibilityStatus::Pending,
+                    pending.succeeded,
+                    pending.retryable,
+                    failure.stage,
+                    failure.message_id,
+                )?;
+                return Err(failure);
+            }
+        };
+        if !preview.can_execute {
+            let error_code = preview
+                .blockers
+                .first()
+                .map(|blocker| format!("session_visibility.{blocker}"))
+                .unwrap_or_else(|| "session_visibility.scan_blocked".to_owned());
+            self.update_pending_for_target(
+                &preview.target,
+                PendingSessionVisibilityStatus::Pending,
+                pending.succeeded,
+                pending.retryable,
+                "scan",
+                &error_code,
+            )?;
+            return Ok(VisibilityCoordinationOutcome {
+                status: VisibilityCoordinationStatus::Deferred,
+                block_codex_restart: false,
+                error_code,
+                execution: None,
+            });
+        }
+        let target = preview.target.clone();
+        let result = self
+            .execute_pending(
+                VisibilityExecutionRequest {
+                    confirmation_id: preview.confirmation_id,
+                    target,
+                },
+                runtime,
+            )
+            .await;
+        match result {
+            Ok(execution) => {
+                let status = if execution.block_codex_restart || execution.status == "indeterminate"
+                {
+                    VisibilityCoordinationStatus::Blocked
+                } else if execution.status == "complete" && execution.retryable == 0 {
+                    VisibilityCoordinationStatus::Complete
+                } else if execution.status == "partial" || execution.succeeded > 0 {
+                    VisibilityCoordinationStatus::Partial
+                } else {
+                    VisibilityCoordinationStatus::Deferred
+                };
+                Ok(coordination_outcome(
+                    status,
+                    execution.block_codex_restart,
+                    execution.error_code,
+                    Some(execution),
+                ))
+            }
+            Err(failure) => {
+                let blocked = self.pending_status()?.is_some_and(|pending| {
+                    pending.status == PendingSessionVisibilityStatus::Blocked
+                });
+                Ok(coordination_outcome(
+                    if blocked {
+                        VisibilityCoordinationStatus::Blocked
+                    } else {
+                        VisibilityCoordinationStatus::Deferred
+                    },
+                    blocked,
+                    failure.message_id,
+                    None,
+                ))
+            }
+        }
+    }
+
+    fn reconcile_pending_result(
+        &self,
+        target: &VisibilityTarget,
+        result: &VisibilityExecutionResult,
+    ) -> Result<(), VisibilityFailure> {
+        let Some(state_store) = &self.pending_state else {
+            return Ok(());
+        };
+        if !self.pending_matches_target(state_store, target)? {
+            return Ok(());
+        }
+        if result.status == "complete" && result.retryable == 0 {
+            state_store
+                .clear_pending_session_visibility(&target.environment_revision)
+                .map_err(|_| pending_state_failure())?;
+            return Ok(());
+        }
+        let status = if result.block_codex_restart || result.status == "indeterminate" {
+            PendingSessionVisibilityStatus::Blocked
+        } else if result.status == "partial" || result.succeeded > 0 {
+            PendingSessionVisibilityStatus::Partial
+        } else {
+            PendingSessionVisibilityStatus::Pending
+        };
+        self.update_pending_for_target(
+            target,
+            status,
+            result.succeeded,
+            result.retryable,
+            result.diagnostic_stage,
+            result.error_code,
+        )
+    }
+
+    fn update_pending_for_target(
+        &self,
+        target: &VisibilityTarget,
+        status: PendingSessionVisibilityStatus,
+        succeeded: u32,
+        retryable: u32,
+        diagnostic_stage: &str,
+        error_code: &str,
+    ) -> Result<(), VisibilityFailure> {
+        let Some(state_store) = &self.pending_state else {
+            return Ok(());
+        };
+        if !self.pending_matches_target(state_store, target)? {
+            return Ok(());
+        }
+        state_store
+            .update_pending_session_visibility(
+                &target.environment_revision,
+                status,
+                succeeded,
+                retryable,
+                diagnostic_stage,
+                error_code,
+            )
+            .map_err(|_| pending_state_failure())?;
+        Ok(())
+    }
+
+    fn pending_matches_target(
+        &self,
+        state_store: &StateStore,
+        target: &VisibilityTarget,
+    ) -> Result<bool, VisibilityFailure> {
+        let pending = state_store
+            .pending_session_visibility()
+            .map_err(|_| pending_state_failure())?;
+        Ok(pending.is_some_and(|pending| {
+            pending.environment_revision == target.environment_revision
+                && pending.model_provider == target.model_provider
+                && matches!(
+                    (pending.target_mode, target.mode),
+                    (
+                        PendingSessionVisibilityTargetMode::Provider,
+                        VisibilityTargetMode::Provider
+                    ) | (
+                        PendingSessionVisibilityTargetMode::OpenaiLogin,
+                        VisibilityTargetMode::OpenaiLogin
+                    )
+                )
+        }))
     }
 
     pub fn assess_recovery(&self) -> Result<VisibilityRecoveryAssessment, VisibilityFailure> {
@@ -1982,6 +2341,51 @@ fn visibility_failure(message_id: &'static str) -> VisibilityFailure {
 
 fn visibility_failure_at(message_id: &'static str, stage: &'static str) -> VisibilityFailure {
     VisibilityFailure { message_id, stage }
+}
+
+fn pending_state_failure() -> VisibilityFailure {
+    visibility_failure_at("session_visibility.state_unavailable", "pending_state")
+}
+
+fn pending_snapshot_matches_target(
+    pending: &PendingSessionVisibilitySnapshot,
+    target: &VisibilityTarget,
+) -> bool {
+    pending.environment_revision == target.environment_revision
+        && pending.model_provider == target.model_provider
+        && matches!(
+            (pending.target_mode, target.mode),
+            (
+                PendingSessionVisibilityTargetMode::Provider,
+                VisibilityTargetMode::Provider
+            ) | (
+                PendingSessionVisibilityTargetMode::OpenaiLogin,
+                VisibilityTargetMode::OpenaiLogin
+            )
+        )
+}
+
+fn consumer_error_code(consumer: VisibilityConsumerState) -> &'static str {
+    match consumer {
+        VisibilityConsumerState::NoConsumers => "none",
+        VisibilityConsumerState::DesktopRunning => "session_visibility.desktop_running",
+        VisibilityConsumerState::CliRunning => "session_visibility.cli_running",
+        VisibilityConsumerState::Unknown => "session_visibility.consumer_unknown",
+    }
+}
+
+fn coordination_outcome(
+    status: VisibilityCoordinationStatus,
+    block_codex_restart: bool,
+    error_code: &str,
+    execution: Option<VisibilityExecutionResult>,
+) -> VisibilityCoordinationOutcome {
+    VisibilityCoordinationOutcome {
+        status,
+        block_codex_restart,
+        error_code: error_code.to_owned(),
+        execution,
+    }
 }
 
 fn ensure_consumers_stopped(

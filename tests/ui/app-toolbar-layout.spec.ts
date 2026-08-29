@@ -45,7 +45,16 @@ for (const viewport of [{ width: 680, height: 520 }, { width: 1120, height: 800 
     await expect(titleBar.getByRole("heading", { name: "供应商管理" })).toBeVisible();
     await expect(titleBar.getByRole("button", { name: "启动 Codex" })).toBeVisible();
     await expect(titleBar.getByRole("button", { name: "帮帮我" })).toBeVisible();
+    const visibilityStatus = page.getByRole("status", { name: "会话可见性自动修复状态" });
+    await expect(visibilityStatus).toContainText("模式已切换");
     await expectChildrenNotToOverlap(titleBar, ":scope > h1, :scope > .app-header-actions > .desktop-control > button, :scope > .app-header-actions > button");
+    const [titleBounds, statusBounds] = await Promise.all([
+      titleBar.boundingBox(),
+      visibilityStatus.boundingBox(),
+    ]);
+    expect(titleBounds).not.toBeNull();
+    expect(statusBounds).not.toBeNull();
+    expect(statusBounds!.y).toBeGreaterThanOrEqual(titleBounds!.y + titleBounds!.height - 0.5);
     await expectNoHorizontalOverflow(page, viewport.width);
 
     await page.getByRole("button", { name: "会话管理" }).click();
@@ -55,6 +64,9 @@ for (const viewport of [{ width: 680, height: 520 }, { width: 1120, height: 800 
     await expect(sessionToolbar.getByRole("tab", { name: "已归档" })).toBeVisible();
     await expect(sessionToolbar.getByRole("button", { name: "修复会话" })).toBeVisible();
     await expect(sessionToolbar.getByRole("button", { name: "刷新会话列表" })).toBeVisible();
+    const sessionToolbarBounds = await sessionToolbar.boundingBox();
+    expect(sessionToolbarBounds).not.toBeNull();
+    expect(sessionToolbarBounds!.y).toBeGreaterThanOrEqual(statusBounds!.y + statusBounds!.height - 0.5);
     await expectChildrenNotToOverlap(sessionToolbar, "[role='tab'], .session-list-actions > button");
     await sessionToolbar.getByRole("tab", { name: "已归档" }).focus();
     await page.keyboard.press("Enter");
