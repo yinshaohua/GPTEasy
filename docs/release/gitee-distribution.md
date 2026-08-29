@@ -77,15 +77,17 @@ unset GITEE_TOKEN
 
 脚本会先核对数值 Release ID、tag、测试清单类型和 blob SHA，再要求输入完整 tag 二次确认；它先删除测试清单，后删除 Release。若 Release 删除失败，可用同一命令重跑，已经删除的测试清单按可恢复状态处理。不得在人工点击前清理，也不得把 Token 放入命令行参数、`.release.env`、日志或验收记录。
 
+本机没有 Token 时，可在 GitHub Actions 手工运行 `.github/workflows/gitee-cleanup-smoke.yml`，分别输入报告中的数值 Release ID 和精确 tag。工作流仍调用同一清理脚本，逐项核对 ID、tag 和清单身份，只从 `GITEE_TOKEN` Secret 读取凭据。
+
 本地 adapter 与应用内 HTTP 测试只证明协议实现，等体积 `.txt` 也不能替代真实 PE 上传；两类证据的边界和真实验收字段见 `docs/evidence/gitee-domestic-distribution.md`。
 
 ## 正式同步
 
 `.github/workflows/gitee-sync.yml` 由 GitHub Release `published` 事件触发，也允许维护者输入同一 Tag 人工重试。工作流只调用 `scripts/sync-gitee-release.mjs` 下载 Release 附件，不运行应用构建。同步器执行以下顺序：
 
-1. 拒绝草稿、预发布和非稳定 SemVer Release；读取当前正式清单以阻止版本降级，首次发布则验证分发仓库 README 的 Raw 可读性。同步器可用公开 Contents 元数据和官方 Raw blob 复核既有清单，但客户端更新端点始终只有一个稳定分支 Raw 地址；
+1. 拒绝草稿、预发布和非稳定 SemVer Release；读取当前正式清单以阻止版本降级；比较仓库根 README 与 Gitee `README.md`，不一致时更新并通过匿名 Raw 读取核对。同步器可用公开 Contents 元数据和官方 Raw blob 复核既有清单，但客户端更新端点始终只有一个稳定分支 Raw 地址；
 2. 下载 GitHub Release 中的 Windows x64 NSIS 安装包及其 `.sig`，计算大小和 SHA-256；Gitee 上的 PE 附件名追加 `.bin`，并按实际附件名生成 `SHA256SUMS.txt`；
-3. 创建或复用同 Tag Gitee Release，正文直接采用 GitHub 中文发布说明；
+3. 创建或复用同 Tag Gitee Release，正文采用 GitHub 中文发布说明，并幂等追加 Gitee `.exe.bin` 手工重命名提示；更新清单中的 `notes` 仍只保存 GitHub 原始发布说明；
 4. 已存在的同名附件必须经匿名下载证明大小和 SHA-256 相同，缺失附件才上传；上传使用官方 `https://gitee.com/api/v5`、HTTP/1.1、无 `Expect: 100-continue` 的 multipart 请求，并保留五分钟单次响应预算；响应丢失时先重新枚举附件，确认未落盘才有限重试，认证、权限和其它确定性错误立即停止；同名内容冲突也立即停止；
 5. 所有附件上传后再次匿名下载校验，最后才写入正式清单。
 

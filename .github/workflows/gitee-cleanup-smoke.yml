@@ -1,0 +1,42 @@
+name: 清理 Gitee 冒烟资源
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_id:
+        description: "要清理的 Gitee 数值 Release ID"
+        required: true
+        type: string
+      tag:
+        description: "必须匹配 smoke-<run-id>-<attempt> 的精确 Tag"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gitee-smoke-maintenance
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+      GITEE_REPOSITORY: ${{ vars.GITEE_REPOSITORY }}
+      GITEE_DEFAULT_BRANCH: ${{ vars.GITEE_DEFAULT_BRANCH }}
+      RELEASE_ID: ${{ inputs.release_id }}
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 精确校验并清理冒烟 Release 与清单
+        shell: bash
+        run: |
+          test -n "$GITEE_TOKEN"
+          test -n "$GITEE_REPOSITORY"
+          test -n "$GITEE_DEFAULT_BRANCH"
+          [[ "$RELEASE_ID" =~ ^[0-9]+$ ]]
+          [[ "$RELEASE_TAG" =~ ^smoke-[0-9]+-[0-9]+$ ]]
+          printf '%s\n' "$RELEASE_TAG" | bash scripts/cleanup-gitee-release.sh "$RELEASE_ID" "$RELEASE_TAG"

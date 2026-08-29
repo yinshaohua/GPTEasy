@@ -81,11 +81,13 @@ if ($null -ne $config) {
 
 $workflowPath = Join-Path $root '.github/workflows/gitee-smoke.yml'
 $syncWorkflowPath = Join-Path $root '.github/workflows/gitee-sync.yml'
+$cleanupWorkflowPath = Join-Path $root '.github/workflows/gitee-cleanup-smoke.yml'
 $smokePath = Join-Path $root 'scripts/smoke-gitee-release.sh'
 $syncPath = Join-Path $root 'scripts/sync-gitee-release.mjs'
 $wizardPath = Join-Path $root 'scripts/setup-gitee-distribution.sh'
 try { $workflow = [System.IO.File]::ReadAllText($workflowPath) } catch { $workflow = ''; Add-TrustError 'Gitee smoke workflow is missing.' }
 try { $syncWorkflow = [System.IO.File]::ReadAllText($syncWorkflowPath) } catch { $syncWorkflow = ''; Add-TrustError 'Gitee sync workflow is missing.' }
+try { $cleanupWorkflow = [System.IO.File]::ReadAllText($cleanupWorkflowPath) } catch { $cleanupWorkflow = ''; Add-TrustError 'Gitee cleanup workflow is missing.' }
 try { $smoke = [System.IO.File]::ReadAllText($smokePath) } catch { $smoke = ''; Add-TrustError 'Gitee smoke command is missing.' }
 try { $sync = [System.IO.File]::ReadAllText($syncPath) } catch { $sync = ''; Add-TrustError 'Gitee sync command is missing.' }
 try { $wizard = [System.IO.File]::ReadAllText($wizardPath) } catch { $wizard = ''; Add-TrustError 'Gitee setup wizard is missing.' }
@@ -107,6 +109,11 @@ if (-not $syncWorkflow.Contains('types: [published]') -or
     $syncWorkflow -match '(?i)(npm run (build|tauri)|cargo build|tauri build)') {
     Add-TrustError 'Gitee formal sync must consume published Release assets without rebuilding.'
 }
+if (-not $cleanupWorkflow.Contains('GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}') -or
+    -not $cleanupWorkflow.Contains('cleanup-gitee-release.sh "$RELEASE_ID" "$RELEASE_TAG"') -or
+    -not $cleanupWorkflow.Contains('^smoke-[0-9]+-[0-9]+$')) {
+    Add-TrustError 'Gitee smoke cleanup must use the Actions secret and exact ID/tag validation.'
+}
 if (-not $sync.Contains('Authorization: `Bearer ${configuration.giteeToken}`') -or
     $sync -match '(?i)(access_token=|PRIVATE-TOKEN)') {
     Add-TrustError 'Gitee formal sync authentication must use the Bearer header only.'
@@ -124,6 +131,8 @@ if (-not $sync.Contains('spawn("curl"') -or
     -not $sync.Contains('"Expect:"') -or
     -not $sync.Contains('attachment-reconcile') -or
     -not $sync.Contains('`${name}.bin`') -or
+    -not $sync.Contains('new URL("../README.md"') -or
+    -not $sync.Contains('giteeReleaseBody') -or
     -not $sync.Contains('new URLSearchParams') -or
     -not $sync.Contains('numericReleaseId')) {
     Add-TrustError 'Gitee sync must use numeric Release IDs, deterministic curl multipart uploads, reconciliation, and form-data content writes.'

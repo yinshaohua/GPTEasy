@@ -2,6 +2,7 @@
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import http from "node:http";
 import { test } from "node:test";
 
@@ -11,6 +12,7 @@ const DISTRIBUTED_INSTALLER = `${INSTALLER}.bin`;
 const SIGNATURE = `${INSTALLER}.sig`;
 const INSTALLER_BYTES = Buffer.from("accepted-windows-installer");
 const SIGNATURE_TEXT = "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIG1pbmlzaWduIHNlY3JldCBrZXkKUlVRZjZMUkNHQTlpNTU5cjNnN1YxcU55SkRBcEdpcDhNZnFjYWRJZ1Q5Q3VoVjNFTWhIb04xbUdUa1VpZEYvejdTcmxRZ1hkeThvZmpiN2JOSkp5bERPb2NyQ284S0x6WndvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNTU2MTkzMzM1CWZpbGU6dGVzdAp5L3JVdzJ5OC9oT1VZalpVNzFlSHAvV28xS1o0MGZHeTJWSkVEbDM0WE1KTStUWDQ4U3MvMTd1M0l2SWZiVlIxRmtaWlNOQ2lzUWJ1UVkrYkh3aEVCZz09";
+const README_TEMPLATE = await readFile(new URL("../README.md", import.meta.url), "utf8");
 
 test("首次同步验证所有附件后最后推进正式清单", async () => {
   const adapter = await startAdapter();
@@ -19,6 +21,8 @@ test("首次同步验证所有附件后最后推进正式清单", async () => {
     assert.equal(result.code, 0, result.stderr);
     assert.equal(adapter.state.uploads.size, 3);
     assert.equal(adapter.state.manifests.length, 1);
+    assert.match(adapter.state.remoteReadme, /\.exe\.bin/);
+    assert.ok(adapter.state.records.some((record) => record.operation === "readme-update"));
     assert.ok(adapter.state.records.some((record) => record.operation === "anonymous-raw-baseline"));
     assert.equal(adapter.state.records.at(-1).operation, "manifest-write");
     const manifest = adapter.state.manifests[0];
@@ -48,6 +52,18 @@ test("首次同步兼容 Gitee 以 HTTP 200 空数组表示清单不存在", asy
   }
 });
 
+test("Gitee README 已与模板一致时不重复写入", async () => {
+  const adapter = await startAdapter({ remoteReadme: README_TEMPLATE });
+  try {
+    const result = await runSync(adapter.baseUrl);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(adapter.state.records.some((record) => record.operation === "readme-update"), false);
+    assert.equal(adapter.state.manifests.length, 1);
+  } finally {
+    await adapter.close();
+  }
+});
+
 test("正式附件上传复用真实冒烟验证过的 curl multipart 路径", async () => {
   const adapter = await startAdapter({ requireCurlUpload: true });
   try {
@@ -68,7 +84,9 @@ test("Release 正文中的字面量转义换行会规范化为 Markdown 换行",
     assert.equal(result.code, 0, result.stderr);
     assert.equal(adapter.state.manifests[0].notes, "第一行\n\n### 更新\n- 第二行");
     const releaseCreate = adapter.state.records.find((record) => record.operation === "release-create");
-    assert.equal(new URLSearchParams(releaseCreate.body).get("body"), "第一行\n\n### 更新\n- 第二行");
+    const releaseBody = new URLSearchParams(releaseCreate.body).get("body");
+    assert.match(releaseBody, /^第一行\n\n### 更新\n- 第二行\n\n## Gitee 下载说明/);
+    assert.equal(releaseBody.match(/## Gitee 下载说明/g)?.length, 1);
     assert.equal(new URLSearchParams(releaseCreate.body).get("target_commitish"), "main");
   } finally {
     await adapter.close();
@@ -116,7 +134,7 @@ test("已有 Release 正文变化时以表单编码更新数值 Release ID", asy
     assert.ok(update, "expected an existing Release update");
     assert.equal(update.path, "/gitee/repos/dist/releases/releases/42");
     assert.match(update.contentType, /^application\/x-www-form-urlencoded/);
-    assert.equal(new URLSearchParams(update.body).get("body"), "正式中文发布说明");
+    assert.match(new URLSearchParams(update.body).get("body"), /^正式中文发布说明\n\n## Gitee 下载说明/);
   } finally {
     await adapter.close();
   }
@@ -317,7 +335,7 @@ test("首次发布的 Raw 匿名读取不可用时不推进分发", async () => 
   try {
     const result = await runSync(adapter.baseUrl);
     assert.notEqual(result.code, 0);
-    assert.match(result.stderr, /Raw baseline download failed/);
+    assert.match(result.stderr, /Anonymous Gitee README download failed/);
     assert.equal(adapter.state.uploads.size, 0);
     assert.equal(adapter.state.manifests.length, 0);
   } finally {
@@ -441,6 +459,7 @@ async function startAdapter(options = {}) {
     transientRawManifestFailures: options.transientRawManifestFailures ?? 0,
     rawManifestAttempts: 0,
     rawManifestBranchAttempts: 0,
+    remoteReadme: options.remoteReadme ?? "# GPTEasy Releases\n",
     records: [],
     manifests: [],
   };
@@ -518,7 +537,15 @@ async function startAdapter(options = {}) {
       return json(response, 200, { sha: "manifest-sha", download_url: `${origin(server)}/raw/blob/latest.md` });
     }
     if (request.method === "GET" && url.pathname.endsWith("/contents/README.md")) {
-      return json(response, 200, { download_url: `${origin(server)}/raw/README.md` });
+      return json(response, 200, { sha: "readme-sha", download_url: `${origin(server)}/raw/README.md` });
+    }
+    if (request.method === "PUT" && url.pathname.endsWith("/contents/README.md")) {
+      assert.match(record.contentType, /^application\/x-www-form-urlencoded/);
+      const payload = new URLSearchParams(body.toString("utf8"));
+      assert.equal(payload.get("sha"), "readme-sha");
+      state.remoteReadme = Buffer.from(payload.get("content"), "base64").toString("utf8");
+      state.records.push({ ...record, operation: "readme-update" });
+      return json(response, 200, { content: { download_url: `${origin(server)}/raw/README.md` } });
     }
     if (request.method === "POST" && /\/releases\/42\/attach_files$/.test(url.pathname)) {
       assert.match(record.contentType, /^multipart\/form-data; boundary=/);
@@ -573,7 +600,7 @@ async function startAdapter(options = {}) {
       assert.equal(authorization, undefined);
       state.records.push({ ...record, operation: "anonymous-raw-baseline" });
       if (state.failRawBaseline) return bytes(response, 403, Buffer.from("forbidden"));
-      return bytes(response, 200, Buffer.from("# GPTEasy Releases\n"));
+      return bytes(response, 200, Buffer.from(state.remoteReadme));
     }
     if (["POST", "PUT"].includes(request.method) && url.pathname.endsWith("/contents/latest.md")) {
       assert.match(record.contentType, /^application\/x-www-form-urlencoded/);

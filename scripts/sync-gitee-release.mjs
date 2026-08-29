@@ -15,7 +15,7 @@ try {
   // Normalize it before copying release notes to Gitee and the updater manifest.
   release.body = normalizeReleaseBody(release.body);
   const currentManifest = await readCurrentManifest();
-  if (!currentManifest) await verifyRawBaseline();
+  await ensureGiteeReadme();
   if (currentManifest && compareVersions(release.tag_name.slice(1), currentManifest.manifest.version) < 0) {
     throw new Error(`refusing to replace newer manifest ${currentManifest.manifest.version} with ${release.tag_name.slice(1)}`);
   }
@@ -291,23 +291,43 @@ function parseManifest(content) {
   try { return JSON.parse(content); } catch { throw new Error("current manifest is not valid JSON"); }
 }
 
-async function verifyRawBaseline() {
+async function ensureGiteeReadme() {
+  const expected = await readFile(new URL("../README.md", import.meta.url), "utf8");
   const endpoint = `/repos/${configuration.giteeRepository}/contents/README.md?ref=${encodeURIComponent(configuration.giteeBranch)}`;
   const metadata = await giteeRequest(endpoint);
-  if (!metadata || typeof metadata.download_url !== "string") {
+  if (!metadata || typeof metadata.sha !== "string" || typeof metadata.download_url !== "string") {
     throw new Error("Gitee distribution README metadata is unavailable");
   }
-  const url = new URL(metadata.download_url);
+  const current = await readAnonymousGiteeText(metadata.download_url, "Anonymous Gitee README download");
+  if (current === expected) return;
+
+  const updated = await giteeRequest(`/repos/${configuration.giteeRepository}/contents/README.md`, {
+    method: "PUT",
+    body: urlEncodedForm({
+      branch: configuration.giteeBranch,
+      message: "docs: update GPTEasy download instructions",
+      content: Buffer.from(expected).toString("base64"),
+      sha: metadata.sha,
+    }),
+  });
+  const downloadUrl = updated?.content?.download_url ?? updated?.download_url;
+  if (typeof downloadUrl !== "string") {
+    throw new Error("Gitee README update response is missing its anonymous download URL");
+  }
+  const published = await readAnonymousGiteeText(downloadUrl, "Anonymous updated Gitee README download");
+  if (published !== expected) throw new Error("Anonymous updated Gitee README does not match the repository template");
+}
+
+async function readAnonymousGiteeText(downloadUrl, label) {
+  const url = new URL(downloadUrl);
   const validOrigin = url.origin === new URL(configuration.giteeRawBase).origin;
   const validTestUrl = configuration.testMode && url.protocol === "http:" && url.hostname === "127.0.0.1";
   if (!validOrigin && !validTestUrl) throw new Error("Gitee returned an unexpected README download URL");
-  const branchUrl = branchRawUrl("README.md");
-  const content = await fetchAnonymousFromCandidates(
-    [branchUrl, url],
-    "Anonymous Gitee Raw baseline download",
+  return fetchAnonymousFromCandidates(
+    [url, branchRawUrl("README.md")],
+    label,
     (response) => response.text(),
   );
-  if (!content.trim()) throw new Error("Anonymous Gitee Raw baseline download returned an empty response");
 }
 
 function selectArtifacts(assets, version) {
@@ -335,7 +355,12 @@ async function downloadGithubAsset(asset, target, token) {
 async function ensureGiteeRelease(release, config) {
   const endpoint = `/repos/${config.giteeRepository}/releases/tags/${encodeURIComponent(config.tag)}`;
   const existing = await giteeRequest(endpoint);
-  const expected = { tag_name: config.tag, name: release.name ?? config.tag, body: release.body ?? "", prerelease: false };
+  const expected = {
+    tag_name: config.tag,
+    name: release.name ?? config.tag,
+    body: giteeReleaseBody(release.body),
+    prerelease: false,
+  };
   if (existing) {
     if (existing.tag_name && existing.tag_name !== config.tag) {
       throw new Error("Gitee returned a release with a different tag");
@@ -350,6 +375,16 @@ async function ensureGiteeRelease(release, config) {
     method: "POST",
     body: urlEncodedForm({ ...expected, target_commitish: config.giteeBranch }),
   });
+}
+
+function giteeReleaseBody(body) {
+  const notice = [
+    "## Gitee 下载说明",
+    "",
+    "Gitee 上的 Windows 安装包因平台附件限制使用 `.exe.bin` 后缀。手工下载后请删除末尾 `.bin`，再按 `SHA256SUMS.txt` 核对后运行；应用内更新无需手工处理。",
+  ].join("\n");
+  const normalized = String(body ?? "").trimEnd();
+  return normalized ? `${normalized}\n\n${notice}` : notice;
 }
 
 function findExistingAsset(release, name) {
