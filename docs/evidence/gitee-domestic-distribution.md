@@ -47,7 +47,7 @@ GitHub Release `v1.4.1` 于 2026-08-29 14:32:34 UTC 发布。自动同步 [33257
 
 这组实验把失败条件收敛到 Gitee Release API 接收的 `.exe` 文件名；它不推断平台未公开的内部 WAF 或审查实现。正式分发因此保持 GitHub `.exe` 不变，只在 Gitee 为同一不可变字节使用 `.exe.bin`。应用更新器不依赖 URL 后缀，仍使用原 `.sig` 验证下载字节并写入临时 `.exe`；手工下载用户须删除末尾 `.bin`。
 
-正式恢复同步 [33266143156](https://github.com/yinshaohua/GPTEasy/actions/runs/33266143156) 首次把 `GPTEasy_1.4.1_x64-setup.exe.bin`、`GPTEasy_1.4.1_x64-setup.exe.sig` 和 `SHA256SUMS.txt` 全部写入 Gitee，并最后把 `latest.md` 推进到 1.4.1。完善 Release 下载提示和 README 同步后，[33266943845](https://github.com/yinshaohua/GPTEasy/actions/runs/33266943845) 对同一 Tag 幂等重跑通过；最终同步 [33267292642](https://github.com/yinshaohua/GPTEasy/actions/runs/33267292642) 又覆盖了 README 已一致时的不可变 Raw 校验。重跑同时证明，Gitee 既有附件枚举不提供附件 ID 时仍可使用数值 Release ID 和稳定附件 URL 完成校验。最终公开结果如下：
+正式恢复同步 [33266143156](https://github.com/yinshaohua/GPTEasy/actions/runs/33266143156) 首次把 `GPTEasy_1.4.1_x64-setup.exe.bin`、`GPTEasy_1.4.1_x64-setup.exe.sig` 和 `SHA256SUMS.txt` 全部写入 Gitee，并最后把 `latest.md` 推进到 1.4.1。完善 Release 下载提示和 README 同步后，[33266943845](https://github.com/yinshaohua/GPTEasy/actions/runs/33266943845) 对同一 Tag 幂等重跑通过；[33267292642](https://github.com/yinshaohua/GPTEasy/actions/runs/33267292642) 又覆盖了 README 已一致时的不可变 Raw 校验。工作流升级到 `actions/checkout@v5` 后，最终复核 [33267454797](https://github.com/yinshaohua/GPTEasy/actions/runs/33267454797) 通过且不再依赖 Node 20 弃用兼容。重跑同时证明，Gitee 既有附件枚举不提供附件 ID 时仍可使用数值 Release ID 和稳定附件 URL 完成校验。最终公开结果如下：
 
 - 无 Cookie、无 Token 的安装包 GET 返回 HTTP 200，大小 3,884,346 字节，SHA-256 为 `40c6b7f1dee993fa93c3eaaa8dbb1b633e91fd17cacffa3a538e161ec96ff6e2`，与 GitHub Release 一致；
 - `latest.md` 匿名 GET 返回 HTTP 200，`version` 为 `1.4.1`，安装包 URL 指向 `.exe.bin`；
