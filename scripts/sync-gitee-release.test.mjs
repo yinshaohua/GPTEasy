@@ -8,20 +8,33 @@ import { test } from "node:test";
 
 const TAG = "v1.2.3";
 const INSTALLER = "GPTEasy_1.2.3_x64-setup.exe";
-const DISTRIBUTED_INSTALLER = `${INSTALLER}.bin`;
+const DISTRIBUTED_INSTALLER = INSTALLER;
 const SIGNATURE = `${INSTALLER}.sig`;
 const INSTALLER_BYTES = Buffer.from("accepted-windows-installer");
 const SIGNATURE_TEXT = "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIG1pbmlzaWduIHNlY3JldCBrZXkKUlVRZjZMUkNHQTlpNTU5cjNnN1YxcU55SkRBcEdpcDhNZnFjYWRJZ1Q5Q3VoVjNFTWhIb04xbUdUa1VpZEYvejdTcmxRZ1hkeThvZmpiN2JOSkp5bERPb2NyQ284S0x6WndvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNTU2MTkzMzM1CWZpbGU6dGVzdAp5L3JVdzJ5OC9oT1VZalpVNzFlSHAvV28xS1o0MGZHeTJWSkVEbDM0WE1KTStUWDQ4U3MvMTd1M0l2SWZiVlIxRmtaWlNOQ2lzUWJ1UVkrYkh3aEVCZz09";
 const README_TEMPLATE = await readFile(new URL("../README.md", import.meta.url), "utf8");
 
-test("首次同步验证所有附件后最后推进正式清单", async () => {
-  const adapter = await startAdapter();
+test("首次同步准备辅助附件，人工上传安装包后重跑才推进正式清单", async () => {
+  const adapter = await startAdapter({ releaseExists: false, uploads: new Map() });
   try {
+    const prepare = await runSync(adapter.baseUrl);
+    assert.notEqual(prepare.code, 0);
+    assert.match(prepare.stderr, /manual Gitee installer upload required/);
+    assert.match(prepare.stderr, /"manualActionRequired":true/);
+    assert.deepEqual(adapter.state.uploadedThisRun.sort(), ["SHA256SUMS.txt", SIGNATURE].sort());
+    assert.equal(adapter.state.manifests.length, 0);
+    assert.match(adapter.state.uploads.get("SHA256SUMS.txt").toString("utf8"), new RegExp(`  ${INSTALLER}\\n`));
+    const releaseCreate = adapter.state.records.find((record) => record.operation === "release-create");
+    assert.equal(new URLSearchParams(releaseCreate.body).get("body"), "正式中文发布说明");
+    assert.equal(new URLSearchParams(releaseCreate.body).get("target_commitish"), "main");
+
+    adapter.state.uploads.set(INSTALLER, INSTALLER_BYTES);
+    adapter.state.uploadedThisRun.length = 0;
     const result = await runSync(adapter.baseUrl);
     assert.equal(result.code, 0, result.stderr);
     assert.equal(adapter.state.uploads.size, 3);
     assert.equal(adapter.state.manifests.length, 1);
-    assert.match(adapter.state.remoteReadme, /\.exe\.bin/);
+    assert.doesNotMatch(adapter.state.remoteReadme, /\.exe\.bin/);
     assert.ok(adapter.state.records.some((record) => record.operation === "readme-update"));
     assert.ok(adapter.state.records.some((record) => record.operation === "anonymous-raw-baseline"));
     assert.ok(adapter.state.records.some((record) => record.operation === "anonymous-raw-baseline"
@@ -33,10 +46,25 @@ test("首次同步验证所有附件后最后推进正式清单", async () => {
     assert.equal(manifest.notes, "正式中文发布说明");
     assert.equal(manifest.pub_date, "2026-08-18T08:00:00Z");
     assert.equal(manifest.platforms["windows-x86_64"].signature, SIGNATURE_TEXT);
-    assert.match(manifest.platforms["windows-x86_64"].url, /\/releases\/download\/v1\.2\.3\/GPTEasy_1\.2\.3_x64-setup\.exe\.bin$/);
+    assert.match(manifest.platforms["windows-x86_64"].url, /\/releases\/download\/v1\.2\.3\/GPTEasy_1\.2\.3_x64-setup\.exe$/);
     assert.equal(adapter.state.uploads.get(DISTRIBUTED_INSTALLER)?.equals(INSTALLER_BYTES), true);
     assert.ok(adapter.state.records.filter((record) => record.operation === "anonymous-download")
       .every((record) => record.authorization === undefined));
+  } finally {
+    await adapter.close();
+  }
+});
+
+test("遗留 exe.bin 附件会阻断同步且不推进正式清单", async () => {
+  const adapter = await startAdapter({
+    uploads: new Map([[`${INSTALLER}.bin`, INSTALLER_BYTES]]),
+  });
+  try {
+    const result = await runSync(adapter.baseUrl);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, new RegExp(`remove legacy Gitee attachment ${INSTALLER}\\.bin before continuing`));
+    assert.equal(adapter.state.uploadedThisRun.length, 0);
+    assert.equal(adapter.state.manifests.length, 0);
   } finally {
     await adapter.close();
   }
@@ -71,7 +99,7 @@ test("正式附件上传复用真实冒烟验证过的 curl multipart 路径", a
   try {
     const result = await runSync(adapter.baseUrl);
     assert.equal(result.code, 0, result.stderr);
-    assert.equal(adapter.state.uploads.size, 3);
+    assert.deepEqual(adapter.state.uploadedThisRun.sort(), ["SHA256SUMS.txt", SIGNATURE].sort());
   } finally {
     await adapter.close();
   }
@@ -85,11 +113,9 @@ test("Release 正文中的字面量转义换行会规范化为 Markdown 换行",
     const result = await runSync(adapter.baseUrl);
     assert.equal(result.code, 0, result.stderr);
     assert.equal(adapter.state.manifests[0].notes, "第一行\n\n### 更新\n- 第二行");
-    const releaseCreate = adapter.state.records.find((record) => record.operation === "release-create");
-    const releaseBody = new URLSearchParams(releaseCreate.body).get("body");
-    assert.match(releaseBody, /^第一行\n\n### 更新\n- 第二行\n\n## Gitee 下载说明/);
-    assert.equal(releaseBody.match(/## Gitee 下载说明/g)?.length, 1);
-    assert.equal(new URLSearchParams(releaseCreate.body).get("target_commitish"), "main");
+    const releaseUpdate = adapter.state.records.find((record) => record.operation === "release-update");
+    const releaseBody = new URLSearchParams(releaseUpdate.body).get("body");
+    assert.equal(releaseBody, "第一行\n\n### 更新\n- 第二行");
   } finally {
     await adapter.close();
   }
@@ -127,12 +153,12 @@ test("既有附件枚举缺少附件 ID 时仍按稳定 URL 复用", async () =>
 });
 
 test("附件已落盘但上传响应丢失时重新枚举并继续同步", async () => {
-  const adapter = await startAdapter({ persistThenDropUploadResponse: DISTRIBUTED_INSTALLER });
+  const adapter = await startAdapter({ persistThenDropUploadResponse: SIGNATURE });
   try {
     const result = await runSync(adapter.baseUrl);
     assert.equal(result.code, 0, result.stderr);
-    assert.equal(adapter.state.uploadAttempts.get(DISTRIBUTED_INSTALLER), 1);
-    assert.equal(adapter.state.uploads.get(DISTRIBUTED_INSTALLER)?.equals(INSTALLER_BYTES), true);
+    assert.equal(adapter.state.uploadAttempts.get(SIGNATURE), 1);
+    assert.equal(adapter.state.uploads.get(SIGNATURE)?.toString("utf8"), SIGNATURE_TEXT);
     assert.equal(adapter.state.manifests.length, 1);
     assert.match(result.stderr, /stage=attachment-reconcile status=found/);
   } finally {
@@ -152,7 +178,7 @@ test("已有 Release 正文变化时以表单编码更新数值 Release ID", asy
     assert.ok(update, "expected an existing Release update");
     assert.equal(update.path, "/gitee/repos/dist/releases/releases/42");
     assert.match(update.contentType, /^application\/x-www-form-urlencoded/);
-    assert.match(new URLSearchParams(update.body).get("body"), /^正式中文发布说明\n\n## Gitee 下载说明/);
+    assert.equal(new URLSearchParams(update.body).get("body"), "正式中文发布说明");
   } finally {
     await adapter.close();
   }
@@ -160,13 +186,13 @@ test("已有 Release 正文变化时以表单编码更新数值 Release ID", asy
 
 test("Gitee 附件上传遇到瞬时 5xx 时有限重试后再推进清单", async () => {
   const adapter = await startAdapter({
-    transientUploadFailures: new Map([[DISTRIBUTED_INSTALLER, 2]]),
+    transientUploadFailures: new Map([[SIGNATURE, 2]]),
   });
   try {
     const result = await runSync(adapter.baseUrl);
     assert.equal(result.code, 0, result.stderr);
-    assert.equal(adapter.state.uploadAttempts.get(DISTRIBUTED_INSTALLER), 3);
-    assert.equal(adapter.state.uploads.get(DISTRIBUTED_INSTALLER)?.equals(INSTALLER_BYTES), true);
+    assert.equal(adapter.state.uploadAttempts.get(SIGNATURE), 3);
+    assert.equal(adapter.state.uploads.get(SIGNATURE)?.toString("utf8"), SIGNATURE_TEXT);
     assert.equal(adapter.state.manifests.length, 1);
     assert.equal(adapter.state.records.at(-1).operation, "manifest-write");
     assert.match(result.stderr, /service=Gitee method=POST stage=attachment-upload status=HTTP-502 asset=.* attempt=1\/3/);
@@ -178,13 +204,13 @@ test("Gitee 附件上传遇到瞬时 5xx 时有限重试后再推进清单", asy
 
 test("Gitee 附件上传遇到 429 时有限重试后再推进清单", async () => {
   const adapter = await startAdapter({
-    transientUploadFailures: new Map([[DISTRIBUTED_INSTALLER, 1]]),
+    transientUploadFailures: new Map([[SIGNATURE, 1]]),
     transientUploadStatus: 429,
   });
   try {
     const result = await runSync(adapter.baseUrl);
     assert.equal(result.code, 0, result.stderr);
-    assert.equal(adapter.state.uploadAttempts.get(DISTRIBUTED_INSTALLER), 2);
+    assert.equal(adapter.state.uploadAttempts.get(SIGNATURE), 2);
     assert.equal(adapter.state.manifests.length, 1);
   } finally {
     await adapter.close();
@@ -290,7 +316,7 @@ test("旧版本人工重跑不会覆盖较新的正式清单", async () => {
     const result = await runSync(adapter.baseUrl);
     assert.notEqual(result.code, 0);
     assert.match(result.stderr, /refusing to replace newer manifest/);
-    assert.equal(adapter.state.uploads.size, 0);
+    assert.equal(adapter.state.uploadedThisRun.length, 0);
     assert.equal(adapter.state.manifests.length, 0);
   } finally {
     await adapter.close();
@@ -304,7 +330,7 @@ test("草稿或预发布 GitHub Release 不进入正式分发", async () => {
       const result = await runSync(adapter.baseUrl);
       assert.notEqual(result.code, 0);
       assert.match(result.stderr, /published stable release/);
-      assert.equal(adapter.state.uploads.size, 0);
+      assert.equal(adapter.state.uploadedThisRun.length, 0);
       assert.equal(adapter.state.manifests.length, 0);
     } finally {
       await adapter.close();
@@ -323,7 +349,7 @@ test("缺少 Windows x64 NSIS 产物时不创建正式分发", async () => {
     const result = await runSync(adapter.baseUrl);
     assert.notEqual(result.code, 0);
     assert.match(result.stderr, /must include GPTEasy_1\.2\.3_x64-setup\.exe/);
-    assert.equal(adapter.state.uploads.size, 0);
+    assert.equal(adapter.state.uploadedThisRun.length, 0);
     assert.equal(adapter.state.manifests.length, 0);
   } finally {
     await adapter.close();
@@ -341,7 +367,7 @@ test("安装包文件名版本与 Release Tag 不同时不进入正式分发", a
     const result = await runSync(adapter.baseUrl);
     assert.notEqual(result.code, 0);
     assert.match(result.stderr, /must include GPTEasy_1\.2\.3_x64-setup\.exe/);
-    assert.equal(adapter.state.uploads.size, 0);
+    assert.equal(adapter.state.uploadedThisRun.length, 0);
     assert.equal(adapter.state.manifests.length, 0);
   } finally {
     await adapter.close();
@@ -354,7 +380,7 @@ test("首次发布的 Raw 匿名读取不可用时不推进分发", async () => 
     const result = await runSync(adapter.baseUrl);
     assert.notEqual(result.code, 0);
     assert.match(result.stderr, /Anonymous updated Gitee README download failed/);
-    assert.equal(adapter.state.uploads.size, 0);
+    assert.equal(adapter.state.uploadedThisRun.length, 0);
     assert.equal(adapter.state.manifests.length, 0);
   } finally {
     await adapter.close();
@@ -450,8 +476,8 @@ async function runSync(baseUrl) {
 
 async function startAdapter(options = {}) {
   const state = {
-    releaseExists: options.releaseExists ?? false,
-    uploads: options.uploads ?? new Map(),
+    releaseExists: options.releaseExists ?? true,
+    uploads: options.uploads ?? new Map([[INSTALLER, INSTALLER_BYTES]]),
     uploadedThisRun: [],
     uploadAttempts: new Map(),
     transientUploadFailures: options.transientUploadFailures ?? new Map(),

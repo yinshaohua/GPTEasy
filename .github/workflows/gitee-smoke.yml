@@ -10,11 +10,11 @@ on:
       asset_extension:
         description: "Gitee 冒烟附件扩展名"
         required: false
-        default: "exe"
+        default: "bin"
         type: choice
         options:
-          - exe
           - bin
+          - exe
 
 concurrency:
   group: gitee-smoke

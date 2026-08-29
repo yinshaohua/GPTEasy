@@ -84,13 +84,15 @@ $syncWorkflowPath = Join-Path $root '.github/workflows/gitee-sync.yml'
 $cleanupWorkflowPath = Join-Path $root '.github/workflows/gitee-cleanup-smoke.yml'
 $smokePath = Join-Path $root 'scripts/smoke-gitee-release.sh'
 $syncPath = Join-Path $root 'scripts/sync-gitee-release.mjs'
-$wizardPath = Join-Path $root 'scripts/setup-gitee-distribution.sh'
+$setupWizardPath = Join-Path $root 'scripts/setup-gitee-distribution.sh'
+$manualWizardPath = Join-Path $root 'scripts/manual-upload-gitee-installer.sh'
 try { $workflow = [System.IO.File]::ReadAllText($workflowPath) } catch { $workflow = ''; Add-TrustError 'Gitee smoke workflow is missing.' }
 try { $syncWorkflow = [System.IO.File]::ReadAllText($syncWorkflowPath) } catch { $syncWorkflow = ''; Add-TrustError 'Gitee sync workflow is missing.' }
 try { $cleanupWorkflow = [System.IO.File]::ReadAllText($cleanupWorkflowPath) } catch { $cleanupWorkflow = ''; Add-TrustError 'Gitee cleanup workflow is missing.' }
 try { $smoke = [System.IO.File]::ReadAllText($smokePath) } catch { $smoke = ''; Add-TrustError 'Gitee smoke command is missing.' }
 try { $sync = [System.IO.File]::ReadAllText($syncPath) } catch { $sync = ''; Add-TrustError 'Gitee sync command is missing.' }
-try { $wizard = [System.IO.File]::ReadAllText($wizardPath) } catch { $wizard = ''; Add-TrustError 'Gitee setup wizard is missing.' }
+try { $setupWizard = [System.IO.File]::ReadAllText($setupWizardPath) } catch { $setupWizard = ''; Add-TrustError 'Gitee setup wizard is missing.' }
+try { $manualWizard = [System.IO.File]::ReadAllText($manualWizardPath) } catch { $manualWizard = ''; Add-TrustError 'Gitee manual installer wizard is missing.' }
 
 if (-not $workflow.Contains('GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}')) {
     Add-TrustError 'Gitee Token must come from the GITEE_TOKEN Actions secret.'
@@ -102,7 +104,8 @@ if (-not $workflow.Contains('actions/checkout@v5') -or
 }
 if (-not $workflow.Contains('GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}') -or
     -not $workflow.Contains('SMOKE_SOURCE_TAG: ${{ inputs.source_tag }}') -or
-    -not $workflow.Contains('SMOKE_ASSET_EXTENSION: ${{ inputs.asset_extension }}')) {
+    -not $workflow.Contains('SMOKE_ASSET_EXTENSION: ${{ inputs.asset_extension }}') -or
+    -not $workflow.Contains('default: "bin"')) {
     Add-TrustError 'Gitee smoke must download a real published GitHub installer.'
 }
 if (-not $workflow.Contains('GITEE_REPOSITORY: ${{ vars.GITEE_REPOSITORY }}')) {
@@ -135,12 +138,14 @@ if (-not $sync.Contains('spawn("curl"') -or
     -not $sync.Contains('"--http1.1"') -or
     -not $sync.Contains('"Expect:"') -or
     -not $sync.Contains('attachment-reconcile') -or
-    -not $sync.Contains('`${name}.bin`') -or
+    -not $sync.Contains('manualActionRequired: true') -or
+    -not $sync.Contains('manual Gitee installer upload required') -or
+    -not $sync.Contains('remove legacy Gitee attachment') -or
+    -not $sync.Contains('return name;') -or
     -not $sync.Contains('new URL("../README.md"') -or
-    -not $sync.Contains('giteeReleaseBody') -or
     -not $sync.Contains('new URLSearchParams') -or
     -not $sync.Contains('numericReleaseId')) {
-    Add-TrustError 'Gitee sync must use numeric Release IDs, deterministic curl multipart uploads, reconciliation, and form-data content writes.'
+    Add-TrustError 'Gitee sync must use manual EXE upload, numeric Release IDs, deterministic auxiliary uploads, reconciliation, and form-data content writes.'
 }
 if (-not $smoke.Contains('--range 0-0') -or -not $smoke.Contains('prerelease=true') -or
     -not $smoke.Contains('ASSET_NAME="gpteasy-${SMOKE_TAG}.${SMOKE_ASSET_EXTENSION}"') -or
@@ -151,10 +156,19 @@ if (-not $smoke.Contains('target_commitish=$GITEE_DEFAULT_BRANCH') -or
     -not $sync.Contains('target_commitish: config.giteeBranch')) {
     Add-TrustError 'Gitee Release creation must target the configured distribution branch.'
 }
-if (-not $wizard.Contains('ask_secret GITEE_TOKEN') -or
-    -not $wizard.Contains('set_secret "$TOKEN_SECRET_NAME"') -or
-    -not $wizard.Contains('unset GITEE_TOKEN')) {
+if (-not $setupWizard.Contains('ask_secret GITEE_TOKEN') -or
+    -not $setupWizard.Contains('set_secret "$TOKEN_SECRET_NAME"') -or
+    -not $setupWizard.Contains('unset GITEE_TOKEN')) {
     Add-TrustError 'The setup wizard must capture, store, and clear the Gitee Token safely.'
+}
+if (-not $manualWizard.Contains('gh release download "$TAG"') -or
+    -not $manualWizard.Contains('verify-pe "$INSTALLER"') -or
+    -not $manualWizard.Contains('/releases/$TAG/edit') -or
+    -not $manualWizard.Contains('curl --fail --silent --show-error --location') -or
+    -not $manualWizard.Contains('cmp --silent "$INSTALLER" "$VERIFIED"') -or
+    -not $manualWizard.Contains('gh workflow run gitee-sync.yml') -or
+    -not $manualWizard.Contains('gh run watch')) {
+    Add-TrustError 'The manual installer wizard must download, verify, guide upload, anonymously compare, and resume formal sync.'
 }
 
 $trackedOutput = & git -C $root ls-files -z

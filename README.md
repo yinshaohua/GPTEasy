@@ -8,7 +8,7 @@ GPTEasy 是一款面向 Windows 用户的 Codex 配置与会话管理工具。�
 
 ## 下载与安装
 
-国内用户可从 [Gitee Releases](https://gitee.com/ericshaohua/gpteasy-releases/releases) 下载最新的 Windows x64 当前用户安装包；Gitee 附件使用 `.exe.bin` 后缀，手工下载后须删除末尾 `.bin` 再运行。[GitHub Releases](https://github.com/yinshaohua/GPTEasy/releases/latest) 继续提供标准 `.exe` 文件名、源码、发布说明和备用下载。两个平台分发同一次正式构建的安装包，安装不需要管理员权限。
+国内用户可从 [Gitee Releases](https://gitee.com/ericshaohua/gpteasy-releases/releases) 直接下载并运行 Windows x64 当前用户 `.exe` 安装包。[GitHub Releases](https://github.com/yinshaohua/GPTEasy/releases/latest) 提供同一正式构建的安装包、源码、发布说明和备用下载。安装不需要管理员权限。
 
 `v1.1.0` 是首个内置应用更新信任根的版本；`v1.4.0` 将国内更新源切换到 Gitee。仍在使用 `v1.3.0` 或更早版本的用户须先手工安装 `v1.4.0` 或更高版本，后续正式更新才会由应用自动检查和下载；签名验证通过后仍需用户明确选择“重启并更新”。
 
@@ -92,7 +92,7 @@ cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1
 npm run candidate:windows
 ```
 
-应用更新的 Gitee 分发信任根、带密码 updater 密钥、冒烟工作流与版本准备流程参见 [`docs/release/gitee-distribution.md`](docs/release/gitee-distribution.md)。首次设置在 Git Bash 或 WSL2 中运行 `bash scripts/setup-gitee-distribution.sh`；私钥和密码不得进入仓库、日志或发布附件。
+应用更新的 Gitee 分发信任根、带密码 updater 密钥、人工安装包上传、冒烟工作流与版本准备流程参见 [`docs/release/gitee-distribution.md`](docs/release/gitee-distribution.md)。首次设置在 Git Bash 或 WSL2 中运行 `bash scripts/setup-gitee-distribution.sh`；正式 GitHub Release 发布后运行 `bash scripts/manual-upload-gitee-installer.sh <version>` 完成 Gitee `.exe` 上传闭环。私钥和密码不得进入仓库、日志或发布附件。
 
 候选构建要求在干净的 `main` 工作树中运行。
 

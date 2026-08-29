@@ -48,13 +48,23 @@ try {
   });
 
   const giteeRelease = await ensureGiteeRelease(release, configuration);
+  const installerArtifact = downloaded.find((asset) => asset.name.toLowerCase().endsWith(".exe"));
+  if (!installerArtifact) throw new Error("GitHub Release must contain a Windows x64 installer");
+  const legacyInstaller = findExistingAsset(giteeRelease, `${installerArtifact.distributionName}.bin`);
+  if (legacyInstaller) {
+    throw new Error(`remove legacy Gitee attachment ${installerArtifact.distributionName}.bin before continuing`);
+  }
   const verifiedAssets = [];
+  let manualInstallerRequired = false;
   for (const asset of downloaded) {
     const existing = findExistingAsset(giteeRelease, asset.distributionName);
     let downloadUrl;
     if (existing) {
       downloadUrl = stableAttachmentUrl(configuration, numericReleaseId(giteeRelease), existing, asset.distributionName);
       await verifyAnonymous(downloadUrl, asset);
+    } else if (asset.name.toLowerCase().endsWith(".exe")) {
+      manualInstallerRequired = true;
+      continue;
     } else {
       const releaseId = numericReleaseId(giteeRelease);
       const distributionAsset = { ...asset, name: asset.distributionName };
@@ -63,6 +73,18 @@ try {
       await verifyAnonymous(downloadUrl, distributionAsset);
     }
     verifiedAssets.push({ ...asset, downloadUrl });
+  }
+
+  if (manualInstallerRequired) {
+    const releaseUrl = `${configuration.giteeRawBase}/${configuration.giteeRepository}/releases/tag/${encodeURIComponent(configuration.tag)}`;
+    process.stderr.write(`${JSON.stringify({
+      passed: false,
+      manualActionRequired: true,
+      tag: configuration.tag,
+      asset: installerArtifact.distributionName,
+      releaseUrl,
+    })}\n`);
+    throw new Error(`manual Gitee installer upload required for ${installerArtifact.distributionName}`);
   }
 
   const installer = verifiedAssets.find((asset) => asset.name.toLowerCase().endsWith(".exe"));
@@ -363,7 +385,7 @@ function selectArtifacts(assets, version) {
 }
 
 function giteeAssetName(name) {
-  return name.toLowerCase().endsWith(".exe") ? `${name}.bin` : name;
+  return name;
 }
 
 async function downloadGithubAsset(asset, target, token) {
@@ -380,7 +402,7 @@ async function ensureGiteeRelease(release, config) {
   const expected = {
     tag_name: config.tag,
     name: release.name ?? config.tag,
-    body: giteeReleaseBody(release.body),
+    body: release.body ?? "",
     prerelease: false,
   };
   if (existing) {
@@ -397,16 +419,6 @@ async function ensureGiteeRelease(release, config) {
     method: "POST",
     body: urlEncodedForm({ ...expected, target_commitish: config.giteeBranch }),
   });
-}
-
-function giteeReleaseBody(body) {
-  const notice = [
-    "## Gitee 下载说明",
-    "",
-    "Gitee 上的 Windows 安装包因自动上传接口限制使用 `.exe.bin` 后缀。手工下载后请删除末尾 `.bin`，再按 `SHA256SUMS.txt` 核对后运行；应用内更新无需手工处理。",
-  ].join("\n");
-  const normalized = String(body ?? "").trimEnd();
-  return normalized ? `${normalized}\n\n${notice}` : notice;
 }
 
 function findExistingAsset(release, name) {
