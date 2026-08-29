@@ -403,7 +403,7 @@ function giteeReleaseBody(body) {
   const notice = [
     "## Gitee 下载说明",
     "",
-    "Gitee 上的 Windows 安装包因平台附件限制使用 `.exe.bin` 后缀。手工下载后请删除末尾 `.bin`，再按 `SHA256SUMS.txt` 核对后运行；应用内更新无需手工处理。",
+    "Gitee 上的 Windows 安装包因自动上传接口限制使用 `.exe.bin` 后缀。手工下载后请删除末尾 `.bin`，再按 `SHA256SUMS.txt` 核对后运行；应用内更新无需手工处理。",
   ].join("\n");
   const normalized = String(body ?? "").trimEnd();
   return normalized ? `${normalized}\n\n${notice}` : notice;

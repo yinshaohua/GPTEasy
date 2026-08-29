@@ -45,7 +45,7 @@ GitHub Release `v1.4.1` 于 2026-08-29 14:32:34 UTC 发布。自动同步 [33257
 - [33265862278](https://github.com/yinshaohua/GPTEasy/actions/runs/33265862278) 延长单次预算后仍使用 `.exe`，连接被对端重置并以 `curl` 退出码 35 失败；
 - [33265656678](https://github.com/yinshaohua/GPTEasy/actions/runs/33265656678) 只把同一 PE 的附件后缀改为 `.bin` 后通过；`tag` 为 `smoke-33265656678-1`，数值 `releaseId` 为 `970921`。Gitee 忽略 Range 并返回 HTTP 200 完整内容，匿名完整下载大小为 3,884,346 字节，SHA-256 为 `40c6b7f1dee993fa93c3eaaa8dbb1b633e91fd17cacffa3a538e161ec96ff6e2`，测试清单明确记录 `formalManifestAdvanced: false`。
 
-这组实验把失败条件收敛到 Gitee Release API 接收的 `.exe` 文件名；它不推断平台未公开的内部 WAF 或审查实现。正式分发因此保持 GitHub `.exe` 不变，只在 Gitee 为同一不可变字节使用 `.exe.bin`。应用更新器不依赖 URL 后缀，仍使用原 `.sig` 验证下载字节并写入临时 `.exe`；手工下载用户须删除末尾 `.bin`。
+这组实验把失败条件收敛到 Gitee Release API 自动上传通道接收 `.exe` 文件名时的行为；它不推断平台未公开的内部 WAF 或审查实现。正式分发因此保持 GitHub `.exe` 不变，只在 Gitee 自动同步时为同一不可变字节使用 `.exe.bin`。应用更新器不依赖 URL 后缀，仍使用原 `.sig` 验证下载字节并写入临时 `.exe`；手工下载用户须删除末尾 `.bin`。
 
 正式恢复同步 [33266143156](https://github.com/yinshaohua/GPTEasy/actions/runs/33266143156) 首次把 `GPTEasy_1.4.1_x64-setup.exe.bin`、`GPTEasy_1.4.1_x64-setup.exe.sig` 和 `SHA256SUMS.txt` 全部写入 Gitee，并最后把 `latest.md` 推进到 1.4.1。完善 Release 下载提示和 README 同步后，[33266943845](https://github.com/yinshaohua/GPTEasy/actions/runs/33266943845) 对同一 Tag 幂等重跑通过；[33267292642](https://github.com/yinshaohua/GPTEasy/actions/runs/33267292642) 又覆盖了 README 已一致时的不可变 Raw 校验。工作流升级到 `actions/checkout@v5` 后，最终复核 [33267454797](https://github.com/yinshaohua/GPTEasy/actions/runs/33267454797) 通过且不再依赖 Node 20 弃用兼容。重跑同时证明，Gitee 既有附件枚举不提供附件 ID 时仍可使用数值 Release ID 和稳定附件 URL 完成校验。最终公开结果如下：
 
@@ -57,3 +57,9 @@ GitHub Release `v1.4.1` 于 2026-08-29 14:32:34 UTC 发布。自动同步 [33257
 三个实验 Release 及清单均已按精确 ID/tag 清理：[33266705774](https://github.com/yinshaohua/GPTEasy/actions/runs/33266705774) 清理 `970815` / `smoke-33265385697-1`，[33266857109](https://github.com/yinshaohua/GPTEasy/actions/runs/33266857109) 清理 `970921` / `smoke-33265656678-1`，[33266706218](https://github.com/yinshaohua/GPTEasy/actions/runs/33266706218) 清理 `970997` / `smoke-33265862278-1`。无凭据复核三个 Release API 和三个 `smoke/*.md` Raw 地址均返回 HTTP 404。
 
 收尾过程中的失败重跑也形成了新的回归边界：[33266705083](https://github.com/yinshaohua/GPTEasy/actions/runs/33266705083) 暴露 Gitee Raw 写后缓存，[33267157559](https://github.com/yinshaohua/GPTEasy/actions/runs/33267157559) 进一步证明查询参数不能保证分支 Raw 后端立即推进；同步器现用 Contents API 的 Base64 内容判断是否需要写入，并以提交 SHA 的不可变匿名 Raw 地址完成最终核对。[33266857112](https://github.com/yinshaohua/GPTEasy/actions/runs/33266857112) 暴露既有附件没有附件 ID，现只要求协议实际需要的数值 Release ID。这些边界均已加入本地 HTTP adapter 回归测试。
+
+## 2026-08-30 网页手工上传对照
+
+维护者在 Gitee 网页中创建临时 Release `manual-exe-upload-20260830`，直接选择原始 `GPTEasy_1.4.1_x64-setup.exe` 后上传成功。公开 API 返回数值 `releaseId` `972559` 和稳定 `.exe` 下载 URL；无 Cookie、无 Token 的完整 GET 返回 HTTP 200，媒体类型为 `application/vnd.microsoft.portable-executable`，大小 3,884,346 字节，SHA-256 为 `40c6b7f1dee993fa93c3eaaa8dbb1b633e91fd17cacffa3a538e161ec96ff6e2`。这证明 Gitee 网页上传和公开下载支持 `.exe`，自动失败边界只适用于本次实测的 Release API 上传通道，不能表述为 Gitee 全平台拒绝 `.exe`。
+
+该临时 Release 创建时实际为 `prerelease=false`，曾使 `/releases/latest` 指向实验 Tag。维护者完成验证后删除 Release 和 Tag；匿名复核 Release API、Release 页面和 Tag API 均返回 HTTP 404，`/releases/latest` 已以 HTTP 302 恢复指向 `v1.4.1`。网页手工上传需要维护者逐次操作，不能满足无人值守正式同步，因此自动发布仍使用已验证的 `.exe.bin` 方案。
