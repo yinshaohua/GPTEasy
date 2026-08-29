@@ -224,7 +224,7 @@ GITEE_REPOSITORY="$GITEE_REPOSITORY" GITEE_DEFAULT_BRANCH="$GITEE_DEFAULT_BRANCH
 const repository = process.env.GITEE_REPOSITORY;
 const branch = process.env.GITEE_DEFAULT_BRANCH;
 const token = process.env.GITEE_TOKEN;
-const apiBase = "https://api.gitee.com/api/v5";
+const apiBase = "https://gitee.com/api/v5";
 
 const response = await fetch(`${apiBase}/repos/${repository}`, {
   headers: { Accept: "application/json", Authorization: `Bearer ${token}` },

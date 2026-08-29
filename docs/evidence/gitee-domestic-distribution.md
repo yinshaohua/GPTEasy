@@ -28,3 +28,11 @@ GitHub Actions 工作流 [33138532094](https://github.com/yinshaohua/GPTEasy/act
 维护者使用精确 ID 和 tag 运行清理脚本后，匿名复核确认 `926296`、`926354`、`926420` 三个 Release 均返回 HTTP 404，对应的三个 smoke 清单均返回 Gitee 表示文件不存在的空数组，非正式资源清理完成。
 
 真实冒烟、人工匿名点击、清理和自动门禁全部完成后，GitHub Actions 中的 `GITCODE_TOKEN`、`GITCODE_REPOSITORY` 和 `GITCODE_DEFAULT_BRANCH` 已删除，只保留活动的 Gitee Secret/Variables。维护者随后在 GitCode 设置页撤销了原 GitHub Actions 使用的旧 Token；历史 GitCode 仓库、Tag、Release 和附件保持不变。
+
+## 2026-08-29 v1.4.1 分发事故
+
+GitHub Release `v1.4.1` 于 2026-08-29 14:32:34 UTC 发布。自动同步 [33257879357](https://github.com/yinshaohua/GPTEasy/actions/runs/33257879357) 和人工重跑 [33258808503](https://github.com/yinshaohua/GPTEasy/actions/runs/33258808503) 都在第一个 `GPTEasy_1.4.1_x64-setup.exe` 附件上传阶段失败：每次请求等待 180 秒后以 `curl` 退出码 28 结束，三次尝试均未收到 HTTP 响应字节。公开复核确认 Gitee `v1.4.1` 只有平台自动生成的源码压缩包，安装包和 `.sig` URL 返回 404，`latest.md` 仍为 1.4.0。
+
+此前真实冒烟只上传 4,194,304 字节 `.txt`，证明了体积、Release API 和匿名下载，却没有覆盖 `.exe` 文件名、PE 内容及其平台审查路径；这是自动门禁未能在发布前发现问题的直接原因。仓库同时使用了可兼容读取的 `api.gitee.com/api/v5`，而当前官方 Swagger 声明的主机和 base path 组合为 `gitee.com/api/v5`。无法从公开日志证明 Gitee 内部为何对 PE 上传保持连接无响应，因此不把某个未公开的 WAF 规则写成既定根因。
+
+修复将 API 根地址收敛到官方声明入口，固定附件传输参数，在响应丢失后重新枚举附件，并把真实稳定版 PE 作为冒烟输入。该记录只证明旧链路失败和本地修复完成；在新的 `gitee-smoke.yml` 真实运行成功、完成无登录下载验收之前，不得宣称 Gitee 的 PE 上传问题已经由平台验证解决。

@@ -107,7 +107,7 @@ fn create_trust_root_fixture() -> TempDir {
         serde_json::to_vec_pretty(&json!({
             "schemaVersion": 1,
             "issue": 55,
-            "apiBaseUrl": "https://api.gitee.com/api/v5",
+            "apiBaseUrl": "https://gitee.com/api/v5",
             "rawBaseUrl": "https://gitee.com",
             "defaultBranch": "main",
             "formalManifestPath": "latest.md",
@@ -137,7 +137,7 @@ fn create_trust_root_fixture() -> TempDir {
     for (path, content) in [
         (
             ".github/workflows/gitee-smoke.yml",
-            "GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}\nGITEE_REPOSITORY: ${{ vars.GITEE_REPOSITORY }}\n",
+            "GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}\nSMOKE_SOURCE_TAG: ${{ inputs.source_tag }}\nGITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}\nGITEE_REPOSITORY: ${{ vars.GITEE_REPOSITORY }}\n",
         ),
         (
             ".github/workflows/gitee-sync.yml",
@@ -145,11 +145,11 @@ fn create_trust_root_fixture() -> TempDir {
         ),
         (
             "scripts/smoke-gitee-release.sh",
-            "gitee-distribution.json\nAuthorization: Bearer $GITEE_TOKEN\n--range 0-0\nprerelease=true\ntarget_commitish=$GITEE_DEFAULT_BRANCH\n",
+            "gitee-distribution.json\nAuthorization: Bearer $GITEE_TOKEN\nASSET_NAME=\"gpteasy-${SMOKE_TAG}.exe\"\nSMOKE_SOURCE_TAG\nverify-pe\n--range 0-0\nprerelease=true\ntarget_commitish=$GITEE_DEFAULT_BRANCH\n",
         ),
         (
             "scripts/sync-gitee-release.mjs",
-            "Authorization: `Bearer ${configuration.giteeToken}`\nspawn(\"curl\", [\n\"--form\"\nnew URLSearchParams()\nnumericReleaseId()\ntarget_commitish: config.giteeBranch\n",
+            "Authorization: `Bearer ${configuration.giteeToken}`\nspawn(\"curl\", [\n\"--form\"\n\"--http1.1\"\n\"Expect:\"\nattachment-reconcile\nnew URLSearchParams()\nnumericReleaseId()\ntarget_commitish: config.giteeBranch\n",
         ),
         (
             "scripts/setup-gitee-distribution.sh",
@@ -607,6 +607,8 @@ fn repository_declares_repeatable_gitee_setup_without_formal_smoke_manifest_writ
         .expect("read Gitee smoke workflow");
     assert!(workflow.contains("GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}"));
     assert!(workflow.contains("GITEE_REPOSITORY: ${{ vars.GITEE_REPOSITORY }}"));
+    assert!(workflow.contains("GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}"));
+    assert!(workflow.contains("SMOKE_SOURCE_TAG: ${{ inputs.source_tag }}"));
 
     let smoke = fs::read_to_string(root.join("scripts/smoke-gitee-release.sh"))
         .expect("read Gitee smoke command");
@@ -619,7 +621,7 @@ fn gitee_distribution_contract_contains_only_public_protocol_configuration() {
     let contract = read_json(repository_root().join("scripts/gitee-distribution.json"));
     assert_eq!(contract["schemaVersion"], 1);
     assert_eq!(contract["issue"], 55);
-    assert_eq!(contract["apiBaseUrl"], "https://api.gitee.com/api/v5");
+    assert_eq!(contract["apiBaseUrl"], "https://gitee.com/api/v5");
     assert_eq!(contract["rawBaseUrl"], "https://gitee.com");
     assert_eq!(contract["formalManifestPath"], "latest.md");
     assert_eq!(contract["smokeManifestPrefix"], "smoke/");
@@ -639,6 +641,8 @@ fn gitee_smoke_declares_authenticated_writes_and_anonymous_reads() {
         .expect("read Gitee smoke command");
     assert!(smoke.contains("Authorization: Bearer $GITEE_TOKEN"));
     assert!(smoke.contains("--form \"file=@$CURL_ASSET_PATH"));
+    assert!(smoke.contains("ASSET_NAME=\"gpteasy-${SMOKE_TAG}.exe\""));
+    assert!(smoke.contains("SMOKE_SOURCE_TAG"));
     assert!(smoke.contains("--range 0-0"));
     assert!(smoke.contains("prerelease=true"));
 
@@ -651,10 +655,10 @@ fn gitee_smoke_declares_authenticated_writes_and_anonymous_reads() {
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake Gitee server");
     let address = listener.local_addr().expect("fake Gitee address");
-    let fixture = "GPTEasy Gitee distribution smoke fixture\n".to_owned();
+    let fixture = "MZGPTEasy Gitee distribution smoke fixture\n".to_owned();
     let fixture_size = fixture.len();
     let fixture_sha256 = format!("{:x}", Sha256::digest(fixture.as_bytes()));
-    let fixture_relative = PathBuf::from("src-tauri/target/gitee-smoke-fixture.txt");
+    let fixture_relative = PathBuf::from("src-tauri/target/gitee-smoke-fixture.exe");
     let fixture_for_bash = fixture_relative.to_string_lossy().replace('\\', "/");
     let fixture_path = repository_root().join(&fixture_relative);
     fs::write(&fixture_path, &fixture).expect("write smoke attachment fixture");

@@ -4,7 +4,7 @@ set -euo pipefail
 : "${GITEE_TOKEN:?GITEE_TOKEN is required}"
 : "${GITEE_REPOSITORY:?GITEE_REPOSITORY is required}"
 : "${GITEE_DEFAULT_BRANCH:?GITEE_DEFAULT_BRANCH is required}"
-: "${GITEE_API_BASE_URL:=https://api.gitee.com/api/v5}"
+: "${GITEE_API_BASE_URL:=https://gitee.com/api/v5}"
 
 release_id="${1:-}"
 tag="${2:-}"

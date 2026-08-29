@@ -133,7 +133,7 @@ async function loadConfiguration() {
   const giteeApiBase = (process.env.GITEE_API_BASE_URL ?? contract.apiBaseUrl).replace(/\/$/, "");
   const giteeRawBase = (process.env.GITEE_RAW_BASE_URL ?? contract.rawBaseUrl).replace(/\/$/, "");
   if (!testMode && (githubApiBase !== "https://api.github.com"
-    || giteeApiBase !== "https://api.gitee.com/api/v5"
+    || giteeApiBase !== "https://gitee.com/api/v5"
     || giteeRawBase !== "https://gitee.com")) {
     throw new Error("custom API endpoints are test-only");
   }
@@ -351,42 +351,65 @@ async function uploadAsset(releaseId, asset) {
     throw new Error("Gitee returned an invalid attachment upload URL");
   }
   for (let attempt = 1; attempt <= configuration.uploadAttempts; attempt += 1) {
+    let retryStatus = "network-error";
+    let failure;
     try {
       const response = await curlUpload(endpoint, asset);
       if (response.status >= 200 && response.status < 300) {
         try {
           return JSON.parse(response.body);
-        } catch {
-          throw new Error(`Gitee upload returned invalid JSON for ${asset.name}`);
+        } catch (error) {
+          failure = new Error(`Gitee upload returned invalid JSON for ${asset.name}`, { cause: error });
         }
-      }
-      if (attempt >= configuration.uploadAttempts || !isRetryableUploadStatus(response.status)) {
+      } else if (!isRetryableUploadStatus(response.status)) {
         throw new Error(`Gitee upload failed for ${asset.name} with HTTP ${response.status}`);
+      } else {
+        retryStatus = `HTTP-${response.status}`;
+        failure = new Error(`Gitee upload failed for ${asset.name} with HTTP ${response.status}`);
       }
-      writeRetryLog(
-        "Gitee",
-        "POST",
-        "attachment-upload",
-        `HTTP-${response.status}`,
-        attempt,
-        configuration.uploadAttempts,
-      );
     } catch (error) {
-      if (attempt >= configuration.uploadAttempts
-        || (error instanceof Error && error.message.startsWith("Gitee upload failed"))) {
+      if (error instanceof Error && error.message.startsWith("Gitee upload failed")
+        && !/HTTP (408|425|429|500|502|503|504)$/.test(error.message)) {
         throw error;
       }
-      writeRetryLog(
-        "Gitee",
-        "POST",
-        "attachment-upload",
-        "network-error",
-        attempt,
-        configuration.uploadAttempts,
-      );
+      failure = error;
     }
+
+    const reconciled = await reconcileUploadedAsset(releaseId, asset, attempt);
+    if (reconciled) return reconciled;
+    if (attempt >= configuration.uploadAttempts) {
+      throw failure;
+    }
+    writeAssetRetryLog(asset, retryStatus, attempt, configuration.uploadAttempts);
     await new Promise((resolve) => setTimeout(resolve, configuration.uploadDelayMs));
   }
+}
+
+async function reconcileUploadedAsset(releaseId, asset, attempt) {
+  try {
+    const attachments = await giteeRequest(
+      `/repos/${configuration.giteeRepository}/releases/${releaseId}/attach_files?per_page=100`,
+    );
+    const existing = Array.isArray(attachments)
+      ? attachments.find((candidate) => candidate.name === asset.name || candidate.file_name === asset.name)
+      : undefined;
+    if (!existing) return undefined;
+    process.stderr.write(
+      `recovery service=Gitee method=GET stage=attachment-reconcile status=found asset=${asset.name} size=${asset.size} attempt=${attempt}/${configuration.uploadAttempts}\n`,
+    );
+    return existing;
+  } catch (error) {
+    process.stderr.write(
+      `recovery service=Gitee method=GET stage=attachment-reconcile status=lookup-error asset=${asset.name} size=${asset.size} attempt=${attempt}/${configuration.uploadAttempts}\n`,
+    );
+    return undefined;
+  }
+}
+
+function writeAssetRetryLog(asset, status, attempt, total) {
+  process.stderr.write(
+    `retry service=Gitee method=POST stage=attachment-upload status=${status} asset=${asset.name} size=${asset.size} attempt=${attempt}/${total}\n`,
+  );
 }
 
 async function curlUpload(endpoint, asset) {
@@ -396,10 +419,12 @@ async function curlUpload(endpoint, asset) {
     "--silent",
     "--show-error",
     "--location",
+    "--http1.1",
     "--request", "POST",
     "--header", "Accept: application/json",
+    "--header", "Expect:",
     "--header", "@-",
-    "--form", `file=@${asset.path};filename=${asset.name}`,
+    "--form", `file=@${asset.path};filename=${asset.name};type=application/octet-stream`,
     "--max-time", String(timeoutSeconds),
     "--output", "-",
     "--write-out", "\n%{http_code}",

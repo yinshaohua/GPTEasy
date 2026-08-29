@@ -88,6 +88,20 @@ test("部分上传后重跑会复用匹配附件并补传缺失附件", async ()
   }
 });
 
+test("附件已落盘但上传响应丢失时重新枚举并继续同步", async () => {
+  const adapter = await startAdapter({ persistThenDropUploadResponse: INSTALLER });
+  try {
+    const result = await runSync(adapter.baseUrl);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(adapter.state.uploadAttempts.get(INSTALLER), 1);
+    assert.equal(adapter.state.uploads.get(INSTALLER)?.equals(INSTALLER_BYTES), true);
+    assert.equal(adapter.state.manifests.length, 1);
+    assert.match(result.stderr, /stage=attachment-reconcile status=found/);
+  } finally {
+    await adapter.close();
+  }
+});
+
 test("已有 Release 正文变化时以表单编码更新数值 Release ID", async () => {
   const adapter = await startAdapter({
     releaseExists: true,
@@ -117,8 +131,8 @@ test("Gitee 附件上传遇到瞬时 5xx 时有限重试后再推进清单", asy
     assert.equal(adapter.state.uploads.get(INSTALLER)?.equals(INSTALLER_BYTES), true);
     assert.equal(adapter.state.manifests.length, 1);
     assert.equal(adapter.state.records.at(-1).operation, "manifest-write");
-    assert.match(result.stderr, /service=Gitee method=POST stage=attachment-upload status=HTTP-502 attempt=1\/3/);
-    assert.match(result.stderr, /service=Gitee method=POST stage=attachment-upload status=HTTP-502 attempt=2\/3/);
+    assert.match(result.stderr, /service=Gitee method=POST stage=attachment-upload status=HTTP-502 asset=.* attempt=1\/3/);
+    assert.match(result.stderr, /service=Gitee method=POST stage=attachment-upload status=HTTP-502 asset=.* attempt=2\/3/);
   } finally {
     await adapter.close();
   }
@@ -415,6 +429,7 @@ async function startAdapter(options = {}) {
     currentManifest: options.currentManifest,
     missingManifestAsEmptyArray: options.missingManifestAsEmptyArray ?? false,
     requireCurlUpload: options.requireCurlUpload ?? false,
+    persistThenDropUploadResponse: options.persistThenDropUploadResponse,
     releasePatch: options.releasePatch ?? {},
     releaseResponsePatch: options.releaseResponsePatch ?? {},
     releaseAssets: options.releaseAssets,
@@ -511,6 +526,12 @@ async function startAdapter(options = {}) {
       const name = multipartFilename(body);
       const attempts = (state.uploadAttempts.get(name) ?? 0) + 1;
       state.uploadAttempts.set(name, attempts);
+      if (state.persistThenDropUploadResponse === name && attempts === 1) {
+        state.uploads.set(name, multipartFile(body));
+        state.uploadedThisRun.push(name);
+        request.socket.destroy();
+        return;
+      }
       if (attempts <= (state.transientUploadFailures.get(name) ?? 0)) {
         return json(response, state.transientUploadStatus, { message: "temporary upload failure" });
       }
@@ -518,6 +539,9 @@ async function startAdapter(options = {}) {
       state.uploadedThisRun.push(name);
       state.records.push({ ...record, operation: "upload" });
       return json(response, 201, attachmentResponse(name, state, server));
+    }
+    if (request.method === "GET" && /\/releases\/42\/attach_files$/.test(url.pathname)) {
+      return json(response, 200, [...state.uploads.keys()].map((name) => attachmentResponse(name, state, server)));
     }
     if (request.method === "GET" && url.pathname.startsWith(`/releases/download/${TAG}/`)) {
       assert.equal(authorization, undefined);

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "issue": 55,
-  "apiBaseUrl": "https://api.gitee.com/api/v5",
+  "apiBaseUrl": "https://gitee.com/api/v5",
   "rawBaseUrl": "https://gitee.com",
   "defaultBranch": "main",
   "formalManifestPath": "latest.md",

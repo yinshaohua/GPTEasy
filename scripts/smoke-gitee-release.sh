@@ -40,7 +40,7 @@ if [[ "${GITEE_SMOKE_TEST_MODE:-0}" != "1" ]]; then
   }
 fi
 SMOKE_TAG="smoke-${SMOKE_RUN_ID}"
-ASSET_NAME="gpteasy-${SMOKE_TAG}.txt"
+ASSET_NAME="gpteasy-${SMOKE_TAG}.exe"
 MANIFEST_PATH="${SMOKE_MANIFEST_PREFIX}${SMOKE_TAG}.md"
 [[ "$MANIFEST_PATH" != "$FORMAL_MANIFEST_PATH" ]] || { printf 'smoke manifest overlaps formal manifest\n' >&2; exit 2; }
 WORK_DIR=$(mktemp -d)
@@ -50,9 +50,33 @@ ASSET_PATH="$WORK_DIR/$ASSET_NAME"
 if [[ -n "${SMOKE_ASSET_PATH:-}" && -f "$SMOKE_ASSET_PATH" ]]; then
   cp "$SMOKE_ASSET_PATH" "$ASSET_PATH"
 else
-  # Keep the default fixture close to the current installer size without shipping binaries.
-  dd if=/dev/zero of="$ASSET_PATH" bs=1M count="${SMOKE_ASSET_SIZE_MB:-4}" status=none
+  : "${GITHUB_TOKEN:?GITHUB_TOKEN is required when SMOKE_ASSET_PATH is not set}"
+  : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required when SMOKE_ASSET_PATH is not set}"
+  GITHUB_RELEASE_PATH="releases/latest"
+  if [[ -n "${SMOKE_SOURCE_TAG:-}" ]]; then
+    [[ "$SMOKE_SOURCE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+      printf 'SMOKE_SOURCE_TAG must be a stable vSemVer tag\n' >&2
+      exit 2
+    }
+    GITHUB_RELEASE_PATH="releases/tags/$SMOKE_SOURCE_TAG"
+  fi
+  GITHUB_RELEASE_RESPONSE="$WORK_DIR/github-release.json"
+  GITHUB_RELEASE_STATUS=$(curl --silent --show-error --location --http1.1 \
+    --header "Authorization: Bearer $GITHUB_TOKEN" \
+    --header 'Accept: application/vnd.github+json' \
+    --output "$GITHUB_RELEASE_RESPONSE" --write-out '%{http_code}' \
+    "https://api.github.com/repos/$GITHUB_REPOSITORY/$GITHUB_RELEASE_PATH")
+  [[ "$GITHUB_RELEASE_STATUS" == 200 ]] || {
+    printf 'GitHub source Release lookup failed: HTTP %s\n' "$GITHUB_RELEASE_STATUS" >&2
+    exit 1
+  }
+  GITHUB_ASSET_URL=$(node "$JSON_TOOL" github-installer-url "$GITHUB_RELEASE_RESPONSE")
+  curl --fail --silent --show-error --location --http1.1 \
+    --header "Authorization: Bearer $GITHUB_TOKEN" \
+    --header 'Accept: application/octet-stream' \
+    --output "$ASSET_PATH" "$GITHUB_ASSET_URL"
 fi
+node "$JSON_TOOL" verify-pe "$ASSET_PATH" "${GITEE_SMOKE_TEST_MODE:-0}"
 ASSET_SHA256=$(sha256sum "$ASSET_PATH" | cut -d ' ' -f 1)
 ASSET_SIZE=$(wc -c < "$ASSET_PATH")
 ASSET_SIZE=$((ASSET_SIZE))
@@ -108,15 +132,16 @@ request_form POST "$API_BASE/repos/$GITEE_REPOSITORY/releases" "$RELEASE_RESPONS
 RELEASE_ID=$(node -e 'const r=require(process.argv[1]); const id=Number(r.id); if(!Number.isSafeInteger(id)||id<=0) process.exit(1); process.stdout.write(String(id))' "$RELEASE_RESPONSE")
 
 UPLOAD_RESPONSE="$WORK_DIR/upload.json"
-UPLOAD_STATUS=$(curl --silent --show-error --location --request POST \
-  --header "Authorization: Bearer $GITEE_TOKEN" --header 'Accept: application/json' \
-  --form "file=@$CURL_ASSET_PATH;filename=$ASSET_NAME" \
+UPLOAD_STATUS=$(curl --silent --show-error --location --http1.1 --request POST \
+  --header "Authorization: Bearer $GITEE_TOKEN" --header 'Accept: application/json' --header 'Expect:' \
+  --form "file=@$CURL_ASSET_PATH;filename=$ASSET_NAME;type=application/octet-stream" \
+  --max-time 180 \
   --output "$UPLOAD_RESPONSE" --write-out '%{http_code}' \
   "$API_BASE/repos/$GITEE_REPOSITORY/releases/$RELEASE_ID/attach_files")
 [[ "$UPLOAD_STATUS" =~ ^2[0-9][0-9]$ ]] || { printf 'Gitee attachment upload failed: HTTP %s\n' "$UPLOAD_STATUS" >&2; exit 1; }
 ATTACHMENT_ID=$(node -e 'const r=require(process.argv[1]); const id=Number(r.id); if(!Number.isSafeInteger(id)||id<=0) process.exit(1); process.stdout.write(String(id))' "$UPLOAD_RESPONSE")
 
-DOWNLOAD_PATH="$WORK_DIR/downloaded.txt"
+DOWNLOAD_PATH="$WORK_DIR/downloaded.exe"
 DOWNLOAD_URL="https://gitee.com/$GITEE_REPOSITORY/releases/download/$SMOKE_TAG/$ASSET_NAME"
 if [[ "${GITEE_SMOKE_TEST_MODE:-0}" == "1" ]]; then DOWNLOAD_URL="$API_BASE/repos/$GITEE_REPOSITORY/releases/$RELEASE_ID/attach_files/$ATTACHMENT_ID/download"; fi
 RANGE_PATH="$WORK_DIR/range.bin"

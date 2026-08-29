@@ -31,5 +31,6 @@
 ## 发布与平台范围
 
 - GitHub 继续作为源码、Tag、Windows x64 构建产物和中文发布说明的权威来源；正式 GitHub Release 发布后同步同一产物到 Gitee。
+- 发布后复核发现 Gitee 自动同步在 `.exe` 附件上传阶段超时，安装包和签名未进入 Gitee，正式清单保持在 1.4.0；本条是事后事故记录，不把失败同步记为已完成分发。
 - Windows 安装包保持当前用户 NSIS 安装和用户确认更新，不执行静默安装。
 - Windows ARM64、macOS Intel、Apple Silicon、签名、公证和严格 `~/Applications` 安装仍需对应原生环境验证；本次 Windows x64 发布不宣称这些平台已完成交付。

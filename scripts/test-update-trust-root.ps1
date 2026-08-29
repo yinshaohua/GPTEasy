@@ -29,6 +29,7 @@ if ($null -ne $distribution) {
     $rawUri = $null
     if ($distribution.schemaVersion -ne 1 -or $distribution.issue -ne 55 -or
         -not [Uri]::TryCreate([string]$distribution.apiBaseUrl, [UriKind]::Absolute, [ref]$apiUri) -or $apiUri.Scheme -cne 'https' -or
+        [string]$distribution.apiBaseUrl -cne 'https://gitee.com/api/v5' -or
         -not [Uri]::TryCreate([string]$distribution.rawBaseUrl, [UriKind]::Absolute, [ref]$rawUri) -or $rawUri.Scheme -cne 'https' -or
         [string]$distribution.formalManifestPath -notmatch '^[^/\s]+\.md$' -or
         -not ([string]$distribution.smokeManifestPrefix).StartsWith('smoke/', [StringComparison]::Ordinal) -or
@@ -92,6 +93,10 @@ try { $wizard = [System.IO.File]::ReadAllText($wizardPath) } catch { $wizard = '
 if (-not $workflow.Contains('GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}')) {
     Add-TrustError 'Gitee Token must come from the GITEE_TOKEN Actions secret.'
 }
+if (-not $workflow.Contains('GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}') -or
+    -not $workflow.Contains('SMOKE_SOURCE_TAG: ${{ inputs.source_tag }}')) {
+    Add-TrustError 'Gitee smoke must download a real published GitHub installer.'
+}
 if (-not $workflow.Contains('GITEE_REPOSITORY: ${{ vars.GITEE_REPOSITORY }}')) {
     Add-TrustError 'Gitee repository must come from a public Actions variable.'
 }
@@ -114,12 +119,17 @@ if (-not $smoke.Contains('gitee-distribution.json')) {
 }
 if (-not $sync.Contains('spawn("curl"') -or
     -not $sync.Contains('"--form"') -or
+    -not $sync.Contains('"--http1.1"') -or
+    -not $sync.Contains('"Expect:"') -or
+    -not $sync.Contains('attachment-reconcile') -or
     -not $sync.Contains('new URLSearchParams') -or
     -not $sync.Contains('numericReleaseId')) {
-    Add-TrustError 'Gitee sync must use numeric Release IDs, curl multipart attachments and form-data content writes.'
+    Add-TrustError 'Gitee sync must use numeric Release IDs, deterministic curl multipart uploads, reconciliation, and form-data content writes.'
 }
-if (-not $smoke.Contains('--range 0-0') -or -not $smoke.Contains('prerelease=true')) {
-    Add-TrustError 'Gitee smoke must use a prerelease and anonymous Range download.'
+if (-not $smoke.Contains('--range 0-0') -or -not $smoke.Contains('prerelease=true') -or
+    -not $smoke.Contains('ASSET_NAME="gpteasy-${SMOKE_TAG}.exe"') -or
+    -not $smoke.Contains('verify-pe')) {
+    Add-TrustError 'Gitee smoke must upload a real PE to a prerelease and verify it anonymously.'
 }
 if (-not $smoke.Contains('target_commitish=$GITEE_DEFAULT_BRANCH') -or
     -not $sync.Contains('target_commitish: config.giteeBranch')) {

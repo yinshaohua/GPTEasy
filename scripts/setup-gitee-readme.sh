@@ -187,7 +187,7 @@ TOTAL_STAGES=3
 ENV_FILE=".release.env"
 GITEE_REPOSITORY="ericshaohua/gpteasy-releases"
 GITEE_DEFAULT_BRANCH="main"
-GITEE_API_BASE="https://api.gitee.com/api/v5"
+GITEE_API_BASE="https://gitee.com/api/v5"
 
 banner "GPTEasy Gitee README"
 

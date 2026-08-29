@@ -2,6 +2,15 @@ name: Gitee 分发冒烟
 
 on:
   workflow_dispatch:
+    inputs:
+      source_tag:
+        description: "作为真实 PE 冒烟附件的已发布稳定 Tag；留空使用 GitHub latest"
+        required: false
+        type: string
+
+concurrency:
+  group: gitee-smoke
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -11,15 +20,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GITHUB_REPOSITORY: ${{ github.repository }}
       GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
       GITEE_REPOSITORY: ${{ vars.GITEE_REPOSITORY }}
       GITEE_DEFAULT_BRANCH: ${{ vars.GITEE_DEFAULT_BRANCH }}
       SMOKE_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+      SMOKE_SOURCE_TAG: ${{ inputs.source_tag }}
     steps:
       - uses: actions/checkout@v4
       - name: 验证公开仓库输入
         shell: bash
         run: |
+          test -n "$GITHUB_TOKEN"
+          test -n "$GITHUB_REPOSITORY"
           test -n "$GITEE_REPOSITORY"
           test -n "$GITEE_DEFAULT_BRANCH"
           test -n "$GITEE_TOKEN"

@@ -17,6 +17,34 @@ switch (command) {
     process.stdout.write(encodeURIComponent(args[0] ?? ""));
     break;
   }
+  case "github-installer-url": {
+    const release = JSON.parse(await readFile(args[0], "utf8"));
+    if (release.draft || release.prerelease || !/^v\d+\.\d+\.\d+$/.test(release.tag_name ?? "")
+      || typeof release.published_at !== "string" || Number.isNaN(Date.parse(release.published_at))) {
+      throw new Error("GitHub smoke source must be a published stable Release");
+    }
+    const version = release.tag_name.slice(1);
+    const expectedName = `GPTEasy_${version}_x64-setup.exe`;
+    const asset = Array.isArray(release.assets)
+      ? release.assets.find((candidate) => candidate.name?.toLowerCase() === expectedName.toLowerCase())
+      : undefined;
+    if (!asset || typeof asset.url !== "string" || !asset.url.startsWith("https://api.github.com/")) {
+      throw new Error(`GitHub smoke source is missing ${expectedName}`);
+    }
+    process.stdout.write(asset.url);
+    break;
+  }
+  case "verify-pe": {
+    const [assetPath, testMode] = args;
+    const bytes = await readFile(assetPath);
+    if (bytes.length < 2 || bytes[0] !== 0x4d || bytes[1] !== 0x5a) {
+      throw new Error("Gitee smoke attachment must be a Windows PE file");
+    }
+    if (testMode !== "1" && bytes.length < 1024 * 1024) {
+      throw new Error("Gitee smoke attachment must use a representative installer-sized PE file");
+    }
+    break;
+  }
   case "manifest": {
     const [tag, asset, sha256] = args;
     process.stdout.write(
