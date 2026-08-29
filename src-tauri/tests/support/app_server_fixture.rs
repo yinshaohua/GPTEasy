@@ -148,6 +148,12 @@ fn main() {
                 } else {
                     respond_error(id, -32001, "session not found");
                 }
+                if args.iter().any(|arg| arg == "--exit-after-capability") {
+                    std::thread::spawn(|| {
+                        std::thread::sleep(Duration::from_millis(100));
+                        std::process::exit(0);
+                    });
+                }
             } else if let Some(marker) = args
                 .windows(2)
                 .find(|pair| pair[0] == "--lose-unarchive-response")

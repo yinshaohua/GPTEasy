@@ -154,6 +154,86 @@ async fn unfiltered_session_list_explicitly_requests_all_model_providers() {
 }
 
 #[tokio::test]
+async fn app_server_liveness_check_neither_starts_nor_queries_the_server() {
+    let harness = AppServerHarness::new();
+    let state_root = TempDir::new().expect("state root");
+    let store = StateStore::new(StatePaths::from_root(state_root.path()));
+    assert!(store.bootstrap().is_ready());
+    let application = SessionApplication::with_program_for_harness(
+        store,
+        harness.program(),
+        vec!["--fixture-log".into(), harness.log().as_os_str().to_owned()],
+        Duration::from_millis(25),
+    );
+
+    assert!(application.active_app_server_version().await.is_none());
+    assert!(!harness.log().exists());
+    assert_eq!(
+        application.enter("liveness-lease").await.status,
+        SessionAvailabilityStatus::Available,
+    );
+    let before = fs::read_to_string(harness.log()).expect("read protocol log");
+
+    assert_eq!(
+        application.active_app_server_version().await.as_deref(),
+        Some("codex-cli 0.147.0-fixture"),
+    );
+    assert_eq!(
+        fs::read_to_string(harness.log()).expect("read unchanged protocol log"),
+        before,
+    );
+
+    application.shutdown_now().await;
+    let after_shutdown = fs::read_to_string(harness.log()).expect("read shutdown log");
+    assert!(application.active_app_server_version().await.is_none());
+    assert_eq!(
+        fs::read_to_string(harness.log()).expect("read final protocol log"),
+        after_shutdown,
+    );
+}
+
+#[tokio::test]
+async fn app_server_liveness_check_does_not_clean_up_an_exited_process() {
+    let harness = AppServerHarness::new();
+    let state_root = TempDir::new().expect("state root");
+    let store = StateStore::new(StatePaths::from_root(state_root.path()));
+    assert!(store.bootstrap().is_ready());
+    let application = SessionApplication::with_program_for_harness(
+        store.clone(),
+        harness.program(),
+        vec![
+            "--fixture-log".into(),
+            harness.log().as_os_str().to_owned(),
+            "--exit-after-capability".into(),
+        ],
+        Duration::from_millis(25),
+    );
+
+    assert_eq!(
+        application.enter("exited-liveness-lease").await.status,
+        SessionAvailabilityStatus::Available,
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let before_log = fs::read_to_string(harness.log()).expect("read protocol log");
+    let ownership = store
+        .session_process_ownership()
+        .expect("preserve exited process ownership until lifecycle cleanup");
+
+    assert!(application.active_app_server_version().await.is_none());
+    assert_eq!(
+        store.session_process_ownership(),
+        Some(ownership),
+        "read-only liveness must not modify GPTEasy state",
+    );
+    assert_eq!(
+        fs::read_to_string(harness.log()).expect("read unchanged protocol log"),
+        before_log,
+    );
+
+    application.shutdown_now().await;
+}
+
+#[tokio::test]
 async fn list_keeps_internal_sources_out_even_when_the_server_ignores_source_kinds() {
     let harness = AppServerHarness::new();
     let state_root = TempDir::new().expect("state root");

@@ -916,16 +916,28 @@ pub(crate) async fn preview_session_visibility(
             Err(failure) => return Err(failure),
         };
     let availability = state.availability();
-    let app_server = match availability.as_ref().map(|value| value.status) {
-        Some(crate::session::SessionAvailabilityStatus::Available) => {
+    let active_app_server_version = if availability
+        .as_ref()
+        .is_some_and(|value| value.status == crate::session::SessionAvailabilityStatus::Available)
+    {
+        state.application.active_app_server_version().await
+    } else {
+        None
+    };
+    let app_server = match (
+        availability.as_ref().map(|value| value.status),
+        active_app_server_version.as_ref(),
+    ) {
+        (Some(crate::session::SessionAvailabilityStatus::Available), Some(_)) => {
             VisibilityAppServerCapability::Available
         }
-        Some(crate::session::SessionAvailabilityStatus::Incompatible) => {
+        (Some(crate::session::SessionAvailabilityStatus::Incompatible), _) => {
             VisibilityAppServerCapability::Incompatible
         }
         _ => VisibilityAppServerCapability::Unavailable,
     };
-    let codex_version = availability.and_then(|value| value.codex_version);
+    let codex_version =
+        active_app_server_version.or_else(|| availability.and_then(|value| value.codex_version));
     let mut execution_blockers = Vec::new();
     match environment_before.state {
         crate::environment::EnvironmentState::External => {
@@ -978,6 +990,16 @@ pub(crate) async fn preview_session_visibility(
         Ok(preview) => preview,
         Err(failure) => return Err(failure),
     };
+    if preview.app_server == VisibilityAppServerCapability::Available
+        && state
+            .application
+            .active_app_server_version()
+            .await
+            .is_none()
+    {
+        preview.app_server = VisibilityAppServerCapability::Unavailable;
+        SessionVisibilityApplication::add_execution_blocker(&mut preview, "app_server_unavailable");
+    }
     if let Ok(environment_after) = environment.session_visibility_context()
         && (environment_after.revision != environment_before.revision
             || environment_after.mode != environment_before.mode
@@ -2416,7 +2438,7 @@ mod tests {
             "encrypted_content_risk=1",
             "active=6",
             "archived=3",
-            "error_codes=app_server_unavailable",
+            "error_codes=app_server_unavailable,provider_mismatch",
         ] {
             assert!(details.contains(required), "missing {required}: {details}");
         }

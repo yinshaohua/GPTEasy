@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -102,10 +102,16 @@ impl SessionVisibilityPreview {
             .as_deref()
             .map(safe_diagnostic_value)
             .unwrap_or_else(|| "unknown".to_owned());
-        let error_codes = if self.blockers.is_empty() {
+        let error_codes = self
+            .blockers
+            .iter()
+            .chain(self.reasons.iter().map(|reason| &reason.code))
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        let error_codes = if error_codes.is_empty() {
             "none".to_owned()
         } else {
-            self.blockers.join(",")
+            error_codes.into_iter().collect::<Vec<_>>().join(",")
         };
         format!(
             "stage=scan; target_mode={target_mode}; codex_version={codex_version}; \
@@ -194,7 +200,7 @@ impl SessionVisibilityApplication {
         blockers.dedup();
         let can_execute = blockers.is_empty();
         if !can_execute {
-            summary.blocked = summary.candidates;
+            summary.blocked = summary.blocked.max(summary.candidates);
             for blocker in &blockers {
                 increment(&mut reasons, blocker);
             }
@@ -225,7 +231,7 @@ impl SessionVisibilityApplication {
         preview.blockers.push(blocker.to_owned());
         preview.blockers.sort();
         preview.can_execute = false;
-        preview.summary.blocked = preview.summary.candidates;
+        preview.summary.blocked = preview.summary.blocked.max(preview.summary.candidates);
         if let Some(reason) = preview
             .reasons
             .iter_mut()
@@ -294,6 +300,14 @@ impl SessionVisibilityApplication {
                 );
                 continue;
             }
+            if index.schema_status != "supported" {
+                summary.blocked += 1;
+                if rollout.has_encrypted_content {
+                    summary.encrypted_content_risk += 1;
+                    increment(reasons, "encrypted_content");
+                }
+                continue;
+            }
             let Some(indexed) = index.rows.get(&rollout.id) else {
                 summary.candidates += 1;
                 summary.missing_index += 1;
@@ -349,33 +363,21 @@ fn read_index(codex_home: &Path) -> IndexSnapshot {
         database,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     ) else {
-        return IndexSnapshot {
-            schema_status: "missing".to_owned(),
-            rows: HashMap::new(),
-        };
+        return empty_index("missing");
     };
     let Ok(columns) = thread_columns(&connection) else {
-        return IndexSnapshot {
-            schema_status: "unknown".to_owned(),
-            rows: HashMap::new(),
-        };
+        return empty_index("unknown");
     };
     if !REQUIRED_THREAD_COLUMNS
         .iter()
         .all(|required| columns.iter().any(|column| column == required))
     {
-        return IndexSnapshot {
-            schema_status: "unknown".to_owned(),
-            rows: HashMap::new(),
-        };
+        return empty_index("unknown");
     }
     let Ok(mut statement) = connection.prepare(
         "SELECT id, rollout_path, source, model_provider, has_user_event, archived FROM threads",
     ) else {
-        return IndexSnapshot {
-            schema_status: "unknown".to_owned(),
-            rows: HashMap::new(),
-        };
+        return empty_index("unknown");
     };
     let Ok(mapped) = statement.query_map([], |row| {
         Ok((
@@ -389,24 +391,25 @@ fn read_index(codex_home: &Path) -> IndexSnapshot {
             },
         ))
     }) else {
-        return IndexSnapshot {
-            schema_status: "unknown".to_owned(),
-            rows: HashMap::new(),
-        };
+        return empty_index("unknown");
     };
     let mut rows = HashMap::new();
     for row in mapped {
         let Ok((id, indexed)) = row else {
-            return IndexSnapshot {
-                schema_status: "unknown".to_owned(),
-                rows: HashMap::new(),
-            };
+            return empty_index("unknown");
         };
         rows.insert(id, indexed);
     }
     IndexSnapshot {
         schema_status: "supported".to_owned(),
         rows,
+    }
+}
+
+fn empty_index(schema_status: &str) -> IndexSnapshot {
+    IndexSnapshot {
+        schema_status: schema_status.to_owned(),
+        rows: HashMap::new(),
     }
 }
 

@@ -137,8 +137,8 @@ fn scan_remains_available_but_marks_environment_schema_and_app_server_blockers()
 
     assert!(!preview.can_execute);
     assert_eq!(preview.schema.status, "unknown");
-    assert_eq!(preview.summary.candidates, 1);
-    assert_eq!(preview.summary.missing_index, 1);
+    assert_eq!(preview.summary.candidates, 0);
+    assert_eq!(preview.summary.missing_index, 0);
     assert_eq!(preview.summary.blocked, 1);
     assert_eq!(
         preview.blockers,
@@ -156,8 +156,8 @@ fn scan_remains_available_but_marks_environment_schema_and_app_server_blockers()
         "target_mode=openai_login",
         "codex_version=codex-cli 0.150.1",
         "schema=unknown",
-        "candidates=1",
-        "missing_index=1",
+        "candidates=0",
+        "missing_index=0",
         "blocked=1",
         "error_codes=app_server_unavailable,external_configuration,pending_config_operation,unsupported_index_schema",
     ] {
@@ -174,6 +174,39 @@ fn scan_remains_available_but_marks_environment_schema_and_app_server_blockers()
             "diagnostic leaked {sensitive}"
         );
     }
+}
+
+#[test]
+fn diagnostics_include_stable_scan_reason_codes() {
+    let fixture = VisibilityFixture::new();
+    let candidate = fixture.rollout(
+        "sessions/candidate.jsonl",
+        "77777777-7777-4777-8777-777777777777",
+        "old-provider",
+        "cli",
+        true,
+        true,
+    );
+    fixture.index(&candidate, "old-provider", "cli", true, false);
+    fixture.rollout_without_identity("sessions/ambiguous.jsonl", "private-title");
+
+    let preview = SessionVisibilityApplication::new(fixture.codex_home())
+        .scan(VisibilityScanContext {
+            target: VisibilityTarget {
+                mode: VisibilityTargetMode::Provider,
+                model_provider: TARGET_PROVIDER.to_owned(),
+                environment_revision: "revision-diagnostics".to_owned(),
+            },
+            codex_version: None,
+            app_server: VisibilityAppServerCapability::Available,
+            execution_blockers: Vec::new(),
+        })
+        .expect("scan diagnostic reasons");
+
+    let details = preview.diagnostic_details();
+    assert!(details.contains("error_codes=encrypted_content,identity_ambiguous,provider_mismatch"));
+    assert!(!details.contains("private-title"));
+    assert!(!details.contains("77777777-7777-4777-8777-777777777777"));
 }
 
 #[test]

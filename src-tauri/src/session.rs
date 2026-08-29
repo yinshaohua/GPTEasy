@@ -458,6 +458,13 @@ impl SessionApplication {
         leases.generation = leases.generation.wrapping_add(1);
     }
 
+    pub async fn active_app_server_version(&self) -> Option<String> {
+        self.gateway
+            .active_capability()
+            .await
+            .map(|capability| capability.codex_version)
+    }
+
     pub async fn export_markdown(
         &self,
         detail: &SessionDetail,
@@ -733,6 +740,15 @@ impl AppServerGateway {
         let capability = connection.capability.clone();
         *inner = Some(connection);
         Ok(capability)
+    }
+
+    async fn active_capability(&self) -> Option<AppServerCapability> {
+        let mut inner = self.inner.lock().await;
+        let connection = inner.as_mut()?;
+        match connection.child.try_wait() {
+            Ok(None) => Some(connection.capability.clone()),
+            Ok(Some(_)) | Err(_) => None,
+        }
     }
 
     async fn list(&self, query: &SessionQuery) -> Result<SessionListPage, SessionFailure> {
