@@ -137,7 +137,7 @@ fn create_trust_root_fixture() -> TempDir {
     for (path, content) in [
         (
             ".github/workflows/gitee-smoke.yml",
-            "GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}\nSMOKE_SOURCE_TAG: ${{ inputs.source_tag }}\nGITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}\nGITEE_REPOSITORY: ${{ vars.GITEE_REPOSITORY }}\n",
+            "GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}\nSMOKE_SOURCE_TAG: ${{ inputs.source_tag }}\nSMOKE_ASSET_EXTENSION: ${{ inputs.asset_extension }}\nGITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}\nGITEE_REPOSITORY: ${{ vars.GITEE_REPOSITORY }}\n",
         ),
         (
             ".github/workflows/gitee-sync.yml",
@@ -145,7 +145,7 @@ fn create_trust_root_fixture() -> TempDir {
         ),
         (
             "scripts/smoke-gitee-release.sh",
-            "gitee-distribution.json\nAuthorization: Bearer $GITEE_TOKEN\nASSET_NAME=\"gpteasy-${SMOKE_TAG}.exe\"\nSMOKE_SOURCE_TAG\nverify-pe\n--range 0-0\nprerelease=true\ntarget_commitish=$GITEE_DEFAULT_BRANCH\n",
+            "gitee-distribution.json\nAuthorization: Bearer $GITEE_TOKEN\nASSET_NAME=\"gpteasy-${SMOKE_TAG}.${SMOKE_ASSET_EXTENSION}\"\nSMOKE_SOURCE_TAG\nverify-pe\n--range 0-0\nprerelease=true\ntarget_commitish=$GITEE_DEFAULT_BRANCH\n",
         ),
         (
             "scripts/sync-gitee-release.mjs",
@@ -609,6 +609,7 @@ fn repository_declares_repeatable_gitee_setup_without_formal_smoke_manifest_writ
     assert!(workflow.contains("GITEE_REPOSITORY: ${{ vars.GITEE_REPOSITORY }}"));
     assert!(workflow.contains("GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}"));
     assert!(workflow.contains("SMOKE_SOURCE_TAG: ${{ inputs.source_tag }}"));
+    assert!(workflow.contains("SMOKE_ASSET_EXTENSION: ${{ inputs.asset_extension }}"));
 
     let smoke = fs::read_to_string(root.join("scripts/smoke-gitee-release.sh"))
         .expect("read Gitee smoke command");
@@ -641,7 +642,7 @@ fn gitee_smoke_declares_authenticated_writes_and_anonymous_reads() {
         .expect("read Gitee smoke command");
     assert!(smoke.contains("Authorization: Bearer $GITEE_TOKEN"));
     assert!(smoke.contains("--form \"file=@$CURL_ASSET_PATH"));
-    assert!(smoke.contains("ASSET_NAME=\"gpteasy-${SMOKE_TAG}.exe\""));
+    assert!(smoke.contains("ASSET_NAME=\"gpteasy-${SMOKE_TAG}.${SMOKE_ASSET_EXTENSION}\""));
     assert!(smoke.contains("SMOKE_SOURCE_TAG"));
     assert!(smoke.contains("--range 0-0"));
     assert!(smoke.contains("prerelease=true"));

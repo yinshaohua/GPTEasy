@@ -94,7 +94,8 @@ if (-not $workflow.Contains('GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}')) {
     Add-TrustError 'Gitee Token must come from the GITEE_TOKEN Actions secret.'
 }
 if (-not $workflow.Contains('GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}') -or
-    -not $workflow.Contains('SMOKE_SOURCE_TAG: ${{ inputs.source_tag }}')) {
+    -not $workflow.Contains('SMOKE_SOURCE_TAG: ${{ inputs.source_tag }}') -or
+    -not $workflow.Contains('SMOKE_ASSET_EXTENSION: ${{ inputs.asset_extension }}')) {
     Add-TrustError 'Gitee smoke must download a real published GitHub installer.'
 }
 if (-not $workflow.Contains('GITEE_REPOSITORY: ${{ vars.GITEE_REPOSITORY }}')) {
@@ -127,7 +128,7 @@ if (-not $sync.Contains('spawn("curl"') -or
     Add-TrustError 'Gitee sync must use numeric Release IDs, deterministic curl multipart uploads, reconciliation, and form-data content writes.'
 }
 if (-not $smoke.Contains('--range 0-0') -or -not $smoke.Contains('prerelease=true') -or
-    -not $smoke.Contains('ASSET_NAME="gpteasy-${SMOKE_TAG}.exe"') -or
+    -not $smoke.Contains('ASSET_NAME="gpteasy-${SMOKE_TAG}.${SMOKE_ASSET_EXTENSION}"') -or
     -not $smoke.Contains('verify-pe')) {
     Add-TrustError 'Gitee smoke must upload a real PE to a prerelease and verify it anonymously.'
 }

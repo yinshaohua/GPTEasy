@@ -40,7 +40,9 @@ if [[ "${GITEE_SMOKE_TEST_MODE:-0}" != "1" ]]; then
   }
 fi
 SMOKE_TAG="smoke-${SMOKE_RUN_ID}"
-ASSET_NAME="gpteasy-${SMOKE_TAG}.exe"
+SMOKE_ASSET_EXTENSION="${SMOKE_ASSET_EXTENSION:-exe}"
+[[ "$SMOKE_ASSET_EXTENSION" =~ ^(exe|bin)$ ]] || { printf 'SMOKE_ASSET_EXTENSION must be exe or bin\n' >&2; exit 2; }
+ASSET_NAME="gpteasy-${SMOKE_TAG}.${SMOKE_ASSET_EXTENSION}"
 MANIFEST_PATH="${SMOKE_MANIFEST_PREFIX}${SMOKE_TAG}.md"
 [[ "$MANIFEST_PATH" != "$FORMAL_MANIFEST_PATH" ]] || { printf 'smoke manifest overlaps formal manifest\n' >&2; exit 2; }
 WORK_DIR=$(mktemp -d)
