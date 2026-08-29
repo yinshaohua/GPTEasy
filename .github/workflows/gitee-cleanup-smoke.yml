@@ -30,7 +30,7 @@ jobs:
       RELEASE_ID: ${{ inputs.release_id }}
       RELEASE_TAG: ${{ inputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: 精确校验并清理冒烟 Release 与清单
         shell: bash
         run: |

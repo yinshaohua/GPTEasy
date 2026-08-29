@@ -37,7 +37,7 @@ jobs:
       SMOKE_SOURCE_TAG: ${{ inputs.source_tag }}
       SMOKE_ASSET_EXTENSION: ${{ inputs.asset_extension }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: 验证公开仓库输入
         shell: bash
         run: |

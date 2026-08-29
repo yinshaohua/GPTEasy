@@ -95,6 +95,11 @@ try { $wizard = [System.IO.File]::ReadAllText($wizardPath) } catch { $wizard = '
 if (-not $workflow.Contains('GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}')) {
     Add-TrustError 'Gitee Token must come from the GITEE_TOKEN Actions secret.'
 }
+if (-not $workflow.Contains('actions/checkout@v5') -or
+    -not $syncWorkflow.Contains('actions/checkout@v5') -or
+    -not $cleanupWorkflow.Contains('actions/checkout@v5')) {
+    Add-TrustError 'Gitee workflows must use the supported checkout runtime.'
+}
 if (-not $workflow.Contains('GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}') -or
     -not $workflow.Contains('SMOKE_SOURCE_TAG: ${{ inputs.source_tag }}') -or
     -not $workflow.Contains('SMOKE_ASSET_EXTENSION: ${{ inputs.asset_extension }}')) {
