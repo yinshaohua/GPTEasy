@@ -25,7 +25,7 @@ test("首次同步验证所有附件后最后推进正式清单", async () => {
     assert.ok(adapter.state.records.some((record) => record.operation === "readme-update"));
     assert.ok(adapter.state.records.some((record) => record.operation === "anonymous-raw-baseline"));
     assert.ok(adapter.state.records.some((record) => record.operation === "anonymous-raw-baseline"
-      && record.search.startsWith("?gpteasy_sha=")));
+      && /\/raw\/[a-f0-9]{40}\/README\.md$/.test(record.path)));
     assert.equal(adapter.state.records.at(-1).operation, "manifest-write");
     const manifest = adapter.state.manifests[0];
     assert.deepEqual(Object.keys(manifest.platforms), ["windows-x86_64"]);
@@ -353,7 +353,7 @@ test("首次发布的 Raw 匿名读取不可用时不推进分发", async () => 
   try {
     const result = await runSync(adapter.baseUrl);
     assert.notEqual(result.code, 0);
-    assert.match(result.stderr, /Anonymous Gitee README download failed/);
+    assert.match(result.stderr, /Anonymous updated Gitee README download failed/);
     assert.equal(adapter.state.uploads.size, 0);
     assert.equal(adapter.state.manifests.length, 0);
   } finally {
@@ -557,7 +557,15 @@ async function startAdapter(options = {}) {
       return json(response, 200, { sha: "manifest-sha", download_url: `${origin(server)}/raw/blob/latest.md` });
     }
     if (request.method === "GET" && url.pathname.endsWith("/contents/README.md")) {
-      return json(response, 200, { sha: "a".repeat(40), download_url: `${origin(server)}/raw/README.md` });
+      return json(response, 200, {
+        sha: "a".repeat(40),
+        content: Buffer.from(state.remoteReadme).toString("base64"),
+        encoding: "base64",
+        download_url: `${origin(server)}/raw/README.md`,
+      });
+    }
+    if (request.method === "GET" && url.pathname.endsWith("/commits") && url.searchParams.get("path") === "README.md") {
+      return json(response, 200, [{ sha: "c".repeat(40) }]);
     }
     if (request.method === "PUT" && url.pathname.endsWith("/contents/README.md")) {
       assert.match(record.contentType, /^application\/x-www-form-urlencoded/);
@@ -567,6 +575,7 @@ async function startAdapter(options = {}) {
       state.records.push({ ...record, operation: "readme-update" });
       return json(response, 200, {
         content: { sha: "b".repeat(40), download_url: `${origin(server)}/raw/README.md` },
+        commit: { sha: "d".repeat(40) },
       });
     }
     if (request.method === "POST" && /\/releases\/42\/attach_files$/.test(url.pathname)) {
@@ -618,7 +627,8 @@ async function startAdapter(options = {}) {
       if (state.failRawManifestBranch) return bytes(response, 418, Buffer.from("blocked"));
       return json(response, 200, state.currentManifest);
     }
-    if (request.method === "GET" && url.pathname === "/raw/README.md") {
+    if (request.method === "GET" && (url.pathname === "/raw/README.md"
+      || /^\/dist\/releases\/raw\/[a-f0-9]{40}\/README\.md$/.test(url.pathname))) {
       assert.equal(authorization, undefined);
       state.records.push({ ...record, operation: "anonymous-raw-baseline" });
       if (state.failRawBaseline) return bytes(response, 403, Buffer.from("forbidden"));

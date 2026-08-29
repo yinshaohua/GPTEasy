@@ -253,7 +253,7 @@ async function readCurrentManifest() {
   const endpoint = `/repos/${configuration.giteeRepository}/contents/${configuration.formalManifestPath}?ref=${encodeURIComponent(configuration.giteeBranch)}`;
   const metadata = await giteeRequest(endpoint);
   if (!metadata || (Array.isArray(metadata) && metadata.length === 0)) return null;
-  const embedded = decodeApiContent(metadata);
+  const embedded = decodeApiContent(metadata, "Gitee manifest");
   if (embedded !== null) {
     const manifest = parseManifest(embedded);
     validateManifest(manifest);
@@ -275,15 +275,15 @@ async function readCurrentManifest() {
   return { manifest, sha: typeof metadata.sha === "string" ? metadata.sha : undefined };
 }
 
-function decodeApiContent(metadata) {
+function decodeApiContent(metadata, description) {
   if (typeof metadata?.content !== "string") return null;
   if (metadata.encoding && metadata.encoding !== "base64") {
-    throw new Error(`Gitee manifest content uses unsupported encoding ${metadata.encoding}`);
+    throw new Error(`${description} content uses unsupported encoding ${metadata.encoding}`);
   }
   try {
     return Buffer.from(metadata.content.replace(/\s/g, ""), "base64").toString("utf8");
   } catch {
-    throw new Error("Gitee manifest API content is not valid Base64");
+    throw new Error(`${description} API content is not valid Base64`);
   }
 }
 
@@ -298,11 +298,17 @@ async function ensureGiteeReadme() {
   if (!metadata || typeof metadata.sha !== "string" || typeof metadata.download_url !== "string") {
     throw new Error("Gitee distribution README metadata is unavailable");
   }
-  const current = await readAnonymousGiteeText(
-    rawUrlWithRevision(metadata.download_url, metadata.sha),
-    "Anonymous Gitee README download",
-  );
-  if (current === expected) return;
+  const embedded = decodeApiContent(metadata, "Gitee README");
+  const current = embedded ?? await readAnonymousGiteeText(metadata.download_url, "Anonymous Gitee README download");
+  if (current === expected) {
+    const commitSha = await latestGiteeFileCommit("README.md");
+    const published = await readAnonymousGiteeText(
+      rawUrlAtRef("README.md", commitSha),
+      "Anonymous current Gitee README download",
+    );
+    if (published !== expected) throw new Error("Anonymous current Gitee README does not match the repository root README");
+    return;
+  }
 
   const updated = await giteeRequest(`/repos/${configuration.giteeRepository}/contents/README.md`, {
     method: "PUT",
@@ -313,22 +319,25 @@ async function ensureGiteeReadme() {
       sha: metadata.sha,
     }),
   });
-  const downloadUrl = updated?.content?.download_url ?? updated?.download_url;
-  const revision = updated?.content?.sha;
-  if (typeof downloadUrl !== "string" || typeof revision !== "string") {
-    throw new Error("Gitee README update response is missing its anonymous download URL");
+  const commitSha = updated?.commit?.sha;
+  if (typeof commitSha !== "string" || !/^[a-f0-9]{40}$/.test(commitSha)) {
+    throw new Error("Gitee README update response is missing its commit SHA");
   }
   const published = await readAnonymousGiteeText(
-    rawUrlWithRevision(downloadUrl, revision),
+    rawUrlAtRef("README.md", commitSha),
     "Anonymous updated Gitee README download",
   );
   if (published !== expected) throw new Error("Anonymous updated Gitee README does not match the repository root README");
 }
 
-function rawUrlWithRevision(downloadUrl, revision) {
-  const url = new URL(downloadUrl);
-  url.searchParams.set("gpteasy_sha", revision);
-  return url.toString();
+async function latestGiteeFileCommit(filePath) {
+  const endpoint = `/repos/${configuration.giteeRepository}/commits?path=${encodeURIComponent(filePath)}&ref_name=${encodeURIComponent(configuration.giteeBranch)}&per_page=1`;
+  const commits = await giteeRequest(endpoint);
+  const sha = commits?.[0]?.sha;
+  if (typeof sha !== "string" || !/^[a-f0-9]{40}$/.test(sha)) {
+    throw new Error("Gitee README commit lookup did not return a commit SHA");
+  }
+  return sha;
 }
 
 async function readAnonymousGiteeText(downloadUrl, label) {
@@ -665,12 +674,16 @@ async function fetchAnonymousWithAttempts(url, description, attempts, consume) {
 }
 
 function branchRawUrl(filePath) {
+  return rawUrlAtRef(filePath, configuration.giteeBranch);
+}
+
+function rawUrlAtRef(filePath, ref) {
   const repository = configuration.giteeRepository
     .split("/")
     .map((segment) => encodeURIComponent(segment))
     .join("/");
   const path = filePath.split("/").map((segment) => encodeURIComponent(segment)).join("/");
-  return `${configuration.giteeRawBase}/${repository}/raw/${encodeURIComponent(configuration.giteeBranch)}/${path}`;
+  return `${configuration.giteeRawBase}/${repository}/raw/${encodeURIComponent(ref)}/${path}`;
 }
 
 function isRetryableAnonymousStatus(status) {
