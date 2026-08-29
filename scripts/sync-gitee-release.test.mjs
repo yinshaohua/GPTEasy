@@ -24,6 +24,8 @@ test("首次同步验证所有附件后最后推进正式清单", async () => {
     assert.match(adapter.state.remoteReadme, /\.exe\.bin/);
     assert.ok(adapter.state.records.some((record) => record.operation === "readme-update"));
     assert.ok(adapter.state.records.some((record) => record.operation === "anonymous-raw-baseline"));
+    assert.ok(adapter.state.records.some((record) => record.operation === "anonymous-raw-baseline"
+      && record.search.startsWith("?gpteasy_sha=")));
     assert.equal(adapter.state.records.at(-1).operation, "manifest-write");
     const manifest = adapter.state.manifests[0];
     assert.deepEqual(Object.keys(manifest.platforms), ["windows-x86_64"]);
@@ -473,6 +475,7 @@ async function startAdapter(options = {}) {
       authorization,
       contentType: request.headers["content-type"],
       userAgent: request.headers["user-agent"],
+      search: url.search,
     };
 
     if (url.pathname === `/github/repos/source/project/releases/tags/${TAG}`) {
@@ -537,15 +540,17 @@ async function startAdapter(options = {}) {
       return json(response, 200, { sha: "manifest-sha", download_url: `${origin(server)}/raw/blob/latest.md` });
     }
     if (request.method === "GET" && url.pathname.endsWith("/contents/README.md")) {
-      return json(response, 200, { sha: "readme-sha", download_url: `${origin(server)}/raw/README.md` });
+      return json(response, 200, { sha: "a".repeat(40), download_url: `${origin(server)}/raw/README.md` });
     }
     if (request.method === "PUT" && url.pathname.endsWith("/contents/README.md")) {
       assert.match(record.contentType, /^application\/x-www-form-urlencoded/);
       const payload = new URLSearchParams(body.toString("utf8"));
-      assert.equal(payload.get("sha"), "readme-sha");
+      assert.equal(payload.get("sha"), "a".repeat(40));
       state.remoteReadme = Buffer.from(payload.get("content"), "base64").toString("utf8");
       state.records.push({ ...record, operation: "readme-update" });
-      return json(response, 200, { content: { download_url: `${origin(server)}/raw/README.md` } });
+      return json(response, 200, {
+        content: { sha: "b".repeat(40), download_url: `${origin(server)}/raw/README.md` },
+      });
     }
     if (request.method === "POST" && /\/releases\/42\/attach_files$/.test(url.pathname)) {
       assert.match(record.contentType, /^multipart\/form-data; boundary=/);

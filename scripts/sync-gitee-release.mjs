@@ -298,7 +298,10 @@ async function ensureGiteeReadme() {
   if (!metadata || typeof metadata.sha !== "string" || typeof metadata.download_url !== "string") {
     throw new Error("Gitee distribution README metadata is unavailable");
   }
-  const current = await readAnonymousGiteeText(metadata.download_url, "Anonymous Gitee README download");
+  const current = await readAnonymousGiteeText(
+    rawUrlWithRevision(metadata.download_url, metadata.sha),
+    "Anonymous Gitee README download",
+  );
   if (current === expected) return;
 
   const updated = await giteeRequest(`/repos/${configuration.giteeRepository}/contents/README.md`, {
@@ -311,11 +314,21 @@ async function ensureGiteeReadme() {
     }),
   });
   const downloadUrl = updated?.content?.download_url ?? updated?.download_url;
-  if (typeof downloadUrl !== "string") {
+  const revision = updated?.content?.sha;
+  if (typeof downloadUrl !== "string" || typeof revision !== "string") {
     throw new Error("Gitee README update response is missing its anonymous download URL");
   }
-  const published = await readAnonymousGiteeText(downloadUrl, "Anonymous updated Gitee README download");
-  if (published !== expected) throw new Error("Anonymous updated Gitee README does not match the repository template");
+  const published = await readAnonymousGiteeText(
+    rawUrlWithRevision(downloadUrl, revision),
+    "Anonymous updated Gitee README download",
+  );
+  if (published !== expected) throw new Error("Anonymous updated Gitee README does not match the repository root README");
+}
+
+function rawUrlWithRevision(downloadUrl, revision) {
+  const url = new URL(downloadUrl);
+  url.searchParams.set("gpteasy_sha", revision);
+  return url.toString();
 }
 
 async function readAnonymousGiteeText(downloadUrl, label) {
