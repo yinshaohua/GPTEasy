@@ -137,7 +137,7 @@ UPLOAD_RESPONSE="$WORK_DIR/upload.json"
 UPLOAD_STATUS=$(curl --silent --show-error --location --http1.1 --request POST \
   --header "Authorization: Bearer $GITEE_TOKEN" --header 'Accept: application/json' --header 'Expect:' \
   --form "file=@$CURL_ASSET_PATH;filename=$ASSET_NAME;type=application/octet-stream" \
-  --max-time 180 \
+  --max-time 300 \
   --output "$UPLOAD_RESPONSE" --write-out '%{http_code}' \
   "$API_BASE/repos/$GITEE_REPOSITORY/releases/$RELEASE_ID/attach_files")
 [[ "$UPLOAD_STATUS" =~ ^2[0-9][0-9]$ ]] || { printf 'Gitee attachment upload failed: HTTP %s\n' "$UPLOAD_STATUS" >&2; exit 1; }

@@ -156,7 +156,7 @@ async function loadConfiguration() {
     anonymousDelayMs: testMode ? Number(process.env.GITEE_SYNC_RETRY_DELAY_MS ?? "0") : 5000,
     uploadAttempts: testMode ? Number(process.env.GITEE_SYNC_UPLOAD_ATTEMPTS ?? "3") : 3,
     uploadDelayMs: testMode ? Number(process.env.GITEE_SYNC_RETRY_DELAY_MS ?? "0") : 5000,
-    uploadTimeoutMs: testMode ? Number(process.env.GITEE_SYNC_UPLOAD_TIMEOUT_MS ?? "1000") : 180000,
+    uploadTimeoutMs: testMode ? Number(process.env.GITEE_SYNC_UPLOAD_TIMEOUT_MS ?? "1000") : 300000,
   };
 }
 
