@@ -11,6 +11,7 @@ use crate::desktop::{DesktopApplication, DesktopFailure, DesktopFailureCategory,
 use crate::diagnostics::{IssueLogLevel, IssueLogRecord, IssueLogStore};
 use crate::environment::{
     EnvironmentApplication, EnvironmentFailure, EnvironmentFailureCategory, EnvironmentSnapshot,
+    EnvironmentVisibilityContext,
 };
 use crate::provider::{
     AppliedProviderUpdate, DAYWAY_WEBSITE, DiscoveryInput, LinuxExportFailure, LinuxExportResult,
@@ -22,6 +23,10 @@ use crate::provider::{
 use crate::session::{
     SessionApplication, SessionAvailability, SessionDetail, SessionFailure, SessionListPage,
     SessionMutationResult, SessionQuery,
+};
+use crate::session_visibility::{
+    SessionVisibilityApplication, SessionVisibilityPreview, VisibilityAppServerCapability,
+    VisibilityFailure, VisibilityScanContext, VisibilityTarget, VisibilityTargetMode,
 };
 use crate::startup::{StartupCoordinator, StartupSnapshot};
 use crate::tray;
@@ -57,6 +62,8 @@ pub(crate) struct WslRuntime {
 
 pub(crate) struct SessionRuntime {
     application: SessionApplication,
+    visibility: SessionVisibilityApplication,
+    availability: Mutex<Option<SessionAvailability>>,
 }
 
 pub(crate) struct IssueLogRuntime {
@@ -177,6 +184,12 @@ impl EnvironmentRuntime {
     pub(crate) fn has_pending_restart(&self) -> Result<bool, EnvironmentFailure> {
         self.application.has_pending_restart()
     }
+
+    pub(crate) fn session_visibility_context(
+        &self,
+    ) -> Result<EnvironmentVisibilityContext, EnvironmentFailure> {
+        self.application.inspect_for_session_visibility()
+    }
 }
 
 impl DesktopRuntime {
@@ -196,8 +209,15 @@ impl WslRuntime {
 }
 
 impl SessionRuntime {
-    pub(crate) fn new(application: SessionApplication) -> Self {
-        Self { application }
+    pub(crate) fn new(
+        application: SessionApplication,
+        visibility: SessionVisibilityApplication,
+    ) -> Self {
+        Self {
+            application,
+            visibility,
+            availability: Mutex::new(None),
+        }
     }
 
     pub(crate) fn shutdown(&self) {
@@ -210,6 +230,16 @@ impl SessionRuntime {
 
     pub(crate) fn resume(&self) {
         tauri::async_runtime::block_on(self.application.resume());
+    }
+
+    fn record_availability(&self, availability: &SessionAvailability) {
+        if let Ok(mut current) = self.availability.lock() {
+            *current = Some(availability.clone());
+        }
+    }
+
+    fn availability(&self) -> Option<SessionAvailability> {
+        self.availability.lock().ok()?.clone()
     }
 }
 
@@ -271,6 +301,16 @@ impl_issue_loggable_failure!(LinuxExportFailure);
 impl_issue_loggable_failure!(ProviderFailure);
 impl_issue_loggable_failure!(SessionFailure);
 impl_issue_loggable_failure!(WslFailure);
+
+impl IssueLoggableFailure for VisibilityFailure {
+    fn message_id(&self) -> &str {
+        self.message_id
+    }
+
+    fn category_name(&self) -> String {
+        "session_visibility".to_owned()
+    }
+}
 
 impl IssueLoggableFailure for CommandFailure {
     fn message_id(&self) -> &str {
@@ -843,6 +883,7 @@ pub(crate) async fn enter_session_management(
     lease_id: String,
 ) -> Result<SessionAvailability, CommandFailure> {
     let availability = state.application.enter(&lease_id).await;
+    state.record_availability(&availability);
     if availability.status != crate::session::SessionAvailabilityStatus::Available {
         logs.store.append(
             IssueLogLevel::Error,
@@ -855,6 +896,113 @@ pub(crate) async fn enter_session_management(
         );
     }
     Ok(availability)
+}
+
+#[tauri::command]
+pub(crate) async fn preview_session_visibility(
+    state: State<'_, SessionRuntime>,
+    environment: State<'_, EnvironmentRuntime>,
+    logs: State<'_, IssueLogRuntime>,
+) -> Result<SessionVisibilityPreview, VisibilityFailure> {
+    let environment_before =
+        environment
+            .session_visibility_context()
+            .map_err(|_| VisibilityFailure {
+                message_id: "session_visibility.environment_unavailable",
+            });
+    let environment_before =
+        match finish_command(&logs.store, "session_visibility.scan", environment_before) {
+            Ok(context) => context,
+            Err(failure) => return Err(failure),
+        };
+    let availability = state.availability();
+    let app_server = match availability.as_ref().map(|value| value.status) {
+        Some(crate::session::SessionAvailabilityStatus::Available) => {
+            VisibilityAppServerCapability::Available
+        }
+        Some(crate::session::SessionAvailabilityStatus::Incompatible) => {
+            VisibilityAppServerCapability::Incompatible
+        }
+        _ => VisibilityAppServerCapability::Unavailable,
+    };
+    let codex_version = availability.and_then(|value| value.codex_version);
+    let mut execution_blockers = Vec::new();
+    match environment_before.state {
+        crate::environment::EnvironmentState::External => {
+            execution_blockers.push("external_configuration".to_owned());
+        }
+        crate::environment::EnvironmentState::Conflict => {
+            execution_blockers.push("managed_conflict".to_owned());
+        }
+        crate::environment::EnvironmentState::Managed => {}
+    }
+    if environment_before.pending_operation {
+        execution_blockers.push("pending_config_operation".to_owned());
+    }
+    let (mode, model_provider) = match environment_before.mode {
+        Some(crate::environment::AuthenticationMode::OpenaiLogin) => {
+            (VisibilityTargetMode::OpenaiLogin, "openai".to_owned())
+        }
+        Some(crate::environment::AuthenticationMode::Provider) => {
+            match environment_before.provider_id.clone() {
+                Some(provider_id) => (VisibilityTargetMode::Provider, provider_id),
+                None => {
+                    execution_blockers.push("target_mode_unresolved".to_owned());
+                    (VisibilityTargetMode::Unknown, "unknown".to_owned())
+                }
+            }
+        }
+        None => {
+            execution_blockers.push("target_mode_unresolved".to_owned());
+            (VisibilityTargetMode::Unknown, "unknown".to_owned())
+        }
+    };
+    let visibility = state.visibility.clone();
+    let scan_context = VisibilityScanContext {
+        target: VisibilityTarget {
+            mode,
+            model_provider,
+            environment_revision: environment_before.revision.clone(),
+        },
+        codex_version,
+        app_server,
+        execution_blockers,
+    };
+    let scan = tokio::task::spawn_blocking(move || visibility.scan(scan_context))
+        .await
+        .map_err(|_| VisibilityFailure {
+            message_id: "session_visibility.scan_failed",
+        })
+        .and_then(|result| result);
+    let mut preview = match finish_command(&logs.store, "session_visibility.scan", scan) {
+        Ok(preview) => preview,
+        Err(failure) => return Err(failure),
+    };
+    if let Ok(environment_after) = environment.session_visibility_context()
+        && (environment_after.revision != environment_before.revision
+            || environment_after.mode != environment_before.mode
+            || environment_after.provider_id != environment_before.provider_id)
+    {
+        SessionVisibilityApplication::add_execution_blocker(
+            &mut preview,
+            "environment_revision_changed",
+        );
+    }
+    log_session_visibility_preview(&logs.store, &preview);
+    Ok(preview)
+}
+
+fn log_session_visibility_preview(store: &IssueLogStore, preview: &SessionVisibilityPreview) {
+    store.append(
+        IssueLogLevel::Info,
+        "session_visibility.scan",
+        if preview.can_execute {
+            "session_visibility.scan_completed"
+        } else {
+            "session_visibility.scan_blocked"
+        },
+        Some(preview.diagnostic_details()),
+    );
 }
 
 #[tauri::command]
@@ -2178,11 +2326,15 @@ mod tests {
         ProviderSummary, ProviderValidationReceipt, UpdateFailureCategory, UpdateInstallFailure,
         UpdateInstallFailureCategory, UpdateSnapshot, UpdateState, WslReclaimAuditPhase,
         audit_provider_revalidation_result, finish_command, finish_command_with_desktop_restart,
-        log_update_check_failure, log_update_install_failure, log_wsl_reclaim_phase,
-        wsl_inventory_details,
+        log_session_visibility_preview, log_update_check_failure, log_update_install_failure,
+        log_wsl_reclaim_phase, wsl_inventory_details,
     };
     use crate::consumer::{ConsumerIdentity, ConsumerRole, ConsumerStatus};
     use crate::desktop::{DesktopAction, DesktopFailure, DesktopFailureCategory, DesktopSnapshot};
+    use crate::session_visibility::{
+        SessionVisibilityPreview, VisibilityAppServerCapability, VisibilityReason,
+        VisibilitySchemaCapability, VisibilitySummary, VisibilityTarget, VisibilityTargetMode,
+    };
     use crate::wsl::{
         WslAvailability, WslConfigurationState, WslEnvironmentSummary, WslReclaimPreview,
         WslReclaimScope,
@@ -2204,6 +2356,81 @@ mod tests {
             error_message: None,
             manual_download_url: "https://example.invalid/download".to_owned(),
             release_notes_url: None,
+        }
+    }
+
+    #[test]
+    fn session_visibility_scan_log_keeps_minimum_evidence_without_sensitive_identity() {
+        let directory = tempdir().expect("issue log directory");
+        let store = IssueLogStore::new(directory.path());
+        let preview = SessionVisibilityPreview {
+            target: VisibilityTarget {
+                mode: VisibilityTargetMode::Provider,
+                model_provider: "sensitive-provider-id".to_owned(),
+                environment_revision: "sensitive-environment-revision".to_owned(),
+            },
+            codex_version: Some("codex-cli 0.150.1".to_owned()),
+            app_server: VisibilityAppServerCapability::Unavailable,
+            schema: VisibilitySchemaCapability {
+                status: "supported".to_owned(),
+                database: "state_5.sqlite".to_owned(),
+            },
+            summary: VisibilitySummary {
+                candidates: 3,
+                unchanged: 2,
+                missing_index: 1,
+                skipped: 4,
+                blocked: 3,
+                encrypted_content_risk: 1,
+                active: 6,
+                archived: 3,
+            },
+            can_execute: false,
+            blockers: vec!["app_server_unavailable".to_owned()],
+            reasons: vec![VisibilityReason {
+                code: "provider_mismatch".to_owned(),
+                count: 2,
+            }],
+        };
+
+        log_session_visibility_preview(&store, &preview);
+
+        let records = store.list(
+            0,
+            Some(IssueLogLevel::Info),
+            Some("session_visibility.scan"),
+        );
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].message, "session_visibility.scan_blocked");
+        let details = records[0].details.as_deref().expect("scan details");
+        for required in [
+            "stage=scan",
+            "target_mode=provider",
+            "codex_version=codex-cli 0.150.1",
+            "schema=supported",
+            "candidates=3",
+            "unchanged=2",
+            "missing_index=1",
+            "skipped=4",
+            "blocked=3",
+            "encrypted_content_risk=1",
+            "active=6",
+            "archived=3",
+            "error_codes=app_server_unavailable",
+        ] {
+            assert!(details.contains(required), "missing {required}: {details}");
+        }
+        let encoded = serde_json::to_string(&records[0]).expect("serialize issue log record");
+        for sensitive in [
+            "sensitive-provider-id",
+            "sensitive-environment-revision",
+            "private-title",
+            "private-body",
+            "C:\\private\\workspace",
+            "11111111-1111-4111-8111-111111111111",
+            "api-key-canary",
+        ] {
+            assert!(!encoded.contains(sensitive), "issue log leaked {sensitive}");
         }
     }
 

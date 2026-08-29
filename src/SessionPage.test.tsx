@@ -12,6 +12,7 @@ const sessionContract = vi.hoisted(() => ({
   exportSessionMarkdown: vi.fn(),
   leaveSessionManagement: vi.fn(),
   listSessions: vi.fn(),
+  previewSessionVisibility: vi.fn(),
   readSession: vi.fn(),
   unarchiveSessions: vi.fn(),
 }));
@@ -75,6 +76,34 @@ describe("会话管理页面", () => {
         return Promise.resolve({ sessions: [firstSession, secondSession], nextCursor: null });
       }
       return Promise.resolve({ sessions: [firstSession], nextCursor: "cursor-2" });
+    });
+    sessionContract.previewSessionVisibility.mockResolvedValue({
+      target: {
+        mode: "provider",
+        modelProvider: "private-provider-id",
+        environmentRevision: "private-revision",
+      },
+      codexVersion: "codex-cli 0.150.1",
+      appServer: "available",
+      schema: { status: "supported", database: "state_5.sqlite" },
+      summary: {
+        candidates: 3,
+        unchanged: 4,
+        missingIndex: 1,
+        skipped: 2,
+        blocked: 3,
+        encryptedContentRisk: 1,
+        active: 6,
+        archived: 3,
+      },
+      canExecute: false,
+      blockers: ["managed_conflict"],
+      reasons: [
+        { code: "provider_mismatch", count: 2 },
+        { code: "index_missing", count: 1 },
+        { code: "encrypted_content", count: 1 },
+        { code: "excluded_exec", count: 2 },
+      ],
     });
   });
 
@@ -143,6 +172,70 @@ describe("会话管理页面", () => {
     fireEvent.click(within(toolbar).getByRole("button", { name: "刷新会话列表" }));
 
     await waitFor(() => expect(sessionContract.listSessions).toHaveBeenCalledTimes(2));
+  });
+
+  it("两个页签共用固定修复入口并展示只读预览、风险和阻断", async () => {
+    render(<SessionPage onOpenProviders={() => undefined} />);
+
+    const toolbar = await screen.findByRole("region", { name: "会话列表工具栏" });
+    expect(within(toolbar).getByRole("button", { name: "修复会话" })).toBeInTheDocument();
+    fireEvent.click(within(toolbar).getByRole("tab", { name: "已归档" }));
+    await waitFor(() => expect(sessionContract.listSessions).toHaveBeenCalledTimes(2));
+    fireEvent.click(within(toolbar).getByRole("button", { name: "修复会话" }));
+
+    expect(await screen.findByRole("dialog", { name: "会话可见性检查" })).toBeInTheDocument();
+    expect(sessionContract.previewSessionVisibility).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("当前供应商模式")).toBeInTheDocument();
+    expect(screen.getByText("候选").nextSibling).toHaveTextContent("3");
+    expect(screen.getByText("无需修改").nextSibling).toHaveTextContent("4");
+    expect(screen.getByText("索引缺失").nextSibling).toHaveTextContent("1");
+    expect(screen.getByText("跳过").nextSibling).toHaveTextContent("2");
+    expect(screen.getByText("阻断").nextSibling).toHaveTextContent("3");
+    expect(screen.getByText("含加密内容风险").nextSibling).toHaveTextContent("1");
+    expect(screen.getByText(/加密内容可能影响后续续聊或压缩/)).toBeInTheDocument();
+    expect(screen.getByText(/管理冲突/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "关闭预览" })).toBeInTheDocument();
+    expect(sessionContract.archiveSessions).not.toHaveBeenCalled();
+    expect(sessionContract.unarchiveSessions).not.toHaveBeenCalled();
+    expect(sessionContract.deleteSession).not.toHaveBeenCalled();
+  });
+
+  it("App Server 不可用时仍可扫描并明确无法验证", async () => {
+    sessionContract.enterSessionManagement.mockResolvedValue({
+      status: "codex_missing",
+      messageId: "session.codex_missing",
+      codexVersion: null,
+      mutation: { status: "unavailable", messageId: "session.mutations_unavailable" },
+    });
+    sessionContract.previewSessionVisibility.mockResolvedValue({
+      target: {
+        mode: "openai_login",
+        modelProvider: "openai",
+        environmentRevision: "private-revision",
+      },
+      codexVersion: null,
+      appServer: "unavailable",
+      schema: { status: "supported", database: "state_5.sqlite" },
+      summary: {
+        candidates: 1,
+        unchanged: 0,
+        missingIndex: 0,
+        skipped: 0,
+        blocked: 1,
+        encryptedContentRisk: 0,
+        active: 1,
+        archived: 0,
+      },
+      canExecute: false,
+      blockers: ["app_server_unavailable"],
+      reasons: [{ code: "app_server_unavailable", count: 1 }],
+    });
+
+    render(<SessionPage onOpenProviders={() => undefined} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "修复会话" }));
+    expect(await screen.findByText(/扫描已完成，但 App Server 不可用，当前无法验证修复结果/)).toBeInTheDocument();
+    expect(screen.getByText("OpenAI 登录模式")).toBeInTheDocument();
   });
 
   it("筛选变化会取消仍在途的旧列表请求", async () => {

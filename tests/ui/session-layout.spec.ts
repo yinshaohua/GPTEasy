@@ -105,3 +105,30 @@ test("会话列表与详情在最小窗口保持可用布局", async ({ page }) 
   expect(dialogBox!.x + dialogBox!.width).toBeLessThanOrEqual(680);
   expect(dialogBox!.y + dialogBox!.height).toBeLessThanOrEqual(520);
 });
+
+for (const viewport of [{ width: 680, height: 520 }, { width: 1120, height: 800 }]) {
+  test(`会话可见性预览在 ${viewport.width}x${viewport.height} 完整可用`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/");
+    await page.getByRole("button", { name: "会话管理" }).click();
+
+    const toolbar = page.getByRole("region", { name: "会话列表工具栏" });
+    const repair = toolbar.getByRole("button", { name: "修复会话" });
+    await expect(repair).toBeVisible();
+    await repair.click();
+
+    const dialog = page.getByRole("dialog", { name: "会话可见性检查" });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByText("含加密内容的会话可以修复可见性", { exact: false })).toBeVisible();
+    await expect(dialog.getByText("当前检查未发现执行阻断", { exact: false })).toBeVisible();
+    const bounds = await dialog.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.x).toBeGreaterThanOrEqual(0);
+    expect(bounds!.y).toBeGreaterThanOrEqual(0);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(viewport.width);
+    expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(viewport.height);
+    const documentWidth = await page.evaluate(() => document.documentElement.scrollWidth);
+    expect(documentWidth).toBeLessThanOrEqual(viewport.width);
+    await expect(dialog.getByRole("button", { name: "关闭预览" })).toBeVisible();
+  });
+}

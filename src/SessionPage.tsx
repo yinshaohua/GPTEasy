@@ -11,6 +11,8 @@ import {
   Search,
   ShieldAlert,
   Trash2,
+  Wrench,
+  X,
 } from "lucide-react";
 
 import type { OpenAiSidebarAction } from "./AppSidebar";
@@ -24,6 +26,7 @@ import {
   exportSessionMarkdown,
   leaveSessionManagement,
   listSessions,
+  previewSessionVisibility,
   readSession,
   unarchiveSessions,
   type SessionAvailability,
@@ -34,6 +37,7 @@ import {
   type SessionMutationResult,
   type SessionQuery,
   type SessionSummary,
+  type SessionVisibilityPreview,
 } from "./contracts/session";
 import { sessionMessages } from "./messages";
 
@@ -44,6 +48,11 @@ type DetailState =
   | { kind: "loading"; summary: SessionSummary }
   | { kind: "loaded"; detail: SessionDetail }
   | { kind: "error"; summary: SessionSummary; failure: SessionFailure };
+type VisibilityPreviewState =
+  | { kind: "closed" }
+  | { kind: "scanning" }
+  | { kind: "loaded"; preview: SessionVisibilityPreview }
+  | { kind: "error" };
 
 interface SessionListCache {
   sessions: SessionSummary[];
@@ -95,6 +104,7 @@ export default function SessionPage({
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteFailure, setDeleteFailure] = useState<string | null>(null);
   const [deleteLoadingId, setDeleteLoadingId] = useState<string | null>(null);
+  const [visibilityPreview, setVisibilityPreview] = useState<VisibilityPreviewState>({ kind: "closed" });
 
   useEffect(() => {
     activeRef.current = active;
@@ -444,6 +454,17 @@ export default function SessionPage({
     setDeleteBusy(false);
   }
 
+  async function openVisibilityPreview() {
+    if (visibilityPreview.kind === "scanning") return;
+    setVisibilityPreview({ kind: "scanning" });
+    try {
+      const preview = await previewSessionVisibility();
+      setVisibilityPreview({ kind: "loaded", preview });
+    } catch {
+      setVisibilityPreview({ kind: "error" });
+    }
+  }
+
   if (!availability) {
     return (
       <SessionShell>
@@ -458,7 +479,19 @@ export default function SessionPage({
   if (availability.status !== "available") {
     return (
       <SessionShell>
+        <SessionListToolbar
+          tab={tab}
+          setTab={setTab}
+          onPreview={() => void openVisibilityPreview()}
+          previewBusy={visibilityPreview.kind === "scanning"}
+          onRefresh={() => void checkAvailability()}
+          refreshBusy={false}
+        />
         <UnavailableState availability={availability} onRetry={() => void checkAvailability()} />
+        <VisibilityPreviewDialog
+          state={visibilityPreview}
+          onClose={() => setVisibilityPreview({ kind: "closed" })}
+        />
       </SessionShell>
     );
   }
@@ -502,6 +535,8 @@ export default function SessionPage({
           nextCursor={nextCursor}
           onLoadMore={() => void loadMore()}
           onRefresh={refreshList}
+          onPreview={() => void openVisibilityPreview()}
+          previewBusy={visibilityPreview.kind === "scanning"}
           onRetry={refreshList}
           onRecover={() => void checkAvailability()}
           onOpen={(summary) => void openDetail(summary)}
@@ -578,6 +613,10 @@ export default function SessionPage({
           onConfirm={() => void confirmBulkDelete()}
         />
       )}
+      <VisibilityPreviewDialog
+        state={visibilityPreview}
+        onClose={() => setVisibilityPreview({ kind: "closed" })}
+      />
     </SessionShell>
   );
 }
@@ -588,6 +627,177 @@ function SessionShell({
   children: React.ReactNode;
 }) {
   return <main className="main-content session-main">{children}</main>;
+}
+
+function SessionListToolbar({
+  tab,
+  setTab,
+  onPreview,
+  previewBusy,
+  onRefresh,
+  refreshBusy,
+}: {
+  tab: SessionTab;
+  setTab: (tab: SessionTab) => void;
+  onPreview: () => void;
+  previewBusy: boolean;
+  onRefresh: () => void;
+  refreshBusy: boolean;
+}) {
+  return (
+    <section className="session-list-toolbar" aria-label="会话列表工具栏">
+      <div className="session-tabs" role="tablist" aria-label="会话范围">
+        <button type="button" role="tab" aria-selected={tab === "active"} onClick={() => setTab("active")}>
+          {sessionMessages.activeTab}
+        </button>
+        <button type="button" role="tab" aria-selected={tab === "archived"} onClick={() => setTab("archived")}>
+          {sessionMessages.archivedTab}
+        </button>
+      </div>
+      <div className="session-list-actions">
+        <button
+          className="secondary-button compact session-visibility-button"
+          type="button"
+          onClick={onPreview}
+          disabled={previewBusy}
+        >
+          {previewBusy
+            ? <LoaderCircle className="is-spinning" size={16} aria-hidden="true" />
+            : <Wrench size={16} aria-hidden="true" />}
+          {sessionMessages.repairSessions}
+        </button>
+        <button
+          className="icon-button"
+          type="button"
+          aria-label={sessionMessages.refreshList}
+          title={sessionMessages.refreshList}
+          onClick={onRefresh}
+          disabled={refreshBusy}
+        >
+          <RefreshCw
+            className={refreshBusy ? "is-spinning" : undefined}
+            size={17}
+            aria-hidden="true"
+          />
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function VisibilityPreviewDialog({
+  state,
+  onClose,
+}: {
+  state: VisibilityPreviewState;
+  onClose: () => void;
+}) {
+  if (state.kind === "closed") return null;
+  const preview = state.kind === "loaded" ? state.preview : null;
+  return (
+    <div className="dialog-backdrop">
+      <section
+        className="confirmation-dialog session-visibility-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="session-visibility-title"
+      >
+        <header className="session-visibility-heading">
+          <div>
+            <h2 id="session-visibility-title">{sessionMessages.visibility.title}</h2>
+            {preview && (
+              <p>{sessionMessages.visibility.targetMode[preview.target.mode]}</p>
+            )}
+          </div>
+          <button
+            className="field-icon-button"
+            type="button"
+            aria-label={sessionMessages.visibility.close}
+            title={sessionMessages.visibility.close}
+            onClick={onClose}
+          >
+            <X size={17} aria-hidden="true" />
+          </button>
+        </header>
+        {state.kind === "scanning" && (
+          <p className="session-visibility-state" role="status">
+            <LoaderCircle className="is-spinning" size={18} aria-hidden="true" />
+            {sessionMessages.visibility.scanning}
+          </p>
+        )}
+        {state.kind === "error" && (
+          <p className="inline-error" role="alert">{sessionMessages.visibility.scanFailed}</p>
+        )}
+        {preview && (
+          <>
+            <dl className="session-visibility-counts">
+              <VisibilityCount label={sessionMessages.visibility.counts.candidates} value={preview.summary.candidates} />
+              <VisibilityCount label={sessionMessages.visibility.counts.unchanged} value={preview.summary.unchanged} />
+              <VisibilityCount label={sessionMessages.visibility.counts.missingIndex} value={preview.summary.missingIndex} />
+              <VisibilityCount label={sessionMessages.visibility.counts.skipped} value={preview.summary.skipped} />
+              <VisibilityCount label={sessionMessages.visibility.counts.blocked} value={preview.summary.blocked} />
+              <VisibilityCount
+                label={sessionMessages.visibility.counts.encryptedContentRisk}
+                value={preview.summary.encryptedContentRisk}
+              />
+            </dl>
+            {preview.summary.encryptedContentRisk > 0 && (
+              <p className="session-visibility-warning">
+                <ShieldAlert size={17} aria-hidden="true" />
+                {sessionMessages.visibility.encryptedRisk}
+              </p>
+            )}
+            {preview.appServer === "unavailable" && (
+              <p className="session-visibility-blocker" role="status">
+                {sessionMessages.visibility.appServerUnavailable}
+              </p>
+            )}
+            {preview.appServer === "incompatible" && (
+              <p className="session-visibility-blocker" role="status">
+                {sessionMessages.visibility.appServerIncompatible}
+              </p>
+            )}
+            <p className={preview.canExecute ? "session-visibility-ready" : "session-visibility-blocker"}>
+              {preview.canExecute
+                ? sessionMessages.visibility.executable
+                : sessionMessages.visibility.blocked}
+            </p>
+            {visibilityReasons(preview).length > 0 && (
+              <div className="session-visibility-reasons">
+                <h3>{sessionMessages.visibility.reasonsLabel}</h3>
+                <ul>
+                  {visibilityReasons(preview).map((reason) => (
+                    <li key={reason.code}>
+                      <span>{visibilityReasonLabel(reason.code)}</span>
+                      <strong>{reason.count}</strong>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function VisibilityCount({ label, value }: { label: string; value: number }) {
+  return <div><dt>{label}</dt><dd>{value}</dd></div>;
+}
+
+function visibilityReasonLabel(code: string): string {
+  return sessionMessages.visibility.reason[
+    code as keyof typeof sessionMessages.visibility.reason
+  ] ?? code;
+}
+
+function visibilityReasons(preview: SessionVisibilityPreview): Array<{ code: string; count: number }> {
+  const reasons = new Map(preview.reasons.map((reason) => [reason.code, reason]));
+  for (const blocker of preview.blockers) {
+    if (!reasons.has(blocker)) reasons.set(blocker, { code: blocker, count: 1 });
+  }
+  return [...reasons.values()];
 }
 
 function SessionList({
@@ -605,6 +815,8 @@ function SessionList({
   nextCursor,
   onLoadMore,
   onRefresh,
+  onPreview,
+  previewBusy,
   onRetry,
   onRecover,
   onOpen,
@@ -635,6 +847,8 @@ function SessionList({
   nextCursor: string | null;
   onLoadMore: () => void;
   onRefresh: () => void;
+  onPreview: () => void;
+  previewBusy: boolean;
   onRetry: () => void;
   onRecover: () => void;
   onOpen: (summary: SessionSummary) => void;
@@ -658,32 +872,14 @@ function SessionList({
     : sessionMessages.mutationBlocked.unavailable;
   return (
     <>
-      <section className="session-list-toolbar" aria-label="会话列表工具栏">
-        <div className="session-tabs" role="tablist" aria-label="会话范围">
-          <button type="button" role="tab" aria-selected={tab === "active"} onClick={() => setTab("active")}>
-            {sessionMessages.activeTab}
-          </button>
-          <button type="button" role="tab" aria-selected={tab === "archived"} onClick={() => setTab("archived")}>
-            {sessionMessages.archivedTab}
-          </button>
-        </div>
-        <div className="session-list-actions">
-          <button
-            className="icon-button"
-            type="button"
-            aria-label={sessionMessages.refreshList}
-            title={sessionMessages.refreshList}
-            onClick={onRefresh}
-            disabled={listState === "initial_loading" || listState === "loading_more"}
-          >
-            <RefreshCw
-              className={listState === "initial_loading" ? "is-spinning" : undefined}
-              size={17}
-              aria-hidden="true"
-            />
-          </button>
-        </div>
-      </section>
+      <SessionListToolbar
+        tab={tab}
+        setTab={setTab}
+        onPreview={onPreview}
+        previewBusy={previewBusy}
+        onRefresh={onRefresh}
+        refreshBusy={listState === "initial_loading" || listState === "loading_more"}
+      />
       <div className="session-filters" aria-label="会话筛选">
         <label className="session-search">
           <span className="visually-hidden">{sessionMessages.searchLabel}</span>

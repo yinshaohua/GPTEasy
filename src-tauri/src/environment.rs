@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -96,6 +96,15 @@ pub struct EnvironmentSnapshot {
     pub pending_restart: bool,
     pub requires_consumer_confirmation: bool,
     pub consumers: ConsumerStatuses,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvironmentVisibilityContext {
+    pub state: EnvironmentState,
+    pub mode: Option<AuthenticationMode>,
+    pub provider_id: Option<String>,
+    pub revision: String,
+    pub pending_operation: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -380,6 +389,56 @@ impl EnvironmentApplication {
             .map_err(|_| state_unavailable())?;
         let connection = self.open_state()?;
         self.inspect_environment(&connection)
+    }
+
+    pub fn inspect_for_session_visibility(
+        &self,
+    ) -> Result<EnvironmentVisibilityContext, EnvironmentFailure> {
+        let _guard = self
+            .operation_lock
+            .lock()
+            .map_err(|_| state_unavailable())?;
+        let connection = Connection::open_with_flags(
+            self.state_store.paths().database(),
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|_| state_unavailable())?;
+        connection
+            .execute_batch("PRAGMA busy_timeout = 5000;")
+            .map_err(|_| state_unavailable())?;
+        let snapshot = inspect_environment(
+            &connection,
+            &self.codex_home,
+            crate::codex::LoginStatus::Unavailable,
+        )?;
+        let stored_target = connection
+            .query_row(
+                "SELECT mode, provider_id FROM last_applied_state WHERE singleton = 1",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()
+            .map_err(|_| state_unavailable())?;
+        let stored_mode = stored_target
+            .as_ref()
+            .and_then(|(mode, _)| match mode.as_str() {
+                "openai_login" => Some(AuthenticationMode::OpenaiLogin),
+                "provider" => Some(AuthenticationMode::Provider),
+                _ => None,
+            });
+        let mode = snapshot.mode.or(stored_mode);
+        let provider_id = snapshot
+            .current_provider
+            .as_ref()
+            .map(|provider| provider.id.clone())
+            .or_else(|| stored_target.and_then(|(_, provider_id)| provider_id));
+        Ok(EnvironmentVisibilityContext {
+            state: snapshot.state,
+            mode,
+            provider_id,
+            revision: snapshot.revision,
+            pending_operation: has_pending_operation(&connection)?,
+        })
     }
 
     pub fn preview_custom_provider_repair(

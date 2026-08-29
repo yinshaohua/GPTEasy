@@ -82,6 +82,36 @@ export interface SessionFailure {
   messageId: string;
 }
 
+export type VisibilityTargetMode = "openai_login" | "provider" | "unknown";
+export type VisibilityAppServerCapability = "available" | "unavailable" | "incompatible";
+
+export interface SessionVisibilityPreview {
+  target: {
+    mode: VisibilityTargetMode;
+    modelProvider: string;
+    environmentRevision: string;
+  };
+  codexVersion: string | null;
+  appServer: VisibilityAppServerCapability;
+  schema: {
+    status: string;
+    database: string;
+  };
+  summary: {
+    candidates: number;
+    unchanged: number;
+    missingIndex: number;
+    skipped: number;
+    blocked: number;
+    encryptedContentRisk: number;
+    active: number;
+    archived: number;
+  };
+  canExecute: boolean;
+  blockers: string[];
+  reasons: Array<{ code: string; count: number }>;
+}
+
 export function enterSessionManagement(leaseId: string): Promise<SessionAvailability> {
   if (isBrowserPreview()) return Promise.resolve(previewAvailability);
   return invoke<SessionAvailability>("enter_session_management", { leaseId });
@@ -95,6 +125,11 @@ export function leaveSessionManagement(leaseId: string): Promise<void> {
 export function listSessions(query: SessionQuery): Promise<SessionListPage> {
   if (isBrowserPreview()) return Promise.resolve(previewList(query));
   return invoke<SessionListPage>("list_sessions", { query });
+}
+
+export function previewSessionVisibility(): Promise<SessionVisibilityPreview> {
+  if (isBrowserPreview()) return Promise.resolve(previewVisibility);
+  return invoke<SessionVisibilityPreview>("preview_session_visibility");
 }
 
 export function cancelSessionRequest(requestId: string): Promise<boolean> {
@@ -157,6 +192,35 @@ const previewAvailability: SessionAvailability = {
     status: "allowed",
     messageId: "session.mutations_allowed",
   },
+};
+
+const previewVisibility: SessionVisibilityPreview = {
+  target: {
+    mode: "provider",
+    modelProvider: "preview-provider",
+    environmentRevision: "preview-revision",
+  },
+  codexVersion: "codex-cli 0.150.1",
+  appServer: "available",
+  schema: { status: "supported", database: "state_5.sqlite" },
+  summary: {
+    candidates: 2,
+    unchanged: 1,
+    missingIndex: 1,
+    skipped: 1,
+    blocked: 0,
+    encryptedContentRisk: 1,
+    active: 3,
+    archived: 2,
+  },
+  canExecute: true,
+  blockers: [],
+  reasons: [
+    { code: "provider_mismatch", count: 1 },
+    { code: "index_missing", count: 1 },
+    { code: "excluded_exec", count: 1 },
+    { code: "encrypted_content", count: 1 },
+  ],
 };
 
 const previewSessions: Array<SessionSummary & { archived: boolean }> = [

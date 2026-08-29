@@ -8,6 +8,7 @@ pub mod diagnostics;
 pub mod environment;
 pub mod provider;
 pub mod session;
+pub mod session_visibility;
 #[cfg(windows)]
 pub mod single_instance;
 pub mod startup;
@@ -30,12 +31,13 @@ use commands::{
     get_issue_log_path, get_startup_snapshot, get_update_snapshot, install_update,
     leave_session_management, list_issue_logs, list_providers, list_sessions,
     list_wsl_environments, open_dayway_website, open_update_manual_download,
-    open_update_release_notes, perform_update_check, read_session, reclaim_wsl_provider,
-    record_frontend_failure, refresh_startup_snapshot, refresh_wsl_environment, rename_provider,
-    reorder_providers, restart_desktop_application, restore_last_environment_config,
-    revalidate_provider, reveal_provider_api_key, save_and_apply_provider_update,
-    save_dayway_provider, save_provider_update, save_verified_provider, start_desktop_application,
-    switch_to_openai_login, unarchive_sessions, validate_provider, validate_provider_update,
+    open_update_release_notes, perform_update_check, preview_session_visibility, read_session,
+    reclaim_wsl_provider, record_frontend_failure, refresh_startup_snapshot,
+    refresh_wsl_environment, rename_provider, reorder_providers, restart_desktop_application,
+    restore_last_environment_config, revalidate_provider, reveal_provider_api_key,
+    save_and_apply_provider_update, save_dayway_provider, save_provider_update,
+    save_verified_provider, start_desktop_application, switch_to_openai_login, unarchive_sessions,
+    validate_provider, validate_provider_update,
 };
 use desktop::DesktopApplication;
 use diagnostic_report::{
@@ -47,6 +49,7 @@ use diagnostics::{IssueLogLevel, IssueLogStore, install_panic_issue_logging};
 use environment::{EnvironmentApplication, EnvironmentRecovery};
 use provider::{ProviderApplication, ProviderValidator, ValidationTimeouts};
 use session::SessionApplication;
+use session_visibility::SessionVisibilityApplication;
 #[cfg(windows)]
 use single_instance::{InstanceRole, acquire};
 use startup::StartupCoordinator;
@@ -127,9 +130,10 @@ pub fn run() {
                 );
             }
             app.manage(WslRuntime::new(wsl));
-            app.manage(SessionRuntime::new(SessionApplication::new(
-                state_store.clone(),
-            )));
+            app.manage(SessionRuntime::new(
+                SessionApplication::new(state_store.clone()),
+                SessionVisibilityApplication::new(&codex_home),
+            ));
             app.manage(ProviderRuntime::new(ProviderApplication::new(
                 state_store,
                 ProviderValidator::new(ValidationTimeouts::default()),
@@ -199,6 +203,7 @@ pub fn run() {
             enter_session_management,
             leave_session_management,
             list_sessions,
+            preview_session_visibility,
             cancel_session_request,
             read_session,
             archive_sessions,

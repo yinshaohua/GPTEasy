@@ -190,6 +190,60 @@ fn missing_codex_artifacts_are_previewed_without_being_created() {
 }
 
 #[test]
+fn session_visibility_context_resolves_provider_and_openai_targets() {
+    let (temp, _, application) = fixture();
+    let codex_home = temp.path().join(".codex");
+    let provider = application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("establish provider mode");
+
+    let provider_context = application
+        .inspect_for_session_visibility()
+        .expect("inspect provider visibility target");
+
+    assert_eq!(provider_context.state, EnvironmentState::Managed);
+    assert_eq!(provider_context.mode, Some(AuthenticationMode::Provider));
+    assert_eq!(provider_context.provider_id.as_deref(), Some(PROVIDER_ID));
+    assert_eq!(provider_context.revision, provider.revision);
+    assert!(!provider_context.pending_operation);
+
+    let openai = application
+        .switch_to_openai_login(true, &provider.revision)
+        .expect("switch to OpenAI login mode");
+    let openai_context = application
+        .inspect_for_session_visibility()
+        .expect("inspect OpenAI visibility target");
+
+    assert_eq!(openai_context.state, EnvironmentState::Managed);
+    assert_eq!(openai_context.mode, Some(AuthenticationMode::OpenaiLogin));
+    assert!(openai_context.provider_id.is_none());
+    assert_eq!(openai_context.revision, openai.revision);
+    assert!(!openai_context.pending_operation);
+    assert!(codex_home.exists());
+}
+
+#[test]
+fn session_visibility_context_keeps_last_managed_target_during_conflict() {
+    let (temp, _, application) = fixture();
+    let config_path = temp.path().join(".codex/config.toml");
+    application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("establish provider mode");
+    let managed = fs::read_to_string(&config_path).expect("read managed config");
+    let unknown_provider = "11111111-1111-4111-8111-111111111111";
+    fs::write(&config_path, managed.replace(PROVIDER_ID, unknown_provider))
+        .expect("introduce managed provider conflict");
+
+    let context = application
+        .inspect_for_session_visibility()
+        .expect("inspect conflicted visibility target");
+
+    assert_eq!(context.state, EnvironmentState::Conflict);
+    assert_eq!(context.mode, Some(AuthenticationMode::Provider));
+    assert_eq!(context.provider_id.as_deref(), Some(PROVIDER_ID));
+}
+
+#[test]
 fn confirmed_first_provider_application_initializes_a_never_started_codex_home() {
     let (temp, _, application) = fixture();
     let codex_home = temp.path().join(".codex");

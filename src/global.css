@@ -474,6 +474,11 @@ select {
   gap: 8px;
 }
 
+.session-visibility-button {
+  min-width: 104px;
+  white-space: nowrap;
+}
+
 .session-tabs button {
   position: relative;
   padding: 8px 2px 10px;
@@ -2287,6 +2292,173 @@ select:focus-visible {
   color: var(--text-muted);
   font-size: 13px;
   line-height: 1.55;
+}
+
+.session-visibility-dialog {
+  width: min(620px, 100%);
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
+}
+
+.session-visibility-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.session-visibility-heading > div {
+  min-width: 0;
+}
+
+.session-visibility-heading p {
+  margin: 3px 0 0;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.session-visibility-heading .field-icon-button {
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.session-visibility-state {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 96px;
+  margin: 12px 0 0;
+}
+
+.session-visibility-counts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 18px 0 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.session-visibility-counts > div {
+  min-width: 0;
+  padding: 10px 8px;
+}
+
+.session-visibility-counts > div:not(:nth-child(3n + 1)) {
+  border-left: 1px solid var(--border);
+}
+
+.session-visibility-counts > div:nth-child(n + 4) {
+  border-top: 1px solid var(--border);
+}
+
+.session-visibility-counts dt {
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.session-visibility-counts dd {
+  margin: 3px 0 0;
+  font-size: 19px;
+  font-weight: 700;
+}
+
+.confirmation-dialog .session-visibility-warning,
+.confirmation-dialog .session-visibility-blocker,
+.confirmation-dialog .session-visibility-ready {
+  margin: 12px 0 0;
+  font-size: 12px;
+}
+
+.session-visibility-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: #9a6100;
+}
+
+.session-visibility-warning svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.session-visibility-blocker {
+  color: var(--danger) !important;
+}
+
+.session-visibility-ready {
+  color: var(--accent) !important;
+}
+
+.session-visibility-reasons {
+  margin-top: 16px;
+}
+
+.session-visibility-reasons h3 {
+  margin: 0 0 6px;
+  font-size: 13px;
+}
+
+.session-visibility-reasons ul {
+  padding: 0;
+  margin: 0;
+  list-style: none;
+  border-top: 1px solid var(--border);
+}
+
+.session-visibility-reasons li {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.session-visibility-reasons li span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.session-visibility-reasons li strong {
+  flex: 0 0 auto;
+  color: var(--text);
+}
+
+@media (max-width: 720px) {
+  .session-list-toolbar {
+    gap: 8px;
+  }
+
+  .session-list-actions {
+    gap: 4px;
+  }
+
+  .session-visibility-button {
+    min-width: 0;
+    padding-right: 8px;
+    padding-left: 8px;
+  }
+
+  .session-visibility-counts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .session-visibility-counts > div:not(:nth-child(3n + 1)) {
+    border-left: 0;
+  }
+
+  .session-visibility-counts > div:nth-child(even) {
+    border-left: 1px solid var(--border);
+  }
+
+  .session-visibility-counts > div:nth-child(n + 3) {
+    border-top: 1px solid var(--border);
+  }
 }
 
 .session-delete-dialog {

@@ -53,6 +53,7 @@ for (const viewport of [{ width: 680, height: 520 }, { width: 1120, height: 800 
     const sessionToolbar = page.getByRole("region", { name: "会话列表工具栏" });
     await expect(sessionToolbar.getByRole("tab", { name: "会话" })).toBeVisible();
     await expect(sessionToolbar.getByRole("tab", { name: "已归档" })).toBeVisible();
+    await expect(sessionToolbar.getByRole("button", { name: "修复会话" })).toBeVisible();
     await expect(sessionToolbar.getByRole("button", { name: "刷新会话列表" })).toBeVisible();
     await expectChildrenNotToOverlap(sessionToolbar, "[role='tab'], .session-list-actions > button");
     await sessionToolbar.getByRole("tab", { name: "已归档" }).focus();
