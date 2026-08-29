@@ -45,6 +45,9 @@ for (const viewport of [{ width: 680, height: 520 }, { width: 1120, height: 800 
     await expect(titleBar.getByRole("heading", { name: "供应商管理" })).toBeVisible();
     await expect(titleBar.getByRole("button", { name: "启动 Codex" })).toBeVisible();
     await expect(titleBar.getByRole("button", { name: "帮帮我" })).toBeVisible();
+    const addProvider = page.getByRole("button", { name: "添加供应商" });
+    await expect(addProvider).toHaveClass(/secondary-button/);
+    await expect(addProvider).not.toHaveClass(/command-button/);
     const visibilityStatus = page.getByRole("status", { name: "会话可见性自动修复状态" });
     await expect(visibilityStatus).toContainText("模式已切换");
     await expectChildrenNotToOverlap(titleBar, ":scope > h1, :scope > .app-header-actions > .desktop-control > button, :scope > .app-header-actions > button");
@@ -62,7 +65,10 @@ for (const viewport of [{ width: 680, height: 520 }, { width: 1120, height: 800 
     const sessionToolbar = page.getByRole("region", { name: "会话列表工具栏" });
     await expect(sessionToolbar.getByRole("tab", { name: "会话" })).toBeVisible();
     await expect(sessionToolbar.getByRole("tab", { name: "已归档" })).toBeVisible();
-    await expect(sessionToolbar.getByRole("button", { name: "修复会话" })).toBeVisible();
+    const repairSessions = sessionToolbar.getByRole("button", { name: "修复会话" });
+    await expect(repairSessions).toBeVisible();
+    await expect(repairSessions).toHaveClass(/secondary-button/);
+    await expect(repairSessions.locator("svg")).toHaveClass(/is-blue/);
     await expect(sessionToolbar.getByRole("button", { name: "刷新会话列表" })).toBeVisible();
     const sessionToolbarBounds = await sessionToolbar.boundingBox();
     expect(sessionToolbarBounds).not.toBeNull();

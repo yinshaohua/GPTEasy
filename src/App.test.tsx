@@ -2776,7 +2776,7 @@ describe("Codex 桌面版受控启动与重启", () => {
     expect(screen.getByRole("button", { name: "重启 Codex" })).toBeEnabled();
   });
 
-  it("添加供应商与供应商目录标题保持同一行", async () => {
+  it("添加供应商与供应商目录标题保持同一行并使用普通操作样式", async () => {
     invoke.mockImplementation((command: string) => {
       if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
       if (command === "list_providers") return Promise.resolve([]);
@@ -2796,8 +2796,10 @@ describe("Codex 桌面版受控启动与重启", () => {
     const heading = await screen.findByRole("heading", { name: "供应商目录" });
     const headingRow = heading.closest(".catalog-heading");
     expect(headingRow).not.toBeNull();
-    expect(within(headingRow as HTMLElement).getByRole("button", { name: "添加供应商" }))
-      .toBeInTheDocument();
+    const addProvider = within(headingRow as HTMLElement).getByRole("button", { name: "添加供应商" });
+    expect(addProvider).toHaveClass("secondary-button");
+    expect(addProvider).not.toHaveClass("command-button");
+    expect(addProvider.querySelector("svg")).toHaveClass("is-green");
   });
 
   it("强制设置按目录顺序重验供应商，并在重建确认后调用后端", async () => {

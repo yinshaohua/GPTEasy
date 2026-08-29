@@ -87,11 +87,24 @@ pub enum VisibilityAppServerCapability {
     Incompatible,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VisibilityExecutionReadiness {
+    Ready,
+    CliRunning,
+    UnknownConsumer,
+    DesktopRunning,
+    AppServerUnavailable,
+    ConfigurationBlocked,
+    IndexSchemaUnsupported,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VisibilityScanContext {
     pub target: VisibilityTarget,
     pub codex_version: Option<String>,
     pub app_server: VisibilityAppServerCapability,
+    pub consumer_state: VisibilityConsumerState,
     pub execution_blockers: Vec<String>,
 }
 
@@ -113,7 +126,6 @@ pub struct VisibilitySummary {
 pub struct VisibilitySchemaCapability {
     pub status: String,
     pub database: String,
-    #[serde(skip)]
     pub variant: String,
 }
 
@@ -142,6 +154,8 @@ pub struct SessionVisibilityPreview {
     pub schema: VisibilitySchemaCapability,
     pub index_plan: VisibilityIndexPlan,
     pub summary: VisibilitySummary,
+    pub readiness: VisibilityExecutionReadiness,
+    pub consumer_state: VisibilityConsumerState,
     pub can_execute: bool,
     pub blockers: Vec<String>,
     pub reasons: Vec<VisibilityReason>,
@@ -172,10 +186,13 @@ impl SessionVisibilityPreview {
         };
         format!(
             "stage=scan; target_mode={target_mode}; codex_version={codex_version}; \
+             readiness={}; consumer_state={}; \
              schema={}; schema_variant={}; candidates={}; unchanged={}; missing_index={}; skipped={}; \
              blocked={}; encrypted_content_risk={}; active={}; archived={}; \
              index_app_server_coordination={}; index_sqlite_fallback_eligible={}; \
              index_schema_skipped={}; error_codes={error_codes}",
+            self.readiness.diagnostic_name(),
+            self.consumer_state.diagnostic_name(),
             self.schema.status,
             self.schema.variant,
             self.summary.candidates,
@@ -214,12 +231,38 @@ pub struct VisibilityExecutionRequest {
     pub target: VisibilityTarget,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum VisibilityConsumerState {
     NoConsumers,
     DesktopRunning,
     CliRunning,
     Unknown,
+}
+
+impl VisibilityConsumerState {
+    pub fn diagnostic_name(self) -> &'static str {
+        match self {
+            Self::NoConsumers => "none",
+            Self::DesktopRunning => "desktop_running",
+            Self::CliRunning => "cli_running",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+impl VisibilityExecutionReadiness {
+    pub fn diagnostic_name(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::CliRunning => "cli_running",
+            Self::UnknownConsumer => "unknown_consumer",
+            Self::DesktopRunning => "desktop_running",
+            Self::AppServerUnavailable => "app_server_unavailable",
+            Self::ConfigurationBlocked => "configuration_blocked",
+            Self::IndexSchemaUnsupported => "index_schema_unsupported",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -259,6 +302,10 @@ pub struct VisibilityExecutionResult {
     pub retryable: u32,
     pub encrypted_content_risk: u32,
     pub breakdown: VisibilityExecutionBreakdown,
+    pub schema_variant: String,
+    pub consumer_state: VisibilityConsumerState,
+    pub writes_started: bool,
+    pub recovery_required: bool,
     pub block_codex_restart: bool,
     pub message_id: &'static str,
     pub diagnostic_stage: &'static str,
@@ -311,7 +358,8 @@ impl VisibilityExecutionResult {
             "stage={}; status={}; succeeded={}; retryable={}; \
              encrypted_content_risk={}; index_app_server_coordinated={}; \
              index_sqlite_fallback={}; index_schema_skipped={}; verification_failed={}; \
-             block_codex_restart={}; error_codes={}",
+             schema_variant={}; consumer_state={}; writes_started={}; recovery_required={}; \
+             block_codex_restart={}; error_code={}",
             self.diagnostic_stage,
             self.status,
             self.succeeded,
@@ -321,6 +369,10 @@ impl VisibilityExecutionResult {
             self.breakdown.sqlite_fallback,
             self.breakdown.schema_skipped,
             self.breakdown.verification_failed,
+            self.schema_variant,
+            self.consumer_state.diagnostic_name(),
+            self.writes_started,
+            self.recovery_required,
             self.block_codex_restart,
             self.error_code,
         )
@@ -502,9 +554,16 @@ impl SessionVisibilityApplication {
         if index.schema_status != "supported" {
             blockers.push("unsupported_index_schema".to_owned());
         }
+        match context.consumer_state {
+            VisibilityConsumerState::NoConsumers => {}
+            VisibilityConsumerState::DesktopRunning => blockers.push("desktop_running".to_owned()),
+            VisibilityConsumerState::CliRunning => blockers.push("cli_running".to_owned()),
+            VisibilityConsumerState::Unknown => blockers.push("consumer_unknown".to_owned()),
+        }
         blockers.sort();
         blockers.dedup();
-        let can_execute = blockers.is_empty();
+        let readiness = execution_readiness(&blockers);
+        let can_execute = readiness == VisibilityExecutionReadiness::Ready;
         if !can_execute {
             summary.blocked = summary.blocked.max(summary.candidates);
             for blocker in &blockers {
@@ -545,6 +604,8 @@ impl SessionVisibilityApplication {
                 },
             },
             summary,
+            readiness,
+            consumer_state: context.consumer_state,
             can_execute,
             blockers,
             reasons: reasons
@@ -567,11 +628,17 @@ impl SessionVisibilityApplication {
             Ok(_) => {}
         }
         let index = read_index(&self.codex_home);
+        let schema_variant = index
+            .schema
+            .map(SupportedThreadSchema::diagnostic_name)
+            .unwrap_or(index.schema_status.as_str())
+            .to_owned();
         let mut candidates = self.execution_candidates(&request.target.model_provider, &index)?;
         let execution_scan = self.scan(VisibilityScanContext {
             target: request.target.clone(),
             codex_version: None,
             app_server: VisibilityAppServerCapability::Available,
+            consumer_state: VisibilityConsumerState::NoConsumers,
             execution_blockers: Vec::new(),
         })?;
         if !execution_scan.can_execute {
@@ -779,6 +846,12 @@ impl SessionVisibilityApplication {
                         schema_skipped: 0,
                         verification_failed: written.len() as u32,
                     },
+                    schema_variant,
+                    consumer_state: VisibilityConsumerState::NoConsumers,
+                    writes_started: app_server_coordinated > 0
+                        || sqlite_fallback > 0
+                        || !written.is_empty(),
+                    recovery_required: true,
                     block_codex_restart: false,
                     message_id: if rescan_required {
                         "session_visibility.rescan_required"
@@ -859,6 +932,12 @@ impl SessionVisibilityApplication {
                 schema_skipped: 0,
                 verification_failed,
             },
+            schema_variant,
+            consumer_state: VisibilityConsumerState::NoConsumers,
+            writes_started: app_server_coordinated > 0
+                || sqlite_fallback > 0
+                || !written.is_empty(),
+            recovery_required: retryable > 0,
             block_codex_restart: false,
             message_id: if rescan_required {
                 "session_visibility.rescan_required"
@@ -1253,6 +1332,46 @@ impl SessionVisibilityApplication {
         self.recovery_root.join("session-visibility-recovery.json")
     }
 
+    pub(crate) fn diagnostic_schema_variant(&self) -> String {
+        let index = read_index(&self.codex_home);
+        index
+            .schema
+            .map(SupportedThreadSchema::diagnostic_name)
+            .unwrap_or(index.schema_status.as_str())
+            .to_owned()
+    }
+
+    pub(crate) fn diagnostic_index_hash(&self) -> Option<String> {
+        self.index_database_hash()
+    }
+
+    pub(crate) fn diagnostic_recovery_evidence(&self) -> (bool, bool, u32) {
+        let path = self.recovery_manifest_path();
+        let manifest = fs::read(path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<VisibilityRecoveryManifest>(&bytes).ok());
+        let writes_started = manifest.as_ref().is_some_and(|manifest| {
+            manifest.items.iter().any(|item| {
+                matches!(
+                    item.stage.as_str(),
+                    "written" | "verified" | "verification_failed"
+                ) || matches!(
+                    item.index_stage,
+                    VisibilityIndexStage::AppServerCoordinated
+                        | VisibilityIndexStage::SqliteFallbackCommitted
+                )
+            })
+        });
+        match self.assess_recovery() {
+            Ok(assessment) => (
+                writes_started,
+                assessment.status == "retryable" || assessment.status == "indeterminate",
+                assessment.retryable,
+            ),
+            Err(_) => (writes_started, manifest.is_some(), 0),
+        }
+    }
+
     fn observed_rollout_hashes(&self) -> Result<HashMap<String, String>, VisibilityFailure> {
         let mut observed = HashMap::new();
         for root in [
@@ -1418,6 +1537,7 @@ impl SessionVisibilityApplication {
         }
         preview.blockers.push(blocker.to_owned());
         preview.blockers.sort();
+        preview.readiness = execution_readiness(&preview.blockers);
         preview.can_execute = false;
         preview.summary.blocked = preview.summary.blocked.max(preview.summary.candidates);
         if let Some(reason) = preview
@@ -2487,6 +2607,30 @@ fn consumer_error_code(consumer: VisibilityConsumerState) -> &'static str {
     }
 }
 
+fn execution_readiness(blockers: &[String]) -> VisibilityExecutionReadiness {
+    if blockers.iter().any(|blocker| blocker == "cli_running") {
+        VisibilityExecutionReadiness::CliRunning
+    } else if blockers.iter().any(|blocker| blocker == "consumer_unknown") {
+        VisibilityExecutionReadiness::UnknownConsumer
+    } else if blockers.iter().any(|blocker| blocker == "desktop_running") {
+        VisibilityExecutionReadiness::DesktopRunning
+    } else if blockers
+        .iter()
+        .any(|blocker| blocker == "app_server_unavailable" || blocker == "app_server_incompatible")
+    {
+        VisibilityExecutionReadiness::AppServerUnavailable
+    } else if blockers
+        .iter()
+        .any(|blocker| blocker == "unsupported_index_schema")
+    {
+        VisibilityExecutionReadiness::IndexSchemaUnsupported
+    } else if blockers.is_empty() {
+        VisibilityExecutionReadiness::Ready
+    } else {
+        VisibilityExecutionReadiness::ConfigurationBlocked
+    }
+}
+
 fn coordination_outcome(
     status: VisibilityCoordinationStatus,
     block_codex_restart: bool,
@@ -2526,6 +2670,10 @@ fn indeterminate_execution_result() -> VisibilityExecutionResult {
             schema_skipped: 0,
             verification_failed: 0,
         },
+        schema_variant: "unknown".to_owned(),
+        consumer_state: VisibilityConsumerState::Unknown,
+        writes_started: true,
+        recovery_required: true,
         block_codex_restart: true,
         message_id: "session_visibility.recovery_indeterminate",
         diagnostic_stage: "recovery",

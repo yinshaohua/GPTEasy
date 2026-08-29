@@ -6,18 +6,202 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use gpteasy_lib::session_visibility::{
     SessionVisibilityApplication, VisibilityAppServerCapability, VisibilityConsumerState,
-    VisibilityCoordinationStatus, VisibilityExecutionRequest, VisibilityExecutionRuntime,
-    VisibilityFailurePoint, VisibilityFaultInjector, VisibilityScanContext, VisibilityTarget,
-    VisibilityTargetMode, VisibilityThreadView,
+    VisibilityCoordinationStatus, VisibilityExecutionReadiness, VisibilityExecutionRequest,
+    VisibilityExecutionRuntime, VisibilityFailurePoint, VisibilityFaultInjector,
+    VisibilityScanContext, VisibilityTarget, VisibilityTargetMode, VisibilityThreadView,
 };
 use gpteasy_lib::state::{
     PendingSessionVisibilityStatus, PendingSessionVisibilityTargetMode, StatePaths, StateStore,
+};
+#[cfg(windows)]
+use gpteasy_lib::{
+    consumer::{ConsumerScanner, ConsumerStatus, WindowsConsumerScanner},
+    environment::{AuthenticationMode, EnvironmentApplication, EnvironmentState},
+    session::{SessionApplication, SessionAvailabilityStatus, SessionQuery},
 };
 use rusqlite::{Connection, params};
 use serde_json::json;
 use tempfile::TempDir;
 
 const TARGET_PROVIDER: &str = "4c8f7402-669f-40cf-a2a9-cfc6f124de6d";
+
+#[cfg(windows)]
+#[tokio::test]
+#[ignore = "opt-in read-only diagnosis of the current Windows user Codex environment"]
+async fn real_current_user_codex_0_150_1_visibility_counts_are_stable_and_redacted() {
+    let local_app_data = PathBuf::from(std::env::var_os("LOCALAPPDATA").expect("LOCALAPPDATA"));
+    let user_profile = PathBuf::from(std::env::var_os("USERPROFILE").expect("USERPROFILE"));
+    let state_root = local_app_data.join("com.gpteasy.desktop");
+    let codex_home = user_profile.join(".codex");
+    let state_store = StateStore::new(StatePaths::from_root(&state_root));
+    let environment = EnvironmentApplication::new(state_store.clone(), &codex_home)
+        .inspect_for_session_visibility()
+        .expect("read current environment target");
+    assert_eq!(environment.state, EnvironmentState::Managed);
+    assert!(!environment.pending_operation);
+    let (mode, model_provider) = match (environment.mode, environment.provider_id) {
+        (Some(AuthenticationMode::Provider), Some(provider_id)) => {
+            (VisibilityTargetMode::Provider, provider_id)
+        }
+        (Some(AuthenticationMode::OpenaiLogin), _) => {
+            (VisibilityTargetMode::OpenaiLogin, "openai".to_owned())
+        }
+        _ => panic!("current visibility target is not executable"),
+    };
+    let consumer_scan = WindowsConsumerScanner::new().scan();
+    let consumer_state = if consumer_scan.desktop == ConsumerStatus::Unknown
+        || consumer_scan.cli == ConsumerStatus::Unknown
+    {
+        VisibilityConsumerState::Unknown
+    } else if consumer_scan.cli == ConsumerStatus::Running {
+        VisibilityConsumerState::CliRunning
+    } else if consumer_scan.desktop == ConsumerStatus::Running {
+        VisibilityConsumerState::DesktopRunning
+    } else {
+        VisibilityConsumerState::NoConsumers
+    };
+    let visibility = SessionVisibilityApplication::with_recovery_root(&codex_home, &state_root)
+        .with_pending_state(state_store.clone());
+    let scan_context = VisibilityScanContext {
+        target: VisibilityTarget {
+            mode,
+            model_provider: model_provider.clone(),
+            environment_revision: environment.revision,
+        },
+        codex_version: Some("codex-cli 0.150.1".to_owned()),
+        app_server: VisibilityAppServerCapability::Available,
+        consumer_state,
+        execution_blockers: Vec::new(),
+    };
+    let before = visibility
+        .scan(scan_context.clone())
+        .expect("scan before App Server views");
+
+    let isolated_state_root = TempDir::new().expect("isolated App Server state");
+    let isolated_store = StateStore::new(StatePaths::from_root(isolated_state_root.path()));
+    assert!(isolated_store.bootstrap().is_ready());
+    let sessions = SessionApplication::new(isolated_store);
+    let availability = sessions.enter("real-visibility-diagnostic").await;
+    assert_eq!(availability.status, SessionAvailabilityStatus::Available);
+    let all_providers = real_app_server_view(&sessions, None).await;
+    let target_provider = real_app_server_view(&sessions, Some(model_provider)).await;
+    sessions.shutdown_now().await;
+
+    let after = visibility
+        .scan(scan_context)
+        .expect("scan after App Server views");
+    assert_eq!(before.summary.candidates, after.summary.candidates);
+    assert_eq!(before.summary.unchanged, after.summary.unchanged);
+    assert_eq!(before.summary.skipped, after.summary.skipped);
+    assert_eq!(after.summary.missing_index, 0);
+    assert_eq!(target_provider, after.summary.unchanged as usize);
+    assert_eq!(
+        all_providers,
+        target_provider + after.summary.candidates as usize
+    );
+    assert_optional_expected_count("GPTEASY_VISIBILITY_EXPECTED_ALL", all_providers);
+    assert_optional_expected_count("GPTEASY_VISIBILITY_EXPECTED_TARGET", target_provider);
+    assert_optional_expected_count(
+        "GPTEASY_VISIBILITY_EXPECTED_CANDIDATES",
+        after.summary.candidates as usize,
+    );
+    eprintln!(
+        "safe_counts all={all_providers} target={target_provider} candidates={} unchanged={} skipped={} encrypted_risk={} consumer_state={}",
+        after.summary.candidates,
+        after.summary.unchanged,
+        after.summary.skipped,
+        after.summary.encrypted_content_risk,
+        consumer_state.diagnostic_name(),
+    );
+    assert_eq!(before.schema.variant, "codex_0_150_1");
+    assert_eq!(after.schema.variant, "codex_0_150_1");
+    assert_eq!(before.consumer_state, consumer_state);
+    let confirmation_stable = before.confirmation_id == after.confirmation_id;
+    if consumer_state == VisibilityConsumerState::NoConsumers {
+        assert!(confirmation_stable);
+        assert_eq!(after.readiness, VisibilityExecutionReadiness::Ready);
+    } else {
+        assert!(!after.can_execute);
+    }
+    eprintln!("safe_hash_state stable={confirmation_stable}");
+    let recovery = visibility
+        .assess_recovery()
+        .expect("assess recovery evidence");
+    assert_eq!(recovery.status, "none");
+    let pending = state_store
+        .pending_session_visibility()
+        .expect("read pending visibility state");
+    if let Some(pending) = pending {
+        assert!(matches!(
+            pending.status,
+            PendingSessionVisibilityStatus::Pending
+                | PendingSessionVisibilityStatus::Running
+                | PendingSessionVisibilityStatus::Partial
+                | PendingSessionVisibilityStatus::Blocked
+        ));
+        assert!(!pending.diagnostic_stage.is_empty());
+        assert!(!pending.error_code.is_empty());
+        assert!(safe_diagnostic_token(&pending.diagnostic_stage));
+        assert!(safe_diagnostic_token(&pending.error_code));
+        eprintln!(
+            "safe_pending status={:?} succeeded={} retryable={}",
+            pending.status, pending.succeeded, pending.retryable,
+        );
+    } else {
+        eprintln!("safe_pending status=none");
+    }
+}
+
+#[cfg(windows)]
+fn assert_optional_expected_count(variable: &str, actual: usize) {
+    let Some(value) = std::env::var_os(variable) else {
+        return;
+    };
+    let expected = value
+        .to_string_lossy()
+        .parse::<usize>()
+        .expect("expected count must be an unsigned integer");
+    assert_eq!(actual, expected, "{variable}");
+}
+
+#[cfg(windows)]
+fn safe_diagnostic_token(value: &str) -> bool {
+    value.len() <= 96
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.'))
+}
+
+#[cfg(windows)]
+async fn real_app_server_view(
+    application: &SessionApplication,
+    model_provider: Option<String>,
+) -> usize {
+    let mut count = 0;
+    for archived in [false, true] {
+        let mut cursor = None;
+        loop {
+            let page = application
+                .list(SessionQuery {
+                    request_id: None,
+                    archived,
+                    search_term: None,
+                    project: None,
+                    model_provider: model_provider.clone(),
+                    cursor,
+                    limit: 100,
+                })
+                .await
+                .expect("read redacted App Server count");
+            count += page.sessions.len();
+            let Some(next_cursor) = page.next_cursor else {
+                break;
+            };
+            cursor = Some(next_cursor);
+        }
+    }
+    count
+}
 
 #[tokio::test]
 async fn confirmed_repair_atomically_changes_only_the_runtime_provider_and_verifies_a_clean_view() {
@@ -135,6 +319,10 @@ async fn execution_rejects_changed_candidates_consumers_and_revision_without_wri
             VisibilityConsumerState::Unknown,
             "session_visibility.consumer_unknown",
         ),
+        (
+            VisibilityConsumerState::DesktopRunning,
+            "session_visibility.desktop_running",
+        ),
     ] {
         let fixture = VisibilityFixture::new();
         let rollout = fixture.indexed_candidate("consumer.jsonl");
@@ -190,6 +378,110 @@ async fn execution_rejects_changed_candidates_consumers_and_revision_without_wri
     assert_eq!(
         fs::read(&rollout).expect("read rollout after revision race"),
         before
+    );
+}
+
+#[tokio::test]
+async fn scan_reports_consumer_readiness_and_a_clean_rescan_can_execute() {
+    let fixture = VisibilityFixture::new();
+    let rollout = fixture.indexed_candidate("consumer-preview.jsonl");
+    let application =
+        SessionVisibilityApplication::with_recovery_root(fixture.codex_home(), fixture.root());
+    let before = fs::read(&rollout).expect("read rollout before previews");
+
+    for (consumer_state, readiness, blocker) in [
+        (
+            VisibilityConsumerState::CliRunning,
+            VisibilityExecutionReadiness::CliRunning,
+            "cli_running",
+        ),
+        (
+            VisibilityConsumerState::Unknown,
+            VisibilityExecutionReadiness::UnknownConsumer,
+            "consumer_unknown",
+        ),
+        (
+            VisibilityConsumerState::DesktopRunning,
+            VisibilityExecutionReadiness::DesktopRunning,
+            "desktop_running",
+        ),
+    ] {
+        let mut context = executable_context("revision-consumer-preview");
+        context.consumer_state = consumer_state;
+        let preview = application.scan(context).expect("scan consumer blocker");
+
+        assert_eq!(preview.readiness, readiness);
+        assert_eq!(preview.consumer_state, consumer_state);
+        assert!(!preview.can_execute);
+        assert!(preview.blockers.iter().any(|value| value == blocker));
+        assert_eq!(fs::read(&rollout).expect("read after preview"), before);
+        assert!(
+            !fixture
+                .root()
+                .join("session-visibility-recovery.json")
+                .exists()
+        );
+    }
+
+    let preview = application
+        .scan(executable_context("revision-consumer-preview"))
+        .expect("rescan after consumer exit");
+    assert_eq!(preview.readiness, VisibilityExecutionReadiness::Ready);
+    assert!(preview.can_execute);
+    let runtime = VisibilityRuntimeFixture::with_state(
+        fixture.codex_home(),
+        VisibilityConsumerState::NoConsumers,
+        "revision-consumer-preview",
+        None,
+    );
+
+    let result = application
+        .execute(execution_request(&preview), &runtime)
+        .await
+        .expect("execute after clean rescan");
+
+    assert_eq!(result.status, "complete");
+    assert_eq!(result.succeeded, 1);
+}
+
+#[test]
+fn adding_a_late_execution_blocker_recomputes_preview_readiness() {
+    let fixture = VisibilityFixture::new();
+    fixture.indexed_candidate("late-blocker.jsonl");
+    let application =
+        SessionVisibilityApplication::with_recovery_root(fixture.codex_home(), fixture.root());
+    let mut preview = application
+        .scan(executable_context("revision-late-blocker"))
+        .expect("scan executable preview");
+
+    SessionVisibilityApplication::add_execution_blocker(&mut preview, "app_server_unavailable");
+
+    assert_eq!(
+        preview.readiness,
+        VisibilityExecutionReadiness::AppServerUnavailable
+    );
+    assert!(!preview.can_execute);
+
+    SessionVisibilityApplication::add_execution_blocker(
+        &mut preview,
+        "environment_revision_changed",
+    );
+    assert_eq!(
+        preview.readiness,
+        VisibilityExecutionReadiness::AppServerUnavailable,
+        "the highest-priority blocker remains visible"
+    );
+
+    let mut configuration_preview = application
+        .scan(executable_context("revision-late-configuration-blocker"))
+        .expect("scan second executable preview");
+    SessionVisibilityApplication::add_execution_blocker(
+        &mut configuration_preview,
+        "environment_revision_changed",
+    );
+    assert_eq!(
+        configuration_preview.readiness,
+        VisibilityExecutionReadiness::ConfigurationBlocked
     );
 }
 
@@ -1204,6 +1496,7 @@ fn executable_context(revision: &str) -> VisibilityScanContext {
         },
         codex_version: Some("codex-cli fixture".to_owned()),
         app_server: VisibilityAppServerCapability::Available,
+        consumer_state: VisibilityConsumerState::NoConsumers,
         execution_blockers: Vec::new(),
     }
 }
@@ -1217,6 +1510,7 @@ fn openai_context(revision: &str) -> VisibilityScanContext {
         },
         codex_version: Some("codex-cli fixture".to_owned()),
         app_server: VisibilityAppServerCapability::Available,
+        consumer_state: VisibilityConsumerState::NoConsumers,
         execution_blockers: Vec::new(),
     }
 }
@@ -1611,6 +1905,7 @@ fn read_only_scan_classifies_active_archived_missing_internal_and_encrypted_roll
             },
             codex_version: Some("codex-cli 0.150.1".to_owned()),
             app_server: VisibilityAppServerCapability::Available,
+            consumer_state: VisibilityConsumerState::NoConsumers,
             execution_blockers: Vec::new(),
         })
         .expect("scan visibility");
@@ -1762,6 +2057,7 @@ fn scan_remains_available_but_marks_environment_schema_and_app_server_blockers()
             },
             codex_version: Some("codex-cli 0.150.1".to_owned()),
             app_server: VisibilityAppServerCapability::Unavailable,
+            consumer_state: VisibilityConsumerState::NoConsumers,
             execution_blockers: vec![
                 "external_configuration".to_owned(),
                 "pending_config_operation".to_owned(),
@@ -1972,6 +2268,7 @@ fn diagnostics_include_stable_scan_reason_codes() {
             },
             codex_version: None,
             app_server: VisibilityAppServerCapability::Available,
+            consumer_state: VisibilityConsumerState::NoConsumers,
             execution_blockers: Vec::new(),
         })
         .expect("scan diagnostic reasons");
@@ -2016,6 +2313,7 @@ fn scan_excludes_every_known_non_interactive_source_kind() {
             },
             codex_version: None,
             app_server: VisibilityAppServerCapability::Available,
+            consumer_state: VisibilityConsumerState::NoConsumers,
             execution_blockers: Vec::new(),
         })
         .expect("scan excluded sources");
@@ -2057,6 +2355,7 @@ fn scan_skips_an_index_row_that_points_at_another_rollout() {
             },
             codex_version: None,
             app_server: VisibilityAppServerCapability::Available,
+            consumer_state: VisibilityConsumerState::NoConsumers,
             execution_blockers: Vec::new(),
         })
         .expect("scan mismatched index path");

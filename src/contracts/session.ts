@@ -85,6 +85,15 @@ export interface SessionFailure {
 
 export type VisibilityTargetMode = "openai_login" | "provider" | "unknown";
 export type VisibilityAppServerCapability = "available" | "unavailable" | "incompatible";
+export type VisibilityExecutionReadiness =
+  | "ready"
+  | "cli_running"
+  | "unknown_consumer"
+  | "desktop_running"
+  | "app_server_unavailable"
+  | "configuration_blocked"
+  | "index_schema_unsupported";
+export type VisibilityConsumerState = "none" | "desktop_running" | "cli_running" | "unknown";
 
 export interface SessionVisibilityPreview {
   confirmationId: string;
@@ -98,6 +107,7 @@ export interface SessionVisibilityPreview {
   schema: {
     status: string;
     database: string;
+    variant: string;
   };
   indexPlan: {
     appServerCoordination: number;
@@ -114,6 +124,8 @@ export interface SessionVisibilityPreview {
     active: number;
     archived: number;
   };
+  readiness: VisibilityExecutionReadiness;
+  consumerState: VisibilityConsumerState;
   canExecute: boolean;
   blockers: string[];
   reasons: Array<{ code: string; count: number }>;
@@ -135,6 +147,10 @@ export interface SessionVisibilityExecutionResult {
     schemaSkipped: number;
     verificationFailed: number;
   };
+  schemaVariant: string;
+  consumerState: VisibilityConsumerState;
+  writesStarted: boolean;
+  recoveryRequired: boolean;
   blockCodexRestart: boolean;
   messageId: string;
   diagnosticStage: string;
@@ -204,6 +220,10 @@ export function executeSessionVisibility(
         schemaSkipped: 0,
         verificationFailed: 0,
       },
+      schemaVariant: "codex_0_150_1",
+      consumerState: "none",
+      writesStarted: true,
+      recoveryRequired: true,
       blockCodexRestart: false,
       messageId: "session_visibility.repair_partial",
       diagnosticStage: "rollout_replace",
@@ -284,7 +304,7 @@ const previewVisibility: SessionVisibilityPreview = {
   },
   codexVersion: "codex-cli 0.150.1",
   appServer: "available",
-  schema: { status: "supported", database: "state_5.sqlite" },
+  schema: { status: "supported", database: "state_5.sqlite", variant: "codex_0_150_1" },
   indexPlan: {
     appServerCoordination: 1,
     sqliteFallbackEligible: 1,
@@ -300,6 +320,8 @@ const previewVisibility: SessionVisibilityPreview = {
     active: 3,
     archived: 2,
   },
+  readiness: "ready",
+  consumerState: "none",
   canExecute: true,
   blockers: [],
   reasons: [

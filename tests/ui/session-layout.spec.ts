@@ -1,5 +1,33 @@
 import { expect, test } from "@playwright/test";
 
+async function expectVisibleChildrenNotToOverlap(
+  container: import("@playwright/test").Locator,
+  selector: string,
+) {
+  const boxes = await container.locator(selector).evaluateAll((elements) => elements
+    .filter((element) => {
+      const style = window.getComputedStyle(element);
+      return style.display !== "none" && style.visibility !== "hidden";
+    })
+    .map((element) => {
+      const bounds = element.getBoundingClientRect();
+      return { left: bounds.left, top: bounds.top, right: bounds.right, bottom: bounds.bottom };
+    }));
+  for (let left = 0; left < boxes.length; left += 1) {
+    for (let right = left + 1; right < boxes.length; right += 1) {
+      const a = boxes[left];
+      const b = boxes[right];
+      expect(
+        a.left < b.right - 0.5
+          && a.right > b.left + 0.5
+          && a.top < b.bottom - 0.5
+          && a.bottom > b.top + 0.5,
+        `元素 ${left} 与 ${right} 不应重叠`,
+      ).toBe(false);
+    }
+  }
+}
+
 test("完整会话列表不会把侧栏设置区推离视口", async ({ page }) => {
   await page.setViewportSize({ width: 1120, height: 520 });
   await page.goto("/");
@@ -117,12 +145,23 @@ for (const viewport of [{ width: 680, height: 520 }, { width: 1120, height: 800 
     const toolbar = page.getByRole("region", { name: "会话列表工具栏" });
     const repair = toolbar.getByRole("button", { name: "修复会话" });
     await expect(repair).toBeVisible();
+    await expect(repair).toHaveClass(/secondary-button/);
+    await expect(repair).not.toHaveClass(/command-button/);
+    await expect(repair.locator("svg")).toHaveClass(/is-blue/);
+    await expectVisibleChildrenNotToOverlap(toolbar, "[role='tab'], .session-list-actions > button");
     await repair.click();
 
     const dialog = page.getByRole("dialog", { name: "会话可见性检查" });
     await expect(dialog).toBeVisible();
     await expect(dialog.getByText("含加密内容的会话可以修复可见性", { exact: false })).toBeVisible();
     await expect(dialog.getByText("当前检查未发现执行阻断", { exact: false })).toBeVisible();
+    const confirm = dialog.getByRole("button", { name: "确认开始修复" });
+    await expect(confirm).toBeEnabled();
+    await expect(confirm).toHaveClass(/command-button/);
+    await expectVisibleChildrenNotToOverlap(
+      dialog,
+      ":scope > header, :scope > dl, :scope > p, :scope > .session-visibility-reasons, :scope > footer",
+    );
     const bounds = await dialog.boundingBox();
     expect(bounds).not.toBeNull();
     expect(bounds!.x).toBeGreaterThanOrEqual(0);

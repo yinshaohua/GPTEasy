@@ -55,8 +55,13 @@ type VisibilityPreviewState =
   | { kind: "scanning" }
   | { kind: "loaded"; preview: SessionVisibilityPreview }
   | { kind: "executing"; preview: SessionVisibilityPreview }
-  | { kind: "execution_error"; preview: SessionVisibilityPreview }
+  | { kind: "execution_error"; preview: SessionVisibilityPreview; failure: VisibilityExecutionFailure }
   | { kind: "error" };
+
+interface VisibilityExecutionFailure {
+  messageId: string;
+  stage: string;
+}
 
 interface SessionListCache {
   sessions: SessionSummary[];
@@ -481,8 +486,12 @@ export default function SessionPage({
       setVisibilityResult(result);
       setVisibilityPreview({ kind: "closed" });
       refreshList();
-    } catch {
-      setVisibilityPreview({ kind: "execution_error", preview });
+    } catch (failure) {
+      setVisibilityPreview({
+        kind: "execution_error",
+        preview,
+        failure: asVisibilityExecutionFailure(failure),
+      });
     }
   }
 
@@ -549,13 +558,7 @@ export default function SessionPage({
           role={visibilityResult.blockCodexRestart ? "alert" : "status"}
           aria-label={sessionMessages.visibility.resultLabel}
         >
-          {visibilityResult.blockCodexRestart
-            ? sessionMessages.visibility.indeterminate
-            : visibilityResult.messageId === "session_visibility.rescan_required"
-            ? sessionMessages.visibility.rescanRequired(visibilityResult.succeeded)
-            : visibilityResult.status === "complete"
-            ? sessionMessages.visibility.complete(visibilityResult.succeeded)
-            : sessionMessages.visibility.partial(visibilityResult.succeeded, visibilityResult.retryable)}
+          {visibilityExecutionResultMessage(visibilityResult)}
           {visibilityResult.encryptedContentRisk > 0 && ` ${sessionMessages.visibility.encryptedResult}`}
           {` ${sessionMessages.visibility.executionBreakdown(visibilityResult.breakdown)}`}
         </p>
@@ -705,7 +708,7 @@ function SessionListToolbar({
         >
           {previewBusy
             ? <LoaderCircle className="is-spinning" size={16} aria-hidden="true" />
-            : <Wrench size={16} aria-hidden="true" />}
+            : <Wrench className="button-icon is-blue" size={16} aria-hidden="true" />}
           {sessionMessages.repairSessions}
         </button>
         <button
@@ -777,7 +780,9 @@ function VisibilityPreviewDialog({
           <p className="inline-error" role="alert">{sessionMessages.visibility.scanFailed}</p>
         )}
         {state.kind === "execution_error" && (
-          <p className="inline-error" role="alert">{sessionMessages.visibility.executeFailed}</p>
+          <p className="inline-error" role="alert">
+            {visibilityExecutionFailureMessage(state.failure)}
+          </p>
         )}
         {preview && (
           <>
@@ -826,9 +831,7 @@ function VisibilityPreviewDialog({
               </p>
             )}
             <p className={preview.canExecute ? "session-visibility-ready" : "session-visibility-blocker"}>
-              {preview.canExecute
-                ? sessionMessages.visibility.executable
-                : sessionMessages.visibility.blocked}
+              {sessionMessages.visibility.readiness[preview.readiness]}
             </p>
             {visibilityReasons(preview).length > 0 && (
               <div className="session-visibility-reasons">
@@ -843,12 +846,12 @@ function VisibilityPreviewDialog({
                 </ul>
               </div>
             )}
-            {preview.canExecute && preview.summary.candidates > 0 && (
+            {preview.summary.candidates > 0 && (
               <footer className="session-visibility-actions">
                 <button
-                  className="primary-button"
+                  className="command-button"
                   type="button"
-                  disabled={executing}
+                  disabled={executing || !preview.canExecute}
                   onClick={() => onExecute(preview)}
                 >
                   {executing ? (
@@ -883,6 +886,62 @@ function visibilityReasons(preview: SessionVisibilityPreview): Array<{ code: str
     if (!reasons.has(blocker)) reasons.set(blocker, { code: blocker, count: 1 });
   }
   return [...reasons.values()];
+}
+
+function asVisibilityExecutionFailure(value: unknown): VisibilityExecutionFailure {
+  if (!value || typeof value !== "object") {
+    return { messageId: "session_visibility.unknown", stage: "unknown" };
+  }
+  const failure = value as Record<string, unknown>;
+  return {
+    messageId: typeof failure.messageId === "string"
+      ? failure.messageId
+      : "session_visibility.unknown",
+    stage: typeof failure.stage === "string" ? failure.stage : "unknown",
+  };
+}
+
+function visibilityExecutionFailureMessage(failure: VisibilityExecutionFailure): string {
+  switch (failure.messageId) {
+    case "session_visibility.cli_running":
+      return sessionMessages.visibility.executionFailure.cliRunning;
+    case "session_visibility.consumer_unknown":
+      return sessionMessages.visibility.executionFailure.unknownConsumer;
+    case "session_visibility.desktop_running":
+      return sessionMessages.visibility.executionFailure.desktopRunning;
+    case "session_visibility.rescan_required":
+      return ["target_snapshot", "target_recheck", "post_shutdown_target_recheck"]
+        .includes(failure.stage)
+        ? sessionMessages.visibility.executionFailure.targetChanged
+        : sessionMessages.visibility.executionFailure.candidateChanged;
+    case "session_visibility.app_server_verification_failed":
+      return sessionMessages.visibility.executionFailure.appServerUnavailable;
+    default:
+      return sessionMessages.visibility.executeFailed;
+  }
+}
+
+function visibilityExecutionResultMessage(result: SessionVisibilityExecutionResult): string {
+  if (result.blockCodexRestart || result.status === "indeterminate") {
+    return sessionMessages.visibility.indeterminate;
+  }
+  if (
+    result.writesStarted
+    && (result.errorCode === "session_visibility.app_server_verification_failed"
+      || result.breakdown.verificationFailed > 0)
+  ) {
+    return sessionMessages.visibility.postWriteVerificationFailed(result.succeeded, result.retryable);
+  }
+  if (result.messageId === "session_visibility.rescan_required") {
+    return sessionMessages.visibility.rescanRequired(result.succeeded);
+  }
+  if (result.status === "complete") {
+    return sessionMessages.visibility.complete(result.succeeded);
+  }
+  if (result.status === "failed") {
+    return sessionMessages.visibility.failed(result.retryable);
+  }
+  return sessionMessages.visibility.partial(result.succeeded, result.retryable);
 }
 
 function SessionList({

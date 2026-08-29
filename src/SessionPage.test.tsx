@@ -74,6 +74,10 @@ describe("会话管理页面", () => {
         schemaSkipped: 0,
         verificationFailed: 0,
       },
+      schemaVariant: "codex_0_150_1",
+      consumerState: "none",
+      writesStarted: true,
+      recoveryRequired: false,
       blockCodexRestart: false,
       messageId: "session_visibility.repair_complete",
       diagnosticStage: "verify",
@@ -103,7 +107,7 @@ describe("会话管理页面", () => {
       },
       codexVersion: "codex-cli 0.150.1",
       appServer: "available",
-      schema: { status: "supported", database: "state_5.sqlite" },
+      schema: { status: "supported", database: "state_5.sqlite", variant: "codex_0_150_1" },
       indexPlan: {
         appServerCoordination: 1,
         sqliteFallbackEligible: 1,
@@ -119,6 +123,8 @@ describe("会话管理页面", () => {
         active: 6,
         archived: 3,
       },
+      readiness: "configuration_blocked",
+      consumerState: "none",
       canExecute: false,
       blockers: ["managed_conflict"],
       reasons: [
@@ -201,7 +207,10 @@ describe("会话管理页面", () => {
     render(<SessionPage onOpenProviders={() => undefined} />);
 
     const toolbar = await screen.findByRole("region", { name: "会话列表工具栏" });
-    expect(within(toolbar).getByRole("button", { name: "修复会话" })).toBeInTheDocument();
+    const repairButton = within(toolbar).getByRole("button", { name: "修复会话" });
+    expect(repairButton).toHaveClass("secondary-button");
+    expect(repairButton).not.toHaveClass("command-button");
+    expect(repairButton.querySelector("svg")).toHaveClass("is-blue");
     fireEvent.click(within(toolbar).getByRole("tab", { name: "已归档" }));
     await waitFor(() => expect(sessionContract.listSessions).toHaveBeenCalledTimes(2));
     fireEvent.click(within(toolbar).getByRole("button", { name: "修复会话" }));
@@ -242,7 +251,7 @@ describe("会话管理页面", () => {
       },
       codexVersion: null,
       appServer: "unavailable",
-      schema: { status: "supported", database: "state_5.sqlite" },
+      schema: { status: "supported", database: "state_5.sqlite", variant: "codex_0_150_1" },
       indexPlan: {
         appServerCoordination: 0,
         sqliteFallbackEligible: 0,
@@ -258,6 +267,8 @@ describe("会话管理页面", () => {
         active: 1,
         archived: 0,
       },
+      readiness: "app_server_unavailable",
+      consumerState: "none",
       canExecute: false,
       blockers: ["app_server_unavailable"],
       reasons: [{ code: "app_server_unavailable", count: 1 }],
@@ -280,7 +291,7 @@ describe("会话管理页面", () => {
       },
       codexVersion: "codex-cli 0.151.0",
       appServer: "available",
-      schema: { status: "unknown", database: "state_5.sqlite" },
+      schema: { status: "unknown", database: "state_5.sqlite", variant: "unknown" },
       indexPlan: {
         appServerCoordination: 0,
         sqliteFallbackEligible: 0,
@@ -296,6 +307,8 @@ describe("会话管理页面", () => {
         active: 1,
         archived: 1,
       },
+      readiness: "index_schema_unsupported",
+      consumerState: "none",
       canExecute: false,
       blockers: ["unsupported_index_schema"],
       reasons: [{ code: "unsupported_index_schema", count: 1 }],
@@ -307,7 +320,95 @@ describe("会话管理页面", () => {
     expect(await screen.findByText("未知 schema 跳过")).toHaveTextContent("未知 schema 跳过");
     expect(screen.getByText("未知 schema 跳过").nextSibling).toHaveTextContent("2");
     expect(screen.getByText("Codex 索引 schema 未受支持")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "确认修复" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "确认开始修复" })).not.toBeInTheDocument();
+  });
+
+  it("扫描发现 CLI 时说明关闭后重扫并禁用确认", async () => {
+    sessionContract.previewSessionVisibility.mockResolvedValue({
+      confirmationId: "confirmation-cli-preview",
+      target: {
+        mode: "provider",
+        modelProvider: "private-provider-id",
+        environmentRevision: "private-revision",
+      },
+      codexVersion: "codex-cli 0.150.1",
+      appServer: "available",
+      schema: { status: "supported", database: "state_5.sqlite", variant: "codex_0_150_1" },
+      indexPlan: {
+        appServerCoordination: 0,
+        sqliteFallbackEligible: 0,
+        schemaSkipped: 0,
+      },
+      summary: {
+        candidates: 42,
+        unchanged: 71,
+        missingIndex: 0,
+        skipped: 118,
+        blocked: 42,
+        encryptedContentRisk: 38,
+        active: 231,
+        archived: 0,
+      },
+      readiness: "cli_running",
+      consumerState: "cli_running",
+      canExecute: false,
+      blockers: ["cli_running"],
+      reasons: [{ code: "provider_mismatch", count: 42 }],
+    });
+    render(<SessionPage onOpenProviders={() => undefined} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "修复会话" }));
+
+    expect(await screen.findByText("可检查，关闭 Codex CLI 后才能执行修复。")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "确认开始修复" })).toBeDisabled();
+    expect(sessionContract.executeSessionVisibility).not.toHaveBeenCalled();
+  });
+
+  it("执行前复查发现 CLI 后明确说明零写入并要求重新扫描", async () => {
+    sessionContract.previewSessionVisibility.mockResolvedValue({
+      confirmationId: "confirmation-cli-race",
+      target: {
+        mode: "provider",
+        modelProvider: "private-provider-id",
+        environmentRevision: "private-revision",
+      },
+      codexVersion: "codex-cli 0.150.1",
+      appServer: "available",
+      schema: { status: "supported", database: "state_5.sqlite", variant: "codex_0_150_1" },
+      indexPlan: {
+        appServerCoordination: 0,
+        sqliteFallbackEligible: 0,
+        schemaSkipped: 0,
+      },
+      summary: {
+        candidates: 1,
+        unchanged: 0,
+        missingIndex: 0,
+        skipped: 0,
+        blocked: 0,
+        encryptedContentRisk: 0,
+        active: 1,
+        archived: 0,
+      },
+      readiness: "ready",
+      consumerState: "none",
+      canExecute: true,
+      blockers: [],
+      reasons: [{ code: "provider_mismatch", count: 1 }],
+    });
+    sessionContract.executeSessionVisibility.mockRejectedValue({
+      messageId: "session_visibility.cli_running",
+      stage: "consumer_preflight",
+    });
+    render(<SessionPage onOpenProviders={() => undefined} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "修复会话" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认开始修复" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "检测到 Codex CLI，未修改会话；关闭后重新扫描",
+    );
+    expect(screen.queryByText("无法执行会话可见性修复。请重新扫描后重试。")).not.toBeInTheDocument();
   });
 
   it("再次确认后执行修复，完整成功关闭对话框且部分成功保留非阻塞待重试状态", async () => {
@@ -320,7 +421,7 @@ describe("会话管理页面", () => {
       },
       codexVersion: "codex-cli 0.150.1",
       appServer: "available",
-      schema: { status: "supported", database: "state_5.sqlite" },
+      schema: { status: "supported", database: "state_5.sqlite", variant: "codex_0_150_1" },
       indexPlan: {
         appServerCoordination: 0,
         sqliteFallbackEligible: 0,
@@ -336,6 +437,8 @@ describe("会话管理页面", () => {
         active: 2,
         archived: 0,
       },
+      readiness: "ready",
+      consumerState: "none",
       canExecute: true,
       blockers: [],
       reasons: [{ code: "provider_mismatch", count: 1 }],
@@ -343,7 +446,7 @@ describe("会话管理页面", () => {
     render(<SessionPage onOpenProviders={() => undefined} />);
 
     fireEvent.click(await screen.findByRole("button", { name: "修复会话" }));
-    fireEvent.click(await screen.findByRole("button", { name: "确认修复" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认开始修复" }));
 
     await waitFor(() => expect(sessionContract.executeSessionVisibility).toHaveBeenCalledWith({
       confirmationId: "confirmation-executable",
@@ -370,16 +473,20 @@ describe("会话管理页面", () => {
         schemaSkipped: 0,
         verificationFailed: 1,
       },
+      schemaVariant: "codex_0_150_1",
+      consumerState: "none",
+      writesStarted: true,
+      recoveryRequired: true,
       blockCodexRestart: false,
       messageId: "session_visibility.repair_partial",
       diagnosticStage: "rollout_replace",
-      errorCode: "session_visibility.write_failed",
+      errorCode: "session_visibility.app_server_verification_failed",
     });
     fireEvent.click(screen.getByRole("button", { name: "修复会话" }));
-    fireEvent.click(await screen.findByRole("button", { name: "确认修复" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认开始修复" }));
 
     expect(await screen.findByRole("status", { name: "会话可见性修复结果" })).toHaveTextContent(
-      "已修复 1 个，2 个待重试",
+      "会话写入后验证失败；已验证 1 个，2 个待重试",
     );
     expect(screen.getByRole("status", { name: "会话可见性修复结果" })).toHaveTextContent("续聊或压缩风险");
     expect(screen.getByRole("status", { name: "会话可见性修复结果" })).toHaveTextContent(
@@ -397,13 +504,17 @@ describe("会话管理页面", () => {
         schemaSkipped: 0,
         verificationFailed: 0,
       },
+      schemaVariant: "unknown",
+      consumerState: "unknown",
+      writesStarted: true,
+      recoveryRequired: true,
       blockCodexRestart: true,
       messageId: "session_visibility.recovery_indeterminate",
       diagnosticStage: "recovery",
       errorCode: "session_visibility.recovery_indeterminate",
     });
     fireEvent.click(screen.getByRole("button", { name: "修复会话" }));
-    fireEvent.click(await screen.findByRole("button", { name: "确认修复" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认开始修复" }));
 
     expect(await screen.findByRole("alert", { name: "会话可见性修复结果" })).toHaveTextContent(
       "暂不要重启 Codex",

@@ -2466,7 +2466,7 @@ select:focus-visible {
   margin-top: 16px;
 }
 
-.session-visibility-actions .primary-button {
+.session-visibility-actions .command-button {
   display: inline-flex;
   align-items: center;
   gap: 7px;

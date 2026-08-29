@@ -1234,12 +1234,12 @@ export default function ProviderPage({
                 {providerMessages.forceSetProvider}
               </button>
               <button
-                className="command-button compact catalog-heading-button"
+                className="secondary-button compact catalog-heading-button"
                 type="button"
                 onClick={() => resetEditor("detail")}
                 disabled={busy}
               >
-                <Plus size={16} aria-hidden="true" />
+                <Plus className="button-icon is-green" size={16} aria-hidden="true" />
                 {providerMessages.newProvider}
               </button>
             </div>
@@ -1267,8 +1267,8 @@ export default function ProviderPage({
                   <span className="provider-row-model">尚未选择</span>
                 </div>
                 <div className="provider-row-actions">
-                  <button className="command-button compact" type="button" onClick={configureDayway} disabled={busy} aria-label={providerMessages.configureDayway}>
-                    <Pencil size={16} aria-hidden="true" />
+                  <button className="secondary-button compact" type="button" onClick={configureDayway} disabled={busy} aria-label={providerMessages.configureDayway}>
+                    <Pencil className="button-icon is-orange" size={16} aria-hidden="true" />
                     配置
                   </button>
                 </div>

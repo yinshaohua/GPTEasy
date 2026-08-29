@@ -1177,6 +1177,7 @@ async fn coordinate_pending_session_visibility(
                 target,
                 codex_version,
                 app_server,
+                consumer_state: consumer,
                 execution_blockers: Vec::new(),
             },
             &runtime,
@@ -1242,10 +1243,18 @@ fn log_visibility_pending_recorded(store: &IssueLogStore) {
 fn log_visibility_coordination(store: &IssueLogStore, outcome: &VisibilityCoordinationOutcome) {
     let details = outcome.execution.as_ref().map_or_else(
         || {
+            let consumer_state = match outcome.error_code.as_str() {
+                "session_visibility.cli_running" => "cli_running",
+                "session_visibility.desktop_running" => "desktop_running",
+                "session_visibility.consumer_unknown" => "unknown",
+                _ => "none",
+            };
             format!(
                 "stage=consumer_recheck; status={}; succeeded=0; retryable=0; \
-                 block_codex_restart={}; error_codes={}",
+                 verification_failed=0; schema_variant=unknown; consumer_state={consumer_state}; \
+                 writes_started=false; recovery_required={}; block_codex_restart={}; error_code={}",
                 outcome.status.as_str(),
+                outcome.block_codex_restart,
                 outcome.block_codex_restart,
                 outcome.error_code
             )
@@ -1384,6 +1393,7 @@ pub(crate) async fn preview_session_visibility(
         }
     };
     let visibility = state.visibility.clone();
+    let consumer_state = scan_visibility_consumers(&state.application, true);
     let scan_context = VisibilityScanContext {
         target: VisibilityTarget {
             mode,
@@ -1392,6 +1402,7 @@ pub(crate) async fn preview_session_visibility(
         },
         codex_version,
         app_server,
+        consumer_state,
         execution_blockers,
     };
     let scan = tokio::task::spawn_blocking(move || visibility.scan(scan_context))
@@ -1495,23 +1506,7 @@ impl VisibilityExecutionRuntime for CommandVisibilityRuntime<'_> {
     }
 
     fn consumers(&self, exclude_owned_app_server: bool) -> VisibilityConsumerState {
-        let scanner = WindowsConsumerScanner::new();
-        let exclusion = exclude_owned_app_server
-            .then(|| self.session.owned_consumer_exclusion())
-            .flatten();
-        let scan = exclusion
-            .as_ref()
-            .map(|exclusion| scanner.scan_excluding(std::slice::from_ref(exclusion)))
-            .unwrap_or_else(|| scanner.scan());
-        if scan.desktop == ConsumerStatus::Unknown || scan.cli == ConsumerStatus::Unknown {
-            VisibilityConsumerState::Unknown
-        } else if scan.cli == ConsumerStatus::Running {
-            VisibilityConsumerState::CliRunning
-        } else if scan.desktop == ConsumerStatus::Running {
-            VisibilityConsumerState::DesktopRunning
-        } else {
-            VisibilityConsumerState::NoConsumers
-        }
+        scan_visibility_consumers(self.session, exclude_owned_app_server)
     }
 
     fn verification_views<'a>(
@@ -1527,6 +1522,29 @@ impl VisibilityExecutionRuntime for CommandVisibilityRuntime<'_> {
                 target_provider,
             })
         })
+    }
+}
+
+fn scan_visibility_consumers(
+    session: &SessionApplication,
+    exclude_owned_app_server: bool,
+) -> VisibilityConsumerState {
+    let scanner = WindowsConsumerScanner::new();
+    let exclusion = exclude_owned_app_server
+        .then(|| session.owned_consumer_exclusion())
+        .flatten();
+    let scan = exclusion
+        .as_ref()
+        .map(|exclusion| scanner.scan_excluding(std::slice::from_ref(exclusion)))
+        .unwrap_or_else(|| scanner.scan());
+    if scan.desktop == ConsumerStatus::Unknown || scan.cli == ConsumerStatus::Unknown {
+        VisibilityConsumerState::Unknown
+    } else if scan.cli == ConsumerStatus::Running {
+        VisibilityConsumerState::CliRunning
+    } else if scan.desktop == ConsumerStatus::Running {
+        VisibilityConsumerState::DesktopRunning
+    } else {
+        VisibilityConsumerState::NoConsumers
     }
 }
 
@@ -1589,11 +1607,8 @@ pub(crate) async fn execute_session_visibility(
         session: &state.application,
         environment: &environment.application,
     };
-    let result = finish_command(
-        &logs.store,
-        "session_visibility.execute",
-        state.visibility.execute_pending(request, &runtime).await,
-    );
+    let index_hash_before = state.visibility.diagnostic_index_hash();
+    let result = state.visibility.execute_pending(request, &runtime).await;
     match &result {
         Ok(result) => {
             log_session_visibility_execution_result(&logs.store, result);
@@ -1606,10 +1621,59 @@ pub(crate) async fn execute_session_visibility(
                     .show();
             }
         }
-        Err(_) => {}
+        Err(failure) => log_session_visibility_execution_failure(
+            &logs.store,
+            &state.visibility,
+            failure,
+            index_hash_before.as_deref(),
+            runtime.consumers(true),
+        ),
     }
     emit_session_visibility_status(&app, &state.visibility, &logs.store);
     result
+}
+
+fn log_session_visibility_execution_failure(
+    store: &IssueLogStore,
+    visibility: &SessionVisibilityApplication,
+    failure: &VisibilityFailure,
+    index_hash_before: Option<&str>,
+    observed_consumer: VisibilityConsumerState,
+) {
+    let (manifest_writes_started, recovery_required, retryable) =
+        visibility.diagnostic_recovery_evidence();
+    let index_changed = visibility.diagnostic_index_hash().as_deref() != index_hash_before;
+    let definitely_before_write = matches!(
+        failure.stage,
+        "pending_state"
+            | "scan"
+            | "storage_capability_recheck"
+            | "confirmation_recheck"
+            | "target_snapshot"
+            | "target_recheck"
+            | "consumer_preflight"
+    );
+    let consumer = match failure.message_id {
+        "session_visibility.cli_running" => VisibilityConsumerState::CliRunning,
+        "session_visibility.desktop_running" => VisibilityConsumerState::DesktopRunning,
+        "session_visibility.consumer_unknown" => VisibilityConsumerState::Unknown,
+        _ => observed_consumer,
+    };
+    store.append(
+        IssueLogLevel::Error,
+        "session_visibility.execute",
+        failure.message_id,
+        Some(format!(
+            "stage={}; status=failed; error_code={}; succeeded=0; retryable={retryable}; \
+             verification_failed=0; schema_variant={}; consumer_state={}; writes_started={}; \
+             recovery_required={recovery_required}",
+            failure.stage,
+            failure.message_id,
+            visibility.diagnostic_schema_variant(),
+            consumer.diagnostic_name(),
+            !definitely_before_write && (manifest_writes_started || index_changed),
+        )),
+    );
 }
 
 fn log_session_visibility_execution_result(
@@ -2968,11 +3032,12 @@ mod tests {
         UpdateInstallFailureCategory, UpdateSnapshot, UpdateState, WslReclaimAuditPhase,
         audit_provider_revalidation_result, ensure_coordination_allows_restart,
         ensure_session_visibility_restart_allowed, finish_command,
-        finish_command_with_desktop_restart, log_session_visibility_execution_result,
-        log_session_visibility_preview, log_update_check_failure, log_update_install_failure,
-        log_visibility_coordination, log_visibility_coordination_failure,
-        log_visibility_pending_recorded, log_visibility_status_event_failure,
-        log_wsl_reclaim_phase, record_mode_switch_pending_visibility, wsl_inventory_details,
+        finish_command_with_desktop_restart, log_session_visibility_execution_failure,
+        log_session_visibility_execution_result, log_session_visibility_preview,
+        log_update_check_failure, log_update_install_failure, log_visibility_coordination,
+        log_visibility_coordination_failure, log_visibility_pending_recorded,
+        log_visibility_status_event_failure, log_wsl_reclaim_phase,
+        record_mode_switch_pending_visibility, wsl_inventory_details,
     };
     use crate::codex::{LoginInspection, LoginMethod, LoginStatus};
     use crate::consumer::{
@@ -2982,9 +3047,10 @@ mod tests {
     use crate::environment::{AuthenticationMode, EnvironmentApplication, OpenAiLoginProbe};
     use crate::session_visibility::{
         SessionVisibilityApplication, SessionVisibilityPreview, VisibilityAppServerCapability,
-        VisibilityCoordinationOutcome, VisibilityCoordinationStatus, VisibilityExecutionBreakdown,
-        VisibilityExecutionResult, VisibilityFailure, VisibilityIndexPlan, VisibilityReason,
-        VisibilitySchemaCapability, VisibilitySummary, VisibilityTarget, VisibilityTargetMode,
+        VisibilityConsumerState, VisibilityCoordinationOutcome, VisibilityCoordinationStatus,
+        VisibilityExecutionBreakdown, VisibilityExecutionReadiness, VisibilityExecutionResult,
+        VisibilityFailure, VisibilityIndexPlan, VisibilityReason, VisibilitySchemaCapability,
+        VisibilitySummary, VisibilityTarget, VisibilityTargetMode,
     };
     use crate::state::{PendingSessionVisibilityTargetMode, StatePaths, StateStore};
     use crate::wsl::{
@@ -3070,6 +3136,8 @@ mod tests {
                 active: 6,
                 archived: 3,
             },
+            readiness: VisibilityExecutionReadiness::AppServerUnavailable,
+            consumer_state: VisibilityConsumerState::NoConsumers,
             can_execute: false,
             blockers: vec!["app_server_unavailable".to_owned()],
             reasons: vec![VisibilityReason {
@@ -3092,7 +3160,10 @@ mod tests {
             "stage=scan",
             "target_mode=provider",
             "codex_version=codex-cli 0.150.1",
+            "readiness=app_server_unavailable",
+            "consumer_state=none",
             "schema=supported",
+            "schema_variant=legacy",
             "candidates=3",
             "unchanged=2",
             "missing_index=1",
@@ -3153,6 +3224,41 @@ mod tests {
     }
 
     #[test]
+    fn session_visibility_consumer_failure_log_states_that_no_write_or_recovery_started() {
+        let directory = tempdir().expect("issue log directory");
+        let store = IssueLogStore::new(directory.path());
+        let visibility = SessionVisibilityApplication::with_recovery_root(
+            directory.path().join("codex"),
+            directory.path(),
+        );
+        let failure = VisibilityFailure {
+            message_id: "session_visibility.cli_running",
+            stage: "consumer_preflight",
+        };
+
+        log_session_visibility_execution_failure(
+            &store,
+            &visibility,
+            &failure,
+            None,
+            VisibilityConsumerState::NoConsumers,
+        );
+
+        let records = store.list(
+            0,
+            Some(IssueLogLevel::Error),
+            Some("session_visibility.execute"),
+        );
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].details.as_deref(),
+            Some(
+                "stage=consumer_preflight; status=failed; error_code=session_visibility.cli_running; succeeded=0; retryable=0; verification_failed=0; schema_variant=missing; consumer_state=cli_running; writes_started=false; recovery_required=false"
+            )
+        );
+    }
+
+    #[test]
     fn session_visibility_partial_result_log_persists_redacted_stage_and_error_code() {
         let directory = tempdir().expect("issue log directory");
         let store = IssueLogStore::new(directory.path());
@@ -3167,6 +3273,10 @@ mod tests {
                 schema_skipped: 0,
                 verification_failed: 1,
             },
+            schema_variant: "codex_0_150_1".to_owned(),
+            consumer_state: VisibilityConsumerState::NoConsumers,
+            writes_started: true,
+            recovery_required: true,
             block_codex_restart: false,
             message_id: "session_visibility.repair_partial",
             diagnostic_stage: "rollout_replace",
@@ -3185,7 +3295,7 @@ mod tests {
         assert_eq!(
             records[0].details.as_deref(),
             Some(
-                "stage=rollout_replace; status=partial; succeeded=1; retryable=2; encrypted_content_risk=1; index_app_server_coordinated=1; index_sqlite_fallback=1; index_schema_skipped=0; verification_failed=1; block_codex_restart=false; error_codes=session_visibility.write_failed"
+                "stage=rollout_replace; status=partial; succeeded=1; retryable=2; encrypted_content_risk=1; index_app_server_coordinated=1; index_sqlite_fallback=1; index_schema_skipped=0; verification_failed=1; schema_variant=codex_0_150_1; consumer_state=none; writes_started=true; recovery_required=true; block_codex_restart=false; error_code=session_visibility.write_failed"
             )
         );
     }
@@ -3339,6 +3449,10 @@ mod tests {
                         schema_skipped: 0,
                         verification_failed: 0,
                     },
+                    schema_variant: "codex_0_150_1".to_owned(),
+                    consumer_state: VisibilityConsumerState::NoConsumers,
+                    writes_started: true,
+                    recovery_required: false,
                     block_codex_restart: false,
                     message_id: "session_visibility.repair_complete",
                     diagnostic_stage: "verify",
@@ -3372,13 +3486,13 @@ mod tests {
         assert!(automatic.iter().any(|record| {
             record.details.as_deref()
                 == Some(
-                    "stage=verify; status=complete; succeeded=3; retryable=0; encrypted_content_risk=0; index_app_server_coordinated=1; index_sqlite_fallback=1; index_schema_skipped=0; verification_failed=0; block_codex_restart=false; error_codes=none",
+                    "stage=verify; status=complete; succeeded=3; retryable=0; encrypted_content_risk=0; index_app_server_coordinated=1; index_sqlite_fallback=1; index_schema_skipped=0; verification_failed=0; schema_variant=codex_0_150_1; consumer_state=none; writes_started=true; recovery_required=false; block_codex_restart=false; error_code=none",
                 )
         }));
         assert!(automatic.iter().any(|record| {
             record.details.as_deref()
                 == Some(
-                    "stage=consumer_recheck; status=deferred; succeeded=0; retryable=0; block_codex_restart=false; error_codes=session_visibility.cli_running",
+                    "stage=consumer_recheck; status=deferred; succeeded=0; retryable=0; verification_failed=0; schema_variant=unknown; consumer_state=cli_running; writes_started=false; recovery_required=false; block_codex_restart=false; error_code=session_visibility.cli_running",
                 )
         }));
         let status_events = store.list(
@@ -3742,6 +3856,7 @@ mod tests {
             "enter_session_management",
             "leave_session_management",
             "cancel_session_request",
+            "execute_session_visibility",
         ];
 
         for block in source.split("#[tauri::command]").skip(1) {
