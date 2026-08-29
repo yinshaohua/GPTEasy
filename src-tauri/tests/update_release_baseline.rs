@@ -149,7 +149,7 @@ fn create_trust_root_fixture() -> TempDir {
         ),
         (
             "scripts/sync-gitee-release.mjs",
-            "Authorization: `Bearer ${configuration.giteeToken}`\nnew FormData()\nnew URLSearchParams()\nnumericReleaseId()\ntarget_commitish: config.giteeBranch\n",
+            "Authorization: `Bearer ${configuration.giteeToken}`\nspawn(\"curl\", [\n\"--form\"\nnew URLSearchParams()\nnumericReleaseId()\ntarget_commitish: config.giteeBranch\n",
         ),
         (
             "scripts/setup-gitee-distribution.sh",

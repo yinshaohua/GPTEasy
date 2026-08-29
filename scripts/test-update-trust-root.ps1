@@ -112,8 +112,11 @@ if (-not $smoke.Contains('Authorization: Bearer $GITEE_TOKEN') -or
 if (-not $smoke.Contains('gitee-distribution.json')) {
     Add-TrustError 'Gitee smoke must consume the public distribution contract.'
 }
-if (-not $sync.Contains('new FormData') -or -not $sync.Contains('new URLSearchParams') -or -not $sync.Contains('numericReleaseId')) {
-    Add-TrustError 'Gitee sync must use numeric Release IDs, multipart attachments and form-data content writes.'
+if (-not $sync.Contains('spawn("curl"') -or
+    -not $sync.Contains('"--form"') -or
+    -not $sync.Contains('new URLSearchParams') -or
+    -not $sync.Contains('numericReleaseId')) {
+    Add-TrustError 'Gitee sync must use numeric Release IDs, curl multipart attachments and form-data content writes.'
 }
 if (-not $smoke.Contains('--range 0-0') -or -not $smoke.Contains('prerelease=true')) {
     Add-TrustError 'Gitee smoke must use a prerelease and anonymous Range download.'
