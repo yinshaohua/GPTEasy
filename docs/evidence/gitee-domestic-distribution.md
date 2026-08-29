@@ -47,7 +47,7 @@ GitHub Release `v1.4.1` 于 2026-08-29 14:32:34 UTC 发布。自动同步 [33257
 
 这组实验把失败条件收敛到 Gitee Release API 接收的 `.exe` 文件名；它不推断平台未公开的内部 WAF 或审查实现。正式分发因此保持 GitHub `.exe` 不变，只在 Gitee 为同一不可变字节使用 `.exe.bin`。应用更新器不依赖 URL 后缀，仍使用原 `.sig` 验证下载字节并写入临时 `.exe`；手工下载用户须删除末尾 `.bin`。
 
-正式恢复同步 [33266143156](https://github.com/yinshaohua/GPTEasy/actions/runs/33266143156) 首次把 `GPTEasy_1.4.1_x64-setup.exe.bin`、`GPTEasy_1.4.1_x64-setup.exe.sig` 和 `SHA256SUMS.txt` 全部写入 Gitee，并最后把 `latest.md` 推进到 1.4.1。完善 Release 下载提示和 README 同步后，[33266943845](https://github.com/yinshaohua/GPTEasy/actions/runs/33266943845) 对同一 Tag 幂等重跑通过；重跑还验证了 Gitee 既有附件枚举不提供附件 ID 时仍可使用数值 Release ID 和稳定附件 URL 完成校验。最终公开结果如下：
+正式恢复同步 [33266143156](https://github.com/yinshaohua/GPTEasy/actions/runs/33266143156) 首次把 `GPTEasy_1.4.1_x64-setup.exe.bin`、`GPTEasy_1.4.1_x64-setup.exe.sig` 和 `SHA256SUMS.txt` 全部写入 Gitee，并最后把 `latest.md` 推进到 1.4.1。完善 Release 下载提示和 README 同步后，[33266943845](https://github.com/yinshaohua/GPTEasy/actions/runs/33266943845) 对同一 Tag 幂等重跑通过；最终同步 [33267292642](https://github.com/yinshaohua/GPTEasy/actions/runs/33267292642) 又覆盖了 README 已一致时的不可变 Raw 校验。重跑同时证明，Gitee 既有附件枚举不提供附件 ID 时仍可使用数值 Release ID 和稳定附件 URL 完成校验。最终公开结果如下：
 
 - 无 Cookie、无 Token 的安装包 GET 返回 HTTP 200，大小 3,884,346 字节，SHA-256 为 `40c6b7f1dee993fa93c3eaaa8dbb1b633e91fd17cacffa3a538e161ec96ff6e2`，与 GitHub Release 一致；
 - `latest.md` 匿名 GET 返回 HTTP 200，`version` 为 `1.4.1`，安装包 URL 指向 `.exe.bin`；
@@ -56,4 +56,4 @@ GitHub Release `v1.4.1` 于 2026-08-29 14:32:34 UTC 发布。自动同步 [33257
 
 三个实验 Release 及清单均已按精确 ID/tag 清理：[33266705774](https://github.com/yinshaohua/GPTEasy/actions/runs/33266705774) 清理 `970815` / `smoke-33265385697-1`，[33266857109](https://github.com/yinshaohua/GPTEasy/actions/runs/33266857109) 清理 `970921` / `smoke-33265656678-1`，[33266706218](https://github.com/yinshaohua/GPTEasy/actions/runs/33266706218) 清理 `970997` / `smoke-33265862278-1`。无凭据复核三个 Release API 和三个 `smoke/*.md` Raw 地址均返回 HTTP 404。
 
-收尾过程中两次失败重跑也形成了新的回归边界：[33266705083](https://github.com/yinshaohua/GPTEasy/actions/runs/33266705083) 暴露 Gitee Raw 写后缓存，现使用 Contents API 返回的文件 SHA 作为匿名 Raw 缓存键；[33266857112](https://github.com/yinshaohua/GPTEasy/actions/runs/33266857112) 暴露既有附件没有附件 ID，现只要求协议实际需要的数值 Release ID。两项均已加入本地 HTTP adapter 回归测试。
+收尾过程中的失败重跑也形成了新的回归边界：[33266705083](https://github.com/yinshaohua/GPTEasy/actions/runs/33266705083) 暴露 Gitee Raw 写后缓存，[33267157559](https://github.com/yinshaohua/GPTEasy/actions/runs/33267157559) 进一步证明查询参数不能保证分支 Raw 后端立即推进；同步器现用 Contents API 的 Base64 内容判断是否需要写入，并以提交 SHA 的不可变匿名 Raw 地址完成最终核对。[33266857112](https://github.com/yinshaohua/GPTEasy/actions/runs/33266857112) 暴露既有附件没有附件 ID，现只要求协议实际需要的数值 Release ID。这些边界均已加入本地 HTTP adapter 回归测试。
