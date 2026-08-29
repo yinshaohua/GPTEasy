@@ -62,4 +62,19 @@ GitHub Release `v1.4.1` 于 2026-08-29 14:32:34 UTC 发布。自动同步 [33257
 
 维护者在 Gitee 网页中创建临时 Release `manual-exe-upload-20260830`，直接选择原始 `GPTEasy_1.4.1_x64-setup.exe` 后上传成功。公开 API 返回数值 `releaseId` `972559` 和稳定 `.exe` 下载 URL；无 Cookie、无 Token 的完整 GET 返回 HTTP 200，媒体类型为 `application/vnd.microsoft.portable-executable`，大小 3,884,346 字节，SHA-256 为 `40c6b7f1dee993fa93c3eaaa8dbb1b633e91fd17cacffa3a538e161ec96ff6e2`。这证明 Gitee 网页上传和公开下载支持 `.exe`，自动失败边界只适用于本次实测的 Release API 上传通道，不能表述为 Gitee 全平台拒绝 `.exe`。
 
-该临时 Release 创建时实际为 `prerelease=false`，曾使 `/releases/latest` 指向实验 Tag。维护者完成验证后删除 Release 和 Tag；匿名复核 Release API、Release 页面和 Tag API 均返回 HTTP 404，`/releases/latest` 已以 HTTP 302 恢复指向 `v1.4.1`。网页手工上传需要维护者逐次操作，不能满足无人值守正式同步，因此自动发布仍使用已验证的 `.exe.bin` 方案。
+该临时 Release 创建时实际为 `prerelease=false`，曾使 `/releases/latest` 指向实验 Tag。维护者完成验证后删除 Release 和 Tag；匿名复核 Release API、Release 页面和 Tag API 均返回 HTTP 404，`/releases/latest` 已以 HTTP 302 恢复指向 `v1.4.1`。网页手工上传需要维护者逐次操作，不能满足无人值守正式同步；该对照因此促成“网页上传标准 `.exe`、自动同步其它附件并完成最终验证”的两阶段发布协议。
+
+## 2026-08-30 v1.4.1 标准 EXE 最终迁移
+
+维护者在正式 Gitee `v1.4.1`（数值 `releaseId` `968231`）编辑页删除遗留 `.exe.bin` 和旧 `SHA256SUMS.txt`，保留原 `.sig`，并上传 GitHub Release 中的权威 `GPTEasy_1.4.1_x64-setup.exe`。上传后先以无 Cookie、无 Token 的完整 GET 独立验证 PE、大小和 SHA-256，再触发两阶段协议的自动收尾。
+
+GitHub Actions 工作流 [33269670373](https://github.com/yinshaohua/GPTEasy/actions/runs/33269670373) 在提交 `71424822de3f480a077acf572d0672d77902f4e6` 上通过。同步器复用并匿名校验网页上传的 `.exe` 与既有 `.sig`，自动补回引用标准文件名的 `SHA256SUMS.txt`，移除 Release 正文中的旧 `.exe.bin` 下载提示，并最后更新 `latest.md`。最终公开结果如下：
+
+- `GPTEasy_1.4.1_x64-setup.exe` 为 3,884,346 字节，SHA-256 `40c6b7f1dee993fa93c3eaaa8dbb1b633e91fd17cacffa3a538e161ec96ff6e2`，与 GitHub Release 一致；
+- `.sig` 为 416 字节，SHA-256 `b960779f71a28ed48b88097387ffd836cfb0a12cf6ba53dd1dcdb1d33b82a0b2`，与 GitHub Release 一致；
+- `SHA256SUMS.txt` 只引用标准 `.exe` 和 `.exe.sig` 文件名，不再包含 `.exe.bin`；
+- `latest.md` 匿名 GET 返回版本 `1.4.1`，`windows-x86_64.url` 指向标准 `.exe`，并记录相同大小、SHA-256 和 updater 签名；
+- `scripts/test-updater-manifest.ps1` 对公开清单通过，仓库内 `verify_updater_signature` 使用应用内置公钥对公开 `.exe` 与 `.sig` 验证返回 `passed`；
+- Gitee Release 正文已恢复为 GitHub 原始中文发布说明，Gitee Raw `README.md` 已说明用户可以直接下载和运行 `.exe`。
+
+这组结果验证了正式清单获取、安装包公开下载和 updater 签名链路。客户端仍按既有安全边界在下载验签后等待用户明确确认安装；本次未执行从旧版真实客户端点击“重启并更新”的可选深度 UAT，因此不把该交互记录为已通过。
