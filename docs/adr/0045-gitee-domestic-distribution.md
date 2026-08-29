@@ -8,7 +8,7 @@
 
 国内分发仓库固定为公开的 `ericshaohua/gpteasy-releases`，使用 `main` 分支、Gitee Release 和 `latest.json` 语义（因 Gitee Raw 兼容性，传输文件仍使用 `latest.md` 路径）。GitHub 仍是源码、Tag、构建产物和发布说明的唯一权威来源，Gitee 只复制已发布产物，不独立构建或镜像源码。
 
-同步器通过 Gitee 官方 Swagger 声明的 `https://gitee.com/api/v5` 按 Tag 查询 Release，并使用数值 Release ID 操作附件。附件通过 multipart/form-data 上传，内容写入使用 form-data；Token 只来自 GitHub Actions Secret `GITEE_TOKEN`，不进入 URL、清单或日志。附件完成匿名 Range/完整 GET、大小和 SHA-256 校验后，才最后写入清单。已存在同名附件内容不一致时立即失败；上传响应丢失时先重新枚举附件并校验，不盲目重复上传。
+同步器通过 Gitee 官方 Swagger 声明的 `https://gitee.com/api/v5` 按 Tag 查询 Release，并使用数值 Release ID 操作附件。附件通过 multipart/form-data 上传，内容写入使用 form-data；Token 只来自 GitHub Actions Secret `GITEE_TOKEN`，不进入 URL、清单或日志。Gitee API 会重置 `.exe` 附件上传连接，因此同一 PE 字节在 Gitee 使用不可变的 `.exe.bin` 附件名；客户端仍按原签名验证字节并写成临时 `.exe`。附件完成匿名 Range/完整 GET、大小和 SHA-256 校验后，才最后写入清单。已存在同名附件内容不一致时立即失败；上传响应丢失时先重新枚举附件并校验，不盲目重复上传。
 
 客户端只信任一个 Gitee Raw HTTPS 清单端点和现有 updater 公钥。更新失败时手工入口指向对应 Gitee Release；不实现 GitCode 或其它平台回退，也不轮换 updater 密钥。迁移不包含 #53 的 GitCode Contents API 回退。
 

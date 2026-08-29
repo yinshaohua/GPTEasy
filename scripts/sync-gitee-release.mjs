@@ -27,6 +27,7 @@ try {
     const bytes = await readFile(target);
     downloaded.push({
       name: asset.name,
+      distributionName: giteeAssetName(asset.name),
       path: target,
       bytes,
       size: bytes.length,
@@ -34,11 +35,12 @@ try {
     });
   }
 
-  const checksums = `${downloaded.map((asset) => `${asset.sha256}  ${asset.name}`).join("\n")}\n`;
+  const checksums = `${downloaded.map((asset) => `${asset.sha256}  ${asset.distributionName}`).join("\n")}\n`;
   const checksumPath = path.join(workspace, "SHA256SUMS.txt");
   await writeFile(checksumPath, checksums, "utf8");
   downloaded.push({
     name: "SHA256SUMS.txt",
+    distributionName: "SHA256SUMS.txt",
     path: checksumPath,
     bytes: Buffer.from(checksums),
     size: Buffer.byteLength(checksums),
@@ -48,16 +50,17 @@ try {
   const giteeRelease = await ensureGiteeRelease(release, configuration);
   const verifiedAssets = [];
   for (const asset of downloaded) {
-    const existing = findExistingAsset(giteeRelease, asset.name);
+    const existing = findExistingAsset(giteeRelease, asset.distributionName);
     let downloadUrl;
     if (existing) {
-      downloadUrl = stableAttachmentUrl(configuration, numericReleaseId(giteeRelease), existing, asset.name);
+      downloadUrl = stableAttachmentUrl(configuration, numericReleaseId(giteeRelease), existing, asset.distributionName);
       await verifyAnonymous(downloadUrl, asset);
     } else {
       const releaseId = numericReleaseId(giteeRelease);
-      const uploaded = await uploadAsset(releaseId, asset);
-      downloadUrl = stableAttachmentUrl(configuration, releaseId, uploaded, asset.name);
-      await verifyAnonymous(downloadUrl, asset);
+      const distributionAsset = { ...asset, name: asset.distributionName };
+      const uploaded = await uploadAsset(releaseId, distributionAsset);
+      downloadUrl = stableAttachmentUrl(configuration, releaseId, uploaded, asset.distributionName);
+      await verifyAnonymous(downloadUrl, distributionAsset);
     }
     verifiedAssets.push({ ...asset, downloadUrl });
   }
@@ -100,7 +103,13 @@ try {
     version: manifest.version,
     repository: configuration.giteeRepository,
     manifestPath,
-    assets: verifiedAssets.map(({ name, size, sha256, downloadUrl }) => ({ name, size, sha256, downloadUrl })),
+    assets: verifiedAssets.map(({ name, distributionName, size, sha256, downloadUrl }) => ({
+      sourceName: name,
+      name: distributionName,
+      size,
+      sha256,
+      downloadUrl,
+    })),
   })}\n`);
 } finally {
   await rm(workspace, { recursive: true, force: true });
@@ -309,6 +318,10 @@ function selectArtifacts(assets, version) {
     throw new Error(`Release assets must include ${expectedInstaller} and its .sig`);
   }
   return [installer, signature];
+}
+
+function giteeAssetName(name) {
+  return name.toLowerCase().endsWith(".exe") ? `${name}.bin` : name;
 }
 
 async function downloadGithubAsset(asset, target, token) {

@@ -8,7 +8,7 @@ GPTEasy 是一款面向 Windows 用户的 Codex 配置与会话管理工具。�
 
 ## 下载与安装
 
-国内用户可从 [Gitee Releases](https://gitee.com/ericshaohua/gpteasy-releases/releases) 下载最新的 Windows x64 当前用户安装包；[GitHub Releases](https://github.com/yinshaohua/GPTEasy/releases/latest) 继续提供源码、发布说明和备用下载。两个平台分发同一次正式构建的安装包，安装不需要管理员权限。
+国内用户可从 [Gitee Releases](https://gitee.com/ericshaohua/gpteasy-releases/releases) 下载最新的 Windows x64 当前用户安装包；Gitee 附件使用 `.exe.bin` 后缀，手工下载后须删除末尾 `.bin` 再运行。[GitHub Releases](https://github.com/yinshaohua/GPTEasy/releases/latest) 继续提供标准 `.exe` 文件名、源码、发布说明和备用下载。两个平台分发同一次正式构建的安装包，安装不需要管理员权限。
 
 `v1.1.0` 是首个内置应用更新信任根的更新自举版本，必须先手工下载安装。此后的正式更新由应用自动检查和下载，签名验证通过后仍需用户明确选择“重启并更新”。
 

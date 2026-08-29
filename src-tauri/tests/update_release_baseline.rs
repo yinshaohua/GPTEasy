@@ -149,7 +149,7 @@ fn create_trust_root_fixture() -> TempDir {
         ),
         (
             "scripts/sync-gitee-release.mjs",
-            "Authorization: `Bearer ${configuration.giteeToken}`\nspawn(\"curl\", [\n\"--form\"\n\"--http1.1\"\n\"Expect:\"\nattachment-reconcile\nnew URLSearchParams()\nnumericReleaseId()\ntarget_commitish: config.giteeBranch\n",
+            "Authorization: `Bearer ${configuration.giteeToken}`\nspawn(\"curl\", [\n\"--form\"\n\"--http1.1\"\n\"Expect:\"\nattachment-reconcile\n`${name}.bin`\nnew URLSearchParams()\nnumericReleaseId()\ntarget_commitish: config.giteeBranch\n",
         ),
         (
             "scripts/setup-gitee-distribution.sh",

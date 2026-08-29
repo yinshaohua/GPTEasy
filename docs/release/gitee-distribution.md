@@ -84,12 +84,14 @@ unset GITEE_TOKEN
 `.github/workflows/gitee-sync.yml` 由 GitHub Release `published` 事件触发，也允许维护者输入同一 Tag 人工重试。工作流只调用 `scripts/sync-gitee-release.mjs` 下载 Release 附件，不运行应用构建。同步器执行以下顺序：
 
 1. 拒绝草稿、预发布和非稳定 SemVer Release；读取当前正式清单以阻止版本降级，首次发布则验证分发仓库 README 的 Raw 可读性。同步器可用公开 Contents 元数据和官方 Raw blob 复核既有清单，但客户端更新端点始终只有一个稳定分支 Raw 地址；
-2. 下载 GitHub Release 中的 Windows x64 NSIS 安装包及其 `.sig`，计算大小和 SHA-256，并生成 `SHA256SUMS.txt`；
+2. 下载 GitHub Release 中的 Windows x64 NSIS 安装包及其 `.sig`，计算大小和 SHA-256；Gitee 上的 PE 附件名追加 `.bin`，并按实际附件名生成 `SHA256SUMS.txt`；
 3. 创建或复用同 Tag Gitee Release，正文直接采用 GitHub 中文发布说明；
-4. 已存在的同名附件必须经匿名下载证明大小和 SHA-256 相同，缺失附件才上传；上传使用官方 `https://gitee.com/api/v5`、HTTP/1.1、无 `Expect: 100-continue` 的 multipart 请求，并为 Gitee 的可执行附件审查保留五分钟单次响应预算；响应丢失时先重新枚举附件，确认未落盘才有限重试，认证、权限和其它确定性错误立即停止；同名内容冲突也立即停止；
+4. 已存在的同名附件必须经匿名下载证明大小和 SHA-256 相同，缺失附件才上传；上传使用官方 `https://gitee.com/api/v5`、HTTP/1.1、无 `Expect: 100-continue` 的 multipart 请求，并保留五分钟单次响应预算；响应丢失时先重新枚举附件，确认未落盘才有限重试，认证、权限和其它确定性错误立即停止；同名内容冲突也立即停止；
 5. 所有附件上传后再次匿名下载校验，最后才写入正式清单。
 
 正式清单只包含 `windows-x86_64`，签名字段保存 `.sig` 正文。任何附件、匿名下载或版本门禁失败都不会写入清单，也不会修改或删除 GitHub Release。GitHub Release 发布不等于发布流程完成；只有 `gitee-sync.yml` 成功，且公开 Gitee Release 的三个附件与 `latest.md` 均指向该版本后，才能记录国内分发完成。可控 HTTP adapter 测试通过 `npm run test:gitee-sync` 运行。
+
+Gitee 的安装包附件名为 `GPTEasy_<version>_x64-setup.exe.bin`。应用更新下载后按原 updater 签名验证完整 PE 字节，并固定写入临时 `.exe`，不依赖 URL 扩展名。手工下载用户须先去掉末尾 `.bin`，再按 `SHA256SUMS.txt` 校验并运行；GitHub 备用下载仍保留标准 `.exe` 文件名。
 
 ### 失败恢复
 

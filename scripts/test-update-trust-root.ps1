@@ -123,6 +123,7 @@ if (-not $sync.Contains('spawn("curl"') -or
     -not $sync.Contains('"--http1.1"') -or
     -not $sync.Contains('"Expect:"') -or
     -not $sync.Contains('attachment-reconcile') -or
+    -not $sync.Contains('`${name}.bin`') -or
     -not $sync.Contains('new URLSearchParams') -or
     -not $sync.Contains('numericReleaseId')) {
     Add-TrustError 'Gitee sync must use numeric Release IDs, deterministic curl multipart uploads, reconciliation, and form-data content writes.'

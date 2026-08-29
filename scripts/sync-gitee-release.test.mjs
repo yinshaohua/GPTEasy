@@ -7,6 +7,7 @@ import { test } from "node:test";
 
 const TAG = "v1.2.3";
 const INSTALLER = "GPTEasy_1.2.3_x64-setup.exe";
+const DISTRIBUTED_INSTALLER = `${INSTALLER}.bin`;
 const SIGNATURE = `${INSTALLER}.sig`;
 const INSTALLER_BYTES = Buffer.from("accepted-windows-installer");
 const SIGNATURE_TEXT = "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIG1pbmlzaWduIHNlY3JldCBrZXkKUlVRZjZMUkNHQTlpNTU5cjNnN1YxcU55SkRBcEdpcDhNZnFjYWRJZ1Q5Q3VoVjNFTWhIb04xbUdUa1VpZEYvejdTcmxRZ1hkeThvZmpiN2JOSkp5bERPb2NyQ284S0x6WndvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNTU2MTkzMzM1CWZpbGU6dGVzdAp5L3JVdzJ5OC9oT1VZalpVNzFlSHAvV28xS1o0MGZHeTJWSkVEbDM0WE1KTStUWDQ4U3MvMTd1M0l2SWZiVlIxRmtaWlNOQ2lzUWJ1UVkrYkh3aEVCZz09";
@@ -26,7 +27,8 @@ test("首次同步验证所有附件后最后推进正式清单", async () => {
     assert.equal(manifest.notes, "正式中文发布说明");
     assert.equal(manifest.pub_date, "2026-08-18T08:00:00Z");
     assert.equal(manifest.platforms["windows-x86_64"].signature, SIGNATURE_TEXT);
-    assert.match(manifest.platforms["windows-x86_64"].url, /\/releases\/download\/v1\.2\.3\/GPTEasy_1\.2\.3_x64-setup\.exe$/);
+    assert.match(manifest.platforms["windows-x86_64"].url, /\/releases\/download\/v1\.2\.3\/GPTEasy_1\.2\.3_x64-setup\.exe\.bin$/);
+    assert.equal(adapter.state.uploads.get(DISTRIBUTED_INSTALLER)?.equals(INSTALLER_BYTES), true);
     assert.ok(adapter.state.records.filter((record) => record.operation === "anonymous-download")
       .every((record) => record.authorization === undefined));
   } finally {
@@ -76,7 +78,7 @@ test("Release 正文中的字面量转义换行会规范化为 Markdown 换行",
 test("部分上传后重跑会复用匹配附件并补传缺失附件", async () => {
   const adapter = await startAdapter({
     releaseExists: true,
-    uploads: new Map([[INSTALLER, INSTALLER_BYTES]]),
+    uploads: new Map([[DISTRIBUTED_INSTALLER, INSTALLER_BYTES]]),
   });
   try {
     const result = await runSync(adapter.baseUrl);
@@ -89,12 +91,12 @@ test("部分上传后重跑会复用匹配附件并补传缺失附件", async ()
 });
 
 test("附件已落盘但上传响应丢失时重新枚举并继续同步", async () => {
-  const adapter = await startAdapter({ persistThenDropUploadResponse: INSTALLER });
+  const adapter = await startAdapter({ persistThenDropUploadResponse: DISTRIBUTED_INSTALLER });
   try {
     const result = await runSync(adapter.baseUrl);
     assert.equal(result.code, 0, result.stderr);
-    assert.equal(adapter.state.uploadAttempts.get(INSTALLER), 1);
-    assert.equal(adapter.state.uploads.get(INSTALLER)?.equals(INSTALLER_BYTES), true);
+    assert.equal(adapter.state.uploadAttempts.get(DISTRIBUTED_INSTALLER), 1);
+    assert.equal(adapter.state.uploads.get(DISTRIBUTED_INSTALLER)?.equals(INSTALLER_BYTES), true);
     assert.equal(adapter.state.manifests.length, 1);
     assert.match(result.stderr, /stage=attachment-reconcile status=found/);
   } finally {
@@ -122,13 +124,13 @@ test("已有 Release 正文变化时以表单编码更新数值 Release ID", asy
 
 test("Gitee 附件上传遇到瞬时 5xx 时有限重试后再推进清单", async () => {
   const adapter = await startAdapter({
-    transientUploadFailures: new Map([[INSTALLER, 2]]),
+    transientUploadFailures: new Map([[DISTRIBUTED_INSTALLER, 2]]),
   });
   try {
     const result = await runSync(adapter.baseUrl);
     assert.equal(result.code, 0, result.stderr);
-    assert.equal(adapter.state.uploadAttempts.get(INSTALLER), 3);
-    assert.equal(adapter.state.uploads.get(INSTALLER)?.equals(INSTALLER_BYTES), true);
+    assert.equal(adapter.state.uploadAttempts.get(DISTRIBUTED_INSTALLER), 3);
+    assert.equal(adapter.state.uploads.get(DISTRIBUTED_INSTALLER)?.equals(INSTALLER_BYTES), true);
     assert.equal(adapter.state.manifests.length, 1);
     assert.equal(adapter.state.records.at(-1).operation, "manifest-write");
     assert.match(result.stderr, /service=Gitee method=POST stage=attachment-upload status=HTTP-502 asset=.* attempt=1\/3/);
@@ -140,13 +142,13 @@ test("Gitee 附件上传遇到瞬时 5xx 时有限重试后再推进清单", asy
 
 test("Gitee 附件上传遇到 429 时有限重试后再推进清单", async () => {
   const adapter = await startAdapter({
-    transientUploadFailures: new Map([[INSTALLER, 1]]),
+    transientUploadFailures: new Map([[DISTRIBUTED_INSTALLER, 1]]),
     transientUploadStatus: 429,
   });
   try {
     const result = await runSync(adapter.baseUrl);
     assert.equal(result.code, 0, result.stderr);
-    assert.equal(adapter.state.uploadAttempts.get(INSTALLER), 2);
+    assert.equal(adapter.state.uploadAttempts.get(DISTRIBUTED_INSTALLER), 2);
     assert.equal(adapter.state.manifests.length, 1);
   } finally {
     await adapter.close();
@@ -208,7 +210,7 @@ test("Gitee 错误响应中的认证 Token 会被脱敏", async () => {
 test("同名附件内容冲突时停止且不推进正式清单", async () => {
   const adapter = await startAdapter({
     releaseExists: true,
-    uploads: new Map([[INSTALLER, Buffer.from("different-installer")]]),
+    uploads: new Map([[DISTRIBUTED_INSTALLER, Buffer.from("different-installer")]]),
   });
   try {
     const result = await runSync(adapter.baseUrl);
@@ -221,7 +223,7 @@ test("同名附件内容冲突时停止且不推进正式清单", async () => {
 });
 
 test("匿名附件下载失败时保持旧清单不变", async () => {
-  const adapter = await startAdapter({ failAnonymousName: INSTALLER });
+  const adapter = await startAdapter({ failAnonymousName: DISTRIBUTED_INSTALLER });
   try {
     const result = await runSync(adapter.baseUrl);
     assert.notEqual(result.code, 0);
