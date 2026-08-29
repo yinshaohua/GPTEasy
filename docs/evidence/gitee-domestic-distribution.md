@@ -36,3 +36,24 @@ GitHub Release `v1.4.1` 于 2026-08-29 14:32:34 UTC 发布。自动同步 [33257
 此前真实冒烟只上传 4,194,304 字节 `.txt`，证明了体积、Release API 和匿名下载，却没有覆盖 `.exe` 文件名、PE 内容及其平台审查路径；这是自动门禁未能在发布前发现问题的直接原因。仓库同时使用了可兼容读取的 `api.gitee.com/api/v5`，而当前官方 Swagger 声明的主机和 base path 组合为 `gitee.com/api/v5`。无法从公开日志证明 Gitee 内部为何对 PE 上传保持连接无响应，因此不把某个未公开的 WAF 规则写成既定根因。
 
 修复将 API 根地址收敛到官方声明入口，固定附件传输参数，在响应丢失后重新枚举附件，并把真实稳定版 PE 作为冒烟输入。该记录只证明旧链路失败和本地修复完成；在新的 `gitee-smoke.yml` 真实运行成功、完成无登录下载验收之前，不得宣称 Gitee 的 PE 上传问题已经由平台验证解决。
+
+## 2026-08-30 v1.4.1 恢复验证
+
+使用同一份 3,884,346 字节 PE 安装包做受控后缀实验：
+
+- [33265385697](https://github.com/yinshaohua/GPTEasy/actions/runs/33265385697) 使用 `.exe`，上传等待 180,002 毫秒后收到 0 字节并以 `curl` 退出码 28 失败；
+- [33265862278](https://github.com/yinshaohua/GPTEasy/actions/runs/33265862278) 延长单次预算后仍使用 `.exe`，连接被对端重置并以 `curl` 退出码 35 失败；
+- [33265656678](https://github.com/yinshaohua/GPTEasy/actions/runs/33265656678) 只把同一 PE 的附件后缀改为 `.bin` 后通过；`tag` 为 `smoke-33265656678-1`，数值 `releaseId` 为 `970921`。Gitee 忽略 Range 并返回 HTTP 200 完整内容，匿名完整下载大小为 3,884,346 字节，SHA-256 为 `40c6b7f1dee993fa93c3eaaa8dbb1b633e91fd17cacffa3a538e161ec96ff6e2`，测试清单明确记录 `formalManifestAdvanced: false`。
+
+这组实验把失败条件收敛到 Gitee Release API 接收的 `.exe` 文件名；它不推断平台未公开的内部 WAF 或审查实现。正式分发因此保持 GitHub `.exe` 不变，只在 Gitee 为同一不可变字节使用 `.exe.bin`。应用更新器不依赖 URL 后缀，仍使用原 `.sig` 验证下载字节并写入临时 `.exe`；手工下载用户须删除末尾 `.bin`。
+
+正式恢复同步 [33266143156](https://github.com/yinshaohua/GPTEasy/actions/runs/33266143156) 首次把 `GPTEasy_1.4.1_x64-setup.exe.bin`、`GPTEasy_1.4.1_x64-setup.exe.sig` 和 `SHA256SUMS.txt` 全部写入 Gitee，并最后把 `latest.md` 推进到 1.4.1。完善 Release 下载提示和 README 同步后，[33266943845](https://github.com/yinshaohua/GPTEasy/actions/runs/33266943845) 对同一 Tag 幂等重跑通过；重跑还验证了 Gitee 既有附件枚举不提供附件 ID 时仍可使用数值 Release ID 和稳定附件 URL 完成校验。最终公开结果如下：
+
+- 无 Cookie、无 Token 的安装包 GET 返回 HTTP 200，大小 3,884,346 字节，SHA-256 为 `40c6b7f1dee993fa93c3eaaa8dbb1b633e91fd17cacffa3a538e161ec96ff6e2`，与 GitHub Release 一致；
+- `latest.md` 匿名 GET 返回 HTTP 200，`version` 为 `1.4.1`，安装包 URL 指向 `.exe.bin`；
+- Gitee Release 页面显示三个正式附件和“Gitee 下载说明”；登录态 Chrome 中点击 `.exe.bin` 后直接进入 `foruda.gitee.com` 附件地址，没有出现图形验证或额外登录提示；
+- 当前浏览器会话已有 Gitee 登录态，隔离的应用内浏览器不可用，因此本次没有把页面点击记录为“无登录浏览器通过”。当前附件的匿名 HTTP 完整下载已通过；2026-08-28 的独立无登录浏览器点击仍证明同一公开仓库的 Release 附件页面不强制登录。
+
+三个实验 Release 及清单均已按精确 ID/tag 清理：[33266705774](https://github.com/yinshaohua/GPTEasy/actions/runs/33266705774) 清理 `970815` / `smoke-33265385697-1`，[33266857109](https://github.com/yinshaohua/GPTEasy/actions/runs/33266857109) 清理 `970921` / `smoke-33265656678-1`，[33266706218](https://github.com/yinshaohua/GPTEasy/actions/runs/33266706218) 清理 `970997` / `smoke-33265862278-1`。无凭据复核三个 Release API 和三个 `smoke/*.md` Raw 地址均返回 HTTP 404。
+
+收尾过程中两次失败重跑也形成了新的回归边界：[33266705083](https://github.com/yinshaohua/GPTEasy/actions/runs/33266705083) 暴露 Gitee Raw 写后缓存，现使用 Contents API 返回的文件 SHA 作为匿名 Raw 缓存键；[33266857112](https://github.com/yinshaohua/GPTEasy/actions/runs/33266857112) 暴露既有附件没有附件 ID，现只要求协议实际需要的数值 Release ID。两项均已加入本地 HTTP adapter 回归测试。

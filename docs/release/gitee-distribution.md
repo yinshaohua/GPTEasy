@@ -77,7 +77,7 @@ unset GITEE_TOKEN
 
 脚本会先核对数值 Release ID、tag、测试清单类型和 blob SHA，再要求输入完整 tag 二次确认；它先删除测试清单，后删除 Release。若 Release 删除失败，可用同一命令重跑，已经删除的测试清单按可恢复状态处理。不得在人工点击前清理，也不得把 Token 放入命令行参数、`.release.env`、日志或验收记录。
 
-本机没有 Token 时，可在 GitHub Actions 手工运行 `.github/workflows/gitee-cleanup-smoke.yml`，分别输入报告中的数值 Release ID 和精确 tag。工作流仍调用同一清理脚本，逐项核对 ID、tag 和清单身份，只从 `GITEE_TOKEN` Secret 读取凭据。
+本机没有 Token 时，可在 GitHub Actions 手工运行 `.github/workflows/gitee-cleanup-smoke.yml`，分别输入报告中的数值 Release ID 和精确 tag。工作流仍调用同一清理脚本，逐项核对 ID、tag 和清单身份，只从 `GITEE_TOKEN` Secret 读取凭据。多条资源必须逐条触发并等待前一条完成；共享并发锁只保留一个待处理任务，同时提交多个任务会使中间的待处理任务被 GitHub 取消。
 
 本地 adapter 与应用内 HTTP 测试只证明协议实现，等体积 `.txt` 也不能替代真实 PE 上传；两类证据的边界和真实验收字段见 `docs/evidence/gitee-domestic-distribution.md`。
 

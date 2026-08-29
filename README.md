@@ -10,7 +10,7 @@ GPTEasy 是一款面向 Windows 用户的 Codex 配置与会话管理工具。�
 
 国内用户可从 [Gitee Releases](https://gitee.com/ericshaohua/gpteasy-releases/releases) 下载最新的 Windows x64 当前用户安装包；Gitee 附件使用 `.exe.bin` 后缀，手工下载后须删除末尾 `.bin` 再运行。[GitHub Releases](https://github.com/yinshaohua/GPTEasy/releases/latest) 继续提供标准 `.exe` 文件名、源码、发布说明和备用下载。两个平台分发同一次正式构建的安装包，安装不需要管理员权限。
 
-`v1.1.0` 是首个内置应用更新信任根的更新自举版本，必须先手工下载安装。此后的正式更新由应用自动检查和下载，签名验证通过后仍需用户明确选择“重启并更新”。
+`v1.1.0` 是首个内置应用更新信任根的版本；`v1.4.0` 将国内更新源切换到 Gitee。仍在使用 `v1.3.0` 或更早版本的用户须先手工安装 `v1.4.0` 或更高版本，后续正式更新才会由应用自动检查和下载；签名验证通过后仍需用户明确选择“重启并更新”。
 
 系统要求：
 
@@ -20,7 +20,7 @@ GPTEasy 是一款面向 Windows 用户的 Codex 配置与会话管理工具。�
 下载后，请同时获取同一 Release 中的 `SHA256SUMS.txt`，并在 PowerShell 中校验安装包：
 
 ```powershell
-Get-FileHash .\GPTEasy_1.1.0_x64-setup.exe -Algorithm SHA256
+Get-FileHash .\GPTEasy_*_x64-setup.exe -Algorithm SHA256
 ```
 
 安装包目前没有 Authenticode 代码签名，Windows Defender SmartScreen 可能显示“Windows 已保护你的电脑”。请确认安装包来自本仓库的 Release，并且 SHA-256 与 `SHA256SUMS.txt` 一致；确认后可通过“更多信息”选择“仍要运行”。
