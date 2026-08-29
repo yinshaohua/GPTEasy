@@ -86,6 +86,7 @@ export type VisibilityTargetMode = "openai_login" | "provider" | "unknown";
 export type VisibilityAppServerCapability = "available" | "unavailable" | "incompatible";
 
 export interface SessionVisibilityPreview {
+  confirmationId: string;
   target: {
     mode: VisibilityTargetMode;
     modelProvider: string;
@@ -112,6 +113,22 @@ export interface SessionVisibilityPreview {
   reasons: Array<{ code: string; count: number }>;
 }
 
+export interface SessionVisibilityExecutionRequest {
+  confirmationId: string;
+  target: SessionVisibilityPreview["target"];
+}
+
+export interface SessionVisibilityExecutionResult {
+  status: "complete" | "partial" | "failed" | "indeterminate";
+  succeeded: number;
+  retryable: number;
+  encryptedContentRisk: number;
+  blockCodexRestart: boolean;
+  messageId: string;
+  diagnosticStage: string;
+  errorCode: string;
+}
+
 export function enterSessionManagement(leaseId: string): Promise<SessionAvailability> {
   if (isBrowserPreview()) return Promise.resolve(previewAvailability);
   return invoke<SessionAvailability>("enter_session_management", { leaseId });
@@ -130,6 +147,24 @@ export function listSessions(query: SessionQuery): Promise<SessionListPage> {
 export function previewSessionVisibility(): Promise<SessionVisibilityPreview> {
   if (isBrowserPreview()) return Promise.resolve(previewVisibility);
   return invoke<SessionVisibilityPreview>("preview_session_visibility");
+}
+
+export function executeSessionVisibility(
+  request: SessionVisibilityExecutionRequest,
+): Promise<SessionVisibilityExecutionResult> {
+  if (isBrowserPreview()) {
+    return Promise.resolve({
+      status: "partial",
+      succeeded: 1,
+      retryable: 1,
+      encryptedContentRisk: 1,
+      blockCodexRestart: false,
+      messageId: "session_visibility.repair_partial",
+      diagnosticStage: "rollout_replace",
+      errorCode: "session_visibility.write_failed",
+    });
+  }
+  return invoke<SessionVisibilityExecutionResult>("execute_session_visibility", { request });
 }
 
 export function cancelSessionRequest(requestId: string): Promise<boolean> {
@@ -195,6 +230,7 @@ const previewAvailability: SessionAvailability = {
 };
 
 const previewVisibility: SessionVisibilityPreview = {
+  confirmationId: "browser-preview-confirmation",
   target: {
     mode: "provider",
     modelProvider: "preview-provider",

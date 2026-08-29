@@ -2429,6 +2429,31 @@ select:focus-visible {
   color: var(--text);
 }
 
+.session-visibility-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+.session-visibility-actions .primary-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.session-visibility-result {
+  margin: 0 0 12px;
+  padding: 9px 12px;
+  border-left: 3px solid var(--accent);
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.session-visibility-result-pending {
+  border-left-color: var(--warning);
+  background: var(--warning-soft);
+}
+
 @media (max-width: 720px) {
   .session-list-toolbar {
     gap: 8px;

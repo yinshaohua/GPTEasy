@@ -26,10 +26,10 @@ use commands::{
     choose_session_export_destination, confirm_provider_validation_base_url, copy_issue_logs,
     copy_provider_api_key, delete_provider, delete_session, discard_provider_validation,
     discover_provider_models, discover_provider_models_for_update, enter_session_management,
-    export_all_issue_logs, export_issue_logs, export_linux_script, export_session_markdown,
-    force_apply_environment_provider, get_desktop_snapshot, get_environment_snapshot,
-    get_issue_log_path, get_startup_snapshot, get_update_snapshot, install_update,
-    leave_session_management, list_issue_logs, list_providers, list_sessions,
+    execute_session_visibility, export_all_issue_logs, export_issue_logs, export_linux_script,
+    export_session_markdown, force_apply_environment_provider, get_desktop_snapshot,
+    get_environment_snapshot, get_issue_log_path, get_startup_snapshot, get_update_snapshot,
+    install_update, leave_session_management, list_issue_logs, list_providers, list_sessions,
     list_wsl_environments, open_dayway_website, open_update_manual_download,
     open_update_release_notes, perform_update_check, preview_session_visibility, read_session,
     reclaim_wsl_provider, record_frontend_failure, refresh_startup_snapshot,
@@ -132,7 +132,10 @@ pub fn run() {
             app.manage(WslRuntime::new(wsl));
             app.manage(SessionRuntime::new(
                 SessionApplication::new(state_store.clone()),
-                SessionVisibilityApplication::new(&codex_home),
+                SessionVisibilityApplication::with_recovery_root(
+                    &codex_home,
+                    state_store.paths().root(),
+                ),
             ));
             app.manage(ProviderRuntime::new(ProviderApplication::new(
                 state_store,
@@ -204,6 +207,7 @@ pub fn run() {
             leave_session_management,
             list_sessions,
             preview_session_visibility,
+            execute_session_visibility,
             cancel_session_request,
             read_session,
             archive_sessions,

@@ -7,6 +7,7 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_notification::NotificationExt;
 
+use crate::consumer::{ConsumerScanner, ConsumerStatus, WindowsConsumerScanner};
 use crate::desktop::{DesktopApplication, DesktopFailure, DesktopFailureCategory, DesktopSnapshot};
 use crate::diagnostics::{IssueLogLevel, IssueLogRecord, IssueLogStore};
 use crate::environment::{
@@ -26,7 +27,9 @@ use crate::session::{
 };
 use crate::session_visibility::{
     SessionVisibilityApplication, SessionVisibilityPreview, VisibilityAppServerCapability,
-    VisibilityFailure, VisibilityScanContext, VisibilityTarget, VisibilityTargetMode,
+    VisibilityConsumerState, VisibilityExecutionRequest, VisibilityExecutionResult,
+    VisibilityExecutionRuntime, VisibilityFailure, VisibilityRuntimeFuture, VisibilityScanContext,
+    VisibilityTarget, VisibilityTargetMode, VisibilityThreadView, VisibilityVerificationViews,
 };
 use crate::startup::{StartupCoordinator, StartupSnapshot};
 use crate::tray;
@@ -279,6 +282,10 @@ pub(crate) enum FrontendFailureEvent {
 trait IssueLoggableFailure {
     fn message_id(&self) -> &str;
     fn category_name(&self) -> String;
+
+    fn diagnostic_details(&self) -> String {
+        format!("category={}", self.category_name())
+    }
 }
 
 macro_rules! impl_issue_loggable_failure {
@@ -309,6 +316,13 @@ impl IssueLoggableFailure for VisibilityFailure {
 
     fn category_name(&self) -> String {
         "session_visibility".to_owned()
+    }
+
+    fn diagnostic_details(&self) -> String {
+        format!(
+            "category=session_visibility stage={} error_code={}",
+            self.stage, self.message_id
+        )
     }
 }
 
@@ -357,7 +371,7 @@ fn finish_command<T, E: IssueLoggableFailure>(
             IssueLogLevel::Error,
             event,
             failure.message_id(),
-            Some(format!("category={}", failure.category_name())),
+            Some(failure.diagnostic_details()),
         );
     }
     result
@@ -569,8 +583,10 @@ pub(crate) async fn get_desktop_snapshot(
 #[tauri::command]
 pub(crate) async fn start_desktop_application(
     state: State<'_, DesktopRuntime>,
+    sessions: State<'_, SessionRuntime>,
     logs: State<'_, IssueLogRuntime>,
 ) -> Result<DesktopSnapshot, DesktopFailure> {
+    ensure_session_visibility_restart_allowed(&sessions.visibility, &logs.store)?;
     let application = state.application.clone();
     let result = tauri::async_runtime::spawn_blocking(move || application.start())
         .await
@@ -581,9 +597,11 @@ pub(crate) async fn start_desktop_application(
 #[tauri::command]
 pub(crate) async fn restart_desktop_application(
     state: State<'_, DesktopRuntime>,
+    sessions: State<'_, SessionRuntime>,
     logs: State<'_, IssueLogRuntime>,
     expected_roots: Vec<crate::consumer::ConsumerIdentity>,
 ) -> Result<DesktopSnapshot, DesktopFailure> {
+    ensure_session_visibility_restart_allowed(&sessions.visibility, &logs.store)?;
     let application = state.application.clone();
     let expected_root_count = expected_roots.len();
     let (result, observed_after_failure) = tauri::async_runtime::spawn_blocking(move || {
@@ -599,6 +617,40 @@ pub(crate) async fn restart_desktop_application(
         expected_root_count,
         observed_after_failure.as_ref(),
     )
+}
+
+fn ensure_session_visibility_restart_allowed(
+    visibility: &SessionVisibilityApplication,
+    logs: &IssueLogStore,
+) -> Result<(), DesktopFailure> {
+    let assessment = visibility.assess_recovery().map_err(|failure| {
+        logs.append(
+            IssueLogLevel::Error,
+            "desktop.session_visibility_gate",
+            failure.message_id,
+            Some(format!(
+                "category=session_visibility stage={} error_code={}",
+                failure.stage, failure.message_id
+            )),
+        );
+        DesktopFailure {
+            category: DesktopFailureCategory::ActionUnavailable,
+            message_id: "session_visibility.recovery_indeterminate",
+        }
+    })?;
+    if assessment.block_codex_restart {
+        logs.append(
+            IssueLogLevel::Error,
+            "desktop.session_visibility_gate",
+            "session_visibility.recovery_indeterminate",
+            Some("category=session_visibility stage=recovery_gate error_code=session_visibility.recovery_indeterminate".to_owned()),
+        );
+        return Err(DesktopFailure {
+            category: DesktopFailureCategory::ActionUnavailable,
+            message_id: "session_visibility.recovery_indeterminate",
+        });
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -909,6 +961,7 @@ pub(crate) async fn preview_session_visibility(
             .session_visibility_context()
             .map_err(|_| VisibilityFailure {
                 message_id: "session_visibility.environment_unavailable",
+                stage: "scan_context",
             });
     let environment_before =
         match finish_command(&logs.store, "session_visibility.scan", environment_before) {
@@ -984,6 +1037,7 @@ pub(crate) async fn preview_session_visibility(
         .await
         .map_err(|_| VisibilityFailure {
             message_id: "session_visibility.scan_failed",
+            stage: "scan",
         })
         .and_then(|result| result);
     let mut preview = match finish_command(&logs.store, "session_visibility.scan", scan) {
@@ -1012,6 +1066,204 @@ pub(crate) async fn preview_session_visibility(
     }
     log_session_visibility_preview(&logs.store, &preview);
     Ok(preview)
+}
+
+struct CommandVisibilityRuntime<'a> {
+    session: &'a SessionApplication,
+    environment: &'a EnvironmentApplication,
+}
+
+impl VisibilityExecutionRuntime for CommandVisibilityRuntime<'_> {
+    fn current_target(&self) -> Result<VisibilityTarget, VisibilityFailure> {
+        let context = self
+            .environment
+            .inspect_for_session_visibility()
+            .map_err(|_| VisibilityFailure {
+                message_id: "session_visibility.rescan_required",
+                stage: "target_snapshot",
+            })?;
+        if context.state != crate::environment::EnvironmentState::Managed
+            || context.pending_operation
+        {
+            return Err(VisibilityFailure {
+                message_id: "session_visibility.rescan_required",
+                stage: "target_snapshot",
+            });
+        }
+        let (mode, model_provider) = match (context.mode, context.provider_id) {
+            (Some(crate::environment::AuthenticationMode::OpenaiLogin), _) => {
+                (VisibilityTargetMode::OpenaiLogin, "openai".to_owned())
+            }
+            (Some(crate::environment::AuthenticationMode::Provider), Some(provider_id)) => {
+                (VisibilityTargetMode::Provider, provider_id)
+            }
+            _ => {
+                return Err(VisibilityFailure {
+                    message_id: "session_visibility.rescan_required",
+                    stage: "target_snapshot",
+                });
+            }
+        };
+        Ok(VisibilityTarget {
+            mode,
+            model_provider,
+            environment_revision: context.revision,
+        })
+    }
+
+    fn baseline_views<'a>(
+        &'a self,
+        target_provider: &'a str,
+    ) -> VisibilityRuntimeFuture<'a, VisibilityVerificationViews> {
+        Box::pin(async move {
+            let all_providers = collect_visibility_view(self.session, None).await?;
+            let target_provider =
+                collect_visibility_view(self.session, Some(target_provider)).await?;
+            Ok(VisibilityVerificationViews {
+                all_providers,
+                target_provider,
+            })
+        })
+    }
+
+    fn shutdown_owned_app_server(&self) -> VisibilityRuntimeFuture<'_, ()> {
+        Box::pin(async move {
+            self.session.shutdown_now().await;
+            Ok(())
+        })
+    }
+
+    fn consumers(&self, exclude_owned_app_server: bool) -> VisibilityConsumerState {
+        let scanner = WindowsConsumerScanner::new();
+        let exclusion = exclude_owned_app_server
+            .then(|| self.session.owned_consumer_exclusion())
+            .flatten();
+        let scan = exclusion
+            .as_ref()
+            .map(|exclusion| scanner.scan_excluding(std::slice::from_ref(exclusion)))
+            .unwrap_or_else(|| scanner.scan());
+        if scan.desktop == ConsumerStatus::Unknown || scan.cli == ConsumerStatus::Unknown {
+            VisibilityConsumerState::Unknown
+        } else if scan.cli == ConsumerStatus::Running {
+            VisibilityConsumerState::CliRunning
+        } else if scan.desktop == ConsumerStatus::Running {
+            VisibilityConsumerState::DesktopRunning
+        } else {
+            VisibilityConsumerState::NoConsumers
+        }
+    }
+
+    fn verification_views<'a>(
+        &'a self,
+        target_provider: &'a str,
+    ) -> VisibilityRuntimeFuture<'a, VisibilityVerificationViews> {
+        Box::pin(async move {
+            let all_providers = collect_visibility_view(self.session, None).await?;
+            let target_provider =
+                collect_visibility_view(self.session, Some(target_provider)).await?;
+            Ok(VisibilityVerificationViews {
+                all_providers,
+                target_provider,
+            })
+        })
+    }
+}
+
+async fn collect_visibility_view(
+    application: &SessionApplication,
+    model_provider: Option<&str>,
+) -> Result<Vec<VisibilityThreadView>, VisibilityFailure> {
+    let mut threads = Vec::new();
+    for archived in [false, true] {
+        let mut cursor = None;
+        let mut seen_cursors = std::collections::HashSet::new();
+        loop {
+            let page = application
+                .list(SessionQuery {
+                    request_id: None,
+                    archived,
+                    search_term: None,
+                    project: None,
+                    model_provider: model_provider.map(str::to_owned),
+                    cursor: cursor.clone(),
+                    limit: 100,
+                })
+                .await
+                .map_err(|_| VisibilityFailure {
+                    message_id: "session_visibility.app_server_verification_failed",
+                    stage: "app_server_query",
+                })?;
+            threads.extend(
+                page.sessions
+                    .into_iter()
+                    .map(|session| VisibilityThreadView {
+                        id: session.id,
+                        archived,
+                    }),
+            );
+            let Some(next_cursor) = page.next_cursor else {
+                break;
+            };
+            if !seen_cursors.insert(next_cursor.clone()) {
+                return Err(VisibilityFailure {
+                    message_id: "session_visibility.app_server_verification_failed",
+                    stage: "app_server_query",
+                });
+            }
+            cursor = Some(next_cursor);
+        }
+    }
+    Ok(threads)
+}
+
+#[tauri::command]
+pub(crate) async fn execute_session_visibility(
+    app: AppHandle,
+    state: State<'_, SessionRuntime>,
+    environment: State<'_, EnvironmentRuntime>,
+    logs: State<'_, IssueLogRuntime>,
+    request: VisibilityExecutionRequest,
+) -> Result<VisibilityExecutionResult, VisibilityFailure> {
+    let runtime = CommandVisibilityRuntime {
+        session: &state.application,
+        environment: &environment.application,
+    };
+    let result = finish_command(
+        &logs.store,
+        "session_visibility.execute",
+        state.visibility.execute(request, &runtime).await,
+    );
+    match &result {
+        Ok(result) => {
+            log_session_visibility_execution_result(&logs.store, result);
+            if result.status != "complete" {
+                let _ = app
+                    .notification()
+                    .builder()
+                    .title("GPTEasy")
+                    .body("部分会话仍需重试修复")
+                    .show();
+            }
+        }
+        Err(_) => {}
+    }
+    result
+}
+
+fn log_session_visibility_execution_result(
+    store: &IssueLogStore,
+    result: &VisibilityExecutionResult,
+) {
+    store.append(
+        if result.status == "complete" {
+            IssueLogLevel::Info
+        } else {
+            IssueLogLevel::Warn
+        },
+        "session_visibility.execute",
+        result.message_id,
+        Some(result.diagnostic_details()),
+    );
 }
 
 fn log_session_visibility_preview(store: &IssueLogStore, preview: &SessionVisibilityPreview) {
@@ -2347,15 +2599,18 @@ mod tests {
         ProviderFailureCategory, ProviderRevalidationAuditContext, ProviderRevalidationResult,
         ProviderSummary, ProviderValidationReceipt, UpdateFailureCategory, UpdateInstallFailure,
         UpdateInstallFailureCategory, UpdateSnapshot, UpdateState, WslReclaimAuditPhase,
-        audit_provider_revalidation_result, finish_command, finish_command_with_desktop_restart,
-        log_session_visibility_preview, log_update_check_failure, log_update_install_failure,
-        log_wsl_reclaim_phase, wsl_inventory_details,
+        audit_provider_revalidation_result, ensure_session_visibility_restart_allowed,
+        finish_command, finish_command_with_desktop_restart,
+        log_session_visibility_execution_result, log_session_visibility_preview,
+        log_update_check_failure, log_update_install_failure, log_wsl_reclaim_phase,
+        wsl_inventory_details,
     };
     use crate::consumer::{ConsumerIdentity, ConsumerRole, ConsumerStatus};
     use crate::desktop::{DesktopAction, DesktopFailure, DesktopFailureCategory, DesktopSnapshot};
     use crate::session_visibility::{
-        SessionVisibilityPreview, VisibilityAppServerCapability, VisibilityReason,
-        VisibilitySchemaCapability, VisibilitySummary, VisibilityTarget, VisibilityTargetMode,
+        SessionVisibilityApplication, SessionVisibilityPreview, VisibilityAppServerCapability,
+        VisibilityExecutionResult, VisibilityFailure, VisibilityReason, VisibilitySchemaCapability,
+        VisibilitySummary, VisibilityTarget, VisibilityTargetMode,
     };
     use crate::wsl::{
         WslAvailability, WslConfigurationState, WslEnvironmentSummary, WslReclaimPreview,
@@ -2386,6 +2641,7 @@ mod tests {
         let directory = tempdir().expect("issue log directory");
         let store = IssueLogStore::new(directory.path());
         let preview = SessionVisibilityPreview {
+            confirmation_id: "redacted-confirmation".to_owned(),
             target: VisibilityTarget {
                 mode: VisibilityTargetMode::Provider,
                 model_provider: "sensitive-provider-id".to_owned(),
@@ -2454,6 +2710,103 @@ mod tests {
         ] {
             assert!(!encoded.contains(sensitive), "issue log leaked {sensitive}");
         }
+    }
+
+    #[test]
+    fn session_visibility_failure_log_records_stable_stage_and_error_code() {
+        let directory = tempdir().expect("issue log directory");
+        let store = IssueLogStore::new(directory.path());
+
+        let result = finish_command::<(), _>(
+            &store,
+            "session_visibility.execute",
+            Err(VisibilityFailure {
+                message_id: "session_visibility.rescan_required",
+                stage: "post_shutdown_target_recheck",
+            }),
+        );
+
+        assert!(result.is_err());
+        let records = store.list(
+            0,
+            Some(IssueLogLevel::Error),
+            Some("session_visibility.execute"),
+        );
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].message, "session_visibility.rescan_required");
+        assert_eq!(
+            records[0].details.as_deref(),
+            Some(
+                "category=session_visibility stage=post_shutdown_target_recheck error_code=session_visibility.rescan_required"
+            )
+        );
+    }
+
+    #[test]
+    fn session_visibility_partial_result_log_persists_redacted_stage_and_error_code() {
+        let directory = tempdir().expect("issue log directory");
+        let store = IssueLogStore::new(directory.path());
+        let result = VisibilityExecutionResult {
+            status: "partial",
+            succeeded: 1,
+            retryable: 2,
+            encrypted_content_risk: 1,
+            block_codex_restart: false,
+            message_id: "session_visibility.repair_partial",
+            diagnostic_stage: "rollout_replace",
+            error_code: "session_visibility.write_failed",
+        };
+
+        log_session_visibility_execution_result(&store, &result);
+
+        let records = store.list(
+            0,
+            Some(IssueLogLevel::Warn),
+            Some("session_visibility.execute"),
+        );
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].message, "session_visibility.repair_partial");
+        assert_eq!(
+            records[0].details.as_deref(),
+            Some(
+                "stage=rollout_replace; status=partial; succeeded=1; retryable=2; encrypted_content_risk=1; block_codex_restart=false; error_codes=session_visibility.write_failed"
+            )
+        );
+    }
+
+    #[test]
+    fn indeterminate_visibility_recovery_blocks_desktop_start_and_restart() {
+        let directory = tempdir().expect("issue log directory");
+        let store = IssueLogStore::new(directory.path());
+        std::fs::write(
+            directory.path().join("session-visibility-recovery.json"),
+            b"not-json",
+        )
+        .expect("write indeterminate recovery manifest");
+        let visibility = SessionVisibilityApplication::with_recovery_root(
+            directory.path().join("codex-home"),
+            directory.path(),
+        );
+
+        let failure = ensure_session_visibility_restart_allowed(&visibility, &store)
+            .expect_err("indeterminate recovery blocks desktop lifecycle");
+
+        assert_eq!(
+            failure.message_id,
+            "session_visibility.recovery_indeterminate"
+        );
+        let records = store.list(
+            0,
+            Some(IssueLogLevel::Error),
+            Some("desktop.session_visibility_gate"),
+        );
+        assert_eq!(records.len(), 1);
+        assert!(
+            records[0]
+                .details
+                .as_deref()
+                .is_some_and(|details| details.contains("stage=recovery"))
+        );
     }
 
     #[test]

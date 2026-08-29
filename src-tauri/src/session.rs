@@ -27,6 +27,7 @@ use windows_sys::Win32::System::JobObjects::{
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
+use crate::consumer::ConsumerProcessExclusion;
 use crate::state::{SessionProcessOwnership, StateStore};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
@@ -463,6 +464,15 @@ impl SessionApplication {
             .active_capability()
             .await
             .map(|capability| capability.codex_version)
+    }
+
+    pub fn owned_consumer_exclusion(&self) -> Option<ConsumerProcessExclusion> {
+        let ownership = self.gateway.state_store.session_process_ownership()?;
+        ConsumerProcessExclusion::from_windows_process_creation_time(
+            ownership.pid,
+            ownership.process_created_at,
+            ownership.executable_path,
+        )
     }
 
     pub async fn export_markdown(

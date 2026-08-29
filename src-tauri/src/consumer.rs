@@ -33,6 +33,24 @@ pub struct ConsumerProcessExclusion {
     pub executable: PathBuf,
 }
 
+impl ConsumerProcessExclusion {
+    pub fn from_windows_process_creation_time(
+        pid: u32,
+        process_created_at: i64,
+        executable: impl Into<PathBuf>,
+    ) -> Option<Self> {
+        let file_time = u64::try_from(process_created_at).ok()?;
+        let started_at_epoch_millis = file_time
+            .checked_div(10_000)?
+            .checked_sub(11_644_473_600_000)?;
+        Some(Self {
+            pid,
+            started_at_epoch_millis,
+            executable: executable.into(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsumerScan {
     pub desktop: ConsumerStatus,

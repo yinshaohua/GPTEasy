@@ -23,6 +23,7 @@ import {
   chooseSessionExportDestination,
   deleteSession,
   enterSessionManagement,
+  executeSessionVisibility,
   exportSessionMarkdown,
   leaveSessionManagement,
   listSessions,
@@ -38,6 +39,7 @@ import {
   type SessionQuery,
   type SessionSummary,
   type SessionVisibilityPreview,
+  type SessionVisibilityExecutionResult,
 } from "./contracts/session";
 import { sessionMessages } from "./messages";
 
@@ -52,6 +54,8 @@ type VisibilityPreviewState =
   | { kind: "closed" }
   | { kind: "scanning" }
   | { kind: "loaded"; preview: SessionVisibilityPreview }
+  | { kind: "executing"; preview: SessionVisibilityPreview }
+  | { kind: "execution_error"; preview: SessionVisibilityPreview }
   | { kind: "error" };
 
 interface SessionListCache {
@@ -105,6 +109,7 @@ export default function SessionPage({
   const [deleteFailure, setDeleteFailure] = useState<string | null>(null);
   const [deleteLoadingId, setDeleteLoadingId] = useState<string | null>(null);
   const [visibilityPreview, setVisibilityPreview] = useState<VisibilityPreviewState>({ kind: "closed" });
+  const [visibilityResult, setVisibilityResult] = useState<SessionVisibilityExecutionResult | null>(null);
 
   useEffect(() => {
     activeRef.current = active;
@@ -457,11 +462,27 @@ export default function SessionPage({
   async function openVisibilityPreview() {
     if (visibilityPreview.kind === "scanning") return;
     setVisibilityPreview({ kind: "scanning" });
+    setVisibilityResult(null);
     try {
       const preview = await previewSessionVisibility();
       setVisibilityPreview({ kind: "loaded", preview });
     } catch {
       setVisibilityPreview({ kind: "error" });
+    }
+  }
+
+  async function executeVisibilityRepair(preview: SessionVisibilityPreview) {
+    setVisibilityPreview({ kind: "executing", preview });
+    try {
+      const result = await executeSessionVisibility({
+        confirmationId: preview.confirmationId,
+        target: preview.target,
+      });
+      setVisibilityResult(result);
+      setVisibilityPreview({ kind: "closed" });
+      refreshList();
+    } catch {
+      setVisibilityPreview({ kind: "execution_error", preview });
     }
   }
 
@@ -491,6 +512,7 @@ export default function SessionPage({
         <VisibilityPreviewDialog
           state={visibilityPreview}
           onClose={() => setVisibilityPreview({ kind: "closed" })}
+          onExecute={(preview) => void executeVisibilityRepair(preview)}
         />
       </SessionShell>
     );
@@ -519,6 +541,24 @@ export default function SessionPage({
 
   return (
     <SessionShell>
+      {visibilityResult && (
+        <p
+          className={visibilityResult.status === "complete"
+            ? "session-visibility-result"
+            : "session-visibility-result session-visibility-result-pending"}
+          role={visibilityResult.blockCodexRestart ? "alert" : "status"}
+          aria-label={sessionMessages.visibility.resultLabel}
+        >
+          {visibilityResult.blockCodexRestart
+            ? sessionMessages.visibility.indeterminate
+            : visibilityResult.messageId === "session_visibility.rescan_required"
+            ? sessionMessages.visibility.rescanRequired(visibilityResult.succeeded)
+            : visibilityResult.status === "complete"
+            ? sessionMessages.visibility.complete(visibilityResult.succeeded)
+            : sessionMessages.visibility.partial(visibilityResult.succeeded, visibilityResult.retryable)}
+          {visibilityResult.encryptedContentRisk > 0 && ` ${sessionMessages.visibility.encryptedResult}`}
+        </p>
+      )}
       {detailState.kind === "list" ? (
         <SessionList
           tab={tab}
@@ -616,6 +656,7 @@ export default function SessionPage({
       <VisibilityPreviewDialog
         state={visibilityPreview}
         onClose={() => setVisibilityPreview({ kind: "closed" })}
+        onExecute={(preview) => void executeVisibilityRepair(preview)}
       />
     </SessionShell>
   );
@@ -688,12 +729,17 @@ function SessionListToolbar({
 function VisibilityPreviewDialog({
   state,
   onClose,
+  onExecute,
 }: {
   state: VisibilityPreviewState;
   onClose: () => void;
+  onExecute: (preview: SessionVisibilityPreview) => void;
 }) {
   if (state.kind === "closed") return null;
-  const preview = state.kind === "loaded" ? state.preview : null;
+  const preview = state.kind === "loaded" || state.kind === "executing" || state.kind === "execution_error"
+    ? state.preview
+    : null;
+  const executing = state.kind === "executing";
   return (
     <div className="dialog-backdrop">
       <section
@@ -715,6 +761,7 @@ function VisibilityPreviewDialog({
             aria-label={sessionMessages.visibility.close}
             title={sessionMessages.visibility.close}
             onClick={onClose}
+            disabled={executing}
           >
             <X size={17} aria-hidden="true" />
           </button>
@@ -727,6 +774,9 @@ function VisibilityPreviewDialog({
         )}
         {state.kind === "error" && (
           <p className="inline-error" role="alert">{sessionMessages.visibility.scanFailed}</p>
+        )}
+        {state.kind === "execution_error" && (
+          <p className="inline-error" role="alert">{sessionMessages.visibility.executeFailed}</p>
         )}
         {preview && (
           <>
@@ -774,6 +824,23 @@ function VisibilityPreviewDialog({
                   ))}
                 </ul>
               </div>
+            )}
+            {preview.canExecute && preview.summary.candidates > 0 && (
+              <footer className="session-visibility-actions">
+                <button
+                  className="primary-button"
+                  type="button"
+                  disabled={executing}
+                  onClick={() => onExecute(preview)}
+                >
+                  {executing ? (
+                    <LoaderCircle className="is-spinning" size={16} aria-hidden="true" />
+                  ) : (
+                    <Wrench size={16} aria-hidden="true" />
+                  )}
+                  {executing ? sessionMessages.visibility.executing : sessionMessages.visibility.confirm}
+                </button>
+              </footer>
             )}
           </>
         )}

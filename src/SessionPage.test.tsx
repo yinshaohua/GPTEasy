@@ -9,6 +9,7 @@ const sessionContract = vi.hoisted(() => ({
   chooseSessionExportDestination: vi.fn(),
   deleteSession: vi.fn(),
   enterSessionManagement: vi.fn(),
+  executeSessionVisibility: vi.fn(),
   exportSessionMarkdown: vi.fn(),
   leaveSessionManagement: vi.fn(),
   listSessions: vi.fn(),
@@ -62,6 +63,16 @@ describe("会话管理页面", () => {
     });
     sessionContract.leaveSessionManagement.mockResolvedValue(undefined);
     sessionContract.exportSessionMarkdown.mockResolvedValue(undefined);
+    sessionContract.executeSessionVisibility.mockResolvedValue({
+      status: "complete",
+      succeeded: 1,
+      retryable: 0,
+      encryptedContentRisk: 0,
+      blockCodexRestart: false,
+      messageId: "session_visibility.repair_complete",
+      diagnosticStage: "verify",
+      errorCode: "none",
+    });
     sessionContract.chooseSessionExportDestination.mockResolvedValue(null);
     sessionContract.readSession.mockResolvedValue({
       ...firstSession,
@@ -78,6 +89,7 @@ describe("会话管理页面", () => {
       return Promise.resolve({ sessions: [firstSession], nextCursor: "cursor-2" });
     });
     sessionContract.previewSessionVisibility.mockResolvedValue({
+      confirmationId: "confirmation-private",
       target: {
         mode: "provider",
         modelProvider: "private-provider-id",
@@ -208,6 +220,7 @@ describe("会话管理页面", () => {
       mutation: { status: "unavailable", messageId: "session.mutations_unavailable" },
     });
     sessionContract.previewSessionVisibility.mockResolvedValue({
+      confirmationId: "confirmation-unavailable",
       target: {
         mode: "openai_login",
         modelProvider: "openai",
@@ -236,6 +249,83 @@ describe("会话管理页面", () => {
     fireEvent.click(await screen.findByRole("button", { name: "修复会话" }));
     expect(await screen.findByText(/扫描已完成，但 App Server 不可用，当前无法验证修复结果/)).toBeInTheDocument();
     expect(screen.getByText("OpenAI 登录模式")).toBeInTheDocument();
+  });
+
+  it("再次确认后执行修复，完整成功关闭对话框且部分成功保留非阻塞待重试状态", async () => {
+    sessionContract.previewSessionVisibility.mockResolvedValue({
+      confirmationId: "confirmation-executable",
+      target: {
+        mode: "provider",
+        modelProvider: "private-provider-id",
+        environmentRevision: "private-revision",
+      },
+      codexVersion: "codex-cli 0.150.1",
+      appServer: "available",
+      schema: { status: "supported", database: "state_5.sqlite" },
+      summary: {
+        candidates: 1,
+        unchanged: 1,
+        missingIndex: 0,
+        skipped: 0,
+        blocked: 0,
+        encryptedContentRisk: 0,
+        active: 2,
+        archived: 0,
+      },
+      canExecute: true,
+      blockers: [],
+      reasons: [{ code: "provider_mismatch", count: 1 }],
+    });
+    render(<SessionPage onOpenProviders={() => undefined} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "修复会话" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认修复" }));
+
+    await waitFor(() => expect(sessionContract.executeSessionVisibility).toHaveBeenCalledWith({
+      confirmationId: "confirmation-executable",
+      target: {
+        mode: "provider",
+        modelProvider: "private-provider-id",
+        environmentRevision: "private-revision",
+      },
+    }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "会话可见性检查" })).not.toBeInTheDocument());
+    expect(screen.getByRole("status", { name: "会话可见性修复结果" })).toHaveTextContent("已修复 1 个会话");
+
+    sessionContract.executeSessionVisibility.mockResolvedValue({
+      status: "partial",
+      succeeded: 1,
+      retryable: 2,
+      encryptedContentRisk: 1,
+      blockCodexRestart: false,
+      messageId: "session_visibility.repair_partial",
+      diagnosticStage: "rollout_replace",
+      errorCode: "session_visibility.write_failed",
+    });
+    fireEvent.click(screen.getByRole("button", { name: "修复会话" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认修复" }));
+
+    expect(await screen.findByRole("status", { name: "会话可见性修复结果" })).toHaveTextContent(
+      "已修复 1 个，2 个待重试",
+    );
+    expect(screen.getByRole("status", { name: "会话可见性修复结果" })).toHaveTextContent("续聊或压缩风险");
+
+    sessionContract.executeSessionVisibility.mockResolvedValue({
+      status: "indeterminate",
+      succeeded: 0,
+      retryable: 1,
+      encryptedContentRisk: 0,
+      blockCodexRestart: true,
+      messageId: "session_visibility.recovery_indeterminate",
+      diagnosticStage: "recovery",
+      errorCode: "session_visibility.recovery_indeterminate",
+    });
+    fireEvent.click(screen.getByRole("button", { name: "修复会话" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认修复" }));
+
+    expect(await screen.findByRole("alert", { name: "会话可见性修复结果" })).toHaveTextContent(
+      "暂不要重启 Codex",
+    );
   });
 
   it("筛选变化会取消仍在途的旧列表请求", async () => {

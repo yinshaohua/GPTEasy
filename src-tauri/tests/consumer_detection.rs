@@ -130,6 +130,26 @@ fn a_stale_owned_process_identity_never_excludes_a_reused_pid() {
 }
 
 #[test]
+fn persisted_app_server_creation_time_builds_the_exact_scanner_exclusion() {
+    let unix_millis = 2_000_u64;
+    let file_time = (unix_millis + 11_644_473_600_000) * 10_000;
+    let executable = PathBuf::from(
+        r"C:\Users\example\AppData\Roaming\npm\node_modules\@openai\codex\vendor\codex.exe",
+    );
+
+    let exclusion = ConsumerProcessExclusion::from_windows_process_creation_time(
+        202,
+        file_time as i64,
+        executable.clone(),
+    )
+    .expect("convert persisted process creation time");
+
+    assert_eq!(exclusion.pid, 202);
+    assert_eq!(exclusion.started_at_epoch_millis, unix_millis);
+    assert_eq!(exclusion.executable, executable);
+}
+
+#[test]
 fn descendants_of_an_exact_owned_launcher_are_excluded_but_unrelated_app_servers_remain() {
     let codex = r"C:\Users\example\AppData\Roaming\npm\node_modules\@openai\codex\vendor\codex.exe";
     let launcher = r"C:\Windows\System32\cmd.exe";
