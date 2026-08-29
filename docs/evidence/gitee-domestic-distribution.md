@@ -77,4 +77,4 @@ GitHub Actions 工作流 [33269670373](https://github.com/yinshaohua/GPTEasy/act
 - `scripts/test-updater-manifest.ps1` 对公开清单通过，仓库内 `verify_updater_signature` 使用应用内置公钥对公开 `.exe` 与 `.sig` 验证返回 `passed`；
 - Gitee Release 正文已恢复为 GitHub 原始中文发布说明，Gitee Raw `README.md` 已说明用户可以直接下载和运行 `.exe`。
 
-这组结果验证了正式清单获取、安装包公开下载和 updater 签名链路。客户端仍按既有安全边界在下载验签后等待用户明确确认安装；本次未执行从旧版真实客户端点击“重启并更新”的可选深度 UAT，因此不把该交互记录为已通过。
+这组结果验证了正式清单获取、安装包公开下载和 updater 签名链路。客户端仍按既有安全边界在下载验签后等待用户明确确认安装。维护者随后确认基于最终 Gitee 清单的真实客户端自动升级测试正常，补足了此前未执行的交互式升级验证。
