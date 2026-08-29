@@ -2341,6 +2341,10 @@ select:focus-visible {
   border-bottom: 1px solid var(--border);
 }
 
+.session-visibility-index-plan {
+  margin-top: 10px;
+}
+
 .session-visibility-counts > div {
   min-width: 0;
   padding: 10px 8px;

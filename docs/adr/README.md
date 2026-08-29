@@ -19,6 +19,7 @@ ADR 记录难以逆转且有真实取舍的决定。重建遵循 ADR-0009 的“
 - ADR-0042：诊断助手只提交后端动作注册表允许的结构化动作，并在用户确认后复用既有受控流程；模型不能执行任意写入或 shell 命令。
 - ADR-0044：正式发布绑定完整自动门禁、候选产物校验和维护者明确验收授权；一次性 Windows 交互式 UAT 保留为可选深度验收。
 - ADR-0045：国内分发直接切换到 Gitee；保留 updater 密钥，使用数值 Release ID、form-data/multipart API 和真实匿名冒烟闭环。
+- ADR-0046-0047：会话可见性修复可受限改写 rollout；缺失索引优先由 App Server 协调，仅对精确识别的 SQLite schema 使用单库事务后备，并由干净 App Server 验证不变量。
 
 ## Historical Or Deferred
 

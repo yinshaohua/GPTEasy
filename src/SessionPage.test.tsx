@@ -68,6 +68,12 @@ describe("会话管理页面", () => {
       succeeded: 1,
       retryable: 0,
       encryptedContentRisk: 0,
+      breakdown: {
+        appServerCoordinated: 1,
+        sqliteFallback: 0,
+        schemaSkipped: 0,
+        verificationFailed: 0,
+      },
       blockCodexRestart: false,
       messageId: "session_visibility.repair_complete",
       diagnosticStage: "verify",
@@ -98,6 +104,11 @@ describe("会话管理页面", () => {
       codexVersion: "codex-cli 0.150.1",
       appServer: "available",
       schema: { status: "supported", database: "state_5.sqlite" },
+      indexPlan: {
+        appServerCoordination: 1,
+        sqliteFallbackEligible: 1,
+        schemaSkipped: 0,
+      },
       summary: {
         candidates: 3,
         unchanged: 4,
@@ -204,6 +215,9 @@ describe("会话管理页面", () => {
     expect(screen.getByText("跳过").nextSibling).toHaveTextContent("2");
     expect(screen.getByText("阻断").nextSibling).toHaveTextContent("3");
     expect(screen.getByText("含加密内容风险").nextSibling).toHaveTextContent("1");
+    expect(screen.getByText("App Server 优先协调").nextSibling).toHaveTextContent("1");
+    expect(screen.getByText("SQLite 后备候选").nextSibling).toHaveTextContent("1");
+    expect(screen.getByText("未知 schema 跳过").nextSibling).toHaveTextContent("0");
     expect(screen.getByText(/加密内容可能影响后续续聊或压缩/)).toBeInTheDocument();
     expect(screen.getByText(/管理冲突/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "关闭预览" })).toBeInTheDocument();
@@ -229,6 +243,11 @@ describe("会话管理页面", () => {
       codexVersion: null,
       appServer: "unavailable",
       schema: { status: "supported", database: "state_5.sqlite" },
+      indexPlan: {
+        appServerCoordination: 0,
+        sqliteFallbackEligible: 0,
+        schemaSkipped: 0,
+      },
       summary: {
         candidates: 1,
         unchanged: 0,
@@ -251,6 +270,46 @@ describe("会话管理页面", () => {
     expect(screen.getByText("OpenAI 登录模式")).toBeInTheDocument();
   });
 
+  it("未知 schema 逐项显示跳过数量且不允许确认写入", async () => {
+    sessionContract.previewSessionVisibility.mockResolvedValue({
+      confirmationId: "confirmation-unknown-schema",
+      target: {
+        mode: "provider",
+        modelProvider: "private-provider-id",
+        environmentRevision: "private-revision",
+      },
+      codexVersion: "codex-cli 0.151.0",
+      appServer: "available",
+      schema: { status: "unknown", database: "state_5.sqlite" },
+      indexPlan: {
+        appServerCoordination: 0,
+        sqliteFallbackEligible: 0,
+        schemaSkipped: 2,
+      },
+      summary: {
+        candidates: 0,
+        unchanged: 0,
+        missingIndex: 0,
+        skipped: 0,
+        blocked: 2,
+        encryptedContentRisk: 0,
+        active: 1,
+        archived: 1,
+      },
+      canExecute: false,
+      blockers: ["unsupported_index_schema"],
+      reasons: [{ code: "unsupported_index_schema", count: 1 }],
+    });
+
+    render(<SessionPage onOpenProviders={() => undefined} />);
+    fireEvent.click(await screen.findByRole("button", { name: "修复会话" }));
+
+    expect(await screen.findByText("未知 schema 跳过")).toHaveTextContent("未知 schema 跳过");
+    expect(screen.getByText("未知 schema 跳过").nextSibling).toHaveTextContent("2");
+    expect(screen.getByText("Codex 索引 schema 未受支持")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "确认修复" })).not.toBeInTheDocument();
+  });
+
   it("再次确认后执行修复，完整成功关闭对话框且部分成功保留非阻塞待重试状态", async () => {
     sessionContract.previewSessionVisibility.mockResolvedValue({
       confirmationId: "confirmation-executable",
@@ -262,6 +321,11 @@ describe("会话管理页面", () => {
       codexVersion: "codex-cli 0.150.1",
       appServer: "available",
       schema: { status: "supported", database: "state_5.sqlite" },
+      indexPlan: {
+        appServerCoordination: 0,
+        sqliteFallbackEligible: 0,
+        schemaSkipped: 0,
+      },
       summary: {
         candidates: 1,
         unchanged: 1,
@@ -291,12 +355,21 @@ describe("会话管理页面", () => {
     }));
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "会话可见性检查" })).not.toBeInTheDocument());
     expect(screen.getByRole("status", { name: "会话可见性修复结果" })).toHaveTextContent("已修复 1 个会话");
+    expect(screen.getByRole("status", { name: "会话可见性修复结果" })).toHaveTextContent(
+      "App Server 协调 1 个；SQLite 后备 0 个；未知 schema 跳过 0 个；验证失败 0 个",
+    );
 
     sessionContract.executeSessionVisibility.mockResolvedValue({
       status: "partial",
       succeeded: 1,
       retryable: 2,
       encryptedContentRisk: 1,
+      breakdown: {
+        appServerCoordinated: 0,
+        sqliteFallback: 1,
+        schemaSkipped: 0,
+        verificationFailed: 1,
+      },
       blockCodexRestart: false,
       messageId: "session_visibility.repair_partial",
       diagnosticStage: "rollout_replace",
@@ -309,12 +382,21 @@ describe("会话管理页面", () => {
       "已修复 1 个，2 个待重试",
     );
     expect(screen.getByRole("status", { name: "会话可见性修复结果" })).toHaveTextContent("续聊或压缩风险");
+    expect(screen.getByRole("status", { name: "会话可见性修复结果" })).toHaveTextContent(
+      "App Server 协调 0 个；SQLite 后备 1 个；未知 schema 跳过 0 个；验证失败 1 个",
+    );
 
     sessionContract.executeSessionVisibility.mockResolvedValue({
       status: "indeterminate",
       succeeded: 0,
       retryable: 1,
       encryptedContentRisk: 0,
+      breakdown: {
+        appServerCoordinated: 0,
+        sqliteFallback: 0,
+        schemaSkipped: 0,
+        verificationFailed: 0,
+      },
       blockCodexRestart: true,
       messageId: "session_visibility.recovery_indeterminate",
       diagnosticStage: "recovery",

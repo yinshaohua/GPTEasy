@@ -2609,8 +2609,9 @@ mod tests {
     use crate::desktop::{DesktopAction, DesktopFailure, DesktopFailureCategory, DesktopSnapshot};
     use crate::session_visibility::{
         SessionVisibilityApplication, SessionVisibilityPreview, VisibilityAppServerCapability,
-        VisibilityExecutionResult, VisibilityFailure, VisibilityReason, VisibilitySchemaCapability,
-        VisibilitySummary, VisibilityTarget, VisibilityTargetMode,
+        VisibilityExecutionBreakdown, VisibilityExecutionResult, VisibilityFailure,
+        VisibilityIndexPlan, VisibilityReason, VisibilitySchemaCapability, VisibilitySummary,
+        VisibilityTarget, VisibilityTargetMode,
     };
     use crate::wsl::{
         WslAvailability, WslConfigurationState, WslEnvironmentSummary, WslReclaimPreview,
@@ -2653,6 +2654,11 @@ mod tests {
                 status: "supported".to_owned(),
                 database: "state_5.sqlite".to_owned(),
             },
+            index_plan: VisibilityIndexPlan {
+                app_server_coordination: 1,
+                sqlite_fallback_eligible: 1,
+                schema_skipped: 0,
+            },
             summary: VisibilitySummary {
                 candidates: 3,
                 unchanged: 2,
@@ -2694,6 +2700,9 @@ mod tests {
             "encrypted_content_risk=1",
             "active=6",
             "archived=3",
+            "index_app_server_coordination=1",
+            "index_sqlite_fallback_eligible=1",
+            "index_schema_skipped=0",
             "error_codes=app_server_unavailable,provider_mismatch",
         ] {
             assert!(details.contains(required), "missing {required}: {details}");
@@ -2751,6 +2760,12 @@ mod tests {
             succeeded: 1,
             retryable: 2,
             encrypted_content_risk: 1,
+            breakdown: VisibilityExecutionBreakdown {
+                app_server_coordinated: 1,
+                sqlite_fallback: 1,
+                schema_skipped: 0,
+                verification_failed: 1,
+            },
             block_codex_restart: false,
             message_id: "session_visibility.repair_partial",
             diagnostic_stage: "rollout_replace",
@@ -2769,7 +2784,7 @@ mod tests {
         assert_eq!(
             records[0].details.as_deref(),
             Some(
-                "stage=rollout_replace; status=partial; succeeded=1; retryable=2; encrypted_content_risk=1; block_codex_restart=false; error_codes=session_visibility.write_failed"
+                "stage=rollout_replace; status=partial; succeeded=1; retryable=2; encrypted_content_risk=1; index_app_server_coordinated=1; index_sqlite_fallback=1; index_schema_skipped=0; verification_failed=1; block_codex_restart=false; error_codes=session_visibility.write_failed"
             )
         );
     }

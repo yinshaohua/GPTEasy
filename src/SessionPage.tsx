@@ -557,6 +557,7 @@ export default function SessionPage({
             ? sessionMessages.visibility.complete(visibilityResult.succeeded)
             : sessionMessages.visibility.partial(visibilityResult.succeeded, visibilityResult.retryable)}
           {visibilityResult.encryptedContentRisk > 0 && ` ${sessionMessages.visibility.encryptedResult}`}
+          {` ${sessionMessages.visibility.executionBreakdown(visibilityResult.breakdown)}`}
         </p>
       )}
       {detailState.kind === "list" ? (
@@ -789,6 +790,23 @@ function VisibilityPreviewDialog({
               <VisibilityCount
                 label={sessionMessages.visibility.counts.encryptedContentRisk}
                 value={preview.summary.encryptedContentRisk}
+              />
+            </dl>
+            <dl
+              className="session-visibility-counts session-visibility-index-plan"
+              aria-label={sessionMessages.visibility.indexPlanLabel}
+            >
+              <VisibilityCount
+                label={sessionMessages.visibility.indexPlan.appServerCoordination}
+                value={preview.indexPlan.appServerCoordination}
+              />
+              <VisibilityCount
+                label={sessionMessages.visibility.indexPlan.sqliteFallbackEligible}
+                value={preview.indexPlan.sqliteFallbackEligible}
+              />
+              <VisibilityCount
+                label={sessionMessages.visibility.indexPlan.schemaSkipped}
+                value={preview.indexPlan.schemaSkipped}
               />
             </dl>
             {preview.summary.encryptedContentRisk > 0 && (

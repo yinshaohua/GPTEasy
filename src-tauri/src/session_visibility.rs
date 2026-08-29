@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_json::value::RawValue;
@@ -14,14 +14,46 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 const STATE_DATABASE: &str = "state_5.sqlite";
-const REQUIRED_THREAD_COLUMNS: [&str; 6] = [
-    "id",
-    "rollout_path",
-    "source",
-    "model_provider",
-    "has_user_event",
-    "archived",
-];
+const SUPPORTED_THREADS_SCHEMA: &str = "CREATE TABLE threads (
+    id TEXT PRIMARY KEY,
+    rollout_path TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    model_provider TEXT NOT NULL,
+    cwd TEXT NOT NULL,
+    title TEXT NOT NULL,
+    sandbox_policy TEXT NOT NULL,
+    approval_mode TEXT NOT NULL,
+    tokens_used INTEGER NOT NULL DEFAULT 0,
+    has_user_event INTEGER NOT NULL,
+    archived INTEGER NOT NULL,
+    archived_at INTEGER,
+    git_sha TEXT,
+    git_branch TEXT,
+    git_origin_url TEXT,
+    cli_version TEXT NOT NULL DEFAULT '',
+    first_user_message TEXT NOT NULL DEFAULT '',
+    agent_nickname TEXT,
+    agent_role TEXT,
+    memory_mode TEXT NOT NULL DEFAULT 'enabled',
+    model TEXT,
+    reasoning_effort TEXT,
+    agent_path TEXT,
+    created_at_ms INTEGER,
+    updated_at_ms INTEGER,
+    thread_source TEXT,
+    preview TEXT NOT NULL DEFAULT '',
+    recency_at INTEGER NOT NULL DEFAULT 0,
+    recency_at_ms INTEGER NOT NULL DEFAULT 0,
+    history_mode TEXT NOT NULL DEFAULT 'legacy',
+    name TEXT,
+    is_pinned INTEGER NOT NULL DEFAULT 0,
+    thread_section_id TEXT,
+    section_position INTEGER,
+    section_entered_at_ms INTEGER,
+    project_id TEXT
+)";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -77,6 +109,14 @@ pub struct VisibilitySchemaCapability {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct VisibilityIndexPlan {
+    pub app_server_coordination: u32,
+    pub sqlite_fallback_eligible: u32,
+    pub schema_skipped: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct VisibilityReason {
     pub code: String,
     pub count: u32,
@@ -90,6 +130,7 @@ pub struct SessionVisibilityPreview {
     pub codex_version: Option<String>,
     pub app_server: VisibilityAppServerCapability,
     pub schema: VisibilitySchemaCapability,
+    pub index_plan: VisibilityIndexPlan,
     pub summary: VisibilitySummary,
     pub can_execute: bool,
     pub blockers: Vec<String>,
@@ -123,7 +164,8 @@ impl SessionVisibilityPreview {
             "stage=scan; target_mode={target_mode}; codex_version={codex_version}; \
              schema={}; candidates={}; unchanged={}; missing_index={}; skipped={}; \
              blocked={}; encrypted_content_risk={}; active={}; archived={}; \
-             error_codes={error_codes}",
+             index_app_server_coordination={}; index_sqlite_fallback_eligible={}; \
+             index_schema_skipped={}; error_codes={error_codes}",
             self.schema.status,
             self.summary.candidates,
             self.summary.unchanged,
@@ -133,6 +175,9 @@ impl SessionVisibilityPreview {
             self.summary.encrypted_content_risk,
             self.summary.active,
             self.summary.archived,
+            self.index_plan.app_server_coordination,
+            self.index_plan.sqlite_fallback_eligible,
+            self.index_plan.schema_skipped,
         )
     }
 }
@@ -202,22 +247,38 @@ pub struct VisibilityExecutionResult {
     pub succeeded: u32,
     pub retryable: u32,
     pub encrypted_content_risk: u32,
+    pub breakdown: VisibilityExecutionBreakdown,
     pub block_codex_restart: bool,
     pub message_id: &'static str,
     pub diagnostic_stage: &'static str,
     pub error_code: &'static str,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VisibilityExecutionBreakdown {
+    pub app_server_coordinated: u32,
+    pub sqlite_fallback: u32,
+    pub schema_skipped: u32,
+    pub verification_failed: u32,
+}
+
 impl VisibilityExecutionResult {
     pub fn diagnostic_details(&self) -> String {
         format!(
             "stage={}; status={}; succeeded={}; retryable={}; \
-             encrypted_content_risk={}; block_codex_restart={}; error_codes={}",
+             encrypted_content_risk={}; index_app_server_coordinated={}; \
+             index_sqlite_fallback={}; index_schema_skipped={}; verification_failed={}; \
+             block_codex_restart={}; error_codes={}",
             self.diagnostic_stage,
             self.status,
             self.succeeded,
             self.retryable,
             self.encrypted_content_risk,
+            self.breakdown.app_server_coordinated,
+            self.breakdown.sqlite_fallback,
+            self.breakdown.schema_skipped,
+            self.breakdown.verification_failed,
             self.block_codex_restart,
             self.error_code,
         )
@@ -226,6 +287,7 @@ impl VisibilityExecutionResult {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VisibilityFailurePoint {
+    BeforeIndexInsert,
     BeforeRolloutReplace,
     AfterRolloutReplace,
 }
@@ -303,6 +365,7 @@ impl SessionVisibilityApplication {
         context: VisibilityScanContext,
     ) -> Result<SessionVisibilityPreview, VisibilityFailure> {
         let index = read_index(&self.codex_home);
+        let ambiguous_rollout_ids = duplicate_rollout_ids(&self.codex_home)?;
         let mut summary = VisibilitySummary {
             candidates: 0,
             unchanged: 0,
@@ -319,6 +382,7 @@ impl SessionVisibilityApplication {
             false,
             &context.target.model_provider,
             &index,
+            &ambiguous_rollout_ids,
             &mut summary,
             &mut reasons,
         )?;
@@ -327,6 +391,7 @@ impl SessionVisibilityApplication {
             true,
             &context.target.model_provider,
             &index,
+            &ambiguous_rollout_ids,
             &mut summary,
             &mut reasons,
         )?;
@@ -356,14 +421,31 @@ impl SessionVisibilityApplication {
         }
 
         let confirmation_id = self.confirmation_id(&context.target, &index)?;
+        let fallback_ineligible = reasons
+            .get("index_fallback_metadata_incomplete")
+            .copied()
+            .unwrap_or(0);
         Ok(SessionVisibilityPreview {
             confirmation_id,
             target: context.target,
             codex_version: context.codex_version,
             app_server: context.app_server,
             schema: VisibilitySchemaCapability {
-                status: index.schema_status,
+                status: index.schema_status.clone(),
                 database: STATE_DATABASE.to_owned(),
+            },
+            index_plan: VisibilityIndexPlan {
+                app_server_coordination: summary.missing_index,
+                sqlite_fallback_eligible: if index.schema_status == "supported" {
+                    summary.missing_index.saturating_sub(fallback_ineligible)
+                } else {
+                    0
+                },
+                schema_skipped: if index.schema_status == "supported" {
+                    0
+                } else {
+                    summary.blocked
+                },
             },
             summary,
             can_execute,
@@ -388,7 +470,7 @@ impl SessionVisibilityApplication {
             Ok(_) => {}
         }
         let index = read_index(&self.codex_home);
-        let candidates = self.execution_candidates(&request.target.model_provider, &index)?;
+        let mut candidates = self.execution_candidates(&request.target.model_provider, &index)?;
         let execution_scan = self.scan(VisibilityScanContext {
             target: request.target.clone(),
             codex_version: None,
@@ -441,10 +523,9 @@ impl SessionVisibilityApplication {
                 "baseline_validation",
             ));
         }
-        if candidates
-            .iter()
-            .any(|candidate| !baseline.contains(&candidate.thread_view()))
-        {
+        if candidates.iter().any(|candidate| {
+            !candidate.missing_index && !baseline.contains(&candidate.thread_view())
+        }) {
             return Err(visibility_failure_at(
                 "session_visibility.rescan_required",
                 "baseline_validation",
@@ -466,18 +547,50 @@ impl SessionVisibilityApplication {
         }
         ensure_consumers_stopped(runtime.consumers(false), "post_shutdown_consumer_recheck")?;
         let refreshed_index = read_index(&self.codex_home);
-        if self.confirmation_id(&request.target, &refreshed_index)? != request.confirmation_id {
+        if candidates.iter().any(|candidate| {
+            file_hash(&candidate.path).as_deref() != Ok(candidate.observed_hash.as_str())
+        }) {
             return Err(visibility_failure_at(
                 "session_visibility.rescan_required",
-                "index_recheck",
+                "candidate_hash_recheck",
             ));
         }
+        accept_app_server_index_coordination(&index, &refreshed_index, &baseline, &mut candidates)?;
+        let app_server_coordinated = candidates
+            .iter()
+            .filter(|candidate| candidate.was_missing_index && !candidate.missing_index)
+            .count() as u32;
 
         let mut manifest = VisibilityRecoveryManifest::new(
             &request.target,
             &candidates,
             self.index_database_hash(),
         )?;
+        self.write_manifest(&manifest)?;
+        if candidates.iter().any(|candidate| candidate.missing_index) {
+            manifest.stage = "index_transaction".to_owned();
+            self.write_manifest(&manifest)?;
+        }
+        let index_outcome =
+            insert_missing_indexes(&self.codex_home, &candidates, self.faults.as_ref());
+        let index_write_failed = index_outcome.failed;
+        let index_metadata_incomplete = !index_outcome.ineligible.is_empty();
+        let sqlite_fallback = index_outcome.inserted.len() as u32;
+        for (candidate_index, candidate) in candidates.iter().enumerate() {
+            if candidate.was_missing_index {
+                manifest.items[candidate_index].index_stage = if !candidate.missing_index {
+                    VisibilityIndexStage::AppServerCoordinated
+                } else if candidate.index_metadata.is_none() {
+                    VisibilityIndexStage::IndexFallbackMetadataIncomplete
+                } else if index_write_failed {
+                    VisibilityIndexStage::IndexWriteFailed
+                } else {
+                    VisibilityIndexStage::SqliteFallbackCommitted
+                };
+            }
+        }
+        manifest.stage = "rollout_replace".to_owned();
+        manifest.index_database_after_hash = self.index_database_hash();
         self.write_manifest(&manifest)?;
         let mut written = Vec::new();
         let mut retryable = 0;
@@ -487,13 +600,18 @@ impl SessionVisibilityApplication {
             .iter()
             .filter(|candidate| candidate.has_encrypted_content)
             .count() as u32;
-        for (index, candidate) in candidates.into_iter().enumerate() {
-            let reference = &manifest.items[index].session_reference;
+        for (candidate_index, candidate) in candidates.into_iter().enumerate() {
+            if candidate.missing_index && (index_write_failed || candidate.index_metadata.is_none())
+            {
+                retryable += 1;
+                continue;
+            }
+            let reference = &manifest.items[candidate_index].session_reference;
             if self
                 .faults
                 .fails_at(VisibilityFailurePoint::BeforeRolloutReplace, reference)
             {
-                manifest.items[index].stage = "write_failed".to_owned();
+                manifest.items[candidate_index].stage = "write_failed".to_owned();
                 self.write_manifest(&manifest)?;
                 retryable += 1;
                 write_failed = true;
@@ -502,7 +620,7 @@ impl SessionVisibilityApplication {
             match replace_rollout_provider(
                 &candidate.path,
                 &request.target.model_provider,
-                &manifest.items[index].before_hash,
+                &manifest.items[candidate_index].before_hash,
             ) {
                 Ok(()) => {
                     if self
@@ -511,22 +629,22 @@ impl SessionVisibilityApplication {
                     {
                         return Err(visibility_failure("session_visibility.interrupted"));
                     }
-                    manifest.items[index].stage = "written".to_owned();
+                    manifest.items[candidate_index].stage = "written".to_owned();
                     self.write_manifest(&manifest)?;
-                    written.push((index, candidate));
+                    written.push((candidate_index, candidate));
                 }
                 Err(failure) if failure.message_id == "session_visibility.rescan_required" => {
-                    manifest.items[index].stage = "external_change".to_owned();
-                    for item in manifest.items.iter_mut().skip(index + 1) {
+                    manifest.items[candidate_index].stage = "external_change".to_owned();
+                    for item in manifest.items.iter_mut().skip(candidate_index + 1) {
                         item.stage = "not_attempted".to_owned();
                     }
                     self.write_manifest(&manifest)?;
-                    retryable += (manifest.items.len() - index) as u32;
+                    retryable += (manifest.items.len() - candidate_index) as u32;
                     rescan_required = true;
                     break;
                 }
                 Err(_) => {
-                    manifest.items[index].stage = "write_failed".to_owned();
+                    manifest.items[candidate_index].stage = "write_failed".to_owned();
                     self.write_manifest(&manifest)?;
                     retryable += 1;
                     write_failed = true;
@@ -540,8 +658,8 @@ impl SessionVisibilityApplication {
             Ok(views) => views,
             Err(_) => {
                 retryable += written.len() as u32;
-                for (index, _) in &written {
-                    manifest.items[*index].stage = "verification_failed".to_owned();
+                for (candidate_index, _) in &written {
+                    manifest.items[*candidate_index].stage = "verification_failed".to_owned();
                 }
                 manifest.stage = "partial".to_owned();
                 manifest.index_database_after_hash = self.index_database_hash();
@@ -551,6 +669,12 @@ impl SessionVisibilityApplication {
                     succeeded: 0,
                     retryable,
                     encrypted_content_risk,
+                    breakdown: VisibilityExecutionBreakdown {
+                        app_server_coordinated,
+                        sqlite_fallback,
+                        schema_skipped: 0,
+                        verification_failed: written.len() as u32,
+                    },
                     block_codex_restart: false,
                     message_id: if rescan_required {
                         "session_visibility.rescan_required"
@@ -570,15 +694,19 @@ impl SessionVisibilityApplication {
             .iter()
             .map(|(_, candidate)| candidate.thread_view())
             .collect::<BTreeSet<_>>();
+        let expected_all = baseline
+            .union(&index_outcome.inserted)
+            .cloned()
+            .collect::<BTreeSet<_>>();
         let expected_target = baseline_target
             .union(&written_target)
             .cloned()
             .collect::<BTreeSet<_>>();
-        let invariants_hold = all_after_count == baseline_count
+        let invariants_hold = all_after_count == expected_all.len()
             && all_after.len() == all_after_count
             && target_after.len() == target_after_count
             && target_after_count == expected_target.len()
-            && all_after == baseline
+            && all_after == expected_all
             && target_after == expected_target;
         let succeeded = written
             .iter()
@@ -587,8 +715,13 @@ impl SessionVisibilityApplication {
             })
             .count() as u32;
         retryable += written.len() as u32 - succeeded;
-        for (index, candidate) in &written {
-            manifest.items[*index].stage =
+        let verification_failed = if invariants_hold {
+            0
+        } else {
+            written.len() as u32
+        };
+        for (candidate_index, candidate) in &written {
+            manifest.items[*candidate_index].stage =
                 if invariants_hold && target_after.contains(&candidate.thread_view()) {
                     "verified"
                 } else {
@@ -616,6 +749,12 @@ impl SessionVisibilityApplication {
             succeeded,
             retryable,
             encrypted_content_risk,
+            breakdown: VisibilityExecutionBreakdown {
+                app_server_coordinated,
+                sqlite_fallback,
+                schema_skipped: 0,
+                verification_failed,
+            },
             block_codex_restart: false,
             message_id: if rescan_required {
                 "session_visibility.rescan_required"
@@ -632,6 +771,10 @@ impl SessionVisibilityApplication {
                 "app_server_verify"
             } else if rescan_required {
                 "candidate_hash_recheck"
+            } else if index_write_failed {
+                "index_transaction"
+            } else if index_metadata_incomplete {
+                "index_fallback_plan"
             } else if write_failed {
                 "rollout_replace"
             } else {
@@ -643,6 +786,10 @@ impl SessionVisibilityApplication {
                 "session_visibility.verification_invariant_failed"
             } else if rescan_required {
                 "session_visibility.rescan_required"
+            } else if index_write_failed {
+                "session_visibility.index_write_failed"
+            } else if index_metadata_incomplete {
+                "session_visibility.index_fallback_metadata_incomplete"
             } else if write_failed {
                 "session_visibility.write_failed"
             } else {
@@ -751,6 +898,7 @@ impl SessionVisibilityApplication {
         index: &IndexSnapshot,
     ) -> Result<Vec<ExecutionCandidate>, VisibilityFailure> {
         let mut candidates = Vec::new();
+        let ambiguous_rollout_ids = duplicate_rollout_ids(&self.codex_home)?;
         for (root, archived) in [
             (self.codex_home.join("sessions"), false),
             (self.codex_home.join("archived_sessions"), true),
@@ -765,6 +913,9 @@ impl SessionVisibilityApplication {
                 let Ok(rollout) = read_rollout(&path) else {
                     continue;
                 };
+                if ambiguous_rollout_ids.contains(&rollout.id) {
+                    continue;
+                }
                 let Some(source) = rollout.source.as_deref() else {
                     continue;
                 };
@@ -777,25 +928,36 @@ impl SessionVisibilityApplication {
                 let Some(before_provider) = rollout.model_provider.clone() else {
                     continue;
                 };
-                let Some(indexed) = index.rows.get(&rollout.id) else {
-                    continue;
-                };
-                if !same_rollout_path(&indexed.rollout_path, &path)
-                    || indexed.source != source
-                    || indexed.archived != archived
-                    || !indexed.has_user_event
-                {
-                    continue;
+                let missing_index = !index.rows.contains_key(&rollout.id);
+                if let Some(indexed) = index.rows.get(&rollout.id) {
+                    if !same_rollout_path(&indexed.rollout_path, &path)
+                        || indexed.source != source
+                        || indexed.archived != archived
+                        || !indexed.has_user_event
+                    {
+                        continue;
+                    }
                 }
-                if rollout.model_provider.as_deref() != Some(target_provider)
-                    || indexed.model_provider != target_provider
+                if missing_index
+                    || rollout.model_provider.as_deref() != Some(target_provider)
+                    || index
+                        .rows
+                        .get(&rollout.id)
+                        .is_some_and(|indexed| indexed.model_provider != target_provider)
                 {
+                    let index_metadata = rollout.index_metadata.clone();
+                    let observed_hash = file_hash(&path)?;
                     candidates.push(ExecutionCandidate {
                         id: rollout.id,
                         path,
                         archived,
+                        source: source.to_owned(),
                         before_provider,
                         has_encrypted_content: rollout.has_encrypted_content,
+                        missing_index,
+                        was_missing_index: missing_index,
+                        index_metadata,
+                        observed_hash,
                     });
                 }
             }
@@ -898,6 +1060,7 @@ impl SessionVisibilityApplication {
         archived: bool,
         target_provider: &str,
         index: &IndexSnapshot,
+        ambiguous_rollout_ids: &BTreeSet<String>,
         summary: &mut VisibilitySummary,
         reasons: &mut BTreeMap<String, u32>,
     ) -> Result<(), VisibilityFailure> {
@@ -921,6 +1084,11 @@ impl SessionVisibilityApplication {
                     continue;
                 }
             };
+            if ambiguous_rollout_ids.contains(&rollout.id) {
+                summary.skipped += 1;
+                increment(reasons, "identity_ambiguous");
+                continue;
+            }
             let Some(source) = rollout.source.as_deref() else {
                 summary.skipped += 1;
                 increment(reasons, "identity_ambiguous");
@@ -959,6 +1127,10 @@ impl SessionVisibilityApplication {
             let Some(indexed) = index.rows.get(&rollout.id) else {
                 summary.missing_index += 1;
                 increment(reasons, "index_missing");
+                if rollout.index_metadata.is_none() {
+                    increment(reasons, "index_fallback_metadata_incomplete");
+                }
+                summary.candidates += 1;
                 if rollout.has_encrypted_content {
                     summary.encrypted_content_risk += 1;
                     increment(reasons, "encrypted_content");
@@ -994,8 +1166,13 @@ struct ExecutionCandidate {
     id: String,
     path: PathBuf,
     archived: bool,
+    source: String,
     before_provider: String,
     has_encrypted_content: bool,
+    missing_index: bool,
+    was_missing_index: bool,
+    index_metadata: Option<IndexInsertMetadata>,
+    observed_hash: String,
 }
 
 impl ExecutionCandidate {
@@ -1042,12 +1219,17 @@ impl VisibilityRecoveryManifest {
                     after_hash: bytes_hash(&after),
                     index_identifier: index_reference(&candidate.id),
                     archived: candidate.archived,
+                    index_stage: if candidate.was_missing_index {
+                        VisibilityIndexStage::PendingCoordination
+                    } else {
+                        VisibilityIndexStage::Existing
+                    },
                     stage: "prepared".to_owned(),
                 })
             })
             .collect::<Result<Vec<_>, VisibilityFailure>>()?;
         Ok(Self {
-            schema_version: 1,
+            schema_version: 2,
             target_mode: target.mode,
             target_provider: target.model_provider.clone(),
             environment_revision: target.environment_revision.clone(),
@@ -1069,7 +1251,22 @@ struct VisibilityRecoveryItem {
     after_hash: String,
     index_identifier: String,
     archived: bool,
+    #[serde(default)]
+    index_stage: VisibilityIndexStage,
     stage: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+enum VisibilityIndexStage {
+    #[default]
+    Legacy,
+    Existing,
+    PendingCoordination,
+    AppServerCoordinated,
+    IndexFallbackMetadataIncomplete,
+    IndexWriteFailed,
+    SqliteFallbackCommitted,
 }
 
 impl PartialOrd for VisibilityThreadView {
@@ -1084,6 +1281,7 @@ impl Ord for VisibilityThreadView {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct IndexedThread {
     rollout_path: PathBuf,
     source: String,
@@ -1097,6 +1295,47 @@ struct IndexSnapshot {
     rows: HashMap<String, IndexedThread>,
 }
 
+fn accept_app_server_index_coordination(
+    before: &IndexSnapshot,
+    after: &IndexSnapshot,
+    baseline: &BTreeSet<VisibilityThreadView>,
+    candidates: &mut [ExecutionCandidate],
+) -> Result<(), VisibilityFailure> {
+    if before.schema_status != after.schema_status
+        || before
+            .rows
+            .iter()
+            .any(|(id, row)| after.rows.get(id) != Some(row))
+    {
+        return Err(visibility_failure_at(
+            "session_visibility.rescan_required",
+            "index_recheck",
+        ));
+    }
+    for candidate in candidates
+        .iter_mut()
+        .filter(|candidate| candidate.missing_index)
+    {
+        let Some(indexed) = after.rows.get(&candidate.id) else {
+            continue;
+        };
+        if !baseline.contains(&candidate.thread_view())
+            || !same_rollout_path(&indexed.rollout_path, &candidate.path)
+            || indexed.source != candidate.source
+            || indexed.model_provider != candidate.before_provider
+            || indexed.archived != candidate.archived
+            || !indexed.has_user_event
+        {
+            return Err(visibility_failure_at(
+                "session_visibility.rescan_required",
+                "index_recheck",
+            ));
+        }
+        candidate.missing_index = false;
+    }
+    Ok(())
+}
+
 fn read_index(codex_home: &Path) -> IndexSnapshot {
     let database = codex_home.join(STATE_DATABASE);
     let Ok(connection) = Connection::open_with_flags(
@@ -1105,15 +1344,9 @@ fn read_index(codex_home: &Path) -> IndexSnapshot {
     ) else {
         return empty_index("missing");
     };
-    let Ok(columns) = thread_columns(&connection) else {
+    let Ok(true) = is_supported_thread_schema(&connection) else {
         return empty_index("unknown");
     };
-    if !REQUIRED_THREAD_COLUMNS
-        .iter()
-        .all(|required| columns.iter().any(|column| column == required))
-    {
-        return empty_index("unknown");
-    }
     let Ok(mut statement) = connection.prepare(
         "SELECT id, rollout_path, source, model_provider, has_user_event, archived FROM threads",
     ) else {
@@ -1153,11 +1386,68 @@ fn empty_index(schema_status: &str) -> IndexSnapshot {
     }
 }
 
-fn thread_columns(connection: &Connection) -> rusqlite::Result<Vec<String>> {
-    let mut statement = connection.prepare("PRAGMA table_info(threads)")?;
-    statement
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect()
+fn is_supported_thread_schema(connection: &Connection) -> rusqlite::Result<bool> {
+    let schema_sql = connection.query_row(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'threads'",
+        [],
+        |row| row.get::<_, String>(0),
+    )?;
+    if canonical_schema_sql(&schema_sql) != canonical_schema_sql(SUPPORTED_THREADS_SCHEMA) {
+        return Ok(false);
+    }
+    let extra_schema_objects = connection.query_row(
+        "SELECT COUNT(*) FROM sqlite_master
+         WHERE tbl_name = 'threads'
+           AND type IN ('index', 'trigger')
+           AND sql IS NOT NULL",
+        [],
+        |row| row.get::<_, u32>(0),
+    )?;
+    Ok(extra_schema_objects == 0)
+}
+
+fn canonical_schema_sql(sql: &str) -> String {
+    let mut canonical = String::with_capacity(sql.len());
+    let mut characters = sql.chars().peekable();
+    let mut in_string = false;
+    while let Some(character) = characters.next() {
+        if character == '\'' {
+            canonical.push(character);
+            if in_string && characters.peek() == Some(&'\'') {
+                canonical.push(characters.next().expect("peeked escaped quote"));
+            } else {
+                in_string = !in_string;
+            }
+        } else if in_string {
+            canonical.push(character);
+        } else if !character.is_ascii_whitespace() {
+            canonical.push(character.to_ascii_lowercase());
+        }
+    }
+    canonical
+}
+
+fn duplicate_rollout_ids(codex_home: &Path) -> Result<BTreeSet<String>, VisibilityFailure> {
+    let mut counts = HashMap::<String, u32>::new();
+    for root in [
+        codex_home.join("sessions"),
+        codex_home.join("archived_sessions"),
+    ] {
+        if !root.exists() {
+            continue;
+        }
+        let mut paths = Vec::new();
+        collect_rollouts(&root, &mut paths)?;
+        for path in paths {
+            if let Ok(rollout) = read_rollout(&path) {
+                *counts.entry(rollout.id).or_default() += 1;
+            }
+        }
+    }
+    Ok(counts
+        .into_iter()
+        .filter_map(|(id, count)| (count > 1).then_some(id))
+        .collect())
 }
 
 fn same_rollout_path(indexed: &Path, observed: &Path) -> bool {
@@ -1175,6 +1465,17 @@ struct RolloutObservation {
     has_derived_identity: bool,
     has_user_event: bool,
     has_encrypted_content: bool,
+    index_metadata: Option<IndexInsertMetadata>,
+}
+
+#[derive(Debug, Clone)]
+struct IndexInsertMetadata {
+    timestamp: String,
+    cwd: String,
+    cli_version: String,
+    approval_mode: String,
+    sandbox_policy: String,
+    first_user_message: String,
 }
 
 fn read_rollout(path: &Path) -> Result<RolloutObservation, &'static str> {
@@ -1211,6 +1512,23 @@ fn read_rollout(path: &Path) -> Result<RolloutObservation, &'static str> {
         .and_then(Value::as_str)
         .filter(|provider| !provider.trim().is_empty())
         .map(str::to_owned);
+    let timestamp = payload
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let cwd = payload
+        .get("cwd")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let cli_version = payload
+        .get("cli_version")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let approval_mode = payload
+        .get("approval_policy")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let sandbox_policy = payload.get("sandbox_policy").map(Value::to_string);
     let has_derived_identity = [
         "forked_from_id",
         "parent_thread_id",
@@ -1228,14 +1546,156 @@ fn read_rollout(path: &Path) -> Result<RolloutObservation, &'static str> {
         has_derived_identity,
         has_user_event: false,
         has_encrypted_content: contains_encrypted_content(&first),
+        index_metadata: None,
     };
+    let mut first_user_message = None;
     for line in lines {
         let line = line.map_err(|_| "rollout_unreadable")?;
         let value = serde_json::from_str::<Value>(&line).map_err(|_| "rollout_damaged")?;
         observation.has_user_event |= is_user_event(&value);
+        if first_user_message.is_none() {
+            first_user_message = user_message_text(&value);
+        }
         observation.has_encrypted_content |= contains_encrypted_content(&value);
     }
+    observation.index_metadata = match (
+        timestamp,
+        cwd,
+        cli_version,
+        approval_mode,
+        sandbox_policy,
+        first_user_message,
+    ) {
+        (
+            Some(timestamp),
+            Some(cwd),
+            Some(cli_version),
+            Some(approval_mode),
+            Some(sandbox_policy),
+            Some(first_user_message),
+        ) => Some(IndexInsertMetadata {
+            timestamp,
+            cwd,
+            cli_version,
+            approval_mode,
+            sandbox_policy,
+            first_user_message,
+        }),
+        _ => None,
+    };
     Ok(observation)
+}
+
+fn user_message_text(value: &Value) -> Option<String> {
+    let payload = value.get("payload")?;
+    match (
+        value.get("type").and_then(Value::as_str),
+        payload.get("type").and_then(Value::as_str),
+        payload.get("role").and_then(Value::as_str),
+    ) {
+        (Some("event_msg"), Some("user_message"), _) => payload
+            .get("message")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        (Some("response_item"), Some("message"), Some("user")) => payload
+            .get("content")
+            .and_then(Value::as_array)
+            .and_then(|content| {
+                content
+                    .iter()
+                    .find_map(|item| item.get("text").and_then(Value::as_str).map(str::to_owned))
+            }),
+        _ => None,
+    }
+}
+
+struct IndexFallbackOutcome {
+    inserted: BTreeSet<VisibilityThreadView>,
+    ineligible: BTreeSet<VisibilityThreadView>,
+    failed: bool,
+}
+
+fn insert_missing_indexes(
+    codex_home: &Path,
+    candidates: &[ExecutionCandidate],
+    faults: &dyn VisibilityFaultInjector,
+) -> IndexFallbackOutcome {
+    let missing = candidates
+        .iter()
+        .filter(|candidate| candidate.missing_index && candidate.index_metadata.is_some())
+        .collect::<Vec<_>>();
+    let ineligible = candidates
+        .iter()
+        .filter(|candidate| candidate.missing_index && candidate.index_metadata.is_none())
+        .map(ExecutionCandidate::thread_view)
+        .collect::<BTreeSet<_>>();
+    if missing.is_empty() {
+        return IndexFallbackOutcome {
+            inserted: BTreeSet::new(),
+            ineligible,
+            failed: false,
+        };
+    }
+    let failed = || IndexFallbackOutcome {
+        inserted: BTreeSet::new(),
+        ineligible: ineligible.clone(),
+        failed: true,
+    };
+    let Ok(mut connection) = Connection::open(codex_home.join(STATE_DATABASE)) else {
+        return failed();
+    };
+    let Ok(transaction) = connection.transaction() else {
+        return failed();
+    };
+    for candidate in &missing {
+        let reference = SessionVisibilityApplication::session_reference(&candidate.id);
+        if faults.fails_at(VisibilityFailurePoint::BeforeIndexInsert, &reference) {
+            return failed();
+        }
+        let Some(metadata) = candidate.index_metadata.as_ref() else {
+            return failed();
+        };
+        if transaction
+            .execute(
+                "INSERT INTO threads (
+                    id, rollout_path, created_at, updated_at, source, model_provider,
+                    cwd, title, sandbox_policy, approval_mode, has_user_event, archived,
+                    cli_version, first_user_message, thread_source, preview
+                ) VALUES (
+                    ?1, ?2, CAST(strftime('%s', ?3) AS INTEGER),
+                    CAST(strftime('%s', ?3) AS INTEGER), ?4, ?5, ?6, ?7, ?8, ?9,
+                    1, ?10, ?11, ?7, 'user', ?7
+                )",
+                params![
+                    candidate.id,
+                    candidate.path.to_string_lossy(),
+                    metadata.timestamp,
+                    candidate.source,
+                    candidate.before_provider,
+                    metadata.cwd,
+                    metadata.first_user_message,
+                    metadata.sandbox_policy,
+                    metadata.approval_mode,
+                    candidate.archived,
+                    metadata.cli_version,
+                ],
+            )
+            .is_err()
+        {
+            return failed();
+        }
+    }
+    if transaction.commit().is_err() {
+        return failed();
+    }
+    IndexFallbackOutcome {
+        inserted: missing
+            .into_iter()
+            .map(|candidate| candidate.thread_view())
+            .collect(),
+        ineligible,
+        failed: false,
+    }
 }
 
 fn is_user_event(value: &Value) -> bool {
@@ -1543,6 +2003,12 @@ fn indeterminate_execution_result() -> VisibilityExecutionResult {
         succeeded: 0,
         retryable: 0,
         encrypted_content_risk: 0,
+        breakdown: VisibilityExecutionBreakdown {
+            app_server_coordinated: 0,
+            sqlite_fallback: 0,
+            schema_skipped: 0,
+            verification_failed: 0,
+        },
         block_codex_restart: true,
         message_id: "session_visibility.recovery_indeterminate",
         diagnostic_stage: "recovery",

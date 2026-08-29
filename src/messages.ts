@@ -548,6 +548,12 @@ export const sessionMessages = {
     rescanRequired: (succeeded: number) => `已修复 ${succeeded} 个；候选已变化，请重新扫描。`,
     indeterminate: "修复结果暂时无法判定。暂不要重启 Codex，请保留当前状态并重试修复。",
     encryptedResult: "含加密内容的会话仍有续聊或压缩风险。",
+    executionBreakdown: (breakdown: {
+      appServerCoordinated: number;
+      sqliteFallback: number;
+      schemaSkipped: number;
+      verificationFailed: number;
+    }) => `App Server 协调 ${breakdown.appServerCoordinated} 个；SQLite 后备 ${breakdown.sqliteFallback} 个；未知 schema 跳过 ${breakdown.schemaSkipped} 个；验证失败 ${breakdown.verificationFailed} 个。`,
     close: "关闭预览",
     targetMode: {
       openai_login: "OpenAI 登录模式",
@@ -562,6 +568,12 @@ export const sessionMessages = {
       blocked: "阻断",
       encryptedContentRisk: "含加密内容风险",
     },
+    indexPlanLabel: "索引补建计划",
+    indexPlan: {
+      appServerCoordination: "App Server 优先协调",
+      sqliteFallbackEligible: "SQLite 后备候选",
+      schemaSkipped: "未知 schema 跳过",
+    },
     encryptedRisk: "含加密内容的会话可以修复可见性，但加密内容可能影响后续续聊或压缩。",
     appServerUnavailable: "扫描已完成，但 App Server 不可用，当前无法验证修复结果。",
     appServerIncompatible: "扫描已完成，但当前 App Server 不兼容，升级 Codex 前无法验证修复结果。",
@@ -571,6 +583,7 @@ export const sessionMessages = {
     reason: {
       provider_mismatch: "会话运行供应商与当前模式不同",
       index_missing: "身份明确但 Codex 索引缺失",
+      index_fallback_metadata_incomplete: "SQLite 后备所需元数据不完整，仅尝试 App Server 协调",
       excluded_exec: "已排除 exec 会话",
       excluded_subagent: "已排除子代理会话",
       excluded_internal: "已排除自动化或内部会话",

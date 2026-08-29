@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -216,7 +217,7 @@ async fn rollout_failures_are_isolated_and_the_latest_manifest_is_compact_and_re
 }
 
 #[tokio::test]
-async fn missing_index_sessions_remain_preview_only_for_the_follow_up_index_feature() {
+async fn a_valid_missing_index_is_repaired_with_other_indexed_sessions() {
     let fixture = VisibilityFixture::new();
     fixture.indexed_candidate("indexed.jsonl");
     fixture.rollout(
@@ -246,7 +247,335 @@ async fn missing_index_sessions_remain_preview_only_for_the_follow_up_index_feat
 
     assert_eq!(preview.summary.missing_index, 1);
     assert_eq!(result.status, "complete");
+    assert_eq!((result.succeeded, result.retryable), (2, 0));
+    assert_eq!(
+        (
+            result.breakdown.app_server_coordinated,
+            result.breakdown.sqlite_fallback,
+        ),
+        (0, 1)
+    );
+    assert_eq!(
+        (
+            result.breakdown.schema_skipped,
+            result.breakdown.verification_failed,
+        ),
+        (0, 0),
+    );
+}
+
+#[tokio::test]
+async fn a_supported_index_schema_uses_a_transactional_fallback_for_a_valid_missing_session() {
+    let fixture = VisibilityFixture::new();
+    let rollout = fixture.rollout(
+        "sessions/2026/08/29/missing-supported.jsonl",
+        "33333333-3333-4333-8333-333333333333",
+        "old-provider",
+        "cli",
+        true,
+        false,
+    );
+    let application =
+        SessionVisibilityApplication::with_recovery_root(fixture.codex_home(), fixture.root());
+    let preview = application
+        .scan(executable_context("revision-index-fallback"))
+        .expect("scan visibility");
+    let runtime = VisibilityRuntimeFixture::with_state(
+        fixture.codex_home(),
+        VisibilityConsumerState::NoConsumers,
+        "revision-index-fallback",
+        None,
+    );
+
+    let result = application
+        .execute(execution_request(&preview), &runtime)
+        .await
+        .expect("repair missing index with the supported fallback");
+
+    assert_eq!(result.status, "complete");
     assert_eq!((result.succeeded, result.retryable), (1, 0));
+    assert_eq!(provider_in_rollout(&rollout), TARGET_PROVIDER);
+    let indexed: (String, String, i64) =
+        Connection::open(fixture.codex_home().join("state_5.sqlite"))
+            .expect("open supported index")
+            .query_row(
+                "SELECT model_provider, rollout_path, archived FROM threads WHERE id = ?1",
+                ["33333333-3333-4333-8333-333333333333"],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("fallback inserted the missing thread");
+    assert_eq!(indexed.0, "old-provider");
+    assert_eq!(PathBuf::from(indexed.1), rollout);
+    assert_eq!(indexed.2, 0);
+}
+
+#[tokio::test]
+async fn duplicate_rollout_ids_are_all_skipped_even_when_only_one_has_fallback_metadata() {
+    let fixture = VisibilityFixture::new();
+    let duplicate_id = "33333333-3333-4333-8333-333333333333";
+    let complete = fixture.rollout(
+        "sessions/2026/08/29/duplicate-complete.jsonl",
+        duplicate_id,
+        "old-provider",
+        "cli",
+        true,
+        false,
+    );
+    let incomplete = fixture.rollout(
+        "archived_sessions/duplicate-incomplete.jsonl",
+        duplicate_id,
+        "old-provider",
+        "cli",
+        true,
+        false,
+    );
+    let changed = fs::read_to_string(&incomplete)
+        .expect("read duplicate rollout")
+        .replacen("\"approval_policy\":\"on-request\",", "", 1);
+    fs::write(&incomplete, changed).expect("remove fallback metadata");
+    let application =
+        SessionVisibilityApplication::with_recovery_root(fixture.codex_home(), fixture.root());
+    let preview = application
+        .scan(executable_context("revision-duplicate-id"))
+        .expect("scan duplicate rollout IDs");
+    let runtime = VisibilityRuntimeFixture::with_state(
+        fixture.codex_home(),
+        VisibilityConsumerState::NoConsumers,
+        "revision-duplicate-id",
+        None,
+    );
+
+    let result = application
+        .execute(execution_request(&preview), &runtime)
+        .await
+        .expect("skip ambiguous duplicate IDs");
+
+    assert_eq!(preview.summary.candidates, 0);
+    assert_eq!(preview.summary.missing_index, 0);
+    assert_eq!(preview.summary.skipped, 2);
+    assert_reason(&preview.reasons, "identity_ambiguous", 2);
+    assert_eq!((result.succeeded, result.retryable), (0, 0));
+    assert_eq!(result.breakdown.sqlite_fallback, 0);
+    assert_eq!(provider_in_rollout(&complete), "old-provider");
+    assert_eq!(provider_in_rollout(&incomplete), "old-provider");
+    let index_count: i64 = Connection::open(fixture.codex_home().join("state_5.sqlite"))
+        .expect("open duplicate-ID index")
+        .query_row("SELECT COUNT(*) FROM threads", [], |row| row.get(0))
+        .expect("count duplicate-ID index rows");
+    assert_eq!(index_count, 0);
+}
+
+#[tokio::test]
+async fn app_server_coordination_precedes_sqlite_fallback_for_missing_indexes() {
+    let fixture = VisibilityFixture::new();
+    let coordinated = fixture.rollout(
+        "sessions/2026/08/29/app-server-coordinated.jsonl",
+        "33333333-3333-4333-8333-333333333333",
+        "old-provider",
+        "cli",
+        true,
+        false,
+    );
+    let fallback = fixture.rollout(
+        "sessions/2026/08/29/sqlite-fallback.jsonl",
+        "44444444-4444-4444-8444-444444444444",
+        "old-provider",
+        "cli",
+        true,
+        false,
+    );
+    let application =
+        SessionVisibilityApplication::with_recovery_root(fixture.codex_home(), fixture.root());
+    let preview = application
+        .scan(executable_context("revision-coordination-first"))
+        .expect("scan visibility");
+    let runtime = VisibilityRuntimeFixture::with_state(
+        fixture.codex_home(),
+        VisibilityConsumerState::NoConsumers,
+        "revision-coordination-first",
+        None,
+    )
+    .with_app_server_coordination(&coordinated);
+
+    let result = application
+        .execute(execution_request(&preview), &runtime)
+        .await
+        .expect("coordinate before fallback");
+
+    assert_eq!(result.status, "complete");
+    assert_eq!((result.succeeded, result.retryable), (2, 0));
+    assert_eq!(
+        (
+            result.breakdown.app_server_coordinated,
+            result.breakdown.sqlite_fallback,
+        ),
+        (1, 1)
+    );
+    assert_eq!(
+        (
+            result.breakdown.schema_skipped,
+            result.breakdown.verification_failed,
+        ),
+        (0, 0),
+    );
+    assert_eq!(provider_in_rollout(&coordinated), TARGET_PROVIDER);
+    assert_eq!(provider_in_rollout(&fallback), TARGET_PROVIDER);
+    assert_eq!(
+        runtime.starts(),
+        2,
+        "one baseline and one clean verification"
+    );
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &fs::read(fixture.root().join("session-visibility-recovery.json"))
+            .expect("read index recovery manifest"),
+    )
+    .expect("parse index recovery manifest");
+    let index_stages = manifest["items"]
+        .as_array()
+        .expect("manifest items")
+        .iter()
+        .filter_map(|item| item["indexStage"].as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        index_stages,
+        BTreeSet::from(["app_server_coordinated", "sqlite_fallback_committed"]),
+    );
+    assert_ne!(
+        manifest["indexDatabaseBeforeHash"],
+        manifest["indexDatabaseAfterHash"],
+    );
+}
+
+#[tokio::test]
+async fn index_transaction_rollback_does_not_undo_other_verified_session_repairs() {
+    let fixture = VisibilityFixture::new();
+    let indexed = fixture.indexed_candidate("indexed-success.jsonl");
+    let first_missing = fixture.rollout(
+        "sessions/2026/08/29/index-rollback-first.jsonl",
+        "33333333-3333-4333-8333-333333333333",
+        "old-provider",
+        "cli",
+        true,
+        false,
+    );
+    let second_missing = fixture.rollout(
+        "sessions/2026/08/29/index-rollback-second.jsonl",
+        "44444444-4444-4444-8444-444444444444",
+        "old-provider",
+        "cli",
+        true,
+        false,
+    );
+    let application = SessionVisibilityApplication::with_fault_injector(
+        fixture.codex_home(),
+        fixture.root(),
+        FailingVisibilityWrites::before_index_insert_for("44444444-4444-4444-8444-444444444444"),
+    );
+    let preview = application
+        .scan(executable_context("revision-index-rollback"))
+        .expect("scan visibility");
+    let runtime = VisibilityRuntimeFixture::with_state(
+        fixture.codex_home(),
+        VisibilityConsumerState::NoConsumers,
+        "revision-index-rollback",
+        None,
+    );
+
+    let result = application
+        .execute(execution_request(&preview), &runtime)
+        .await
+        .expect("index rollback remains a partial result");
+
+    assert_eq!(result.status, "partial");
+    assert_eq!((result.succeeded, result.retryable), (1, 2));
+    assert_eq!(
+        (
+            result.breakdown.app_server_coordinated,
+            result.breakdown.sqlite_fallback,
+        ),
+        (0, 0)
+    );
+    assert_eq!(
+        (
+            result.breakdown.schema_skipped,
+            result.breakdown.verification_failed,
+        ),
+        (0, 0),
+    );
+    assert_eq!(result.diagnostic_stage, "index_transaction");
+    assert_eq!(result.error_code, "session_visibility.index_write_failed");
+    assert_eq!(provider_in_rollout(&indexed), TARGET_PROVIDER);
+    assert_eq!(provider_in_rollout(&first_missing), "old-provider");
+    assert_eq!(provider_in_rollout(&second_missing), "old-provider");
+    let index_count: i64 = Connection::open(fixture.codex_home().join("state_5.sqlite"))
+        .expect("open rolled back index")
+        .query_row("SELECT COUNT(*) FROM threads", [], |row| row.get(0))
+        .expect("count index rows");
+    assert_eq!(
+        index_count, 1,
+        "the whole missing-index transaction rolled back"
+    );
+    let manifest = fs::read_to_string(fixture.root().join("session-visibility-recovery.json"))
+        .expect("read compact recovery manifest");
+    assert!(manifest.contains("index_write_failed"));
+    for sensitive in [
+        "33333333-3333-4333-8333-333333333333",
+        "44444444-4444-4444-8444-444444444444",
+        "index-rollback-first.jsonl",
+        "index-rollback-second.jsonl",
+        "private-title",
+    ] {
+        assert!(!manifest.contains(sensitive), "manifest leaked {sensitive}");
+    }
+}
+
+#[tokio::test]
+async fn incomplete_fallback_metadata_does_not_block_app_server_index_coordination() {
+    let fixture = VisibilityFixture::new();
+    let indexed = fixture.indexed_candidate("indexed-with-legacy-meta.jsonl");
+    let missing = fixture.rollout(
+        "sessions/2026/08/29/missing-incomplete-meta.jsonl",
+        "33333333-3333-4333-8333-333333333333",
+        "old-provider",
+        "cli",
+        true,
+        false,
+    );
+    for rollout in [&indexed, &missing] {
+        let changed = fs::read_to_string(rollout)
+            .expect("read metadata fixture")
+            .replacen("\"approval_policy\":\"on-request\",", "", 1);
+        fs::write(rollout, changed).expect("remove index-only metadata");
+    }
+    let application =
+        SessionVisibilityApplication::with_recovery_root(fixture.codex_home(), fixture.root());
+    let preview = application
+        .scan(executable_context("revision-index-metadata"))
+        .expect("scan incomplete index metadata");
+    let runtime = VisibilityRuntimeFixture::with_state(
+        fixture.codex_home(),
+        VisibilityConsumerState::NoConsumers,
+        "revision-index-metadata",
+        None,
+    )
+    .with_app_server_coordination(&missing);
+
+    let result = application
+        .execute(execution_request(&preview), &runtime)
+        .await
+        .expect("coordinate the missing index before considering fallback metadata");
+
+    assert_eq!(preview.summary.candidates, 2);
+    assert_eq!(preview.summary.missing_index, 1);
+    assert_eq!(preview.summary.skipped, 0);
+    assert_eq!(preview.index_plan.app_server_coordination, 1);
+    assert_eq!(preview.index_plan.sqlite_fallback_eligible, 0);
+    assert_reason(&preview.reasons, "index_fallback_metadata_incomplete", 1);
+    assert_eq!((result.succeeded, result.retryable), (2, 0));
+    assert_eq!(result.breakdown.app_server_coordinated, 1);
+    assert_eq!(result.breakdown.sqlite_fallback, 0);
+    assert_eq!(provider_in_rollout(&indexed), TARGET_PROVIDER);
+    assert_eq!(provider_in_rollout(&missing), TARGET_PROVIDER);
 }
 
 #[tokio::test]
@@ -438,6 +767,7 @@ async fn app_server_filter_and_global_invariant_failures_remain_retryable_and_di
 
         assert_eq!(result.status, "failed");
         assert_eq!((result.succeeded, result.retryable), (0, 1));
+        assert_eq!(result.breakdown.verification_failed, 1);
         assert!(!result.block_codex_restart);
         assert_eq!(provider_in_rollout(&rollout), TARGET_PROVIDER);
         let diagnostics = result.diagnostic_details();
@@ -523,6 +853,7 @@ struct VisibilityRuntimeFixture {
     revision: Mutex<String>,
     revision_after_shutdown: Option<String>,
     verification: VerificationFixture,
+    coordinated_rollout: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy)]
@@ -558,11 +889,17 @@ impl VisibilityRuntimeFixture {
             revision: Mutex::new(revision.to_owned()),
             revision_after_shutdown: revision_after_shutdown.map(str::to_owned),
             verification: VerificationFixture::Normal,
+            coordinated_rollout: None,
         }
     }
 
     fn with_verification(mut self, verification: VerificationFixture) -> Self {
         self.verification = verification;
+        self
+    }
+
+    fn with_app_server_coordination(mut self, rollout: &Path) -> Self {
+        self.coordinated_rollout = Some(rollout.to_path_buf());
         self
     }
 
@@ -638,6 +975,17 @@ impl VisibilityExecutionRuntime for VisibilityRuntimeFixture {
     > {
         self.starts.fetch_add(1, Ordering::SeqCst);
         Box::pin(async move {
+            if let Some(rollout) = &self.coordinated_rollout {
+                insert_fixture_thread(
+                    &self.codex_home,
+                    rollout,
+                    rollout,
+                    "old-provider",
+                    "cli",
+                    true,
+                    false,
+                );
+            }
             Ok(
                 gpteasy_lib::session_visibility::VisibilityVerificationViews {
                     all_providers: self.all_threads(),
@@ -788,6 +1136,14 @@ impl FailingVisibilityWrites {
             remaining: AtomicUsize::new(1),
         }
     }
+
+    fn before_index_insert_for(id: &str) -> Self {
+        Self {
+            point: VisibilityFailurePoint::BeforeIndexInsert,
+            session_reference: Some(SessionVisibilityApplication::session_reference(id)),
+            remaining: AtomicUsize::new(1),
+        }
+    }
 }
 
 impl VisibilityFaultInjector for FailingVisibilityWrites {
@@ -862,7 +1218,7 @@ fn read_only_scan_classifies_active_archived_missing_internal_and_encrypted_roll
 
     assert_eq!(preview.target.model_provider, TARGET_PROVIDER);
     assert_eq!(preview.target.environment_revision, "revision-42");
-    assert_eq!(preview.summary.candidates, 1);
+    assert_eq!(preview.summary.candidates, 2);
     assert_eq!(preview.summary.unchanged, 1);
     assert_eq!(preview.summary.missing_index, 1);
     assert_eq!(preview.summary.skipped, 2);
@@ -932,6 +1288,8 @@ fn scan_remains_available_but_marks_environment_schema_and_app_server_blockers()
 
     assert!(!preview.can_execute);
     assert_eq!(preview.schema.status, "unknown");
+    assert_eq!(preview.index_plan.schema_skipped, 1);
+    assert_eq!(preview.index_plan.sqlite_fallback_eligible, 0);
     assert_eq!(preview.summary.candidates, 0);
     assert_eq!(preview.summary.missing_index, 0);
     assert_eq!(preview.summary.blocked, 1);
@@ -969,6 +1327,109 @@ fn scan_remains_available_but_marks_environment_schema_and_app_server_blockers()
             "diagnostic leaked {sensitive}"
         );
     }
+}
+
+#[test]
+fn a_future_index_schema_is_skipped_without_inserting_or_cleaning_rows() {
+    let fixture = VisibilityFixture::new();
+    let indexed = fixture.indexed_candidate("existing-index.jsonl");
+    fixture.rollout(
+        "sessions/2026/08/29/future-schema-missing.jsonl",
+        "55555555-5555-4555-8555-555555555555",
+        "old-provider",
+        "cli",
+        true,
+        false,
+    );
+    Connection::open(fixture.codex_home().join("state_5.sqlite"))
+        .expect("open future schema fixture")
+        .execute(
+            "ALTER TABLE threads ADD COLUMN future_required TEXT NOT NULL DEFAULT 'future'",
+            [],
+        )
+        .expect("add a future schema field");
+    let before = fixture.snapshot_bytes();
+
+    let preview = SessionVisibilityApplication::new(fixture.codex_home())
+        .scan(executable_context("revision-future-schema"))
+        .expect("scan future schema");
+
+    assert_eq!(preview.schema.status, "unknown");
+    assert!(!preview.can_execute);
+    assert_eq!(preview.index_plan.schema_skipped, 2);
+    assert_eq!(preview.index_plan.sqlite_fallback_eligible, 0);
+    assert_eq!(preview.summary.candidates, 0);
+    assert_eq!(preview.summary.blocked, 2);
+    assert_reason(&preview.reasons, "unsupported_index_schema", 1);
+    assert_eq!(fixture.snapshot_bytes(), before);
+    assert_eq!(provider_in_rollout(&indexed), "old-provider");
+}
+
+#[test]
+fn a_same_named_but_constraint_incompatible_schema_is_skipped() {
+    let fixture = VisibilityFixture::new();
+    fixture.rollout(
+        "sessions/2026/08/29/constraint-mismatch.jsonl",
+        "55555555-5555-4555-8555-555555555555",
+        "old-provider",
+        "cli",
+        true,
+        false,
+    );
+    let connection = Connection::open(fixture.codex_home().join("state_5.sqlite"))
+        .expect("open constraint mismatch fixture");
+    let schema: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'threads'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read supported schema");
+    let incompatible = schema.replacen("rollout_path TEXT NOT NULL", "rollout_path TEXT", 1);
+    assert_ne!(incompatible, schema, "fixture must change a constraint");
+    connection
+        .execute_batch(&format!("DROP TABLE threads; {incompatible};"))
+        .expect("install same-named incompatible schema");
+
+    let preview = SessionVisibilityApplication::new(fixture.codex_home())
+        .scan(executable_context("revision-constraint-mismatch"))
+        .expect("scan constraint mismatch");
+
+    assert_eq!(preview.schema.status, "unknown");
+    assert!(!preview.can_execute);
+    assert_eq!(preview.summary.candidates, 0);
+    assert_eq!(preview.summary.blocked, 1);
+    assert_eq!(preview.index_plan.sqlite_fallback_eligible, 0);
+    assert_eq!(preview.index_plan.schema_skipped, 1);
+}
+
+#[test]
+fn a_corrupt_index_database_is_reported_unknown_without_any_repair_write() {
+    let fixture = VisibilityFixture::new();
+    let rollout = fixture.rollout(
+        "sessions/2026/08/29/corrupt-database.jsonl",
+        "55555555-5555-4555-8555-555555555555",
+        "old-provider",
+        "cli",
+        true,
+        false,
+    );
+    let database = fixture.codex_home().join("state_5.sqlite");
+    fs::write(&database, b"not a sqlite database").expect("corrupt index fixture");
+    let before_database = fs::read(&database).expect("read corrupt fixture");
+
+    let preview = SessionVisibilityApplication::new(fixture.codex_home())
+        .scan(executable_context("revision-corrupt-schema"))
+        .expect("scan corrupt schema");
+
+    assert_eq!(preview.schema.status, "unknown");
+    assert!(!preview.can_execute);
+    assert_eq!(preview.index_plan.schema_skipped, 1);
+    assert_eq!(
+        fs::read(database).expect("read unchanged corrupt fixture"),
+        before_database
+    );
+    assert_eq!(provider_in_rollout(&rollout), "old-provider");
 }
 
 #[test]
@@ -1118,12 +1579,42 @@ impl VisibilityFixture {
                 "CREATE TABLE threads (
                     id TEXT PRIMARY KEY,
                     rollout_path TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
                     source TEXT NOT NULL,
                     model_provider TEXT NOT NULL,
+                    cwd TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    sandbox_policy TEXT NOT NULL,
+                    approval_mode TEXT NOT NULL,
+                    tokens_used INTEGER NOT NULL DEFAULT 0,
                     has_user_event INTEGER NOT NULL,
                     archived INTEGER NOT NULL,
+                    archived_at INTEGER,
+                    git_sha TEXT,
+                    git_branch TEXT,
+                    git_origin_url TEXT,
+                    cli_version TEXT NOT NULL DEFAULT '',
+                    first_user_message TEXT NOT NULL DEFAULT '',
+                    agent_nickname TEXT,
+                    agent_role TEXT,
+                    memory_mode TEXT NOT NULL DEFAULT 'enabled',
+                    model TEXT,
+                    reasoning_effort TEXT,
+                    agent_path TEXT,
+                    created_at_ms INTEGER,
+                    updated_at_ms INTEGER,
                     thread_source TEXT,
-                    agent_path TEXT
+                    preview TEXT NOT NULL DEFAULT '',
+                    recency_at INTEGER NOT NULL DEFAULT 0,
+                    recency_at_ms INTEGER NOT NULL DEFAULT 0,
+                    history_mode TEXT NOT NULL DEFAULT 'legacy',
+                    name TEXT,
+                    is_pinned INTEGER NOT NULL DEFAULT 0,
+                    thread_section_id TEXT,
+                    section_position INTEGER,
+                    section_entered_at_ms INTEGER,
+                    project_id TEXT
                 );",
             )
             .expect("create real thread-index shape");
@@ -1163,7 +1654,9 @@ impl VisibilityFixture {
                 "cli_version": "0.150.1",
                 "source": source,
                 "thread_source": "user",
-                "model_provider": provider
+                "model_provider": provider,
+                "approval_policy": "on-request",
+                "sandbox_policy": { "type": "workspace-write" }
             }
         })];
         if has_user_event {
@@ -1259,34 +1752,15 @@ impl VisibilityFixture {
         has_user_event: bool,
         archived: bool,
     ) {
-        let first_line = fs::read_to_string(rollout)
-            .expect("read rollout")
-            .lines()
-            .next()
-            .expect("session meta")
-            .to_owned();
-        let id = serde_json::from_str::<serde_json::Value>(&first_line)
-            .expect("parse session meta")["payload"]["id"]
-            .as_str()
-            .expect("thread id")
-            .to_owned();
-        Connection::open(self.codex_home.join("state_5.sqlite"))
-            .expect("open state fixture")
-            .execute(
-                "INSERT INTO threads (
-                    id, rollout_path, source, model_provider, has_user_event, archived,
-                    thread_source, agent_path
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'user', NULL)",
-                params![
-                    id,
-                    indexed_rollout_path.to_string_lossy(),
-                    source,
-                    provider,
-                    has_user_event,
-                    archived,
-                ],
-            )
-            .expect("index rollout");
+        insert_fixture_thread(
+            &self.codex_home,
+            rollout,
+            indexed_rollout_path,
+            provider,
+            source,
+            has_user_event,
+            archived,
+        );
     }
 
     fn snapshot_bytes(&self) -> Vec<(PathBuf, Vec<u8>)> {
@@ -1295,6 +1769,51 @@ impl VisibilityFixture {
         files.sort_by(|left, right| left.0.cmp(&right.0));
         files
     }
+}
+
+fn insert_fixture_thread(
+    codex_home: &Path,
+    rollout: &Path,
+    indexed_rollout_path: &Path,
+    provider: &str,
+    source: &str,
+    has_user_event: bool,
+    archived: bool,
+) {
+    let first_line = fs::read_to_string(rollout)
+        .expect("read rollout")
+        .lines()
+        .next()
+        .expect("session meta")
+        .to_owned();
+    let id = serde_json::from_str::<serde_json::Value>(&first_line)
+        .expect("parse session meta")["payload"]["id"]
+        .as_str()
+        .expect("thread id")
+        .to_owned();
+    Connection::open(codex_home.join("state_5.sqlite"))
+        .expect("open state fixture")
+        .execute(
+            r#"INSERT INTO threads (
+                id, rollout_path, created_at, updated_at, source, model_provider,
+                cwd, title, sandbox_policy, approval_mode, has_user_event, archived,
+                thread_source, agent_path, cli_version, first_user_message, preview
+            ) VALUES (
+                ?1, ?2, 1787932800, 1787932801, ?3, ?4,
+                'C:\private\workspace', 'private-title', '{"type":"workspace-write"}',
+                'on-request', ?5, ?6, 'user', NULL, '0.150.1',
+                'private-title', 'private-title'
+            )"#,
+            params![
+                id,
+                indexed_rollout_path.to_string_lossy(),
+                source,
+                provider,
+                has_user_event,
+                archived,
+            ],
+        )
+        .expect("index rollout");
 }
 
 fn collect_files(root: &Path, files: &mut Vec<(PathBuf, Vec<u8>)>) {

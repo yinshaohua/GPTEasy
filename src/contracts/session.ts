@@ -98,6 +98,11 @@ export interface SessionVisibilityPreview {
     status: string;
     database: string;
   };
+  indexPlan: {
+    appServerCoordination: number;
+    sqliteFallbackEligible: number;
+    schemaSkipped: number;
+  };
   summary: {
     candidates: number;
     unchanged: number;
@@ -123,6 +128,12 @@ export interface SessionVisibilityExecutionResult {
   succeeded: number;
   retryable: number;
   encryptedContentRisk: number;
+  breakdown: {
+    appServerCoordinated: number;
+    sqliteFallback: number;
+    schemaSkipped: number;
+    verificationFailed: number;
+  };
   blockCodexRestart: boolean;
   messageId: string;
   diagnosticStage: string;
@@ -158,6 +169,12 @@ export function executeSessionVisibility(
       succeeded: 1,
       retryable: 1,
       encryptedContentRisk: 1,
+      breakdown: {
+        appServerCoordinated: 0,
+        sqliteFallback: 1,
+        schemaSkipped: 0,
+        verificationFailed: 0,
+      },
       blockCodexRestart: false,
       messageId: "session_visibility.repair_partial",
       diagnosticStage: "rollout_replace",
@@ -239,6 +256,11 @@ const previewVisibility: SessionVisibilityPreview = {
   codexVersion: "codex-cli 0.150.1",
   appServer: "available",
   schema: { status: "supported", database: "state_5.sqlite" },
+  indexPlan: {
+    appServerCoordination: 1,
+    sqliteFallbackEligible: 1,
+    schemaSkipped: 0,
+  },
   summary: {
     candidates: 2,
     unchanged: 1,
