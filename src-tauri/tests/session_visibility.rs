@@ -873,6 +873,97 @@ async fn an_interrupted_replace_is_retryable_until_the_file_matches_neither_know
 }
 
 #[tokio::test]
+async fn an_index_commit_without_a_recorded_after_hash_blocks_restart_as_indeterminate() {
+    let fixture = VisibilityFixture::new();
+    fixture.rollout(
+        "sessions/2026/08/29/index-commit-interrupted.jsonl",
+        "33333333-3333-4333-8333-333333333333",
+        "old-provider",
+        "cli",
+        true,
+        false,
+    );
+    let application = SessionVisibilityApplication::with_fault_injector(
+        fixture.codex_home(),
+        fixture.root(),
+        FailingVisibilityWrites::after_index_commit_once(),
+    );
+    let preview = application
+        .scan(executable_context("revision-index-commit"))
+        .expect("scan missing index");
+    let runtime = VisibilityRuntimeFixture::with_state(
+        fixture.codex_home(),
+        VisibilityConsumerState::NoConsumers,
+        "revision-index-commit",
+        None,
+    );
+
+    let failure = application
+        .execute(execution_request(&preview), &runtime)
+        .await
+        .expect_err("fault interrupts after the index transaction commits");
+
+    assert_eq!(failure.message_id, "session_visibility.interrupted");
+    let index_count: i64 = Connection::open(fixture.codex_home().join("state_5.sqlite"))
+        .expect("open index after interruption")
+        .query_row("SELECT COUNT(*) FROM threads", [], |row| row.get(0))
+        .expect("count committed index rows");
+    assert_eq!(index_count, 1);
+    let assessment = application
+        .assess_recovery()
+        .expect("assess interrupted index transaction");
+    assert_eq!(assessment.status, "indeterminate");
+    assert!(assessment.block_codex_restart);
+
+    let next = application
+        .execute(execution_request(&preview), &runtime)
+        .await
+        .expect("public execution reports the indeterminate index state");
+    assert_eq!(next.status, "indeterminate");
+    assert!(next.block_codex_restart);
+    assert_eq!(runtime.shutdowns(), 1);
+}
+
+#[tokio::test]
+async fn database_activity_after_the_index_result_is_recorded_does_not_block_restart() {
+    let fixture = VisibilityFixture::new();
+    fixture.indexed_candidate("retryable-after-database-activity.jsonl");
+    let application = SessionVisibilityApplication::with_fault_injector(
+        fixture.codex_home(),
+        fixture.root(),
+        FailingVisibilityWrites::before_replace_for("11111111-1111-4111-8111-111111111111"),
+    );
+    let preview = application
+        .scan(executable_context("revision-database-activity"))
+        .expect("scan visibility");
+    let runtime = VisibilityRuntimeFixture::with_state(
+        fixture.codex_home(),
+        VisibilityConsumerState::NoConsumers,
+        "revision-database-activity",
+        None,
+    );
+
+    let result = application
+        .execute(execution_request(&preview), &runtime)
+        .await
+        .expect("record a retryable repair result");
+    assert_eq!(result.status, "failed");
+    Connection::open(fixture.codex_home().join("state_5.sqlite"))
+        .expect("open index for normal activity")
+        .execute(
+            "UPDATE threads SET title = 'updated after repair' WHERE id = ?1",
+            ["11111111-1111-4111-8111-111111111111"],
+        )
+        .expect("simulate normal index activity");
+
+    let assessment = application
+        .assess_recovery()
+        .expect("assess retryable repair after normal database activity");
+    assert_eq!(assessment.status, "retryable");
+    assert!(!assessment.block_codex_restart);
+}
+
+#[tokio::test]
 async fn a_verified_manifest_does_not_claim_later_external_changes_are_an_interruption() {
     let fixture = VisibilityFixture::new();
     let rollout = fixture.indexed_candidate("verified.jsonl");
@@ -958,6 +1049,64 @@ async fn app_server_filter_and_global_invariant_failures_remain_retryable_and_di
 }
 
 #[tokio::test]
+async fn verification_keeps_each_success_when_another_session_is_missing_from_the_target_view() {
+    let fixture = VisibilityFixture::new();
+    fixture.indexed_rollout(
+        "verified.jsonl",
+        "11111111-1111-4111-8111-111111111111",
+        false,
+    );
+    fixture.indexed_rollout(
+        "verification-failed.jsonl",
+        "22222222-2222-4222-8222-222222222222",
+        false,
+    );
+    let application =
+        SessionVisibilityApplication::with_recovery_root(fixture.codex_home(), fixture.root());
+    let preview = application
+        .scan(executable_context("revision-partial-verification"))
+        .expect("scan visibility");
+    let runtime = VisibilityRuntimeFixture::with_state(
+        fixture.codex_home(),
+        VisibilityConsumerState::NoConsumers,
+        "revision-partial-verification",
+        None,
+    )
+    .with_verification(VerificationFixture::MissingSecondTarget);
+
+    let result = application
+        .execute(execution_request(&preview), &runtime)
+        .await
+        .expect("verify sessions independently");
+
+    assert_eq!(result.status, "partial");
+    assert_eq!((result.succeeded, result.retryable), (1, 1));
+    assert_eq!(result.breakdown.verification_failed, 1);
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &fs::read(fixture.root().join("session-visibility-recovery.json"))
+            .expect("read recovery manifest"),
+    )
+    .expect("parse recovery manifest");
+    let stages = manifest["items"]
+        .as_array()
+        .expect("manifest items")
+        .iter()
+        .filter_map(|item| item["stage"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        stages.iter().filter(|stage| **stage == "verified").count(),
+        1
+    );
+    assert_eq!(
+        stages
+            .iter()
+            .filter(|stage| **stage == "verification_failed")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn verification_preserves_the_existing_target_provider_filter_view() {
     let fixture = VisibilityFixture::new();
     fixture.indexed_candidate("candidate.jsonl");
@@ -984,8 +1133,9 @@ async fn verification_preserves_the_existing_target_provider_filter_view() {
         .await
         .expect("filter invariant failure is determinate");
 
-    assert_eq!(result.status, "failed");
-    assert_eq!((result.succeeded, result.retryable), (0, 1));
+    assert_eq!(result.status, "partial");
+    assert_eq!((result.succeeded, result.retryable), (1, 1));
+    assert_eq!(result.breakdown.verification_failed, 1);
 }
 
 fn execution_request(
@@ -1040,6 +1190,7 @@ struct VisibilityRuntimeFixture {
 enum VerificationFixture {
     Normal,
     MissingTarget,
+    MissingSecondTarget,
     MissingExistingTarget,
     ArchiveChanged,
     AppServerUnavailable,
@@ -1217,6 +1368,10 @@ impl VisibilityExecutionRuntime for VisibilityRuntimeFixture {
             match self.verification {
                 VerificationFixture::Normal => {}
                 VerificationFixture::MissingTarget => target_provider.clear(),
+                VerificationFixture::MissingSecondTarget => {
+                    target_provider
+                        .retain(|thread| thread.id != "22222222-2222-4222-8222-222222222222");
+                }
                 VerificationFixture::MissingExistingTarget => {
                     target_provider
                         .retain(|thread| thread.id != "00000000-0000-4000-8000-000000000000");
@@ -1320,6 +1475,14 @@ impl FailingVisibilityWrites {
     fn after_replace_once() -> Self {
         Self {
             point: VisibilityFailurePoint::AfterRolloutReplace,
+            session_reference: None,
+            remaining: AtomicUsize::new(1),
+        }
+    }
+
+    fn after_index_commit_once() -> Self {
+        Self {
+            point: VisibilityFailurePoint::AfterIndexCommit,
             session_reference: None,
             remaining: AtomicUsize::new(1),
         }

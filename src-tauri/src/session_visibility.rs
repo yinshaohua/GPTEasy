@@ -324,6 +324,7 @@ impl VisibilityExecutionResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VisibilityFailurePoint {
     BeforeIndexInsert,
+    AfterIndexCommit,
     BeforeRolloutReplace,
     AfterRolloutReplace,
 }
@@ -661,6 +662,13 @@ impl SessionVisibilityApplication {
         let index_write_failed = index_outcome.failed;
         let index_metadata_incomplete = !index_outcome.ineligible.is_empty();
         let sqlite_fallback = index_outcome.inserted.len() as u32;
+        if sqlite_fallback > 0
+            && self
+                .faults
+                .fails_at(VisibilityFailurePoint::AfterIndexCommit, "index_database")
+        {
+            return Err(visibility_failure("session_visibility.interrupted"));
+        }
         for (candidate_index, candidate) in candidates.iter().enumerate() {
             if candidate.was_missing_index {
                 manifest.items[candidate_index].index_stage = if !candidate.missing_index {
@@ -793,26 +801,26 @@ impl SessionVisibilityApplication {
             && target_after_count == expected_target.len()
             && all_after == expected_all
             && target_after == expected_target;
+        let candidate_verified = |candidate: &ExecutionCandidate| {
+            let thread = candidate.thread_view();
+            all_after.contains(&thread) && target_after.contains(&thread)
+        };
         let succeeded = written
             .iter()
-            .filter(|(_, candidate)| {
-                invariants_hold && target_after.contains(&candidate.thread_view())
-            })
+            .filter(|(_, candidate)| candidate_verified(candidate))
             .count() as u32;
-        retryable += written.len() as u32 - succeeded;
-        let verification_failed = if invariants_hold {
-            0
-        } else {
-            written.len() as u32
-        };
+        let candidate_verification_failed = written.len() as u32 - succeeded;
+        let global_verification_failed =
+            u32::from(!invariants_hold && candidate_verification_failed == 0);
+        let verification_failed = candidate_verification_failed + global_verification_failed;
+        retryable += verification_failed;
         for (candidate_index, candidate) in &written {
-            manifest.items[*candidate_index].stage =
-                if invariants_hold && target_after.contains(&candidate.thread_view()) {
-                    "verified"
-                } else {
-                    "verification_failed"
-                }
-                .to_owned();
+            manifest.items[*candidate_index].stage = if candidate_verified(candidate) {
+                "verified"
+            } else {
+                "verification_failed"
+            }
+            .to_owned();
         }
         manifest.stage = if retryable == 0 {
             "verified"
@@ -1178,9 +1186,13 @@ impl SessionVisibilityApplication {
                 block_codex_restart: false,
             });
         }
+        let observed_index_hash = self.index_database_hash();
+        let index_state_indeterminate = manifest.stage == "index_transaction"
+            && manifest.index_database_after_hash.is_none()
+            && observed_index_hash != manifest.index_database_before_hash;
         let observed = self.observed_rollout_hashes()?;
         let mut retryable = 0;
-        let mut indeterminate = false;
+        let mut indeterminate = index_state_indeterminate;
         for item in manifest.items {
             let current = observed.get(&item.session_reference);
             if item.stage == "verified" && current == Some(&item.after_hash) {
