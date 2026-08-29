@@ -59,6 +59,9 @@ const SUPPORTED_THREADS_SCHEMA: &str = "CREATE TABLE threads (
     section_entered_at_ms INTEGER,
     project_id TEXT
 )";
+// Full sqlite_master contract: table plus all explicit indexes and triggers.
+const CODEX_0_150_1_THREADS_SCHEMA_FINGERPRINT: &str =
+    "cdc794aab210ed1108802047ac1dedecfd55a784de257f202fdb3290ecb1bd51";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -110,6 +113,8 @@ pub struct VisibilitySummary {
 pub struct VisibilitySchemaCapability {
     pub status: String,
     pub database: String,
+    #[serde(skip)]
+    pub variant: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -167,11 +172,12 @@ impl SessionVisibilityPreview {
         };
         format!(
             "stage=scan; target_mode={target_mode}; codex_version={codex_version}; \
-             schema={}; candidates={}; unchanged={}; missing_index={}; skipped={}; \
+             schema={}; schema_variant={}; candidates={}; unchanged={}; missing_index={}; skipped={}; \
              blocked={}; encrypted_content_risk={}; active={}; archived={}; \
              index_app_server_coordination={}; index_sqlite_fallback_eligible={}; \
              index_schema_skipped={}; error_codes={error_codes}",
             self.schema.status,
+            self.schema.variant,
             self.summary.candidates,
             self.summary.unchanged,
             self.summary.missing_index,
@@ -519,6 +525,11 @@ impl SessionVisibilityApplication {
             schema: VisibilitySchemaCapability {
                 status: index.schema_status.clone(),
                 database: STATE_DATABASE.to_owned(),
+                variant: index
+                    .schema
+                    .map(SupportedThreadSchema::diagnostic_name)
+                    .unwrap_or(index.schema_status.as_str())
+                    .to_owned(),
             },
             index_plan: VisibilityIndexPlan {
                 app_server_coordination: summary.missing_index,
@@ -1304,7 +1315,7 @@ impl SessionVisibilityApplication {
                     if !same_rollout_path(&indexed.rollout_path, &path)
                         || indexed.source != source
                         || indexed.archived != archived
-                        || !indexed.has_user_event
+                        || !index.accepts_index_user_event(indexed.has_user_event)
                     {
                         continue;
                     }
@@ -1350,6 +1361,7 @@ impl SessionVisibilityApplication {
         hasher.update([0]);
         hasher.update(target.environment_revision.as_bytes());
         hasher.update(index.schema_status.as_bytes());
+        hasher.update(format!("{:?}", index.schema).as_bytes());
         let mut index_rows = index.rows.iter().collect::<Vec<_>>();
         index_rows.sort_by(|(left, _), (right, _)| left.cmp(right));
         for (id, row) in index_rows {
@@ -1511,7 +1523,7 @@ impl SessionVisibilityApplication {
             if !same_rollout_path(&indexed.rollout_path, &path)
                 || indexed.source != source
                 || indexed.archived != archived
-                || !indexed.has_user_event
+                || !index.accepts_index_user_event(indexed.has_user_event)
             {
                 summary.skipped += 1;
                 increment(reasons, "identity_ambiguous");
@@ -1663,7 +1675,36 @@ struct IndexedThread {
 
 struct IndexSnapshot {
     schema_status: String,
+    schema: Option<SupportedThreadSchema>,
     rows: HashMap<String, IndexedThread>,
+}
+
+impl IndexSnapshot {
+    fn accepts_index_user_event(&self, has_user_event: bool) -> bool {
+        !self
+            .schema
+            .is_some_and(SupportedThreadSchema::index_user_event_is_authoritative)
+            || has_user_event
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SupportedThreadSchema {
+    Legacy,
+    Codex01501,
+}
+
+impl SupportedThreadSchema {
+    fn index_user_event_is_authoritative(self) -> bool {
+        matches!(self, Self::Legacy)
+    }
+
+    fn diagnostic_name(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::Codex01501 => "codex_0_150_1",
+        }
+    }
 }
 
 fn accept_app_server_index_coordination(
@@ -1673,6 +1714,7 @@ fn accept_app_server_index_coordination(
     candidates: &mut [ExecutionCandidate],
 ) -> Result<(), VisibilityFailure> {
     if before.schema_status != after.schema_status
+        || before.schema != after.schema
         || before
             .rows
             .iter()
@@ -1695,7 +1737,7 @@ fn accept_app_server_index_coordination(
             || indexed.source != candidate.source
             || indexed.model_provider != candidate.before_provider
             || indexed.archived != candidate.archived
-            || !indexed.has_user_event
+            || !before.accepts_index_user_event(indexed.has_user_event)
         {
             return Err(visibility_failure_at(
                 "session_visibility.rescan_required",
@@ -1715,7 +1757,7 @@ fn read_index(codex_home: &Path) -> IndexSnapshot {
     ) else {
         return empty_index("missing");
     };
-    let Ok(true) = is_supported_thread_schema(&connection) else {
+    let Ok(Some(schema)) = supported_thread_schema(&connection) else {
         return empty_index("unknown");
     };
     let Ok(mut statement) = connection.prepare(
@@ -1746,6 +1788,7 @@ fn read_index(codex_home: &Path) -> IndexSnapshot {
     }
     IndexSnapshot {
         schema_status: "supported".to_owned(),
+        schema: Some(schema),
         rows,
     }
 }
@@ -1753,19 +1796,19 @@ fn read_index(codex_home: &Path) -> IndexSnapshot {
 fn empty_index(schema_status: &str) -> IndexSnapshot {
     IndexSnapshot {
         schema_status: schema_status.to_owned(),
+        schema: None,
         rows: HashMap::new(),
     }
 }
 
-fn is_supported_thread_schema(connection: &Connection) -> rusqlite::Result<bool> {
+fn supported_thread_schema(
+    connection: &Connection,
+) -> rusqlite::Result<Option<SupportedThreadSchema>> {
     let schema_sql = connection.query_row(
         "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'threads'",
         [],
         |row| row.get::<_, String>(0),
     )?;
-    if canonical_schema_sql(&schema_sql) != canonical_schema_sql(SUPPORTED_THREADS_SCHEMA) {
-        return Ok(false);
-    }
     let extra_schema_objects = connection.query_row(
         "SELECT COUNT(*) FROM sqlite_master
          WHERE tbl_name = 'threads'
@@ -1774,7 +1817,44 @@ fn is_supported_thread_schema(connection: &Connection) -> rusqlite::Result<bool>
         [],
         |row| row.get::<_, u32>(0),
     )?;
-    Ok(extra_schema_objects == 0)
+    if canonical_schema_sql(&schema_sql) == canonical_schema_sql(SUPPORTED_THREADS_SCHEMA)
+        && extra_schema_objects == 0
+    {
+        return Ok(Some(SupportedThreadSchema::Legacy));
+    }
+    if thread_schema_fingerprint(connection)? == CODEX_0_150_1_THREADS_SCHEMA_FINGERPRINT {
+        return Ok(Some(SupportedThreadSchema::Codex01501));
+    }
+    Ok(None)
+}
+
+fn thread_schema_fingerprint(connection: &Connection) -> rusqlite::Result<String> {
+    let mut statement = connection.prepare(
+        "SELECT type, name, sql FROM sqlite_master
+         WHERE tbl_name = 'threads'
+           AND type IN ('table', 'index', 'trigger')
+           AND sql IS NOT NULL
+         ORDER BY type, name",
+    )?;
+    let objects = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"gpteasy-thread-schema-v1\0");
+    for object in objects {
+        let (kind, name, sql) = object?;
+        hasher.update(kind.as_bytes());
+        hasher.update([0]);
+        hasher.update(name.as_bytes());
+        hasher.update([0]);
+        hasher.update(canonical_schema_sql(&sql).as_bytes());
+        hasher.update([0]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn canonical_schema_sql(sql: &str) -> String {
@@ -1872,7 +1952,7 @@ fn read_rollout(path: &Path) -> Result<RolloutObservation, &'static str> {
         .to_owned();
     let source = payload
         .get("source")
-        .and_then(Value::as_str)
+        .and_then(rollout_source_kind)
         .map(str::to_owned);
     let thread_source = payload
         .get("thread_source")
@@ -1955,6 +2035,27 @@ fn read_rollout(path: &Path) -> Result<RolloutObservation, &'static str> {
         _ => None,
     };
     Ok(observation)
+}
+
+fn rollout_source_kind(value: &Value) -> Option<&str> {
+    if let Some(source) = value.as_str() {
+        return Some(source);
+    }
+    let object = value.as_object()?;
+    if object.len() != 1 {
+        return None;
+    }
+    let source = object.keys().next()?.as_str();
+    matches!(
+        source,
+        "subAgent"
+            | "subagent"
+            | "subAgentReview"
+            | "subAgentCompact"
+            | "subAgentThreadSpawn"
+            | "subAgentOther"
+    )
+    .then_some(source)
 }
 
 fn user_message_text(value: &Value) -> Option<String> {

@@ -3053,6 +3053,7 @@ mod tests {
             schema: VisibilitySchemaCapability {
                 status: "supported".to_owned(),
                 database: "state_5.sqlite".to_owned(),
+                variant: "legacy".to_owned(),
             },
             index_plan: VisibilityIndexPlan {
                 app_server_coordination: 1,

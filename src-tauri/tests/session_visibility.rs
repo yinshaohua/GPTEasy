@@ -77,6 +77,54 @@ async fn confirmed_repair_atomically_changes_only_the_runtime_provider_and_verif
 }
 
 #[tokio::test]
+async fn confirmed_repair_supports_the_codex_0_150_1_index_contract_end_to_end() {
+    let fixture = VisibilityFixture::new();
+    fixture.use_codex_0_150_1_schema();
+    let rollout = fixture.rollout(
+        "sessions/2026/08/29/codex-0-150-1-execution.jsonl",
+        "11111111-1111-4111-8111-111111111111",
+        "old-provider",
+        "cli",
+        true,
+        true,
+    );
+    fixture.index(&rollout, "old-provider", "cli", false, false);
+    let application =
+        SessionVisibilityApplication::with_recovery_root(fixture.codex_home(), fixture.root());
+    let preview = application
+        .scan(executable_context("revision-codex-0-150-1-execution"))
+        .expect("scan Codex 0.150.1 execution candidate");
+    let runtime = VisibilityRuntimeFixture::with_state(
+        fixture.codex_home(),
+        VisibilityConsumerState::NoConsumers,
+        "revision-codex-0-150-1-execution",
+        None,
+    );
+
+    let result = application
+        .execute(execution_request(&preview), &runtime)
+        .await
+        .expect("execute Codex 0.150.1 visibility repair");
+
+    assert_eq!(result.status, "complete", "{result:?}");
+    assert_eq!((result.succeeded, result.retryable), (1, 0));
+    assert_eq!(provider_in_rollout(&rollout), TARGET_PROVIDER);
+    let indexed: (String, i64) = Connection::open(fixture.codex_home().join("state_5.sqlite"))
+        .expect("open Codex 0.150.1 index")
+        .query_row(
+            "SELECT model_provider, has_user_event FROM threads WHERE id = ?1",
+            ["11111111-1111-4111-8111-111111111111"],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read repaired Codex 0.150.1 index");
+    assert_eq!(
+        indexed,
+        ("old-provider".to_owned(), 0),
+        "existing indexes remain App Server-owned; GPTEasy only rewrites rollout metadata"
+    );
+}
+
+#[tokio::test]
 async fn execution_rejects_changed_candidates_consumers_and_revision_without_writing() {
     for (consumer, expected_message) in [
         (
@@ -1605,6 +1653,90 @@ fn read_only_scan_classifies_active_archived_missing_internal_and_encrypted_roll
 }
 
 #[test]
+fn codex_0_150_1_schema_keeps_index_user_event_default_out_of_identity_matching() {
+    let fixture = VisibilityFixture::new();
+    fixture.use_codex_0_150_1_schema();
+    let candidate = fixture.rollout(
+        "sessions/2026/08/29/codex-0-150-1-candidate.jsonl",
+        "11111111-1111-4111-8111-111111111111",
+        "old-provider",
+        "cli",
+        true,
+        true,
+    );
+    fixture.index(&candidate, "old-provider", "cli", false, false);
+    let unchanged = fixture.rollout(
+        "sessions/2026/08/29/codex-0-150-1-unchanged.jsonl",
+        "22222222-2222-4222-8222-222222222222",
+        TARGET_PROVIDER,
+        "vscode",
+        true,
+        false,
+    );
+    fixture.index(&unchanged, TARGET_PROVIDER, "vscode", false, false);
+
+    let preview = SessionVisibilityApplication::new(fixture.codex_home())
+        .scan(executable_context("revision-codex-0-150-1"))
+        .expect("scan Codex 0.150.1 visibility");
+
+    assert_eq!(preview.schema.status, "supported");
+    assert_eq!(preview.summary.candidates, 1);
+    assert_eq!(preview.summary.unchanged, 1);
+    assert_eq!(preview.summary.skipped, 0);
+    assert_eq!(preview.summary.blocked, 0);
+    assert_eq!(preview.summary.encrypted_content_risk, 1);
+    assert!(preview.can_execute);
+    assert_reason(&preview.reasons, "provider_mismatch", 1);
+    assert_reason(&preview.reasons, "encrypted_content", 1);
+    let details = preview.diagnostic_details();
+    assert!(details.contains("schema=supported"));
+    assert!(details.contains("schema_variant=codex_0_150_1"));
+    for sensitive in [
+        "old-provider",
+        TARGET_PROVIDER,
+        "11111111-1111-4111-8111-111111111111",
+        "C:\\private\\workspace",
+        "private-title",
+        "opaque-encrypted-body",
+    ] {
+        assert!(
+            !details.contains(sensitive),
+            "diagnostic leaked {sensitive}"
+        );
+    }
+}
+
+#[test]
+fn structured_subagent_source_is_excluded_without_becoming_identity_ambiguous() {
+    let fixture = VisibilityFixture::new();
+    let rollout = fixture.rollout(
+        "sessions/2026/08/29/structured-subagent.jsonl",
+        "33333333-3333-4333-8333-333333333333",
+        "old-provider",
+        "subAgent",
+        true,
+        true,
+    );
+    fixture.rewrite_source_as_subagent_object(&rollout);
+
+    let preview = SessionVisibilityApplication::new(fixture.codex_home())
+        .scan(executable_context("revision-structured-subagent"))
+        .expect("scan structured subagent source");
+
+    assert_eq!(preview.summary.candidates, 0);
+    assert_eq!(preview.summary.skipped, 1);
+    assert_eq!(preview.summary.blocked, 0);
+    assert_eq!(preview.summary.encrypted_content_risk, 0);
+    assert_reason(&preview.reasons, "excluded_internal", 1);
+    assert!(
+        preview
+            .reasons
+            .iter()
+            .all(|reason| reason.code != "identity_ambiguous")
+    );
+}
+
+#[test]
 fn scan_remains_available_but_marks_environment_schema_and_app_server_blockers() {
     let fixture = VisibilityFixture::new();
     let connection = Connection::open(fixture.codex_home.join("state_5.sqlite"))
@@ -1714,6 +1846,40 @@ fn a_future_index_schema_is_skipped_without_inserting_or_cleaning_rows() {
     assert_reason(&preview.reasons, "unsupported_index_schema", 1);
     assert_eq!(fixture.snapshot_bytes(), before);
     assert_eq!(provider_in_rollout(&indexed), "old-provider");
+}
+
+#[test]
+fn codex_0_150_1_schema_with_an_extra_index_is_not_written() {
+    let fixture = VisibilityFixture::new();
+    fixture.use_codex_0_150_1_schema();
+    fixture.rollout(
+        "sessions/2026/08/29/codex-0-150-1-extra-index.jsonl",
+        "55555555-5555-4555-8555-555555555555",
+        "old-provider",
+        "cli",
+        true,
+        false,
+    );
+    Connection::open(fixture.codex_home().join("state_5.sqlite"))
+        .expect("open Codex 0.150.1 extra-index fixture")
+        .execute(
+            "CREATE INDEX idx_threads_unrecognized ON threads(title)",
+            [],
+        )
+        .expect("add an unrecognized thread index");
+    let before = fixture.snapshot_bytes();
+
+    let preview = SessionVisibilityApplication::new(fixture.codex_home())
+        .scan(executable_context("revision-codex-0-150-1-extra-index"))
+        .expect("scan Codex 0.150.1 with an extra index");
+
+    assert_eq!(preview.schema.status, "unknown");
+    assert_eq!(preview.schema.variant, "unknown");
+    assert!(!preview.can_execute);
+    assert_eq!(preview.summary.candidates, 0);
+    assert_eq!(preview.summary.blocked, 1);
+    assert_reason(&preview.reasons, "unsupported_index_schema", 1);
+    assert_eq!(fixture.snapshot_bytes(), before);
 }
 
 #[test]
@@ -1979,6 +2145,36 @@ impl VisibilityFixture {
         &self.codex_home
     }
 
+    fn use_codex_0_150_1_schema(&self) {
+        Connection::open(self.codex_home.join("state_5.sqlite"))
+            .expect("open Codex 0.150.1 state fixture")
+            .execute_batch(CODEX_0_150_1_THREADS_SCHEMA)
+            .expect("create Codex 0.150.1 thread-index shape");
+    }
+
+    fn rewrite_source_as_subagent_object(&self, rollout: &Path) {
+        let contents = fs::read_to_string(rollout).expect("read rollout for source rewrite");
+        let mut lines = contents.lines();
+        let mut meta = serde_json::from_str::<serde_json::Value>(
+            lines.next().expect("session meta for source rewrite"),
+        )
+        .expect("parse session meta for source rewrite");
+        meta["payload"]["source"] = json!({
+            "subAgent": {
+                "thread_spawn": {
+                    "parent_thread_id": "44444444-4444-4444-8444-444444444444"
+                }
+            }
+        });
+        meta["payload"]["thread_source"] = json!("subagent");
+        meta["payload"]["agent_role"] = json!("worker");
+        let rewritten = std::iter::once(meta.to_string())
+            .chain(lines.map(str::to_owned))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(rollout, format!("{rewritten}\n")).expect("rewrite structured subagent source");
+    }
+
     fn root(&self) -> &Path {
         self._temp.path()
     }
@@ -2127,6 +2323,100 @@ impl VisibilityFixture {
         files
     }
 }
+
+const CODEX_0_150_1_THREADS_SCHEMA: &str = r#"
+DROP TABLE threads;
+CREATE TABLE projects (id TEXT PRIMARY KEY);
+CREATE TABLE thread_sections (id TEXT PRIMARY KEY);
+CREATE TABLE threads (
+    id TEXT PRIMARY KEY,
+    rollout_path TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    model_provider TEXT NOT NULL,
+    cwd TEXT NOT NULL,
+    title TEXT NOT NULL,
+    sandbox_policy TEXT NOT NULL,
+    approval_mode TEXT NOT NULL,
+    tokens_used INTEGER NOT NULL DEFAULT 0,
+    has_user_event INTEGER NOT NULL DEFAULT 0,
+    archived INTEGER NOT NULL DEFAULT 0,
+    archived_at INTEGER,
+    git_sha TEXT,
+    git_branch TEXT,
+    git_origin_url TEXT,
+    cli_version TEXT NOT NULL DEFAULT '',
+    first_user_message TEXT NOT NULL DEFAULT '',
+    agent_nickname TEXT,
+    agent_role TEXT,
+    memory_mode TEXT NOT NULL DEFAULT 'enabled',
+    model TEXT,
+    reasoning_effort TEXT,
+    agent_path TEXT,
+    created_at_ms INTEGER,
+    updated_at_ms INTEGER,
+    thread_source TEXT,
+    preview TEXT NOT NULL DEFAULT '',
+    recency_at INTEGER NOT NULL DEFAULT 0,
+    recency_at_ms INTEGER NOT NULL DEFAULT 0,
+    history_mode TEXT NOT NULL DEFAULT 'legacy',
+    name TEXT,
+    is_pinned INTEGER NOT NULL DEFAULT 0,
+    thread_section_id TEXT REFERENCES thread_sections(id) ON DELETE SET NULL,
+    section_position INTEGER,
+    section_entered_at_ms INTEGER,
+    project_id TEXT REFERENCES projects(id) ON DELETE SET NULL
+);
+CREATE INDEX idx_threads_archived ON threads(archived);
+CREATE INDEX idx_threads_archived_cwd_created_at_ms ON threads(archived, cwd, created_at_ms DESC, id DESC);
+CREATE INDEX idx_threads_archived_cwd_recency_at_ms ON threads(archived, cwd, recency_at_ms DESC, id DESC);
+CREATE INDEX idx_threads_archived_cwd_updated_at_ms ON threads(archived, cwd, updated_at_ms DESC, id DESC);
+CREATE INDEX idx_threads_created_at ON threads(created_at DESC, id DESC);
+CREATE INDEX idx_threads_created_at_ms ON threads(created_at_ms DESC, id DESC);
+CREATE INDEX idx_threads_pinned_recency_at_ms ON threads(archived, recency_at_ms DESC, id DESC) WHERE is_pinned = 1 AND preview <> '';
+CREATE INDEX idx_threads_project_id ON threads(project_id, archived, created_at_ms DESC, id DESC) WHERE project_id IS NOT NULL;
+CREATE INDEX idx_threads_provider ON threads(model_provider);
+CREATE INDEX idx_threads_recency_at_ms ON threads(recency_at_ms DESC, id DESC);
+CREATE INDEX idx_threads_section_position ON threads(archived, thread_section_id, section_position ASC, id ASC) WHERE thread_section_id IS NOT NULL;
+CREATE INDEX idx_threads_section_recency_at_ms ON threads(archived, thread_section_id, recency_at_ms DESC, id DESC) WHERE thread_section_id IS NOT NULL;
+CREATE INDEX idx_threads_source ON threads(source);
+CREATE INDEX idx_threads_updated_at ON threads(updated_at DESC, id DESC);
+CREATE INDEX idx_threads_updated_at_ms ON threads(updated_at_ms DESC, id DESC);
+CREATE INDEX idx_threads_visible_created_at_ms ON threads(archived, created_at_ms DESC) WHERE preview <> '';
+CREATE INDEX idx_threads_visible_recency_at_ms ON threads(archived, recency_at_ms DESC, id DESC) WHERE preview <> '';
+CREATE INDEX idx_threads_visible_updated_at_ms ON threads(archived, updated_at_ms DESC) WHERE preview <> '';
+CREATE TRIGGER threads_created_at_ms_after_insert
+AFTER INSERT ON threads WHEN NEW.created_at_ms IS NULL
+BEGIN
+    UPDATE threads SET created_at_ms = NEW.created_at * 1000 WHERE id = NEW.id;
+END;
+CREATE TRIGGER threads_created_at_ms_after_update
+AFTER UPDATE OF created_at ON threads
+WHEN NEW.created_at != OLD.created_at AND NEW.created_at_ms IS OLD.created_at_ms
+BEGIN
+    UPDATE threads SET created_at_ms = NEW.created_at * 1000 WHERE id = NEW.id;
+END;
+CREATE TRIGGER threads_recency_at_after_insert
+AFTER INSERT ON threads WHEN NEW.recency_at_ms = 0
+BEGIN
+    UPDATE threads
+    SET recency_at = NEW.updated_at,
+        recency_at_ms = COALESCE(NEW.updated_at_ms, NEW.updated_at * 1000)
+    WHERE id = NEW.id;
+END;
+CREATE TRIGGER threads_updated_at_ms_after_insert
+AFTER INSERT ON threads WHEN NEW.updated_at_ms IS NULL
+BEGIN
+    UPDATE threads SET updated_at_ms = NEW.updated_at * 1000 WHERE id = NEW.id;
+END;
+CREATE TRIGGER threads_updated_at_ms_after_update
+AFTER UPDATE OF updated_at ON threads
+WHEN NEW.updated_at != OLD.updated_at AND NEW.updated_at_ms IS OLD.updated_at_ms
+BEGIN
+    UPDATE threads SET updated_at_ms = NEW.updated_at * 1000 WHERE id = NEW.id;
+END;
+"#;
 
 fn insert_fixture_thread(
     codex_home: &Path,
