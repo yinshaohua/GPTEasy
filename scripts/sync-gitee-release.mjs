@@ -523,8 +523,9 @@ function numericReleaseId(release) {
 }
 
 function stableAttachmentUrl(config, releaseId, uploaded, name) {
-  const id = Number(uploaded?.id);
-  if (!Number.isSafeInteger(id) || id <= 0) throw new Error(`Gitee upload response is missing a numeric attachment ID for ${name}`);
+  if (!Number.isSafeInteger(releaseId) || releaseId <= 0) {
+    throw new Error(`Gitee attachment URL is missing a numeric release ID for ${name}`);
+  }
   const candidate = uploaded.browser_download_url ?? uploaded.download_url;
   if (typeof candidate === "string") {
     const url = new URL(candidate);

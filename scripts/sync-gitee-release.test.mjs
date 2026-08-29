@@ -54,7 +54,7 @@ test("首次同步兼容 Gitee 以 HTTP 200 空数组表示清单不存在", asy
   }
 });
 
-test("Gitee README 已与模板一致时不重复写入", async () => {
+test("Gitee README 已与仓库根 README 一致时不重复写入", async () => {
   const adapter = await startAdapter({ remoteReadme: README_TEMPLATE });
   try {
     const result = await runSync(adapter.baseUrl);
@@ -104,6 +104,22 @@ test("部分上传后重跑会复用匹配附件并补传缺失附件", async ()
     const result = await runSync(adapter.baseUrl);
     assert.equal(result.code, 0, result.stderr);
     assert.deepEqual(adapter.state.uploadedThisRun.sort(), ["SHA256SUMS.txt", SIGNATURE].sort());
+    assert.equal(adapter.state.manifests.length, 1);
+  } finally {
+    await adapter.close();
+  }
+});
+
+test("既有附件枚举缺少附件 ID 时仍按稳定 URL 复用", async () => {
+  const adapter = await startAdapter({
+    releaseExists: true,
+    omitAttachmentIds: true,
+    uploads: new Map([[DISTRIBUTED_INSTALLER, INSTALLER_BYTES]]),
+  });
+  try {
+    const result = await runSync(adapter.baseUrl);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(adapter.state.uploadedThisRun.includes(DISTRIBUTED_INSTALLER), false);
     assert.equal(adapter.state.manifests.length, 1);
   } finally {
     await adapter.close();
@@ -452,6 +468,7 @@ async function startAdapter(options = {}) {
     missingManifestAsEmptyArray: options.missingManifestAsEmptyArray ?? false,
     requireCurlUpload: options.requireCurlUpload ?? false,
     persistThenDropUploadResponse: options.persistThenDropUploadResponse,
+    omitAttachmentIds: options.omitAttachmentIds ?? false,
     releasePatch: options.releasePatch ?? {},
     releaseResponsePatch: options.releaseResponsePatch ?? {},
     releaseAssets: options.releaseAssets,
@@ -640,7 +657,7 @@ function releaseResponse(state, server) {
 
 function attachmentResponse(name, state, server) {
   return {
-    id: [...state.uploads.keys()].indexOf(name) + 1,
+    ...(state.omitAttachmentIds ? {} : { id: [...state.uploads.keys()].indexOf(name) + 1 }),
     name,
     browser_download_url: `${origin(server)}/releases/download/${TAG}/${encodeURIComponent(name)}`,
   };
