@@ -1510,8 +1510,8 @@ select:focus-visible {
 }
 
 .environment-tools .secondary-button {
-  min-height: 30px;
-  padding: 4px 9px;
+  min-height: 36px;
+  padding: 7px 12px;
 }
 
 .upcoming-command { justify-content: space-between; }
@@ -1557,10 +1557,13 @@ select:focus-visible {
 }
 
 .catalog-heading-actions .catalog-heading-button {
-  min-height: 30px;
-  padding: 4px 8px;
-  font-size: 13px;
+  min-height: 36px;
+  padding: 7px 12px;
   white-space: nowrap;
+}
+
+.catalog-heading-actions .command-button .button-icon {
+  color: currentColor;
 }
 
 .button-icon.is-blue { color: #2677c9; }
@@ -3000,7 +3003,7 @@ select:focus-visible {
   }
 
   .desktop-control .secondary-button,
-  .catalog-heading .command-button {
+  .catalog-heading .catalog-heading-button {
     width: 100%;
   }
 

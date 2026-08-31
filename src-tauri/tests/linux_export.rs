@@ -59,6 +59,9 @@ fn bash_export_captures_every_verified_provider_in_catalog_order() {
         "the editable provider catalog must precede the runtime implementation"
     );
     assert!(!script.contains("OpenAI 登录"));
+    assert!(script.contains(
+        "function codex-full() {\n    command codex --dangerously-bypass-approvals-and-sandbox \"$@\"\n}"
+    ));
     assert!(
         script.contains("printf '  %s) %s (%s)%s\\n' \"$index\" \"$name\" \"$model\" \"$marker\"")
     );
@@ -103,6 +106,9 @@ fn zsh_export_captures_every_verified_provider_in_catalog_order() {
     assert!(script.contains("beta-secret-key"));
     assert!(script.find("Alpha Provider") < script.find("Beta Provider"));
     assert!(!script.contains("OpenAI 登录"));
+    assert!(script.contains(
+        "function codex-full() {\n    command codex --dangerously-bypass-approvals-and-sandbox \"$@\"\n}"
+    ));
 }
 
 #[test]

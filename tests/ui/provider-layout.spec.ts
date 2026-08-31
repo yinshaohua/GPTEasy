@@ -187,11 +187,12 @@ test("默认窗口横向展示目录行且底部操作可见", async ({ page }, 
   for (const button of await catalogButtons.all()) {
     const box = await button.boundingBox();
     expect(box).not.toBeNull();
-    expect(box!.height).toBeGreaterThanOrEqual(29);
-    expect(box!.height).toBeLessThanOrEqual(31);
+    expect(box!.height).toBeGreaterThanOrEqual(35);
+    expect(box!.height).toBeLessThanOrEqual(37);
     expect(box!.y + box!.height).toBeLessThanOrEqual(620);
   }
   const addProviderBox = await catalogButtons.last().boundingBox();
+  await expect(catalogButtons.last().locator("svg")).toHaveCSS("color", "rgb(255, 255, 255)");
   const providerActionBoxes = await page
     .locator(".provider-list-row:not(.provider-template-row) .provider-row-actions .command-button")
     .evaluateAll((buttons) => buttons.map((button) => button.getBoundingClientRect().right));
@@ -206,8 +207,8 @@ test("默认窗口横向展示目录行且底部操作可见", async ({ page }, 
   for (const button of await environmentButtons.all()) {
     const box = await button.boundingBox();
     expect(box).not.toBeNull();
-    expect(box!.height).toBeGreaterThanOrEqual(29);
-    expect(box!.height).toBeLessThanOrEqual(31);
+    expect(box!.height).toBeGreaterThanOrEqual(35);
+    expect(box!.height).toBeLessThanOrEqual(37);
     expect(box!.y + box!.height).toBeLessThanOrEqual(620);
   }
 

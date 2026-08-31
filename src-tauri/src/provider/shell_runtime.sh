@@ -1256,6 +1256,10 @@ gpteasy__current() {
     fi
 }
 
+function codex-full() {
+    command codex --dangerously-bypass-approvals-and-sandbox "$@"
+}
+
 gpteasy() {
 {{GPTEASY_FUNCTION_OPTIONS}}
     local command=${1:-}

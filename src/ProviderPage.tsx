@@ -1216,30 +1216,30 @@ export default function ProviderPage({
             </div>
             <div className="catalog-heading-actions">
               <button
-                className="secondary-button compact catalog-heading-button"
+                className="secondary-button catalog-heading-button"
                 type="button"
                 onClick={openLinuxExport}
                 disabled={busy || linuxExportBusy || providers.length === 0}
               >
-                <Download className="button-icon is-teal" size={16} aria-hidden="true" />
+                <Download className="button-icon is-teal" size={17} aria-hidden="true" />
                 {providerMessages.exportLinuxScript}
               </button>
               <button
-                className="secondary-button compact catalog-heading-button"
+                className="secondary-button catalog-heading-button"
                 type="button"
                 onClick={() => setForceDialogOpen(true)}
                 disabled={busy || forceSettingProviderId !== null || providers.length === 0}
               >
-                <ShieldCheck className="button-icon is-amber" size={16} aria-hidden="true" />
+                <ShieldCheck className="button-icon is-amber" size={17} aria-hidden="true" />
                 {providerMessages.forceSetProvider}
               </button>
               <button
-                className="secondary-button compact catalog-heading-button"
+                className="command-button catalog-heading-button"
                 type="button"
                 onClick={() => resetEditor("detail")}
                 disabled={busy}
               >
-                <Plus className="button-icon is-green" size={16} aria-hidden="true" />
+                <Plus className="button-icon" size={17} aria-hidden="true" />
                 {providerMessages.newProvider}
               </button>
             </div>
