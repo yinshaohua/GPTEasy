@@ -137,11 +137,15 @@ fn create_trust_root_fixture() -> TempDir {
     for (path, content) in [
         (
             ".github/workflows/gitee-smoke.yml",
-            "GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}\nSMOKE_SOURCE_TAG: ${{ inputs.source_tag }}\nSMOKE_ASSET_EXTENSION: ${{ inputs.asset_extension }}\nGITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}\nGITEE_REPOSITORY: ${{ vars.GITEE_REPOSITORY }}\n",
+            "actions/checkout@v5\ndefault: \"bin\"\nGITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}\nSMOKE_SOURCE_TAG: ${{ inputs.source_tag }}\nSMOKE_ASSET_EXTENSION: ${{ inputs.asset_extension }}\nGITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}\nGITEE_REPOSITORY: ${{ vars.GITEE_REPOSITORY }}\n",
         ),
         (
             ".github/workflows/gitee-sync.yml",
-            "types: [published]\nGITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}\nGITEE_REPOSITORY: ${{ vars.GITEE_REPOSITORY }}\n",
+            "actions/checkout@v5\ntypes: [published]\nGITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}\nGITEE_REPOSITORY: ${{ vars.GITEE_REPOSITORY }}\n",
+        ),
+        (
+            ".github/workflows/gitee-cleanup-smoke.yml",
+            "actions/checkout@v5\nGITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}\ncleanup-gitee-release.sh \"$RELEASE_ID\" \"$RELEASE_TAG\"\n^smoke-[0-9]+-[0-9]+$\n",
         ),
         (
             "scripts/smoke-gitee-release.sh",
@@ -149,11 +153,15 @@ fn create_trust_root_fixture() -> TempDir {
         ),
         (
             "scripts/sync-gitee-release.mjs",
-            "Authorization: `Bearer ${configuration.giteeToken}`\nspawn(\"curl\", [\n\"--form\"\n\"--http1.1\"\n\"Expect:\"\nattachment-reconcile\n`${name}.bin`\nnew URLSearchParams()\nnumericReleaseId()\ntarget_commitish: config.giteeBranch\n",
+            "Authorization: `Bearer ${configuration.giteeToken}`\nspawn(\"curl\", [\n\"--form\"\n\"--http1.1\"\n\"Expect:\"\nattachment-reconcile\nmanualActionRequired: true\nmanual Gitee installer upload required\nremove legacy Gitee attachment\nreturn name;\nnew URL(\"../README.md\"\nnew URLSearchParams()\nnumericReleaseId()\ntarget_commitish: config.giteeBranch\n",
         ),
         (
             "scripts/setup-gitee-distribution.sh",
             "ask_secret GITEE_TOKEN\nset_secret \"$TOKEN_SECRET_NAME\"\nunset GITEE_TOKEN\n",
+        ),
+        (
+            "scripts/manual-upload-gitee-installer.sh",
+            "gh release download \"$TAG\"\nverify-pe \"$INSTALLER\"\n/releases/$TAG/edit\ncurl --fail --silent --show-error --location\ncmp --silent \"$INSTALLER\" \"$VERIFIED\"\ngh workflow run gitee-sync.yml\ngh run watch\n",
         ),
     ] {
         fs::write(temp.path().join(path), content).expect("write trust root dependency");
