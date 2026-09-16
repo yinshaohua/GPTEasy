@@ -507,6 +507,10 @@ fn confirmed_takeover_preserves_external_fields_and_records_the_applied_provider
         "base_url = \"https://legacy.example/v1\"\r\n",
         "wire_api = \"responses\"\r\n",
         "\r\n",
+        "[tui]\r\n",
+        "notifications = false\r\n",
+        "status_line = [\"current-dir\"]\r\n",
+        "\r\n",
         "[projects.demo]\r\n",
         "trust_level = \"trusted\"\r\n",
     );
@@ -558,6 +562,23 @@ fn confirmed_takeover_preserves_external_fields_and_records_the_applied_provider
     assert_eq!(
         document["projects"]["demo"]["trust_level"].as_str(),
         Some("trusted")
+    );
+    assert_eq!(document["tui"]["notifications"].as_bool(), Some(false));
+    assert_eq!(
+        document["tui"]["status_line"]
+            .as_array()
+            .expect("status line array")
+            .iter()
+            .filter_map(|value| value.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "current-dir",
+            "model-with-reasoning",
+            "context-used",
+            "used-tokens",
+            "total-input-tokens",
+            "total-output-tokens",
+        ]
     );
     assert!(config.contains("# GPTEasy provider-id: 9f319739-f219-48ee-be35-22e08d5402d7"));
     assert!(!config.replace("\r\n", "").contains('\n'));
@@ -2598,6 +2619,22 @@ fn force_application_rebuilds_unreadable_artifacts_after_confirmation_and_keeps_
         .parse::<toml_edit::DocumentMut>()
         .expect("rebuilt config is valid TOML");
     assert_eq!(document["model_provider"].as_str(), Some(PROVIDER_ID));
+    assert_eq!(
+        document["tui"]["status_line"]
+            .as_array()
+            .expect("status line array")
+            .iter()
+            .filter_map(|value| value.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "current-dir",
+            "model-with-reasoning",
+            "context-used",
+            "used-tokens",
+            "total-input-tokens",
+            "total-output-tokens",
+        ]
+    );
     let credentials: Value = serde_json::from_slice(
         &fs::read(codex_home.join("auth.json")).expect("read rebuilt credentials"),
     )

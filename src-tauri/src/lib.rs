@@ -1,4 +1,5 @@
 pub mod codex;
+mod codex_config;
 mod commands;
 pub mod consumer;
 pub mod desktop;

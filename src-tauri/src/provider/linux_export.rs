@@ -5,6 +5,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::codex_config::STATUS_LINE_TOML;
 use crate::state::StateStore;
 
 use super::catalog;
@@ -177,6 +178,11 @@ fn render(shell: LinuxShell, export_id: &str, providers: &[catalog::ProviderReco
         shell.executable(),
         shell.display_name(),
     );
+    let status_line = STATUS_LINE_TOML
+        .lines()
+        .map(|line| format!("    printf '%s\\n' {}", shell_quote(line)))
+        .collect::<Vec<_>>()
+        .join("\n");
     script.push_str(&format!(
         "gpteasy__export_id={}\n\n",
         shell_quote(export_id)
@@ -231,6 +237,8 @@ gpteasy__print_block() {{
     printf '%s\n' 'model_providers.gpteasy.auth.command = "sh"'
     printf 'model_providers.gpteasy.auth.args = ["-c", '\''cat -- "${{CODEX_HOME:-$HOME/.codex}}/%s"'\'']\n' "$credential_relative"
     printf '%s\n' '# <<< GPTEasy managed provider <<<'
+    printf '%s\n' ''
+{status_line}
 }}
 "#
     ));

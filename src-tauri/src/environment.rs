@@ -12,6 +12,7 @@ use toml_edit::DocumentMut;
 use uuid::Uuid;
 
 use crate::codex::{LoginInspection, LoginMethod, LoginStatus, LoginStatusCommand};
+use crate::codex_config::{STATUS_LINE_TOML, apply_status_line, has_expected_status_line};
 pub use crate::consumer::ConsumerStatus;
 use crate::consumer::{ConsumerIdentity, ConsumerScan, ConsumerScanner, WindowsConsumerScanner};
 use crate::provider::{ProviderSummary, combination_fingerprint};
@@ -2516,7 +2517,11 @@ impl PreparedSwitch {
         let credentials_path = codex_home.join("auth.json");
         let config = read_artifact(&config_path)?;
         let credentials = read_artifact(&credentials_path)?;
-        let rendered_config = render_managed_block(&provider, &[], "\n").into_bytes();
+        let rendered_config = format!(
+            "{}\n{STATUS_LINE_TOML}",
+            render_managed_block(&provider, &[], "\n")
+        )
+        .into_bytes();
         let rendered_credentials = render_credentials(None, &provider.api_key)?;
         Ok(Self {
             operation_id: Uuid::new_v4().to_string(),
@@ -4285,10 +4290,26 @@ fn render_config(
         ManagedBlock::Conflict => return Err(managed_conflict()),
     };
     let rendered = migrate_legacy_custom_provider(&rendered, provider, newline)?;
-    rendered
-        .parse::<DocumentMut>()
-        .map_err(|_| invalid_config())?;
-    Ok(rendered.into_bytes())
+    if document.get("tui").is_some() {
+        let mut document = rendered
+            .parse::<DocumentMut>()
+            .map_err(|_| invalid_config())?;
+        if has_expected_status_line(&document) {
+            return Ok(normalize_newlines(&rendered, newline).into_bytes());
+        }
+        apply_status_line(&mut document).map_err(|_| invalid_config())?;
+        Ok(normalize_newlines(&document.to_string(), newline).into_bytes())
+    } else {
+        let mut rendered = normalize_newlines(&rendered, newline);
+        if !rendered.ends_with(newline) {
+            rendered.push_str(newline);
+        }
+        rendered.push_str(&normalize_newlines(STATUS_LINE_TOML, newline));
+        rendered
+            .parse::<DocumentMut>()
+            .map_err(|_| invalid_config())?;
+        Ok(rendered.into_bytes())
+    }
 }
 
 fn render_openai_config(original: Option<&[u8]>) -> Result<Option<Vec<u8>>, EnvironmentFailure> {
@@ -4730,7 +4751,8 @@ fn recover_desktop_managed_block(
     }
     if let Some((marker_start, marker_end)) = relocated_end_marker {
         if marker_start < end
-            || !text.get(marker_end..)?.trim().is_empty()
+            || (!text.get(marker_end..)?.trim().is_empty()
+                && !relocated_tail_is_tui_status(text.get(marker_end..)?))
             || text.get(end..marker_start)?.lines().any(|line| {
                 line.starts_with(PROVIDER_ID_PREFIX) || line.starts_with("model_providers.")
             })
@@ -4746,6 +4768,19 @@ fn recover_desktop_managed_block(
         recovered_desktop_rewrite: true,
         relocated_end_marker,
     })
+}
+
+fn relocated_tail_is_tui_status(tail: &str) -> bool {
+    let Ok(document) = tail.parse::<DocumentMut>() else {
+        return false;
+    };
+    let Some(tui) = document.get("tui").and_then(|item| item.as_table_like()) else {
+        return false;
+    };
+    tui.get("status_line")
+        .and_then(|item| item.as_array())
+        .is_some()
+        && document.iter().all(|(key, _)| key == "tui")
 }
 
 fn validated_managed_block(text: &str, start: usize, end: usize) -> Option<ManagedBlockRange> {

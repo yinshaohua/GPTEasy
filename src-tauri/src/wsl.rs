@@ -14,6 +14,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::codex_config::{STATUS_LINE_TOML, apply_status_line, has_expected_status_line};
 use crate::provider::ProviderSummary;
 use crate::state::StateStore;
 
@@ -2752,9 +2753,31 @@ fn render_config(
             ));
         }
     };
-    rendered.parse::<toml_edit::DocumentMut>().map_err(|_| {
-        WslFailure::new(WslFailureCategory::InvalidEnvironment, "wsl.config_invalid")
-    })?;
+    let rendered = if document.get("tui").is_some() {
+        let mut document = rendered.parse::<toml_edit::DocumentMut>().map_err(|_| {
+            WslFailure::new(WslFailureCategory::InvalidEnvironment, "wsl.config_invalid")
+        })?;
+        if has_expected_status_line(&document) {
+            return Ok(rendered.into_bytes());
+        }
+        apply_status_line(&mut document).map_err(|_| {
+            WslFailure::new(WslFailureCategory::InvalidEnvironment, "wsl.config_invalid")
+        })?;
+        document.to_string()
+    } else {
+        let mut rendered = rendered;
+        if !rendered.ends_with(newline) {
+            rendered.push_str(newline);
+        }
+        rendered.push_str(STATUS_LINE_TOML);
+        rendered
+    };
+    let rendered = rendered.replace("\r\n", "\n");
+    let rendered = if newline == "\r\n" {
+        rendered.replace('\n', "\r\n")
+    } else {
+        rendered
+    };
     Ok(rendered.into_bytes())
 }
 
@@ -5180,6 +5203,10 @@ model_provider = "legacy"
 [model_providers.legacy]
 name = "Legacy"
 base_url = "https://legacy.example/v1"
+
+[tui]
+notifications = false
+status_line = ["current-dir"]
 "#;
         let rendered = render_config(Some(original), &provider("provider-id"), "desktop-test")
             .expect("render");
@@ -5192,6 +5219,16 @@ base_url = "https://legacy.example/v1"
         assert_eq!(
             document["model_providers"]["legacy"]["name"].as_str(),
             Some("Legacy")
+        );
+        assert_eq!(document["tui"]["notifications"].as_bool(), Some(false));
+        assert_eq!(
+            document["tui"]["status_line"]
+                .as_array()
+                .expect("status line array")
+                .iter()
+                .filter_map(|value| value.as_str())
+                .collect::<Vec<_>>(),
+            crate::codex_config::STATUS_LINE_ITEMS
         );
         assert_eq!(
             text.matches("# >>> GPTEasy managed provider >>>").count(),

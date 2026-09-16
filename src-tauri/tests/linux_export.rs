@@ -748,6 +748,22 @@ cp -- "$codex_home/config.toml" "$1"
             .expect("switched config must remain valid TOML");
         assert_eq!(parsed["model"].as_str(), Some("alpha-model"));
         assert_eq!(parsed["model_provider"].as_str(), Some("gpteasy"));
+        assert_eq!(
+            parsed["tui"]["status_line"]
+                .as_array()
+                .expect("status line array")
+                .iter()
+                .filter_map(|value| value.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "current-dir",
+                "model-with-reasoning",
+                "context-used",
+                "used-tokens",
+                "total-input-tokens",
+                "total-output-tokens",
+            ]
+        );
     }
 }
 
