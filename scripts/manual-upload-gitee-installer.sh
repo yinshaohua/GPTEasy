@@ -220,12 +220,13 @@ pause "确认已看到文件路径和哈希后按 Enter。"
 
 stage "在 Gitee 网页上传"
 open_url "$EDIT_URL"
+warn "标准 .exe 必须由维护者本人在网页中上传；自动化助手只打开页面并等待确认，不得代选文件或提交表单。"
 step "在附件区域选择文件：$DISPLAY_PATH"
 step "附件名必须保持为 $ASSET；不要改成 .bin，也不要上传本机重新构建的文件。"
 step "若页面仍有 $ASSET.bin，请删除它。"
 step "仅在 SHA256SUMS.txt 仍引用 .exe.bin 时删除该校验文件；保留 $ASSET.sig。"
 step "等待上传完成并保存 Release。不要修改 Tag、标题或发布说明。"
-confirm "已保存 Gitee Release，并确认页面列出标准 .exe 附件？" || {
+confirm "维护者本人已保存 Gitee Release，并确认页面列出标准 .exe 附件？" || {
   warn "尚未确认上传，自动同步不会触发。"
   exit 1
 }

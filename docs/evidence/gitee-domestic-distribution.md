@@ -78,3 +78,11 @@ GitHub Actions 工作流 [33269670373](https://github.com/yinshaohua/GPTEasy/act
 - Gitee Release 正文已恢复为 GitHub 原始中文发布说明，Gitee Raw `README.md` 已说明用户可以直接下载和运行 `.exe`。
 
 这组结果验证了正式清单获取、安装包公开下载和 updater 签名链路。客户端仍按既有安全边界在下载验签后等待用户明确确认安装。维护者随后确认基于最终 Gitee 清单的真实客户端自动升级测试正常，补足了此前未执行的交互式升级验证。
+
+## 2026-09-16 v1.4.3 两阶段发布复核
+
+GitHub Release `v1.4.3` 发布后，第一次 Gitee 同步 [35096430884](https://github.com/yinshaohua/GPTEasy/actions/runs/35096430884) 按协议创建同 Tag Release、上传 `.sig` 和 `SHA256SUMS.txt`，然后以 `manualActionRequired` 停止，`latest.md` 继续保持 1.4.2。助手打开精确 Gitee 编辑页并提供本地安装包路径，由维护者本人选择 `GPTEasy_1.4.3_x64-setup.exe`、等待上传并点击“更新”；助手不代替维护者操作上传控件或提交表单。
+
+维护者确认上传后，无 Cookie、无 Token 的完整 GET 返回 HTTP 200。Gitee 忽略 Range 并返回完整文件；安装包大小为 3,889,015 字节，SHA-256 为 `6b6dd88fecc4a816bffc78b98d5ec107dc8f05b94ad5db92197461f19027585f`，与 GitHub Release 一致。第二次同步 [35106458030](https://github.com/yinshaohua/GPTEasy/actions/runs/35106458030) 通过，公开 `latest.md` 推进到 1.4.3；`.sig`、`SHA256SUMS.txt`、静态清单检查和应用内公钥 updater 签名验证均通过。
+
+本次流程确认了长期操作边界：正式 `.exe` 网页上传是维护者手工步骤。后续助手只负责打开并保留编辑页、提供精确路径、等待维护者确认，以及完成上传后的匿名验证和自动同步，不自行尝试网页或 API 上传。
