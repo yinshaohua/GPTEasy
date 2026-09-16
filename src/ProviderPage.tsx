@@ -308,7 +308,18 @@ export default function ProviderPage({
       if (progress.requestId === activeRequest.current) {
         setValidationStage(progress.stage);
         setValidationSession((current) => current?.status === "running"
-          ? { ...current, stage: progress.stage, stageStartedAt: Date.now() }
+          ? {
+              ...current,
+              stage: progress.stage,
+              stageStartedAt: current.stage === progress.stage
+                && current.attempt === progress.attempt
+                && current.retrying === progress.retrying
+                ? current.stageStartedAt
+                : Date.now(),
+              attempt: progress.attempt,
+              maxAttempts: progress.maxAttempts,
+              retrying: progress.retrying,
+            }
           : current);
       }
     })
@@ -1410,9 +1421,10 @@ export default function ProviderPage({
               <span>{providerMessages.baseUrl}</span>
               <input
                 type="url"
+                className="provider-base-url-input"
                 value={baseUrl}
                 onChange={(event) => changeConnection("baseUrl", event.target.value)}
-                placeholder="https://provider.example/v1"
+                placeholder={providerMessages.baseUrlPlaceholder}
                 disabled={busy}
                 aria-describedby={errorId}
               />
@@ -2316,6 +2328,9 @@ function createValidationSession(source: ProviderValidationSource): ProviderVali
     stage: "models_confirmed",
     stageStartedAt: Date.now(),
     failure: null,
+    attempt: 1,
+    maxAttempts: 2,
+    retrying: false,
   };
 }
 

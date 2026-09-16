@@ -301,10 +301,24 @@ describe("供应商创建", () => {
       ([eventName]) => eventName === "provider-validation-progress",
     );
     const progressListener = progressSubscription?.[1] as (event: {
-      payload: { requestId: string; stage: string };
+      payload: {
+        requestId: string;
+        stage: string;
+        attempt: number;
+        maxAttempts: number;
+        retrying: boolean;
+      };
     }) => void;
     act(() => {
-      progressListener({ payload: { requestId, stage: "responses_stream" } });
+      progressListener({
+        payload: {
+          requestId,
+          stage: "responses_stream",
+          attempt: 1,
+          maxAttempts: 2,
+          retrying: false,
+        },
+      });
     });
     expect(screen.getByText("Responses API 流式响应").closest("li")).toHaveAttribute(
       "aria-current",
@@ -313,7 +327,32 @@ describe("供应商创建", () => {
     expect(screen.getByText("工具调用闭环").closest("li")).not.toHaveAttribute("aria-current");
 
     act(() => {
-      progressListener({ payload: { requestId, stage: "tool_round_trip" } });
+      progressListener({
+        payload: {
+          requestId,
+          stage: "models_confirmed",
+          attempt: 2,
+          maxAttempts: 2,
+          retrying: true,
+        },
+      });
+    });
+    expect(screen.getByText("第 2/2 次验证 · 连接已断开，正在重新验证")).toBeInTheDocument();
+    expect(screen.getByText("模型确认").closest("li")).toHaveAttribute("aria-current", "step");
+    expect(screen.getByText("Responses API 流式响应").closest("li")).not.toHaveAttribute(
+      "aria-current",
+    );
+
+    act(() => {
+      progressListener({
+        payload: {
+          requestId,
+          stage: "tool_round_trip",
+          attempt: 2,
+          maxAttempts: 2,
+          retrying: false,
+        },
+      });
     });
     expect(screen.getByText("工具调用闭环").closest("li")).toHaveAttribute(
       "aria-current",
@@ -343,6 +382,9 @@ describe("供应商创建", () => {
     await screen.findByRole("heading", { name: "供应商管理" });
     fireEvent.click(screen.getByRole("button", { name: "添加供应商" }));
     const name = await screen.findByLabelText("供应商名称");
+    const baseUrl = screen.getByLabelText("服务地址");
+    expect(baseUrl).toHaveValue("");
+    expect(baseUrl).toHaveAttribute("placeholder", "请从供应商处获取 BASE_URL");
     fireEvent.change(name, { target: { value: "Unsaved" } });
     fireEvent.click(screen.getByRole("button", { name: "返回" }));
     fireEvent.click(screen.getByRole("button", { name: "放弃修改" }));

@@ -19,7 +19,7 @@ use crate::provider::{
     LinuxShell, ModelDiscovery, ProviderApiKey, ProviderApplication, ProviderFailure,
     ProviderFailureCategory, ProviderRevalidationResult, ProviderSummary,
     ProviderUpdateDiscoveryInput, ProviderUpdateValidationInput, ProviderValidationInput,
-    ProviderValidationReceipt, ProviderValidationStage,
+    ProviderValidationProgress, ProviderValidationReceipt, ProviderValidationStage,
 };
 use crate::session::{
     SessionApplication, SessionAvailability, SessionDetail, SessionFailure, SessionListPage,
@@ -2488,29 +2488,22 @@ pub(crate) async fn validate_provider(
         );
     };
     let progress_request_id = request_id.clone();
+    let progress_logs = Arc::clone(&logs.store);
+    let diagnostic = Arc::new(Mutex::new(ProviderValidationDiagnostic::default()));
+    let progress_diagnostic = Arc::clone(&diagnostic);
     let result = state
         .application
-        .validate_provider_with_progress(request_id, input, move |stage| {
-            if app
-                .emit(
-                    "provider-validation-progress",
-                    ProviderValidationProgress {
-                        request_id: progress_request_id.clone(),
-                        stage,
-                    },
-                )
-                .is_err()
-            {
-                log_runtime_error(
-                    &app,
-                    "provider.validation_progress_event",
-                    "event.emit_failed",
-                    "category=event",
-                );
-            }
+        .validate_provider_with_progress(request_id, input, move |progress| {
+            report_provider_validation_progress(
+                &app,
+                &progress_logs,
+                &progress_diagnostic,
+                &progress_request_id,
+                progress,
+            );
         })
         .await;
-    finish_command(&logs.store, "provider.validate", result)
+    finish_provider_validation_command(&logs.store, "provider.validate", &diagnostic, result)
 }
 
 #[tauri::command]
@@ -2536,29 +2529,22 @@ pub(crate) async fn validate_provider_update(
         );
     };
     let progress_request_id = request_id.clone();
+    let progress_logs = Arc::clone(&logs.store);
+    let diagnostic = Arc::new(Mutex::new(ProviderValidationDiagnostic::default()));
+    let progress_diagnostic = Arc::clone(&diagnostic);
     let result = state
         .application
-        .validate_provider_update_with_progress(request_id, input, move |stage| {
-            if app
-                .emit(
-                    "provider-validation-progress",
-                    ProviderValidationProgress {
-                        request_id: progress_request_id.clone(),
-                        stage,
-                    },
-                )
-                .is_err()
-            {
-                log_runtime_error(
-                    &app,
-                    "provider.validation_progress_event",
-                    "event.emit_failed",
-                    "category=event",
-                );
-            }
+        .validate_provider_update_with_progress(request_id, input, move |progress| {
+            report_provider_validation_progress(
+                &app,
+                &progress_logs,
+                &progress_diagnostic,
+                &progress_request_id,
+                progress,
+            );
         })
         .await;
-    finish_command(&logs.store, "provider.validate_update", result)
+    finish_provider_validation_command(&logs.store, "provider.validate_update", &diagnostic, result)
 }
 
 #[tauri::command]
@@ -2585,37 +2571,139 @@ pub(crate) async fn revalidate_provider(
         );
     };
     let progress_request_id = request_id.clone();
+    let progress_logs = Arc::clone(&logs.store);
+    let diagnostic = Arc::new(Mutex::new(ProviderValidationDiagnostic::default()));
+    let progress_diagnostic = Arc::clone(&diagnostic);
     let result = state
         .application
-        .revalidate_provider_with_progress(request_id, provider_id, move |stage| {
-            if app
-                .emit(
-                    "provider-validation-progress",
-                    ProviderValidationProgress {
-                        request_id: progress_request_id.clone(),
-                        stage,
-                    },
-                )
-                .is_err()
-            {
-                log_runtime_error(
-                    &app,
-                    "provider.validation_progress_event",
-                    "event.emit_failed",
-                    "category=event",
-                );
-            }
+        .revalidate_provider_with_progress(request_id, provider_id, move |progress| {
+            report_provider_validation_progress(
+                &app,
+                &progress_logs,
+                &progress_diagnostic,
+                &progress_request_id,
+                progress,
+            );
         })
         .await;
     audit_provider_revalidation_result(&logs.store, audit_context, &result);
-    finish_command(&logs.store, "provider.revalidate", result)
+    finish_provider_validation_command(&logs.store, "provider.revalidate", &diagnostic, result)
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ProviderValidationProgress {
+struct ProviderValidationProgressEvent {
     request_id: String,
     stage: ProviderValidationStage,
+    attempt: u8,
+    max_attempts: u8,
+    retrying: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProviderValidationDiagnostic {
+    stage: ProviderValidationStage,
+    attempt: u8,
+    max_attempts: u8,
+}
+
+impl Default for ProviderValidationDiagnostic {
+    fn default() -> Self {
+        Self {
+            stage: ProviderValidationStage::ModelsConfirmed,
+            attempt: 1,
+            max_attempts: 2,
+        }
+    }
+}
+
+fn report_provider_validation_progress(
+    app: &AppHandle,
+    logs: &IssueLogStore,
+    diagnostic: &Mutex<ProviderValidationDiagnostic>,
+    request_id: &str,
+    progress: ProviderValidationProgress,
+) {
+    if let Some(failure) = progress.retry_failure.as_ref() {
+        log_provider_validation_retry(logs, &progress, failure);
+    }
+    let retrying = progress.is_retrying();
+    let stage = if retrying {
+        ProviderValidationStage::ModelsConfirmed
+    } else {
+        progress.stage
+    };
+    if let Ok(mut current) = diagnostic.lock() {
+        *current = ProviderValidationDiagnostic {
+            stage,
+            attempt: progress.attempt,
+            max_attempts: progress.max_attempts,
+        };
+    }
+    if app
+        .emit(
+            "provider-validation-progress",
+            ProviderValidationProgressEvent {
+                request_id: request_id.to_owned(),
+                stage,
+                attempt: progress.attempt,
+                max_attempts: progress.max_attempts,
+                retrying,
+            },
+        )
+        .is_err()
+    {
+        log_runtime_error(
+            app,
+            "provider.validation_progress_event",
+            "event.emit_failed",
+            "category=event",
+        );
+    }
+}
+
+fn log_provider_validation_retry(
+    store: &IssueLogStore,
+    progress: &ProviderValidationProgress,
+    failure: &ProviderFailure,
+) {
+    store.append(
+        IssueLogLevel::Warn,
+        "provider.validation_retry",
+        failure.message_id,
+        Some(format!(
+            "category={} failed_stage={} next_attempt={} max_attempts={}",
+            stable_category_name(&failure.category),
+            stable_category_name(&progress.stage),
+            progress.attempt,
+            progress.max_attempts,
+        )),
+    );
+}
+
+fn finish_provider_validation_command<T>(
+    store: &IssueLogStore,
+    event: &'static str,
+    diagnostic: &Mutex<ProviderValidationDiagnostic>,
+    result: Result<T, ProviderFailure>,
+) -> Result<T, ProviderFailure> {
+    if let Err(failure) = &result {
+        let diagnostic = diagnostic.lock().map(|value| *value).unwrap_or_default();
+        store.append(
+            IssueLogLevel::Error,
+            event,
+            failure.message_id,
+            Some(format!(
+                "category={} stage={} attempt={} max_attempts={} retried={}",
+                stable_category_name(&failure.category),
+                stable_category_name(&diagnostic.stage),
+                diagnostic.attempt,
+                diagnostic.max_attempts,
+                diagnostic.attempt > 1,
+            )),
+        );
+    }
+    result
 }
 
 #[tauri::command]
@@ -3028,11 +3116,13 @@ mod tests {
     use super::{
         DeleteProviderFailure, IssueLogLevel, IssueLogStore, ProviderFailure,
         ProviderFailureCategory, ProviderRevalidationAuditContext, ProviderRevalidationResult,
-        ProviderSummary, ProviderValidationReceipt, UpdateFailureCategory, UpdateInstallFailure,
-        UpdateInstallFailureCategory, UpdateSnapshot, UpdateState, WslReclaimAuditPhase,
-        audit_provider_revalidation_result, ensure_coordination_allows_restart,
-        ensure_session_visibility_restart_allowed, finish_command,
-        finish_command_with_desktop_restart, log_session_visibility_execution_failure,
+        ProviderSummary, ProviderValidationDiagnostic, ProviderValidationProgress,
+        ProviderValidationReceipt, ProviderValidationStage, UpdateFailureCategory,
+        UpdateInstallFailure, UpdateInstallFailureCategory, UpdateSnapshot, UpdateState,
+        WslReclaimAuditPhase, audit_provider_revalidation_result,
+        ensure_coordination_allows_restart, ensure_session_visibility_restart_allowed,
+        finish_command, finish_command_with_desktop_restart, finish_provider_validation_command,
+        log_provider_validation_retry, log_session_visibility_execution_failure,
         log_session_visibility_execution_result, log_session_visibility_preview,
         log_update_check_failure, log_update_install_failure, log_visibility_coordination,
         log_visibility_coordination_failure, log_visibility_pending_recorded,
@@ -3058,7 +3148,7 @@ mod tests {
         WslReclaimScope,
     };
     use rusqlite::{Connection, params};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
 
     struct LoggedOutProbe;
@@ -3640,6 +3730,73 @@ mod tests {
         assert!(!encoded.contains("api_key"));
         assert!(!encoded.contains("base_url"));
         assert!(!encoded.contains("provider_id"));
+    }
+
+    #[test]
+    fn provider_validation_failure_log_records_stage_and_retry_without_sensitive_inputs() {
+        let directory = tempdir().expect("issue log directory");
+        let store = IssueLogStore::new(directory.path());
+        let diagnostic = Mutex::new(ProviderValidationDiagnostic {
+            stage: ProviderValidationStage::ToolRoundTrip,
+            attempt: 2,
+            max_attempts: 2,
+        });
+        let failure = ProviderFailure::new(
+            ProviderFailureCategory::StreamIdleTimeout,
+            "provider.stream_idle_timeout",
+        );
+
+        let result: Result<(), ProviderFailure> = Err(failure);
+        assert!(
+            finish_provider_validation_command(&store, "provider.validate", &diagnostic, result,)
+                .is_err()
+        );
+
+        let records = store.list(0, Some(IssueLogLevel::Error), Some("provider.validate"));
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].details.as_deref(),
+            Some(
+                "category=stream_idle_timeout stage=tool_round_trip attempt=2 max_attempts=2 retried=true"
+            )
+        );
+        let encoded = serde_json::to_string(&records[0]).expect("serialize validation issue");
+        assert!(!encoded.contains("base_url"));
+        assert!(!encoded.contains("api_key"));
+        assert!(!encoded.contains("provider.example"));
+    }
+
+    #[test]
+    fn provider_validation_retry_log_records_only_stage_category_and_attempt() {
+        let directory = tempdir().expect("issue log directory");
+        let store = IssueLogStore::new(directory.path());
+        let failure = ProviderFailure::new(
+            ProviderFailureCategory::Transport,
+            "provider.transport_failed",
+        );
+        let progress = ProviderValidationProgress {
+            stage: ProviderValidationStage::ResponsesStream,
+            attempt: 2,
+            max_attempts: 2,
+            retry_failure: Some(failure.clone()),
+        };
+
+        log_provider_validation_retry(&store, &progress, &failure);
+
+        let records = store.list(
+            0,
+            Some(IssueLogLevel::Warn),
+            Some("provider.validation_retry"),
+        );
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].details.as_deref(),
+            Some("category=transport failed_stage=responses_stream next_attempt=2 max_attempts=2")
+        );
+        let encoded = serde_json::to_string(&records[0]).expect("serialize retry issue");
+        assert!(!encoded.contains("base_url"));
+        assert!(!encoded.contains("api_key"));
+        assert!(!encoded.contains("provider.example"));
     }
 
     #[test]

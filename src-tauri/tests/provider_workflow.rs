@@ -159,7 +159,7 @@ async fn model_discovery_does_not_guess_paths_for_non_path_failures() {
         ("302 Found", ProviderFailureCategory::SecurityPolicy),
         (
             "500 Internal Server Error",
-            ProviderFailureCategory::ModelDiscovery,
+            ProviderFailureCategory::ServerError,
         ),
     ] {
         let server = ScriptedModelServer::start([(status, r#"{"error":"stop"}"#)]);
@@ -453,8 +453,14 @@ async fn validation_reports_ordered_stages_without_exposing_credentials() {
     let captured_stages = Arc::clone(&stages);
 
     let evidence = validator()
-        .validate_provider_with_progress(input, Default::default(), move |stage| {
-            captured_stages.lock().expect("capture stage").push(stage);
+        .validate_provider_with_progress(input, Default::default(), move |progress| {
+            assert_eq!(progress.attempt, 1);
+            assert_eq!(progress.max_attempts, 2);
+            assert!(!progress.is_retrying());
+            captured_stages
+                .lock()
+                .expect("capture stage")
+                .push(progress.stage);
         })
         .await
         .expect("validation succeeds");
@@ -482,11 +488,11 @@ async fn validation_reports_ordered_stages_without_exposing_credentials() {
                 default_model: "model-a".to_owned(),
             },
             Default::default(),
-            move |stage| {
+            move |progress| {
                 captured_failure_stages
                     .lock()
                     .expect("capture failure stage")
-                    .push(stage);
+                    .push(progress.stage);
             },
         )
         .await
@@ -501,6 +507,94 @@ async fn validation_reports_ordered_stages_without_exposing_credentials() {
         ]
     );
     assert!(!format!("{failure:?}").contains("failure-secret-canary"));
+}
+
+#[tokio::test]
+async fn transient_stream_failure_restarts_the_complete_validation_once() {
+    let server = RetryValidationServer::start();
+    let progress = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured_progress = Arc::clone(&progress);
+
+    let evidence = validator()
+        .validate_provider_with_progress(
+            ProviderValidationInput {
+                base_url: server.base_url.clone(),
+                api_key: "retry-secret-canary".to_owned(),
+                default_model: "model-a".to_owned(),
+            },
+            Default::default(),
+            move |update| {
+                captured_progress
+                    .lock()
+                    .expect("capture retry progress")
+                    .push(update);
+            },
+        )
+        .await
+        .expect("a fresh second attempt succeeds");
+
+    assert_eq!(
+        evidence.normalized_base_url.trim_end_matches('/'),
+        server.base_url
+    );
+    let requests = server.finish();
+    let paths = requests
+        .iter()
+        .map(|request| {
+            String::from_utf8_lossy(request)
+                .lines()
+                .next()
+                .and_then(|line| line.split_whitespace().nth(1))
+                .expect("request path")
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        paths,
+        [
+            "/models",
+            "/responses",
+            "/models",
+            "/responses",
+            "/responses",
+        ]
+    );
+    let first_attempt: Value =
+        serde_json::from_slice(request_body(&requests[1])).expect("first attempt payload");
+    let second_attempt: Value =
+        serde_json::from_slice(request_body(&requests[3])).expect("second attempt payload");
+    let first_nonce = first_attempt["input"][0]["content"][0]["text"]
+        .as_str()
+        .and_then(extract_backtick_value)
+        .expect("first attempt nonce");
+    let second_nonce = second_attempt["input"][0]["content"][0]["text"]
+        .as_str()
+        .and_then(extract_backtick_value)
+        .expect("second attempt nonce");
+    assert_ne!(first_nonce, second_nonce);
+
+    let progress = progress.lock().expect("retry progress");
+    assert_eq!(progress.len(), 6);
+    assert_eq!(progress[0].stage, ProviderValidationStage::ModelsConfirmed);
+    assert_eq!(progress[0].attempt, 1);
+    assert_eq!(progress[1].stage, ProviderValidationStage::ResponsesStream);
+    assert_eq!(progress[1].attempt, 1);
+    assert!(progress[2].is_retrying());
+    assert_eq!(progress[2].stage, ProviderValidationStage::ResponsesStream);
+    assert_eq!(progress[2].attempt, 2);
+    assert_eq!(
+        progress[2]
+            .retry_failure
+            .as_ref()
+            .map(|failure| failure.category),
+        Some(ProviderFailureCategory::Streaming)
+    );
+    assert_eq!(progress[3].stage, ProviderValidationStage::ModelsConfirmed);
+    assert_eq!(progress[3].attempt, 2);
+    assert_eq!(progress[4].stage, ProviderValidationStage::ResponsesStream);
+    assert_eq!(progress[4].attempt, 2);
+    assert_eq!(progress[5].stage, ProviderValidationStage::ToolRoundTrip);
+    assert_eq!(progress[5].attempt, 2);
 }
 
 #[tokio::test]
@@ -556,7 +650,12 @@ async fn validation_rejects_broken_streams_and_nonce_or_schema_mismatches() {
             ProviderFailureCategory::ToolResult,
         ),
     ] {
-        let server = ValidationServer::start(scenario);
+        let repetitions = if matches!(scenario, ValidationScenario::Truncated) {
+            2
+        } else {
+            1
+        };
+        let server = ValidationServer::start_for(scenario, repetitions);
         let failure = validator()
             .validate_provider(
                 ProviderValidationInput {
@@ -576,7 +675,7 @@ async fn validation_rejects_broken_streams_and_nonce_or_schema_mismatches() {
 
 #[tokio::test]
 async fn validation_distinguishes_first_event_timeout_and_user_cancellation() {
-    let timeout_server = ValidationServer::start(ValidationScenario::IdleBeforeFirstEvent);
+    let timeout_server = ValidationServer::start_for(ValidationScenario::IdleBeforeFirstEvent, 2);
     let timed_out = validator()
         .validate_provider(
             ProviderValidationInput {
@@ -1946,6 +2045,63 @@ struct ValidationServer {
     base_url: String,
     requests: mpsc::Receiver<Vec<Vec<u8>>>,
     streaming: Option<mpsc::Receiver<()>>,
+}
+
+struct RetryValidationServer {
+    base_url: String,
+    requests: mpsc::Receiver<Vec<Vec<u8>>>,
+}
+
+impl RetryValidationServer {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind retry provider");
+        let address = listener.local_addr().expect("retry provider address");
+        let (sender, requests) = mpsc::channel();
+        thread::spawn(move || {
+            let mut captured = Vec::new();
+            for index in 0..5 {
+                let (mut stream, _) = listener.accept().expect("accept retry request");
+                let request = read_request(&mut stream);
+                match index {
+                    0 | 2 => write_json(
+                        &mut stream,
+                        "200 OK",
+                        r#"{"object":"list","data":[{"id":"model-a"}]}"#,
+                    ),
+                    1 => {
+                        let payload: Value = serde_json::from_slice(request_body(&request))
+                            .expect("first retry payload");
+                        write_validation_sse(
+                            &mut stream,
+                            ValidationScenario::Truncated,
+                            &payload,
+                            None,
+                        );
+                    }
+                    _ => {
+                        let payload: Value = serde_json::from_slice(request_body(&request))
+                            .expect("successful retry payload");
+                        write_validation_sse(
+                            &mut stream,
+                            ValidationScenario::Success,
+                            &payload,
+                            None,
+                        );
+                    }
+                }
+                captured.push(request);
+            }
+            sender.send(captured).expect("capture retry requests");
+        });
+        Self {
+            base_url: format!("http://{address}"),
+            requests,
+        }
+    }
+
+    fn finish(self) -> Vec<Vec<u8>> {
+        self.requests.recv().expect("retry requests")
+    }
 }
 
 impl ValidationServer {

@@ -10,6 +10,7 @@
   --border: #d8dde3;
   --text: #20242a;
   --text-muted: #616973;
+  --placeholder-text: #8a949f;
   --accent: #147d55;
   --accent-soft: #e5f4ed;
   --warning: #806018;
@@ -1916,6 +1917,12 @@ select:focus-visible {
   color: var(--text-muted);
 }
 
+.form-field .provider-base-url-input::placeholder {
+  color: var(--placeholder-text);
+  font-weight: 400;
+  opacity: 1;
+}
+
 .recommended-address-action {
   justify-self: start;
 }
@@ -2070,10 +2077,17 @@ select:focus-visible {
   line-height: 1.55;
 }
 
+.validation-attempt {
+  margin: 10px 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .validation-dialog-steps {
   display: grid;
   gap: 0;
-  margin: 18px 0 0;
+  margin: 10px 0 0;
   padding: 0;
   list-style: none;
   border-top: 1px solid var(--border);
@@ -2800,6 +2814,7 @@ select:focus-visible {
     --border: #3d444d;
     --text: #edf0f3;
     --text-muted: #aeb6bf;
+    --placeholder-text: #7f8994;
     --accent: #55d99a;
     --accent-soft: #17382c;
     --warning: #e5c267;

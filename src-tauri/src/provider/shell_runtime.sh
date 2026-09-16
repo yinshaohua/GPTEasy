@@ -435,19 +435,6 @@ gpteasy__marker_info() {
     ' "$config"
 }
 
-gpteasy__has_unmanaged_conflict() {
-    local config=$1
-    [[ -f "$config" ]] || return 1
-    awk '
-        { line = $0; sub(/\r$/, "", line) }
-        /^[[:space:]]*\[/ { in_table = 1 }
-        !in_table && line ~ /^[[:space:]]*(model|model_provider)[[:space:]]*=/ { conflict = 1 }
-        line ~ /^[[:space:]]*\[model_providers\.gpteasy\][[:space:]]*$/ { conflict = 1 }
-        line ~ /^[[:space:]]*model_providers\.gpteasy\./ { conflict = 1 }
-        END { exit conflict ? 0 : 1 }
-    ' "$config"
-}
-
 gpteasy__managed_metadata() {
     local config=$1 prefix=$2
     awk -v start="$gpteasy__start_marker" -v end="$gpteasy__end_marker" -v prefix="$prefix" '
@@ -514,44 +501,6 @@ gpteasy__schema_v1_is_valid() {
     auth_args=$(gpteasy__managed_line "$config" 'model_providers.gpteasy.auth.args = ' 2>/dev/null) || return 1
     expected_auth_args="model_providers.gpteasy.auth.args = [\"-c\", 'cat -- \"\${CODEX_HOME:-\$HOME/.codex}/$relative\"']"
     [[ "$auth_args" == "$expected_auth_args" ]]
-}
-
-gpteasy__inspect_writable_config() {
-    local marker_info schema schema_count
-    marker_info=$(gpteasy__marker_info "$gpteasy__config_target") || return
-    read -r gpteasy__starts gpteasy__ends gpteasy__start_line gpteasy__end_line <<<"$marker_info"
-    if [[ "$gpteasy__starts" -eq 0 && "$gpteasy__ends" -eq 0 ]]; then
-        if gpteasy__has_unmanaged_conflict "$gpteasy__config_target"; then
-            printf '%s\n' '检测到管理区块外的供应商字段，需要先由桌面 GPTEasy 完成结构化迁移。' >&2
-            return 1
-        fi
-        return
-    fi
-    if [[ "$gpteasy__starts" -ne 1 || "$gpteasy__ends" -ne 1 || "$gpteasy__start_line" -ge "$gpteasy__end_line" ]]; then
-        printf '%s\n' 'GPTEasy 管理区块边界损坏、重复或倒置，已停止修改。' >&2
-        return 1
-    fi
-    gpteasy__managed_metadata "$gpteasy__config_target" "$gpteasy__provider_id_prefix" >/dev/null || {
-        printf '%s\n' 'GPTEasy 管理区块的供应商 ID 无效。' >&2
-        return 1
-    }
-    schema_count=$(gpteasy__managed_metadata_count "$gpteasy__config_target" "$gpteasy__schema_prefix") || return
-    if [[ "$schema_count" -eq 0 ]]; then
-        return
-    fi
-    if [[ "$schema_count" -ne 1 ]]; then
-        printf '%s\n' 'GPTEasy 管理区块 schema 重复，已停止修改。' >&2
-        return 1
-    fi
-    schema=$(gpteasy__managed_metadata "$gpteasy__config_target" "$gpteasy__schema_prefix") || return
-    if [[ "$schema" != 1 ]]; then
-        printf '%s\n' 'GPTEasy 管理区块 schema 未知，已停止修改。' >&2
-        return 1
-    fi
-    if ! gpteasy__schema_v1_is_valid "$gpteasy__config_target"; then
-        printf '%s\n' 'GPTEasy 管理区块 schema v1 内容损坏，已停止修改。' >&2
-        return 1
-    fi
 }
 
 gpteasy__current_provider_id() {
@@ -685,7 +634,7 @@ gpteasy__current_state() {
 }
 
 gpteasy__prepare_candidate() {
-    local provider_id=$1 target_dir=${gpteasy__config_target%/*} block newline
+    local provider_id=$1 target_dir=${gpteasy__config_target%/*} block
     block=$(mktemp "$target_dir/.gpteasy-block.XXXXXX") || return
     gpteasy__candidate=$(mktemp "$target_dir/.config.toml.gpteasy.XXXXXX") || {
         rm -f -- "$block"
@@ -695,32 +644,7 @@ gpteasy__prepare_candidate() {
         rm -f -- "$block" "$gpteasy__candidate"
         return 1
     fi
-    newline=lf
-    if [[ -f "$gpteasy__config_target" ]] && awk 'index($0, "\r") { found = 1; exit } END { exit found ? 0 : 1 }' "$gpteasy__config_target"; then
-        newline=crlf
-        awk '{ sub(/\r$/, "", $0); printf "%s\r\n", $0 }' "$block" >"$block.crlf" || return
-        mv -f -- "$block.crlf" "$block" || return
-    fi
-    if [[ "$gpteasy__starts" -eq 0 ]]; then
-        cat -- "$block" >"$gpteasy__candidate" || return
-        [[ ! -f "$gpteasy__config_target" ]] || cat -- "$gpteasy__config_target" >>"$gpteasy__candidate" || return
-    else
-        if ! awk -v start="$gpteasy__start_marker" -v end="$gpteasy__end_marker" -v block="$block" '
-            { line = $0; sub(/\r$/, "", line) }
-            line == start {
-                while ((getline replacement < block) > 0) print replacement
-                close(block)
-                skipping = 1
-                next
-            }
-            skipping && line == end { skipping = 0; next }
-            !skipping { print }
-            END { if (skipping) exit 42 }
-        ' "$gpteasy__config_target" >"$gpteasy__candidate"; then
-            rm -f -- "$block" "$gpteasy__candidate"
-            return 1
-        fi
-    fi
+    cat -- "$block" >"$gpteasy__candidate" || return
     rm -f -- "$block"
     if [[ -f "$gpteasy__config_target" ]]; then
         chmod --reference="$gpteasy__config_target" "$gpteasy__candidate" 2>/dev/null || chmod 600 "$gpteasy__candidate"
@@ -924,7 +848,6 @@ gpteasy__apply_provider_locked() {
     gpteasy__credential_created=0
     gpteasy__credential_path=
     gpteasy__resolve_config_target || return
-    gpteasy__inspect_writable_config || return
     gpteasy__prepare_candidate "$provider_id" || {
         gpteasy__cleanup_failed_apply
         return 1
@@ -953,7 +876,9 @@ gpteasy__apply_provider_locked() {
         return 1
     fi
     gpteasy__prune_restore_points || return
-    gpteasy__cleanup_credentials || return
+    if ! gpteasy__cleanup_credentials; then
+        printf '%s\n' '警告：旧凭据清理无法安全完成，已保留相关文件；新配置已经生效。' >&2
+    fi
     if [[ "${gpteasy__codex_cli_state:-ready}" == missing ]]; then
         printf '已预先配置：%s。当前未安装 Codex CLI；安装 0.147.0 或更高版本后即可使用。\n' "$(gpteasy__provider_name "$provider_id")"
     else
@@ -972,7 +897,6 @@ gpteasy__switch_provider() {
     gpteasy__check_codex_compatibility || return
     gpteasy__require_codex_home || return
     gpteasy__resolve_config_target || return
-    gpteasy__inspect_writable_config || return
     gpteasy__require_existing_private_state_safe || return
     gpteasy__prepare_private_state || return
     gpteasy__acquire_lock switch || return

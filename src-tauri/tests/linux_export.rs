@@ -371,7 +371,7 @@ grep -Fq '# GPTEasy provider-id: 11111111-1111-4111-8111-111111111111' "$codex_h
 grep -Fq '# GPTEasy source-id:' "$codex_home/config.toml"
 grep -Fq 'model_providers.gpteasy.auth.command = "sh"' "$codex_home/config.toml"
 ! grep -Fq 'requires_openai_auth' "$codex_home/config.toml"
-grep -Fq 'custom_setting = true' "$codex_home/config.toml"
+! grep -Fq 'custom_setting = true' "$codex_home/config.toml"
 ! grep -Fq 'alpha-secret-key' "$codex_home/config.toml"
 [[ "$auth_before" == "$(sha256sum "$codex_home/auth.json")" ]]
 credential_count=$(find "$codex_home/.gpteasy-shell/credentials" -type f -name '*.token' | wc -l)
@@ -506,7 +506,7 @@ done
 }
 
 #[test]
-fn shell_snapshots_distinguish_current_updated_and_legacy_managed_blocks() {
+fn shell_snapshots_distinguish_states_and_force_rebuild_config_conflicts() {
     let fixture = ExportFixture::new();
     fixture.insert_provider(
         "11111111-1111-4111-8111-111111111111",
@@ -565,18 +565,16 @@ menu=$(gpteasy <<<"q")
 [[ "$menu" == *'Alpha Provider (alpha-model) [当前]'* ]]
 
 sed -i '/# GPTEasy source-id:/d' "$codex_home/config.toml"
-before=$(sha256sum "$codex_home/config.toml")
-if (gpteasy <<<"2" >/dev/null 2>&1); then exit 1; fi
-[[ "$before" == "$(sha256sum "$codex_home/config.toml")" ]]
+gpteasy <<<"2" >/dev/null
+grep -Fq '# GPTEasy provider-id: 22222222-2222-4222-8222-222222222222' "$codex_home/config.toml"
 
 cp -- "$workspace/current-config" "$codex_home/config.toml"
 sed -i 's|^model_providers.gpteasy.auth.args = .*|model_providers.gpteasy.auth.args = ["-c", "printf unsafe"]|' "$codex_home/config.toml"
-before=$(sha256sum "$codex_home/config.toml")
-if (gpteasy <<<"2" >/dev/null 2>&1); then exit 1; fi
-[[ "$before" == "$(sha256sum "$codex_home/config.toml")" ]]
+gpteasy <<<"2" >/dev/null
+grep -Fq '# GPTEasy provider-id: 22222222-2222-4222-8222-222222222222' "$codex_home/config.toml"
 
 cp -- "$workspace/current-config" "$codex_home/config.toml"
-credential=$(find "$codex_home/.gpteasy-shell/credentials" -type f -name '*.token')
+credential=$(find "$codex_home/.gpteasy-shell/credentials" -type f -name '11111111-1111-4111-8111-111111111111.token' -print -quit)
 printf '%s' 'changed-key' >"$credential"
 chmod 600 "$credential"
 menu=$(gpteasy <<<"q")
@@ -605,22 +603,151 @@ menu=$(gpteasy <<<"q")
 
 cp -- "$workspace/current-config" "$codex_home/config.toml"
 sed -i 's/# GPTEasy schema-version: 1/# GPTEasy schema-version: 2/' "$codex_home/config.toml"
-before=$(sha256sum "$codex_home/config.toml")
-if (gpteasy <<<"2" >/dev/null 2>&1); then exit 1; fi
-[[ "$before" == "$(sha256sum "$codex_home/config.toml")" ]]
+gpteasy <<<"2" >/dev/null
+grep -Fq '# GPTEasy schema-version: 1' "$codex_home/config.toml"
+grep -Fq '# GPTEasy provider-id: 22222222-2222-4222-8222-222222222222' "$codex_home/config.toml"
 
 printf '%s\n' '# >>> GPTEasy managed provider >>>' 'model = "broken"' >"$codex_home/config.toml"
-before=$(sha256sum "$codex_home/config.toml")
-if (gpteasy <<<"2" >/dev/null 2>&1); then exit 1; fi
-[[ "$before" == "$(sha256sum "$codex_home/config.toml")" ]]
+gpteasy <<<"2" >/dev/null
+grep -Fq '# GPTEasy provider-id: 22222222-2222-4222-8222-222222222222' "$codex_home/config.toml"
+grep -Fq '# <<< GPTEasy managed provider <<<' "$codex_home/config.toml"
 
 printf '%s\n' 'model = "external"' 'model_provider = "external"' >"$codex_home/config.toml"
-before=$(sha256sum "$codex_home/config.toml")
-if (gpteasy <<<"2" >/dev/null 2>&1); then exit 1; fi
-[[ "$before" == "$(sha256sum "$codex_home/config.toml")" ]]
+gpteasy <<<"2" >/dev/null
+grep -Fq 'model = "beta-model"' "$codex_home/config.toml"
+grep -Fq 'model_provider = "gpteasy"' "$codex_home/config.toml"
+! grep -Fq 'model = "external"' "$codex_home/config.toml"
 [[ "$auth_before" == "$(sha256sum "$codex_home/auth.json")" ]]
 "##,
         );
+    }
+}
+
+#[test]
+fn shell_snapshots_force_new_provider_config_over_existing_external_config() {
+    let fixture = ExportFixture::new();
+    fixture.insert_provider(
+        "11111111-1111-4111-8111-111111111111",
+        "Alpha Provider",
+        "https://alpha.example/v1",
+        "alpha-secret-key",
+        "alpha-model",
+        1,
+    );
+    for shell in shell_matrix_targets() {
+        let destination = fixture.temp.path().join(match shell {
+            LinuxShell::Bash => "gpteasy.sh",
+            LinuxShell::Zsh => "gpteasy.zsh",
+        });
+        fixture
+            .application
+            .export_linux_script(shell, &destination, false)
+            .expect("export shell snapshot");
+
+        run_shell_black_box(
+            shell,
+            &destination,
+            r#"
+set -euo pipefail
+workspace=$(mktemp -d "${TMPDIR:-/tmp}/gpteasy-external-config.XXXXXX")
+trap 'rm -rf -- "$workspace"' EXIT
+script="$workspace/gpteasy.sh"
+codex_home="$workspace/codex"
+fake_bin="$workspace/bin"
+cp -- "$1" "$script"
+chmod 600 "$script"
+mkdir -p -- "$codex_home" "$fake_bin"
+cat >"$codex_home/config.toml" <<'EXTERNAL_CONFIG'
+model_provider = "custom"
+
+model = "gpt-5.6-sol"
+model_reasoning_effort = "high"
+
+[features]
+goals = true
+js_repl = false
+
+[tui]
+status_line = ["current-dir", "model-with-reasoning"]
+
+[model_providers.custom]
+name = "Existing Provider"
+wire_api = "responses"
+base_url = "https://existing.example/v1"
+env_key = "EXISTING_API_KEY"
+
+[projects."/data/new-api"]
+trust_level = "trusted"
+
+[mcp_servers.openaiDeveloperDocs]
+command = "/data/opt/mcp-remote/mcp-remote"
+args = ["https://developers.openai.com/mcp", "--silent"]
+EXTERNAL_CONFIG
+cat >"$fake_bin/codex" <<'SUPPORTED_CODEX'
+#!/usr/bin/env bash
+printf '%s\n' 'codex-cli 0.147.0'
+SUPPORTED_CODEX
+chmod 700 "$fake_bin/codex"
+export PATH="$fake_bin:$PATH"
+export CODEX_HOME="$codex_home"
+# shellcheck disable=SC1090
+source "$script"
+
+original=$(cat "$codex_home/config.toml")
+switched=$(gpteasy <<<"1")
+[[ "$switched" == *'已切换到：Alpha Provider'* ]]
+grep -Fq '# GPTEasy provider-id: 11111111-1111-4111-8111-111111111111' "$codex_home/config.toml"
+grep -Fq 'model = "alpha-model"' "$codex_home/config.toml"
+grep -Fq 'model_provider = "gpteasy"' "$codex_home/config.toml"
+! grep -Fq 'model = "gpt-5.6-sol"' "$codex_home/config.toml"
+! grep -Fq 'model_provider = "custom"' "$codex_home/config.toml"
+! grep -Fq '[model_providers.custom]' "$codex_home/config.toml"
+! grep -Fq 'model_reasoning_effort = "high"' "$codex_home/config.toml"
+! grep -Fq '[projects."/data/new-api"]' "$codex_home/config.toml"
+restore=$(find "$codex_home/.gpteasy-shell/shell-restore" -type f -name config.toml -print -quit)
+[[ -n "$restore" ]]
+[[ "$original" == "$(cat "$restore")" ]]
+cat >"$codex_home/config.toml" <<'OLD_GPTEASY_CONFIG'
+model_provider = "gpteasy"
+model = "old-model"
+[model_providers.gpteasy]
+base_url = "https://old.example/v1"
+OLD_GPTEASY_CONFIG
+old_gpteasy=$(gpteasy <<<"1")
+[[ "$old_gpteasy" == *'已切换到：Alpha Provider'* ]]
+grep -Fq 'model = "alpha-model"' "$codex_home/config.toml"
+! grep -Fq 'model = "old-model"' "$codex_home/config.toml"
+! grep -Fq 'https://old.example/v1' "$codex_home/config.toml"
+
+cat >"$codex_home/config.toml" <<'MALFORMED_CONFIG'
+# >>> GPTEasy managed provider >>>
+# GPTEasy credential-file: ../../unsafe.token
+model = "unterminated
+MALFORMED_CONFIG
+malformed=$(gpteasy <<<"1" 2>&1)
+[[ "$malformed" == *'已切换到：Alpha Provider'* ]]
+[[ "$malformed" == *'新配置已经生效'* ]]
+grep -Fq 'model = "alpha-model"' "$codex_home/config.toml"
+grep -Fq '# <<< GPTEasy managed provider <<<' "$codex_home/config.toml"
+cp -- "$codex_home/config.toml" "$1"
+"#,
+        );
+
+        let (environment, default_executable) = match shell {
+            LinuxShell::Bash => ("GPTEASY_TEST_BASH", "bash"),
+            LinuxShell::Zsh => ("GPTEASY_TEST_ZSH", "zsh"),
+        };
+        let executable =
+            std::env::var(environment).unwrap_or_else(|_| default_executable.to_owned());
+        if !shell_is_available(&executable) {
+            continue;
+        }
+        let rendered = fs::read_to_string(&destination).expect("read switched config");
+        let parsed = rendered
+            .parse::<toml_edit::DocumentMut>()
+            .expect("switched config must remain valid TOML");
+        assert_eq!(parsed["model"].as_str(), Some("alpha-model"));
+        assert_eq!(parsed["model_provider"].as_str(), Some("gpteasy"));
     }
 }
 

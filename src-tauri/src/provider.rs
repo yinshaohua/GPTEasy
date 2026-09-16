@@ -150,6 +150,20 @@ pub enum ProviderValidationStage {
     ToolRoundTrip,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderValidationProgress {
+    pub stage: ProviderValidationStage,
+    pub attempt: u8,
+    pub max_attempts: u8,
+    pub retry_failure: Option<ProviderFailure>,
+}
+
+impl ProviderValidationProgress {
+    pub fn is_retrying(&self) -> bool {
+        self.retry_failure.is_some()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderSummary {
@@ -225,6 +239,7 @@ pub enum ProviderFailureCategory {
     OverallTimeout,
     Authentication,
     RateLimit,
+    ServerError,
     ModelDiscovery,
     Streaming,
     ResponsesProtocol,
@@ -388,7 +403,7 @@ impl ProviderApplication {
         progress: F,
     ) -> Result<ProviderValidationReceipt, ProviderFailure>
     where
-        F: Fn(ProviderValidationStage),
+        F: Fn(ProviderValidationProgress),
     {
         let cancellation = self.begin_request(&request_id)?;
         let evidence = self
@@ -427,7 +442,7 @@ impl ProviderApplication {
         progress: F,
     ) -> Result<ProviderValidationReceipt, ProviderFailure>
     where
-        F: Fn(ProviderValidationStage),
+        F: Fn(ProviderValidationProgress),
     {
         let cancellation = self.begin_request(&request_id)?;
         let record = match catalog::get_provider(&self.state_store, &input.provider_id) {
@@ -818,7 +833,7 @@ impl ProviderApplication {
         progress: F,
     ) -> Result<ProviderRevalidationResult, ProviderFailure>
     where
-        F: Fn(ProviderValidationStage),
+        F: Fn(ProviderValidationProgress),
     {
         let cancellation = self.begin_request(&request_id)?;
         let record = match catalog::get_provider(&self.state_store, &provider_id) {

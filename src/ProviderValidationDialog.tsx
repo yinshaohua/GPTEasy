@@ -16,6 +16,9 @@ export interface ProviderValidationSession {
   stage: ProviderValidationStage;
   stageStartedAt: number;
   failure: ProviderFailure | null;
+  attempt: number;
+  maxAttempts: number;
+  retrying: boolean;
 }
 
 interface ProviderValidationDialogProps {
@@ -96,6 +99,10 @@ export default function ProviderValidationDialog({
           </strong>
         </header>
         <p className="validation-cost-notice">{providerMessages.validationCostNotice}</p>
+        <p className="validation-attempt" role="status">
+          {providerMessages.validationAttempt(session.attempt, session.maxAttempts)}
+          {session.retrying && ` · ${providerMessages.validationRetrying}`}
+        </p>
 
         <ol className="validation-dialog-steps" aria-label={providerMessages.validationProgress}>
           {STAGES.map((stage, index) => {

@@ -246,6 +246,25 @@ test("默认窗口横向展示目录行且底部操作可见", async ({ page }, 
   await page.screenshot({ path: testInfo.outputPath("provider-layout-1120x620.png"), fullPage: true });
 });
 
+test("新供应商服务地址使用浅色提示，已有地址保持正常文字", async ({ page }, testInfo) => {
+  await openProviderCatalog(page, 1120, 620);
+
+  await page.getByRole("button", { name: "添加供应商" }).click();
+  const emptyAddress = page.getByLabel("服务地址");
+  await expect(emptyAddress).toHaveValue("");
+  await expect(emptyAddress).toHaveAttribute("placeholder", "请从供应商处获取 BASE_URL");
+  expect(await emptyAddress.evaluate((input) => getComputedStyle(input, "::placeholder").color))
+    .toBe("rgb(138, 148, 159)");
+  await page.screenshot({ path: testInfo.outputPath("new-provider-base-url-placeholder.png"), fullPage: true });
+
+  await page.getByRole("button", { name: "返回" }).click();
+  await page.getByRole("button", { name: "修改 Long Provider Name" }).click();
+  const savedAddress = page.getByLabel("服务地址");
+  await expect(savedAddress).toHaveValue(providers[1].baseUrl);
+  await expect(savedAddress).toHaveCSS("color", "rgb(32, 36, 42)");
+  await page.screenshot({ path: testInfo.outputPath("saved-provider-base-url.png"), fullPage: true });
+});
+
 test("最小窗口无横向溢出且所有操作可滚动到达", async ({ page }, testInfo) => {
   await openProviderCatalog(page, 680, 520);
 

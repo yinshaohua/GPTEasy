@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::sync::Mutex;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use futures_util::StreamExt;
@@ -13,28 +14,43 @@ use uuid::Uuid;
 
 use super::{
     DiscoveryInput, ModelDiscovery, ProviderFailure, ProviderFailureCategory,
-    ProviderValidationInput, ProviderValidationStage, ValidationEvidence, ValidationTimeouts,
-    cancelled, combination_fingerprint,
+    ProviderValidationInput, ProviderValidationProgress, ProviderValidationStage,
+    ValidationEvidence, ValidationTimeouts, cancelled, combination_fingerprint,
 };
+
+const MAX_VALIDATION_ATTEMPTS: u8 = 2;
 
 #[derive(Clone)]
 pub struct ProviderValidator {
-    client: reqwest::Client,
     timeouts: ValidationTimeouts,
 }
 
 impl ProviderValidator {
     pub fn new(timeouts: ValidationTimeouts) -> Self {
-        let client = reqwest::Client::builder()
+        Self { timeouts }
+    }
+
+    fn build_client(timeouts: ValidationTimeouts) -> reqwest::Client {
+        reqwest::Client::builder()
             .connect_timeout(timeouts.connect)
             .redirect(Policy::none())
             .build()
-            .expect("reqwest client configuration must be valid");
-        Self { client, timeouts }
+            .expect("reqwest client configuration must be valid")
     }
 
     pub async fn discover_models(
         &self,
+        input: DiscoveryInput,
+        cancellation: CancellationToken,
+    ) -> Result<ModelDiscovery, ProviderFailure> {
+        let client = Self::build_client(self.timeouts);
+        self.discover_models_with_client(&client, input, cancellation)
+            .await
+    }
+
+    async fn discover_models_with_client(
+        &self,
+        client: &reqwest::Client,
         input: DiscoveryInput,
         cancellation: CancellationToken,
     ) -> Result<ModelDiscovery, ProviderFailure> {
@@ -43,7 +59,7 @@ impl ProviderValidator {
         let candidate_count = candidates.len();
         for (index, candidate) in candidates.into_iter().enumerate() {
             match self
-                .discover_models_at(&candidate, &input.api_key, cancellation.clone())
+                .discover_models_at(client, &candidate, &input.api_key, cancellation.clone())
                 .await
             {
                 Ok(models) => {
@@ -71,12 +87,12 @@ impl ProviderValidator {
 
     async fn discover_models_at(
         &self,
+        client: &reqwest::Client,
         base_url: &Url,
         api_key: &str,
         cancellation: CancellationToken,
     ) -> Result<Vec<String>, DiscoveryAttemptFailure> {
-        let request = self
-            .client
+        let request = client
             .get(endpoint(base_url, "models"))
             .bearer_auth(api_key)
             .send();
@@ -128,6 +144,59 @@ impl ProviderValidator {
         progress: F,
     ) -> Result<ValidationEvidence, ProviderFailure>
     where
+        F: Fn(ProviderValidationProgress),
+    {
+        for attempt in 1..=MAX_VALIDATION_ATTEMPTS {
+            let client = Self::build_client(self.timeouts);
+            let current_stage = Mutex::new(ProviderValidationStage::ModelsConfirmed);
+            let result = self
+                .validate_provider_once(&client, input.clone(), cancellation.clone(), |stage| {
+                    if let Ok(mut current) = current_stage.lock() {
+                        *current = stage;
+                    }
+                    progress(ProviderValidationProgress {
+                        stage,
+                        attempt,
+                        max_attempts: MAX_VALIDATION_ATTEMPTS,
+                        retry_failure: None,
+                    });
+                })
+                .await;
+            drop(client);
+
+            match result {
+                Ok(evidence) => return Ok(evidence),
+                Err(failure)
+                    if attempt < MAX_VALIDATION_ATTEMPTS && is_retryable_failure(&failure) =>
+                {
+                    if cancellation.is_cancelled() {
+                        return Err(cancelled());
+                    }
+                    progress(ProviderValidationProgress {
+                        stage: current_stage
+                            .lock()
+                            .map(|stage| *stage)
+                            .unwrap_or(ProviderValidationStage::ModelsConfirmed),
+                        attempt: attempt + 1,
+                        max_attempts: MAX_VALIDATION_ATTEMPTS,
+                        retry_failure: Some(failure),
+                    });
+                }
+                Err(failure) => return Err(failure),
+            }
+        }
+
+        unreachable!("validation attempt loop always returns")
+    }
+
+    async fn validate_provider_once<F>(
+        &self,
+        client: &reqwest::Client,
+        input: ProviderValidationInput,
+        cancellation: CancellationToken,
+        progress: F,
+    ) -> Result<ValidationEvidence, ProviderFailure>
+    where
         F: Fn(ProviderValidationStage),
     {
         if input.default_model.is_empty() {
@@ -137,7 +206,8 @@ impl ProviderValidator {
             ));
         }
         let discovery = self
-            .discover_models(
+            .discover_models_with_client(
+                client,
                 DiscoveryInput {
                     base_url: input.base_url.clone(),
                     api_key: input.api_key.clone(),
@@ -163,6 +233,7 @@ impl ProviderValidator {
             )
         })?;
         self.validate_tool_round_trip(
+            client,
             &base_url,
             &input.api_key,
             &input.default_model,
@@ -189,6 +260,7 @@ impl ProviderValidator {
 
     async fn validate_tool_round_trip<F>(
         &self,
+        client: &reqwest::Client,
         base_url: &Url,
         api_key: &str,
         model: &str,
@@ -230,7 +302,13 @@ impl ProviderValidator {
         });
         progress(ProviderValidationStage::ResponsesStream);
         let first = self
-            .post_sse(base_url, api_key, &first_payload, cancellation.clone())
+            .post_sse(
+                client,
+                base_url,
+                api_key,
+                &first_payload,
+                cancellation.clone(),
+            )
             .await?;
         progress(ProviderValidationStage::ToolRoundTrip);
         let mut calls = first.function_calls.into_iter();
@@ -281,7 +359,7 @@ impl ProviderValidator {
             "stream": true
         });
         let second = self
-            .post_sse(base_url, api_key, &second_payload, cancellation)
+            .post_sse(client, base_url, api_key, &second_payload, cancellation)
             .await?;
         if !second.function_calls.is_empty() || !second.output_text.contains(&nonce) {
             return Err(ProviderFailure::new(
@@ -294,14 +372,14 @@ impl ProviderValidator {
 
     async fn post_sse(
         &self,
+        client: &reqwest::Client,
         base_url: &Url,
         api_key: &str,
         payload: &Value,
         cancellation: CancellationToken,
     ) -> Result<SseResult, ProviderFailure> {
         let started = Instant::now();
-        let request = self
-            .client
+        let request = client
             .post(endpoint(base_url, "responses"))
             .bearer_auth(api_key)
             .json(payload)
@@ -544,6 +622,22 @@ fn overall_timeout() -> ProviderFailure {
     )
 }
 
+fn is_retryable_failure(failure: &ProviderFailure) -> bool {
+    match failure.category {
+        ProviderFailureCategory::Transport
+        | ProviderFailureCategory::ResponseHeaderTimeout
+        | ProviderFailureCategory::FirstEventTimeout
+        | ProviderFailureCategory::StreamIdleTimeout
+        | ProviderFailureCategory::OverallTimeout
+        | ProviderFailureCategory::ServerError => true,
+        ProviderFailureCategory::Streaming => matches!(
+            failure.message_id,
+            "provider.responses_stream_broken" | "provider.responses_stream_incomplete"
+        ),
+        _ => false,
+    }
+}
+
 enum DiscoveryAttemptFailure {
     EndpointPath,
     Failure(ProviderFailure),
@@ -666,6 +760,12 @@ fn classify_status(status: StatusCode, model_discovery: bool) -> Result<(), Prov
         return Err(ProviderFailure::new(
             ProviderFailureCategory::RateLimit,
             "provider.rate_limited",
+        ));
+    }
+    if status.is_server_error() {
+        return Err(ProviderFailure::new(
+            ProviderFailureCategory::ServerError,
+            "provider.server_error",
         ));
     }
     let (category, message_id) = if model_discovery {

@@ -18,6 +18,7 @@ export type ProviderFailureCategory =
   | "overall_timeout"
   | "authentication"
   | "rate_limit"
+  | "server_error"
   | "model_discovery"
   | "streaming"
   | "responses_protocol"
@@ -63,6 +64,9 @@ export type ProviderValidationStage =
 export interface ProviderValidationProgress {
   requestId: string;
   stage: ProviderValidationStage;
+  attempt: number;
+  maxAttempts: number;
+  retrying: boolean;
 }
 
 export function onProviderSwitchRequested(
