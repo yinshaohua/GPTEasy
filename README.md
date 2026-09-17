@@ -66,6 +66,34 @@ Get-FileHash .\GPTEasy_*_x64-setup.exe -Algorithm SHA256
 2. 保存供应商后将其设为“当前使用”，或者切换到“OpenAI 登录模式”。
 3. 如果 Codex 正在运行，请自行重启相关桌面客户端或 CLI，使新配置生效。
 
+### 安装 ChatGPT/Codex 桌面版
+
+Windows 用户在 Microsoft Store 搜索 `ChatGPT`，选择 OpenAI 发布的官方 ChatGPT 应用并安装。该应用内置 ChatGPT Work 和 Codex；搜索结果界面示例：
+
+![Microsoft Store 搜索 ChatGPT 的界面](https://raw.githubusercontent.com/yinshaohua/GPTEasy/main/images/gpt-store.png)
+
+### 安装 Codex-CLI
+
+Codex-CLI 需要 Node.js `22.20.0` 或更高版本。下面两个脚本会使用国内的 Node.js/npm 镜像，安装到当前用户目录，不需要翻墙或管理员权限：
+
+- Windows PowerShell：[下载 `install-codex-cli.ps1`](https://raw.githubusercontent.com/yinshaohua/GPTEasy/main/scripts/install-codex-cli.ps1)
+
+  ```powershell
+  $script = "$env:TEMP\install-codex-cli.ps1"
+  Invoke-WebRequest https://raw.githubusercontent.com/yinshaohua/GPTEasy/main/scripts/install-codex-cli.ps1 -OutFile $script
+  powershell -ExecutionPolicy Bypass -File $script
+  Remove-Item -LiteralPath $script
+  ```
+
+- Ubuntu / Bash：[下载 `install-codex-cli.sh`](https://raw.githubusercontent.com/yinshaohua/GPTEasy/main/scripts/install-codex-cli.sh)
+
+  ```bash
+  script="$(mktemp)"
+  curl -fL https://raw.githubusercontent.com/yinshaohua/GPTEasy/main/scripts/install-codex-cli.sh -o "$script"
+  bash "$script"
+  rm -f "$script"
+  ```
+
 GPTEasy 只负责配置和管理，不会主动启动、关闭或重启用户的 Codex 进程。
 
 ## 本地开发
