@@ -14,7 +14,9 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::codex_config::{STATUS_LINE_TOML, apply_status_line, has_expected_status_line};
+use crate::codex_config::{
+    DEFAULT_MODEL_REASONING_EFFORT, STATUS_LINE_TOML, apply_status_line, has_expected_status_line,
+};
 use crate::provider::ProviderSummary;
 use crate::state::StateStore;
 
@@ -2293,10 +2295,14 @@ fn schema_v1_block_variant(block: &[&str]) -> Option<SchemaV1Variant> {
 
     let document = block.join("\n").parse::<toml_edit::DocumentMut>().ok()?;
     let root = document.as_table();
-    if root.len() != 3
+    let has_reasoning_effort = root.contains_key("model_reasoning_effort");
+    if root.len() != if has_reasoning_effort { 4 } else { 3 }
         || !root.contains_key("model")
         || !root.contains_key("model_provider")
         || !root.contains_key("model_providers")
+        || root
+            .get("model_reasoning_effort")
+            .is_some_and(|value| value.as_str() != Some(DEFAULT_MODEL_REASONING_EFFORT))
     {
         return None;
     }
@@ -2700,6 +2706,10 @@ fn render_config(
             "model = {}",
             toml_edit::Value::from(provider.default_model.as_str())
         ),
+        format!(
+            "model_reasoning_effort = {}",
+            toml_edit::Value::from(DEFAULT_MODEL_REASONING_EFFORT)
+        ),
         "model_provider = \"gpteasy\"".to_owned(),
         format!(
             "model_providers.gpteasy.name = {}",
@@ -2739,10 +2749,48 @@ fn render_config(
                 .find('\n')
                 .map(|offset| end_at + offset + 1)
                 .unwrap_or(source.len());
-            format!("{}{}{}", &source[..start_at], block, &source[end_line..])
+            let block_document = source[start_at..end_line]
+                .parse::<toml_edit::DocumentMut>()
+                .map_err(|_| {
+                    WslFailure::new(
+                        WslFailureCategory::InvalidEnvironment,
+                        "wsl.managed_conflict",
+                    )
+                })?;
+            if block_document.get("model_reasoning_effort").is_none()
+                && document.get("model_reasoning_effort").is_some()
+            {
+                document.remove("model_reasoning_effort");
+                let migrated = document.to_string();
+                let migrated_start = migrated.find(start).ok_or_else(|| {
+                    WslFailure::new(
+                        WslFailureCategory::InvalidEnvironment,
+                        "wsl.managed_conflict",
+                    )
+                })?;
+                let migrated_end_at = migrated.find(end).ok_or_else(|| {
+                    WslFailure::new(
+                        WslFailureCategory::InvalidEnvironment,
+                        "wsl.managed_conflict",
+                    )
+                })?;
+                let migrated_end = migrated[migrated_end_at..]
+                    .find('\n')
+                    .map(|offset| migrated_end_at + offset + 1)
+                    .unwrap_or(migrated.len());
+                format!(
+                    "{}{}{}",
+                    &migrated[..migrated_start],
+                    block,
+                    &migrated[migrated_end..]
+                )
+            } else {
+                format!("{}{}{}", &source[..start_at], block, &source[end_line..])
+            }
         }
         (0, 0) => {
             document.remove("model");
+            document.remove("model_reasoning_effort");
             document.remove("model_provider");
             format!("{}{}{}", block, newline, document)
         }
@@ -2825,6 +2873,7 @@ fn render_reclaimed_config(
         return render_config(None, provider, source_id);
     };
     document.remove("model");
+    document.remove("model_reasoning_effort");
     document.remove("model_provider");
     let remove_providers = document
         .get_mut("model_providers")
@@ -4128,14 +4177,14 @@ model_providers.gpteasy.auth.command = \"sh\"\n\
     }
 
     #[test]
-    fn desktop_apply_writes_the_schema_v1_command_credential_protocol() {
+    fn desktop_apply_writes_schema_v1_credentials_and_sets_default_reasoning_effort_high() {
         let provider_id = "22222222-2222-4222-8222-222222222222";
         let mut running_probe = probe();
         running_probe.running = true;
         let runtime = Arc::new(FakeRuntime::new(
             running_probe,
             WslArtifacts {
-                config: Some(b"custom = true\n".to_vec()),
+                config: Some(b"custom = true\nmodel_reasoning_effort = \"low\"\n".to_vec()),
                 credentials: None,
             },
         ));
@@ -4153,10 +4202,11 @@ model_providers.gpteasy.auth.command = \"sh\"\n\
 
         let artifacts = runtime.artifacts.lock().expect("artifacts").clone();
         assert_eq!(artifacts.credentials.as_deref(), Some(b"secret".as_slice()));
-        assert!(
-            !String::from_utf8_lossy(artifacts.config.as_deref().expect("written config"))
-                .contains("requires_openai_auth")
-        );
+        let config = String::from_utf8_lossy(artifacts.config.as_deref().expect("written config"));
+        assert!(config.contains("model_reasoning_effort = \"high\""));
+        assert!(!config.contains("model_reasoning_effort = \"low\""));
+        assert_eq!(config.matches("model_reasoning_effort = ").count(), 1);
+        assert!(!config.contains("requires_openai_auth"));
         assert!(matches!(
             inspect_actual_managed_state(
                 artifacts.config.as_deref(),

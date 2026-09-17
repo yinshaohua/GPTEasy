@@ -1,5 +1,7 @@
 use toml_edit::{Array, DocumentMut, Item, Table, Value};
 
+pub(crate) const DEFAULT_MODEL_REASONING_EFFORT: &str = "high";
+
 pub(crate) const STATUS_LINE_ITEMS: [&str; 6] = [
     "current-dir",
     "model-with-reasoning",

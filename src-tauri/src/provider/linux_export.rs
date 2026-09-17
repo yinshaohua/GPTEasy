@@ -5,7 +5,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::codex_config::STATUS_LINE_TOML;
+use crate::codex_config::{DEFAULT_MODEL_REASONING_EFFORT, STATUS_LINE_TOML};
 use crate::state::StateStore;
 
 use super::catalog;
@@ -229,6 +229,7 @@ gpteasy__print_block() {{
     printf '# GPTEasy source-id: %s\n' "$gpteasy__export_id"
     printf '# GPTEasy credential-file: %s\n' "$credential_relative"
     printf 'model = %s\n' "$(gpteasy__toml_string "$model")"
+    printf '%s\n' 'model_reasoning_effort = "{DEFAULT_MODEL_REASONING_EFFORT}"'
     printf '%s\n' 'model_provider = "gpteasy"'
     printf 'model_providers.gpteasy.name = %s\n' "$(gpteasy__toml_string "$name")"
     printf 'model_providers.gpteasy.base_url = %s\n' "$(gpteasy__toml_string "$base_url")"

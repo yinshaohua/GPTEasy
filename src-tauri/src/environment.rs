@@ -12,7 +12,9 @@ use toml_edit::DocumentMut;
 use uuid::Uuid;
 
 use crate::codex::{LoginInspection, LoginMethod, LoginStatus, LoginStatusCommand};
-use crate::codex_config::{STATUS_LINE_TOML, apply_status_line, has_expected_status_line};
+use crate::codex_config::{
+    DEFAULT_MODEL_REASONING_EFFORT, STATUS_LINE_TOML, apply_status_line, has_expected_status_line,
+};
 pub use crate::consumer::ConsumerStatus;
 use crate::consumer::{ConsumerIdentity, ConsumerScan, ConsumerScanner, WindowsConsumerScanner};
 use crate::provider::{ProviderSummary, combination_fingerprint};
@@ -1409,7 +1411,12 @@ fn inspect_environment(
         ArtifactImpact {
             artifact: ArtifactKind::Config,
             action: action_for(&config),
-            fields: vec!["model", "model_provider", "model_providers.<provider-id>"],
+            fields: vec![
+                "model",
+                "model_reasoning_effort",
+                "model_provider",
+                "model_providers.<provider-id>",
+            ],
         },
         ArtifactImpact {
             artifact: ArtifactKind::Credentials,
@@ -4285,7 +4292,9 @@ fn render_config(
             if !managed_block_is_root_scoped(&document, text, &existing) {
                 return Err(managed_conflict());
             }
-            replace_managed_block(text, &existing, Some(&block)).ok_or_else(managed_conflict)?
+            replace_managed_block_with_reasoning_upgrade(
+                text, &document, &existing, &block, newline,
+            )?
         }
         ManagedBlock::Conflict => return Err(managed_conflict()),
     };
@@ -4455,6 +4464,7 @@ fn migrate_external_config(
         .parse::<DocumentMut>()
         .map_err(|_| invalid_config())?;
     document.remove("model");
+    document.remove("model_reasoning_effort");
     document.remove("model_provider");
     let mut remove_parent = false;
     if let Some(item) = document.get_mut("model_providers") {
@@ -4516,6 +4526,10 @@ fn render_managed_block(provider: &ProviderTarget, aliases: &[String], newline: 
         MANAGED_START.to_owned(),
         format!("{PROVIDER_ID_PREFIX} {}", provider.id),
         format!("model = {}", string(&provider.default_model)),
+        format!(
+            "model_reasoning_effort = {}",
+            string(DEFAULT_MODEL_REASONING_EFFORT)
+        ),
         format!("model_provider = {}", string(&provider.id)),
     ];
     for id in std::iter::once(&provider.id).chain(aliases.iter()) {
@@ -4700,15 +4714,23 @@ fn recover_desktop_managed_block(
     let primary_lines = text
         .get(start_line_end..)?
         .split_inclusive('\n')
-        .take(8)
+        .take(9)
         .collect::<Vec<_>>();
-    let primary_len = if primary_lines
-        .get(7)
-        .is_some_and(|line| line.contains(".supports_websockets = false"))
+    let required_len = if primary_lines
+        .get(2)
+        .is_some_and(|line| line.starts_with("model_reasoning_effort = "))
     {
         8
     } else {
         7
+    };
+    let primary_len = if primary_lines
+        .get(required_len)
+        .is_some_and(|line| line.contains(".supports_websockets = false"))
+    {
+        required_len + 1
+    } else {
+        required_len
     };
     for line in primary_lines.into_iter().take(primary_len) {
         end += line.len();
@@ -4817,11 +4839,15 @@ fn managed_block_has_expected_shape(block: &str, provider_id: &str) -> bool {
     let Ok(document) = block.parse::<DocumentMut>() else {
         return false;
     };
-    if document.iter().count() != 3
+    let has_reasoning_effort = document.get("model_reasoning_effort").is_some();
+    if document.iter().count() != if has_reasoning_effort { 4 } else { 3 }
         || document
             .get("model")
             .and_then(|item| item.as_str())
             .is_none()
+        || document
+            .get("model_reasoning_effort")
+            .is_some_and(|item| item.as_str() != Some(DEFAULT_MODEL_REASONING_EFFORT))
         || document
             .get("model_provider")
             .and_then(|item| item.as_str())
@@ -4883,6 +4909,34 @@ fn managed_block_is_root_scoped(
         (Some(actual), Some(expected)) => managed_provider_fields_match(actual, expected),
         _ => false,
     }
+}
+
+fn replace_managed_block_with_reasoning_upgrade(
+    text: &str,
+    document: &DocumentMut,
+    managed: &ManagedBlockRange,
+    replacement: &str,
+    newline: &str,
+) -> Result<String, EnvironmentFailure> {
+    let block = canonical_managed_block(text, managed).ok_or_else(managed_conflict)?;
+    let block_document = block
+        .parse::<DocumentMut>()
+        .map_err(|_| managed_conflict())?;
+    if block_document.get("model_reasoning_effort").is_some()
+        || document.get("model_reasoning_effort").is_none()
+    {
+        return replace_managed_block(text, managed, Some(replacement))
+            .ok_or_else(managed_conflict);
+    }
+
+    let mut migrated = document.clone();
+    migrated.remove("model_reasoning_effort");
+    let migrated = normalize_newlines(&migrated.to_string(), newline);
+    let ManagedBlock::Valid(migrated_block) = managed_block(&migrated) else {
+        return Err(managed_conflict());
+    };
+    replace_managed_block(&migrated, &migrated_block, Some(replacement))
+        .ok_or_else(managed_conflict)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5048,6 +5102,17 @@ fn historical_alias_free_fingerprint(bytes: &[u8]) -> Option<String> {
         MANAGED_START.to_owned(),
         format!("{PROVIDER_ID_PREFIX} {}", managed.provider_id),
         format!("model = {}", string(document.get("model")?.as_str()?)),
+    ];
+    if let Some(reasoning_effort) = document
+        .get("model_reasoning_effort")
+        .and_then(|item| item.as_str())
+    {
+        primary_lines.push(format!(
+            "model_reasoning_effort = {}",
+            string(reasoning_effort)
+        ));
+    }
+    primary_lines.extend([
         format!("model_provider = {}", string(&managed.provider_id)),
         format!("{table}.name = {}", string(fields.name)),
         format!("{table}.base_url = {}", string(fields.base_url)),
@@ -5056,7 +5121,7 @@ fn historical_alias_free_fingerprint(bytes: &[u8]) -> Option<String> {
             "{table}.requires_openai_auth = {}",
             fields.requires_openai_auth
         ),
-    ];
+    ]);
     if let Some(supports_websockets) = fields.supports_websockets {
         primary_lines.push(format!(
             "{table}.supports_websockets = {supports_websockets}"

@@ -13,7 +13,7 @@ use tempfile::TempDir;
 use uuid::Uuid;
 
 #[test]
-fn bash_export_captures_every_verified_provider_in_catalog_order() {
+fn bash_export_captures_every_verified_provider_and_sets_default_reasoning_effort_high() {
     let fixture = ExportFixture::new();
     fixture.insert_provider(
         "11111111-1111-4111-8111-111111111111",
@@ -47,6 +47,7 @@ fn bash_export_captures_every_verified_provider_in_catalog_order() {
     assert!(script.contains("Beta Provider"));
     assert!(script.contains("alpha-secret-key"));
     assert!(script.contains("beta-secret-key"));
+    assert!(script.contains("model_reasoning_effort = \"high\""));
     assert!(script.find("Alpha Provider") < script.find("Beta Provider"));
     assert!(
         script.contains(
@@ -70,7 +71,7 @@ fn bash_export_captures_every_verified_provider_in_catalog_order() {
 }
 
 #[test]
-fn zsh_export_captures_every_verified_provider_in_catalog_order() {
+fn zsh_export_captures_every_verified_provider_and_sets_default_reasoning_effort_high() {
     let fixture = ExportFixture::new();
     fixture.insert_provider(
         "11111111-1111-4111-8111-111111111111",
@@ -104,6 +105,7 @@ fn zsh_export_captures_every_verified_provider_in_catalog_order() {
     assert!(script.contains("Beta Provider"));
     assert!(script.contains("alpha-secret-key"));
     assert!(script.contains("beta-secret-key"));
+    assert!(script.contains("model_reasoning_effort = \"high\""));
     assert!(script.find("Alpha Provider") < script.find("Beta Provider"));
     assert!(!script.contains("OpenAI 登录"));
     assert!(script.contains(
@@ -702,7 +704,7 @@ grep -Fq 'model_provider = "gpteasy"' "$codex_home/config.toml"
 ! grep -Fq 'model = "gpt-5.6-sol"' "$codex_home/config.toml"
 ! grep -Fq 'model_provider = "custom"' "$codex_home/config.toml"
 ! grep -Fq '[model_providers.custom]' "$codex_home/config.toml"
-! grep -Fq 'model_reasoning_effort = "high"' "$codex_home/config.toml"
+grep -Fq 'model_reasoning_effort = "high"' "$codex_home/config.toml"
 ! grep -Fq '[projects."/data/new-api"]' "$codex_home/config.toml"
 restore=$(find "$codex_home/.gpteasy-shell/shell-restore" -type f -name config.toml -print -quit)
 [[ -n "$restore" ]]
@@ -747,6 +749,7 @@ cp -- "$codex_home/config.toml" "$1"
             .parse::<toml_edit::DocumentMut>()
             .expect("switched config must remain valid TOML");
         assert_eq!(parsed["model"].as_str(), Some("alpha-model"));
+        assert_eq!(parsed["model_reasoning_effort"].as_str(), Some("high"));
         assert_eq!(parsed["model_provider"].as_str(), Some("gpteasy"));
         assert_eq!(
             parsed["tui"]["status_line"]

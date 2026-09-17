@@ -492,13 +492,14 @@ fn credential_changes_after_preview_abort_before_backup_or_write() {
 }
 
 #[test]
-fn confirmed_takeover_preserves_external_fields_and_records_the_applied_provider() {
+fn confirmed_takeover_preserves_external_fields_and_sets_default_reasoning_effort_high() {
     let (temp, store, application) = fixture();
     let codex_home = temp.path().join(".codex");
     fs::create_dir_all(&codex_home).expect("create Codex fixture");
     let original_config = concat!(
         "# user heading\r\n",
         "model = \"old-model\"\r\n",
+        "model_reasoning_effort = \"low\"\r\n",
         "model_provider = \"legacy\"\r\n",
         "custom_flag = true\r\n",
         "\r\n",
@@ -541,6 +542,7 @@ fn confirmed_takeover_preserves_external_fields_and_records_the_applied_provider
         .parse::<toml_edit::DocumentMut>()
         .expect("applied config is TOML");
     assert_eq!(document["model"].as_str(), Some("fixture-model"));
+    assert_eq!(document["model_reasoning_effort"].as_str(), Some("high"));
     assert_eq!(document["model_provider"].as_str(), Some(PROVIDER_ID));
     assert_eq!(
         document["model_providers"][PROVIDER_ID]["base_url"].as_str(),

@@ -482,6 +482,7 @@ gpteasy__schema_v1_is_valid() {
         index(line, source) == 1 { source_count += 1; next }
         index(line, credential) == 1 { credential_count += 1; next }
         index(line, "model = ") == 1 { model_count += 1; next }
+        line == "model_reasoning_effort = \"high\"" { reasoning_count += 1; next }
         line == "model_provider = \"gpteasy\"" { model_provider_count += 1; next }
         index(line, "model_providers.gpteasy.name = ") == 1 { name_count += 1; next }
         index(line, "model_providers.gpteasy.base_url = ") == 1 { base_url_count += 1; next }
@@ -492,7 +493,8 @@ gpteasy__schema_v1_is_valid() {
         { invalid = 1 }
         END {
             valid = !invalid && schema_count == 1 && provider_count == 1 && source_count == 1 &&
-                credential_count == 1 && model_count == 1 && model_provider_count == 1 &&
+                credential_count == 1 && model_count == 1 && reasoning_count <= 1 &&
+                model_provider_count == 1 &&
                 name_count == 1 && base_url_count == 1 && wire_count == 1 && websocket_count == 1 &&
                 auth_command_count == 1 && auth_args_count == 1
             exit valid ? 0 : 1
