@@ -74,7 +74,7 @@ Windows 用户在 Microsoft Store 搜索 `ChatGPT`，选择 OpenAI 发布的官�
 
 ### 安装 Codex-CLI
 
-Codex-CLI 需要 Node.js `22.20.0` 或更高版本。下面两个脚本会使用国内的 Node.js/npm 镜像，安装到当前用户目录，不需要翻墙或管理员权限：
+Codex-CLI 需要 Node.js `22.20.0` 或更高版本。下面两个脚本使用国内的 Node.js/npm 镜像，无需翻墙；Windows 脚本安装到当前用户目录，Ubuntu 脚本会在需要时通过 `sudo` 准备系统依赖：
 
 - Windows PowerShell：[下载 `install-codex-cli.ps1`](https://raw.githubusercontent.com/yinshaohua/GPTEasy/main/scripts/install-codex-cli.ps1)
 
