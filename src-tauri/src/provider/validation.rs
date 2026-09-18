@@ -107,6 +107,11 @@ impl ProviderValidator {
                     .map_err(|error| transport_failure(&error))?
             }
         };
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
         if matches!(
             response.status(),
             StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
@@ -125,7 +130,13 @@ impl ProviderValidator {
                     .map_err(|error| transport_failure(&error))?
             }
         };
-        parse_models(&body).map_err(Into::into)
+        match parse_models(&body) {
+            Ok(models) => Ok(models),
+            Err(_failure) if is_html_content_type(content_type.as_deref()) => {
+                Err(DiscoveryAttemptFailure::EndpointPath)
+            }
+            Err(failure) => Err(failure.into()),
+        }
     }
 
     pub async fn validate_provider(
@@ -255,6 +266,7 @@ impl ProviderValidator {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
+            models: discovery.models,
         })
     }
 
@@ -689,6 +701,15 @@ fn parse_models(body: &[u8]) -> Result<Vec<String>, ProviderFailure> {
         ));
     }
     Ok(models)
+}
+
+fn is_html_content_type(content_type: Option<&str>) -> bool {
+    let media_type = content_type
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .unwrap_or_default();
+    media_type.eq_ignore_ascii_case("text/html")
+        || media_type.eq_ignore_ascii_case("application/xhtml+xml")
 }
 
 fn base_url_candidates(requested: &Url) -> Vec<Url> {

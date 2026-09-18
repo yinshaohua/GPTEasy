@@ -3862,6 +3862,7 @@ mod tests {
                 default_model: "model-a".to_owned(),
                 combination_fingerprint: "fingerprint".to_owned(),
                 verified_at_epoch_seconds: 1,
+                models: Vec::new(),
             }),
         });
         audit_provider_revalidation_result(

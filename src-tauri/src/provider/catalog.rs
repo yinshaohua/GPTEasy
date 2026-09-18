@@ -139,6 +139,12 @@ pub(super) fn insert_provider(
             }
             _ => state_unavailable(),
         })?;
+    store_model_catalog(
+        &transaction,
+        &summary.id,
+        &candidate.evidence.combination_fingerprint,
+        &candidate.evidence.models,
+    )?;
     transaction.commit().map_err(|_| state_unavailable())?;
     Ok(summary)
 }
@@ -438,6 +444,12 @@ pub(super) fn replace_provider(
             ],
         )
         .map_err(map_write_failure)?;
+    store_model_catalog(
+        &transaction,
+        provider_id,
+        &candidate.evidence.combination_fingerprint,
+        &candidate.evidence.models,
+    )?;
     transaction.commit().map_err(|_| state_unavailable())?;
     let mut summary = ProviderSummary {
         id: provider_id.to_owned(),
@@ -489,11 +501,33 @@ pub(super) fn record_revalidation(
     if changed != 1 {
         return Err(verification_expired());
     }
+    store_model_catalog(
+        &transaction,
+        provider_id,
+        &evidence.combination_fingerprint,
+        &evidence.models,
+    )?;
     transaction.commit().map_err(|_| state_unavailable())?;
     Ok(ProviderSummary {
         verified_at_epoch_seconds: evidence.verified_at_epoch_seconds,
         ..record.summary
     })
+}
+
+fn store_model_catalog(
+    transaction: &rusqlite::Transaction<'_>,
+    provider_id: &str,
+    fingerprint: &str,
+    models: &[String],
+) -> Result<(), ProviderFailure> {
+    let models_json = serde_json::to_string(models).map_err(|_| state_unavailable())?;
+    transaction.execute(
+        "INSERT INTO provider_model_catalog(provider_id, verification_fingerprint, models_json)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(provider_id) DO UPDATE SET verification_fingerprint=excluded.verification_fingerprint, models_json=excluded.models_json",
+        params![provider_id, fingerprint, models_json],
+    ).map_err(|_| state_unavailable())?;
+    Ok(())
 }
 
 fn find_provider(

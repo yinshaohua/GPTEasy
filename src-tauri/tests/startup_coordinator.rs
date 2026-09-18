@@ -653,6 +653,59 @@ fn provider_startup_accepts_outside_edits_but_blocks_managed_block_drift() {
 }
 
 #[test]
+fn provider_startup_accepts_legacy_managed_block_without_model_catalog() {
+    let app_data = TempDir::new().expect("app data");
+    let codex_home = TempDir::new().expect("codex home");
+    let store = StateStore::new(StatePaths::from_root(app_data.path()));
+    assert!(store.bootstrap().is_ready());
+    let provider_id = "9f319739-f219-48ee-be35-22e08d5402d7";
+    let connection = rusqlite::Connection::open(store.paths().database()).expect("open state");
+    connection
+        .execute(
+            "INSERT INTO providers (id, name, base_url, api_key, default_model, verified_at, verification_fingerprint) \
+             VALUES (?1, 'Provider', 'https://provider.example/v1', 'test-key', 'gpt-5.4', '1775606400', 'verification')",
+            [provider_id],
+        )
+        .expect("insert provider evidence");
+    EnvironmentApplication::new(store.clone(), codex_home.path())
+        .apply_provider(provider_id, true)
+        .expect("establish managed environment");
+
+    let config_path = codex_home.path().join("config.toml");
+    let current = fs::read_to_string(&config_path).expect("read managed config");
+    let legacy = current
+        .lines()
+        .filter(|line| !line.starts_with("model_catalog_json ="))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    fs::write(&config_path, &legacy).expect("write legacy managed config");
+    let legacy_fingerprint = Sha256::digest(legacy.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    connection
+        .execute(
+            "UPDATE last_applied_state SET config_fingerprint = ?1 WHERE singleton = 1",
+            [&legacy_fingerprint],
+        )
+        .expect("record legacy config evidence");
+
+    let coordinator = StartupCoordinator::new(
+        store,
+        CodexInspector::new(codex_home.path(), login_command(0)),
+    );
+    let snapshot = coordinator.inspect();
+
+    assert_eq!(snapshot.mode, ApplicationMode::Ready);
+    assert_eq!(snapshot.block_reason, None);
+    assert_eq!(
+        fs::read_to_string(config_path).expect("read unchanged legacy config"),
+        legacy
+    );
+}
+
+#[test]
 fn provider_startup_accepts_an_equivalent_historical_provider_alias() {
     let app_data = TempDir::new().expect("app data");
     let codex_home = TempDir::new().expect("codex home");

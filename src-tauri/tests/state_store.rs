@@ -58,6 +58,7 @@ fn fresh_install_initializes_only_the_minimum_schema() {
             "last_applied_state",
             "pending_config_operation",
             "pending_session_visibility",
+            "provider_model_catalog",
             "providers",
             "session_capability",
             "session_process_ownership",
@@ -271,6 +272,9 @@ fn recommendation_migration_never_claims_or_overwrites_an_existing_dayway_name()
     let store = store_in(&temp);
     assert!(store.bootstrap().is_ready());
     let connection = Connection::open(store.paths().database()).expect("open state database");
+    connection
+        .execute("DROP TABLE provider_model_catalog", [])
+        .expect("remove v10 provider model catalog");
     connection
         .execute("DROP TABLE pending_session_visibility", [])
         .expect("remove v9 pending visibility table");

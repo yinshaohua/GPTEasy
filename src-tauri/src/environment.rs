@@ -12,11 +12,10 @@ use toml_edit::DocumentMut;
 use uuid::Uuid;
 
 use crate::codex::{LoginInspection, LoginMethod, LoginStatus, LoginStatusCommand};
-use crate::codex_config::{
-    DEFAULT_MODEL_REASONING_EFFORT, STATUS_LINE_TOML, apply_status_line, has_expected_status_line,
-};
+use crate::codex_config::{STATUS_LINE_TOML, apply_status_line, has_expected_status_line};
 pub use crate::consumer::ConsumerStatus;
 use crate::consumer::{ConsumerIdentity, ConsumerScan, ConsumerScanner, WindowsConsumerScanner};
+use crate::provider::model_catalog;
 use crate::provider::{ProviderSummary, combination_fingerprint};
 use crate::state::StateStore;
 
@@ -824,6 +823,7 @@ impl EnvironmentApplication {
         self.check_interruption(EnvironmentFailurePoint::AfterPendingRegistered)?;
 
         let mut config_applied = false;
+        let mut catalog_applied = false;
         let mut credentials_applied = false;
         let mut recovery_removed = false;
         let mut interrupted = false;
@@ -832,6 +832,10 @@ impl EnvironmentApplication {
             self.check_fault(EnvironmentFailurePoint::BeforeConfigReplace)?;
             prepared.config.commit()?;
             config_applied = true;
+            if let Some(catalog) = &prepared.catalog {
+                catalog.commit()?;
+                catalog_applied = true;
+            }
             update_pending_stage(&connection, &prepared.operation_id, "config_replaced")?;
             self.check_interruption(EnvironmentFailurePoint::AfterConfigReplaced)
                 .inspect_err(|_| {
@@ -885,6 +889,7 @@ impl EnvironmentApplication {
                 || rollback_openai_switch(
                     &prepared,
                     config_applied,
+                    catalog_applied,
                     credentials_applied,
                     recovery_removed,
                 )
@@ -1059,6 +1064,7 @@ impl EnvironmentApplication {
         self.check_interruption(EnvironmentFailurePoint::AfterPendingRegistered)?;
 
         let mut config_applied = false;
+        let mut catalog_applied = false;
         let mut credentials_applied = false;
         let mut recovery_applied = false;
         let mut interrupted = false;
@@ -1071,6 +1077,8 @@ impl EnvironmentApplication {
             self.check_fault(EnvironmentFailurePoint::BeforeConfigReplace)?;
             prepared.config.commit()?;
             config_applied = true;
+            prepared.catalog.commit()?;
+            catalog_applied = true;
             update_pending_stage(connection, &prepared.operation_id, "config_replaced")?;
             self.check_interruption(EnvironmentFailurePoint::AfterConfigReplaced)
                 .inspect_err(|_| {
@@ -1118,6 +1126,7 @@ impl EnvironmentApplication {
                 || rollback_switch(
                     &prepared,
                     config_applied,
+                    catalog_applied,
                     credentials_applied,
                     recovery_applied,
                 )
@@ -1209,6 +1218,8 @@ pub(crate) struct ProviderTarget {
     base_url: String,
     api_key: String,
     default_model: String,
+    #[serde(default)]
+    model_catalog: Vec<String>,
     verified_at_epoch_seconds: u64,
     verification_fingerprint: String,
     #[serde(default)]
@@ -1224,6 +1235,7 @@ impl ProviderTarget {
         base_url: String,
         api_key: String,
         default_model: String,
+        model_catalog: Vec<String>,
         verified_at_epoch_seconds: u64,
         verification_fingerprint: String,
         recommendation_id: Option<String>,
@@ -1235,6 +1247,7 @@ impl ProviderTarget {
             base_url,
             api_key,
             default_model,
+            model_catalog,
             verified_at_epoch_seconds,
             verification_fingerprint,
             recommendation_id,
@@ -1299,9 +1312,10 @@ fn load_provider(
 ) -> Result<ProviderTarget, EnvironmentFailure> {
     connection
         .query_row(
-            "SELECT id, name, base_url, api_key, default_model, verified_at,
-                    verification_fingerprint, recommendation_id, recommendation_template_base_url
-             FROM providers WHERE id = ?1",
+            "SELECT p.id, p.name, p.base_url, p.api_key, p.default_model, p.verified_at,
+                    p.verification_fingerprint, p.recommendation_id, p.recommendation_template_base_url,
+                    COALESCE(c.models_json, '[]')
+             FROM providers p LEFT JOIN provider_model_catalog c ON c.provider_id = p.id WHERE p.id = ?1",
             [provider_id],
             |row| {
                 let verified_at = row.get::<_, String>(5)?;
@@ -1321,6 +1335,7 @@ fn load_provider(
                     verification_fingerprint: row.get(6)?,
                     recommendation_id: row.get(7)?,
                     recommendation_template_base_url: row.get(8)?,
+                    model_catalog: serde_json::from_str::<Vec<String>>(&row.get::<_, String>(9)?).unwrap_or_default(),
                 })
             },
         )
@@ -2042,6 +2057,7 @@ struct PreparedSwitch {
     operation_id: String,
     provider: ProviderTarget,
     config: PreparedArtifact,
+    catalog: PreparedArtifact,
     credentials: PreparedArtifact,
     openai_credentials_recovery: Option<PreparedArtifact>,
     update_guard: Option<UpdateGuard>,
@@ -2052,6 +2068,7 @@ struct PreparedSwitch {
 struct PreparedOpenAiSwitch {
     operation_id: String,
     config: PreparedRestoreArtifact,
+    catalog: Option<PreparedRestoreArtifact>,
     credentials: Option<PreparedRestoreArtifact>,
     openai_credentials_recovery: Option<PreparedRestoreArtifact>,
 }
@@ -2415,6 +2432,8 @@ impl PreparedOpenAiSwitch {
         let credential_target = ArtifactBytes {
             bytes: render_openai_credentials(credential_source.bytes.as_deref())?,
         };
+        let catalog_path = codex_home.join("gpteasy-model-catalog.json");
+        let catalog_current = read_artifact(&catalog_path)?;
         Ok(Self {
             operation_id: Uuid::new_v4().to_string(),
             config: PreparedRestoreArtifact::new(
@@ -2423,6 +2442,14 @@ impl PreparedOpenAiSwitch {
                 target,
                 ArtifactKind::Config,
             ),
+            catalog: catalog_current.bytes.is_some().then(|| {
+                PreparedRestoreArtifact::new(
+                    catalog_path,
+                    catalog_current,
+                    ArtifactBytes { bytes: None },
+                    ArtifactKind::Config,
+                )
+            }),
             credentials: (credentials.bytes != credential_target.bytes).then(|| {
                 PreparedRestoreArtifact::new(
                     credentials_path,
@@ -2444,6 +2471,9 @@ impl PreparedOpenAiSwitch {
 
     fn verify_committed(&self) -> Result<(), EnvironmentFailure> {
         self.config.verify_target()?;
+        if let Some(catalog) = &self.catalog {
+            catalog.verify_target()?;
+        }
         if let Some(credentials) = &self.credentials {
             credentials.verify_target()?;
         }
@@ -2480,6 +2510,10 @@ impl PreparedSwitch {
         provider_alias_ids.extend(historical_managed_provider_ids(codex_home));
         let rendered_config =
             render_config(config.bytes.as_deref(), &provider, &provider_alias_ids)?;
+        let catalog_path = codex_home.join("gpteasy-model-catalog.json");
+        let catalog_old = read_artifact(&catalog_path)?;
+        let catalog_new = model_catalog::render(&provider.model_catalog, &provider.default_model)
+            .map_err(|_| invalid_config())?;
         let credentials = read_artifact(&credentials_path)?;
         let rendered_credentials =
             render_credentials(credentials.bytes.as_deref(), &provider.api_key)?;
@@ -2502,6 +2536,12 @@ impl PreparedSwitch {
                 config_path,
                 config,
                 rendered_config,
+                ArtifactKind::Config,
+            ),
+            catalog: PreparedArtifact::new(
+                catalog_path,
+                catalog_old,
+                catalog_new,
                 ArtifactKind::Config,
             ),
             credentials: PreparedArtifact::new(
@@ -2529,6 +2569,10 @@ impl PreparedSwitch {
             render_managed_block(&provider, &[], "\n")
         )
         .into_bytes();
+        let catalog_path = codex_home.join("gpteasy-model-catalog.json");
+        let catalog_old = read_artifact(&catalog_path)?;
+        let catalog_new = model_catalog::render(&provider.model_catalog, &provider.default_model)
+            .map_err(|_| invalid_config())?;
         let rendered_credentials = render_credentials(None, &provider.api_key)?;
         Ok(Self {
             operation_id: Uuid::new_v4().to_string(),
@@ -2537,6 +2581,12 @@ impl PreparedSwitch {
                 config_path,
                 config,
                 rendered_config,
+                ArtifactKind::Config,
+            ),
+            catalog: PreparedArtifact::new(
+                catalog_path,
+                catalog_old,
+                catalog_new,
                 ArtifactKind::Config,
             ),
             credentials: PreparedArtifact::new(
@@ -2553,6 +2603,7 @@ impl PreparedSwitch {
 
     fn verify_committed(&self) -> Result<(), EnvironmentFailure> {
         self.config.verify_new()?;
+        self.catalog.verify_new()?;
         self.credentials.verify_new()?;
         if let Some(recovery) = &self.openai_credentials_recovery {
             recovery.verify_new()?;
@@ -2955,6 +3006,7 @@ impl PreparedRestoreArtifact {
 fn rollback_switch(
     prepared: &PreparedSwitch,
     config_applied: bool,
+    catalog_applied: bool,
     credentials_applied: bool,
     recovery_applied: bool,
 ) -> Result<(), EnvironmentFailure> {
@@ -2963,6 +3015,9 @@ fn rollback_switch(
     }
     if config_applied {
         prepared.config.restore()?;
+    }
+    if catalog_applied {
+        prepared.catalog.restore()?;
     }
     if recovery_applied {
         prepared
@@ -2995,6 +3050,7 @@ fn rollback_restore(
 fn rollback_openai_switch(
     prepared: &PreparedOpenAiSwitch,
     config_applied: bool,
+    catalog_applied: bool,
     credentials_applied: bool,
     recovery_removed: bool,
 ) -> Result<(), EnvironmentFailure> {
@@ -3007,6 +3063,13 @@ fn rollback_openai_switch(
     }
     if config_applied {
         prepared.config.rollback()?;
+    }
+    if catalog_applied {
+        prepared
+            .catalog
+            .as_ref()
+            .ok_or_else(state_unavailable)?
+            .rollback()?;
     }
     if recovery_removed {
         prepared
@@ -4526,12 +4589,12 @@ fn render_managed_block(provider: &ProviderTarget, aliases: &[String], newline: 
         MANAGED_START.to_owned(),
         format!("{PROVIDER_ID_PREFIX} {}", provider.id),
         format!("model = {}", string(&provider.default_model)),
-        format!(
-            "model_reasoning_effort = {}",
-            string(DEFAULT_MODEL_REASONING_EFFORT)
-        ),
+        "model_catalog_json = \"gpteasy-model-catalog.json\"".to_owned(),
         format!("model_provider = {}", string(&provider.id)),
     ];
+    if let Some(effort) = model_catalog::default_reasoning_effort(&provider.default_model) {
+        lines.insert(3, format!("model_reasoning_effort = {}", string(&effort)));
+    }
     for id in std::iter::once(&provider.id).chain(aliases.iter()) {
         let table = format!("model_providers.{id}");
         lines.extend([
@@ -4714,16 +4777,17 @@ fn recover_desktop_managed_block(
     let primary_lines = text
         .get(start_line_end..)?
         .split_inclusive('\n')
-        .take(9)
+        .take(11)
         .collect::<Vec<_>>();
-    let required_len = if primary_lines
-        .get(2)
-        .is_some_and(|line| line.starts_with("model_reasoning_effort = "))
-    {
-        8
-    } else {
-        7
-    };
+    let optional_root_fields = primary_lines
+        .iter()
+        .take(5)
+        .filter(|line| {
+            line.starts_with("model_reasoning_effort = ")
+                || line.starts_with("model_catalog_json = ")
+        })
+        .count();
+    let required_len = 7 + optional_root_fields;
     let primary_len = if primary_lines
         .get(required_len)
         .is_some_and(|line| line.contains(".supports_websockets = false"))
@@ -4840,14 +4904,33 @@ fn managed_block_has_expected_shape(block: &str, provider_id: &str) -> bool {
         return false;
     };
     let has_reasoning_effort = document.get("model_reasoning_effort").is_some();
-    if document.iter().count() != if has_reasoning_effort { 4 } else { 3 }
+    let has_model_catalog = document.get("model_catalog_json").is_some();
+    let expected_root_fields = match (has_model_catalog, has_reasoning_effort) {
+        (true, true) => 5,
+        (true, false) | (false, true) => 4,
+        (false, false) => 3,
+    };
+    if document.iter().count() != expected_root_fields
+        || document.iter().any(|(key, _)| {
+            !matches!(
+                key,
+                "model"
+                    | "model_reasoning_effort"
+                    | "model_catalog_json"
+                    | "model_provider"
+                    | "model_providers"
+            )
+        })
         || document
             .get("model")
             .and_then(|item| item.as_str())
             .is_none()
         || document
             .get("model_reasoning_effort")
-            .is_some_and(|item| item.as_str() != Some(DEFAULT_MODEL_REASONING_EFFORT))
+            .is_some_and(|item| !matches!(item.as_str(), Some("low" | "medium" | "high")))
+        || document
+            .get("model_catalog_json")
+            .is_some_and(|item| item.as_str() != Some("gpteasy-model-catalog.json"))
         || document
             .get("model_provider")
             .and_then(|item| item.as_str())
@@ -5112,6 +5195,15 @@ fn historical_alias_free_fingerprint(bytes: &[u8]) -> Option<String> {
             string(reasoning_effort)
         ));
     }
+    if let Some(model_catalog_json) = document
+        .get("model_catalog_json")
+        .and_then(|item| item.as_str())
+    {
+        primary_lines.push(format!(
+            "model_catalog_json = {}",
+            string(model_catalog_json)
+        ));
+    }
     primary_lines.extend([
         format!("model_provider = {}", string(&managed.provider_id)),
         format!("{table}.name = {}", string(fields.name)),
@@ -5217,7 +5309,21 @@ fn managed_config_matches(document: &DocumentMut, provider: &ProviderTarget) -> 
     else {
         return false;
     };
+    let reasoning_matches = if document.get("model_catalog_json").is_some() {
+        document
+            .get("model_reasoning_effort")
+            .and_then(|item| item.as_str())
+            == model_catalog::default_reasoning_effort(&provider.default_model).as_deref()
+    } else {
+        // Configurations written before the model catalog migration did not
+        // carry capability metadata. Preserve them as-is; the next explicit
+        // GPTEasy write upgrades the managed block to the current schema.
+        document
+            .get("model_reasoning_effort")
+            .is_none_or(|item| item.as_str() == Some("high"))
+    };
     document.get("model").and_then(|item| item.as_str()) == Some(&provider.default_model)
+        && reasoning_matches
         && document
             .get("model_provider")
             .and_then(|item| item.as_str())

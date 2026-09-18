@@ -13,14 +13,14 @@ use tempfile::TempDir;
 use uuid::Uuid;
 
 #[test]
-fn bash_export_captures_every_verified_provider_and_sets_default_reasoning_effort_high() {
+fn bash_export_captures_every_verified_provider_and_reasoning_rules() {
     let fixture = ExportFixture::new();
     fixture.insert_provider(
         "11111111-1111-4111-8111-111111111111",
         "Alpha Provider",
         "https://alpha.example/v1",
         "alpha-secret-key",
-        "alpha-model",
+        "DeepSeek-R1",
         1,
     );
     fixture.insert_provider(
@@ -28,7 +28,7 @@ fn bash_export_captures_every_verified_provider_and_sets_default_reasoning_effor
         "Beta Provider",
         "https://beta.example/v1",
         "beta-secret-key",
-        "beta-model",
+        "Qwen3-Coder",
         2,
     );
     let destination = fixture.temp.path().join("gpteasy.sh");
@@ -48,10 +48,11 @@ fn bash_export_captures_every_verified_provider_and_sets_default_reasoning_effor
     assert!(script.contains("alpha-secret-key"));
     assert!(script.contains("beta-secret-key"));
     assert!(script.contains("model_reasoning_effort = \"high\""));
+    assert!(script.contains("model_reasoning_effort = \"medium\""));
     assert!(script.find("Alpha Provider") < script.find("Beta Provider"));
     assert!(
         script.contains(
-            "11111111-1111-4111-8111-111111111111\tAlpha Provider\thttps://alpha.example/v1\talpha-model\talpha-secret-key"
+            "11111111-1111-4111-8111-111111111111\tAlpha Provider\thttps://alpha.example/v1\tDeepSeek-R1\talpha-secret-key"
         ),
         "each provider must be editable as one top-of-script catalog record"
     );
@@ -71,14 +72,14 @@ fn bash_export_captures_every_verified_provider_and_sets_default_reasoning_effor
 }
 
 #[test]
-fn zsh_export_captures_every_verified_provider_and_sets_default_reasoning_effort_high() {
+fn zsh_export_captures_every_verified_provider_and_reasoning_rules() {
     let fixture = ExportFixture::new();
     fixture.insert_provider(
         "11111111-1111-4111-8111-111111111111",
         "Alpha Provider",
         "https://alpha.example/v1",
         "alpha-secret-key",
-        "alpha-model",
+        "DeepSeek-R1",
         1,
     );
     fixture.insert_provider(
@@ -86,7 +87,7 @@ fn zsh_export_captures_every_verified_provider_and_sets_default_reasoning_effort
         "Beta Provider",
         "https://beta.example/v1",
         "beta-secret-key",
-        "beta-model",
+        "Qwen3-Coder",
         2,
     );
     let destination = fixture.temp.path().join("gpteasy.zsh");
@@ -106,6 +107,7 @@ fn zsh_export_captures_every_verified_provider_and_sets_default_reasoning_effort
     assert!(script.contains("alpha-secret-key"));
     assert!(script.contains("beta-secret-key"));
     assert!(script.contains("model_reasoning_effort = \"high\""));
+    assert!(script.contains("model_reasoning_effort = \"medium\""));
     assert!(script.find("Alpha Provider") < script.find("Beta Provider"));
     assert!(!script.contains("OpenAI 登录"));
     assert!(script.contains(
@@ -633,8 +635,24 @@ fn shell_snapshots_force_new_provider_config_over_existing_external_config() {
         "Alpha Provider",
         "https://alpha.example/v1",
         "alpha-secret-key",
-        "alpha-model",
+        "DeepSeek-R1",
         1,
+    );
+    fixture.insert_provider(
+        "22222222-2222-4222-8222-222222222222",
+        "Qwen Provider",
+        "https://qwen.example/v1",
+        "qwen-secret-key",
+        "Qwen3-Coder",
+        2,
+    );
+    fixture.insert_provider(
+        "33333333-3333-4333-8333-333333333333",
+        "Custom Provider",
+        "https://custom.example/v1",
+        "custom-secret-key",
+        "alpha-model",
+        3,
     );
     for shell in shell_matrix_targets() {
         let destination = fixture.temp.path().join(match shell {
@@ -699,7 +717,7 @@ original=$(cat "$codex_home/config.toml")
 switched=$(gpteasy <<<"1")
 [[ "$switched" == *'已切换到：Alpha Provider'* ]]
 grep -Fq '# GPTEasy provider-id: 11111111-1111-4111-8111-111111111111' "$codex_home/config.toml"
-grep -Fq 'model = "alpha-model"' "$codex_home/config.toml"
+grep -Fq 'model = "DeepSeek-R1"' "$codex_home/config.toml"
 grep -Fq 'model_provider = "gpteasy"' "$codex_home/config.toml"
 ! grep -Fq 'model = "gpt-5.6-sol"' "$codex_home/config.toml"
 ! grep -Fq 'model_provider = "custom"' "$codex_home/config.toml"
@@ -709,6 +727,22 @@ grep -Fq 'model_reasoning_effort = "high"' "$codex_home/config.toml"
 restore=$(find "$codex_home/.gpteasy-shell/shell-restore" -type f -name config.toml -print -quit)
 [[ -n "$restore" ]]
 [[ "$original" == "$(cat "$restore")" ]]
+
+qwen=$(gpteasy <<<"2")
+[[ "$qwen" == *'已切换到：Qwen Provider'* ]]
+grep -Fq 'model = "Qwen3-Coder"' "$codex_home/config.toml"
+grep -Fq 'model_reasoning_effort = "medium"' "$codex_home/config.toml"
+! grep -Fq 'model_reasoning_effort = "high"' "$codex_home/config.toml"
+
+custom=$(gpteasy <<<"3")
+[[ "$custom" == *'已切换到：Custom Provider'* ]]
+grep -Fq 'model = "alpha-model"' "$codex_home/config.toml"
+! grep -Fq 'model_reasoning_effort' "$codex_home/config.toml"
+
+deepseek=$(gpteasy <<<"1")
+[[ "$deepseek" == *'已切换到：Alpha Provider'* ]]
+grep -Fq 'model = "DeepSeek-R1"' "$codex_home/config.toml"
+grep -Fq 'model_reasoning_effort = "high"' "$codex_home/config.toml"
 cat >"$codex_home/config.toml" <<'OLD_GPTEASY_CONFIG'
 model_provider = "gpteasy"
 model = "old-model"
@@ -717,7 +751,7 @@ base_url = "https://old.example/v1"
 OLD_GPTEASY_CONFIG
 old_gpteasy=$(gpteasy <<<"1")
 [[ "$old_gpteasy" == *'已切换到：Alpha Provider'* ]]
-grep -Fq 'model = "alpha-model"' "$codex_home/config.toml"
+grep -Fq 'model = "DeepSeek-R1"' "$codex_home/config.toml"
 ! grep -Fq 'model = "old-model"' "$codex_home/config.toml"
 ! grep -Fq 'https://old.example/v1' "$codex_home/config.toml"
 
@@ -729,7 +763,7 @@ MALFORMED_CONFIG
 malformed=$(gpteasy <<<"1" 2>&1)
 [[ "$malformed" == *'已切换到：Alpha Provider'* ]]
 [[ "$malformed" == *'新配置已经生效'* ]]
-grep -Fq 'model = "alpha-model"' "$codex_home/config.toml"
+grep -Fq 'model = "DeepSeek-R1"' "$codex_home/config.toml"
 grep -Fq '# <<< GPTEasy managed provider <<<' "$codex_home/config.toml"
 cp -- "$codex_home/config.toml" "$1"
 "#,
@@ -748,7 +782,7 @@ cp -- "$codex_home/config.toml" "$1"
         let parsed = rendered
             .parse::<toml_edit::DocumentMut>()
             .expect("switched config must remain valid TOML");
-        assert_eq!(parsed["model"].as_str(), Some("alpha-model"));
+        assert_eq!(parsed["model"].as_str(), Some("DeepSeek-R1"));
         assert_eq!(parsed["model_reasoning_effort"].as_str(), Some("high"));
         assert_eq!(parsed["model_provider"].as_str(), Some("gpteasy"));
         assert_eq!(

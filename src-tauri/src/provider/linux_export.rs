@@ -5,7 +5,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::codex_config::{DEFAULT_MODEL_REASONING_EFFORT, STATUS_LINE_TOML};
+use crate::codex_config::STATUS_LINE_TOML;
 use crate::state::StateStore;
 
 use super::catalog;
@@ -216,7 +216,7 @@ gpteasy__toml_string() {{
 }}
 
 gpteasy__print_block() {{
-    local provider_id=$1 name model base_url credential_relative
+    local provider_id=$1 name model normalized_model base_url credential_relative
     gpteasy__provider_id_is_safe "$provider_id" || return 1
     name=$(gpteasy__provider_name "$provider_id") || return 1
     model=$(gpteasy__provider_model "$provider_id") || return 1
@@ -229,7 +229,15 @@ gpteasy__print_block() {{
     printf '# GPTEasy source-id: %s\n' "$gpteasy__export_id"
     printf '# GPTEasy credential-file: %s\n' "$credential_relative"
     printf 'model = %s\n' "$(gpteasy__toml_string "$model")"
-    printf '%s\n' 'model_reasoning_effort = "{DEFAULT_MODEL_REASONING_EFFORT}"'
+    normalized_model=$(printf '%s' "$model" | tr '[:upper:]' '[:lower:]')
+    case "$normalized_model" in
+        *gpt*|o1*|o3*|o4*|*deepseek*|*reasoner*)
+            printf '%s\n' 'model_reasoning_effort = "high"'
+            ;;
+        *claude*|*anthropic*|*qwen*|*gemini*|*glm*|*kimi*|*mistral*|*llama*)
+            printf '%s\n' 'model_reasoning_effort = "medium"'
+            ;;
+    esac
     printf '%s\n' 'model_provider = "gpteasy"'
     printf 'model_providers.gpteasy.name = %s\n' "$(gpteasy__toml_string "$name")"
     printf 'model_providers.gpteasy.base_url = %s\n' "$(gpteasy__toml_string "$base_url")"

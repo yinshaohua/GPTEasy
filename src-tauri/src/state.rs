@@ -9,7 +9,7 @@ use rusqlite::backup::Backup;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction};
 use serde::Serialize;
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 9;
+pub const CURRENT_SCHEMA_VERSION: i64 = 10;
 const APPLICATION_ID: i64 = 0x4750_5445;
 const BACKUP_LIMIT: usize = 3;
 const INSTALLATION_MARKER_CONTENT: &[u8] = b"gpteasy-state-v1\n";
@@ -165,6 +165,14 @@ CREATE TABLE pending_session_visibility (
 ) STRICT;
 "#;
 
+const SCHEMA_V10: &str = r#"
+CREATE TABLE provider_model_catalog (
+    provider_id TEXT PRIMARY KEY REFERENCES providers(id) ON DELETE CASCADE,
+    verification_fingerprint TEXT NOT NULL,
+    models_json TEXT NOT NULL
+) STRICT;
+"#;
+
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, SCHEMA_V1),
     (2, SCHEMA_V2),
@@ -175,6 +183,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (7, SCHEMA_V7),
     (8, SCHEMA_V8),
     (9, SCHEMA_V9),
+    (10, SCHEMA_V10),
 ];
 
 #[derive(Debug, Clone)]

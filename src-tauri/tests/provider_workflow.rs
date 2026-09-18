@@ -85,6 +85,40 @@ async fn model_discovery_allows_http_for_each_loopback_host_form() {
 }
 
 #[tokio::test]
+async fn model_discovery_falls_back_to_v1_when_root_models_response_is_not_a_model_list() {
+    let server = ScriptedModelServer::start_with_content_types([
+        (
+            "200 OK",
+            "text/html; charset=utf-8",
+            r#"<html>provider landing page</html>"#,
+        ),
+        (
+            "200 OK",
+            "application/json",
+            r#"{"object":"list","data":[{"id":"model-a"}]}"#,
+        ),
+    ]);
+
+    let discovery = validator()
+        .discover_models(
+            DiscoveryInput {
+                base_url: server.base_url.clone(),
+                api_key: "test-provider-key".to_owned(),
+            },
+            Default::default(),
+        )
+        .await
+        .expect("model discovery should fall back to the /v1 endpoint");
+
+    assert_eq!(
+        discovery.normalized_base_url,
+        format!("{}/v1", server.base_url)
+    );
+    assert_eq!(discovery.models, ["model-a"]);
+    assert_eq!(server.finish(), ["/models", "/v1/models"]);
+}
+
+#[tokio::test]
 async fn model_discovery_preserves_the_path_prefix_and_returns_actual_models() {
     let server = ModelServer::start(
         "200 OK",
@@ -1895,12 +1929,20 @@ struct ScriptedModelServer {
 
 impl ScriptedModelServer {
     fn start<const N: usize>(responses: [(&'static str, &'static str); N]) -> Self {
+        Self::start_with_content_types(
+            responses.map(|(status, body)| (status, "application/json", body)),
+        )
+    }
+
+    fn start_with_content_types<const N: usize>(
+        responses: [(&'static str, &'static str, &'static str); N],
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind scripted provider");
         let address = listener.local_addr().expect("scripted provider address");
         let (sender, requests) = mpsc::channel();
         let worker = thread::spawn(move || {
             let mut paths = Vec::new();
-            for (status, body) in responses {
+            for (status, content_type, body) in responses {
                 let (mut stream, _) = listener.accept().expect("accept scripted request");
                 let request = read_request(&mut stream);
                 let request_line = String::from_utf8_lossy(&request)
@@ -1914,7 +1956,7 @@ impl ScriptedModelServer {
                     .expect("request path")
                     .to_owned();
                 paths.push(path);
-                write_json(&mut stream, status, body);
+                write_response(&mut stream, status, content_type, body);
             }
             sender.send(paths).expect("capture scripted paths");
         });
@@ -2216,12 +2258,16 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 fn write_json(stream: &mut std::net::TcpStream, status: &str, body: &str) {
+    write_response(stream, status, "application/json", body);
+}
+
+fn write_response(stream: &mut std::net::TcpStream, status: &str, content_type: &str, body: &str) {
     write!(
         stream,
-        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
         body.len()
     )
-    .expect("write JSON response");
+    .expect("write HTTP response");
     stream.flush().expect("flush JSON response");
 }
 
