@@ -547,6 +547,21 @@ fn confirmed_takeover_preserves_external_fields_without_guessing_unknown_model_r
         document["model_catalog_json"].as_str(),
         Some("gpteasy-model-catalog.json")
     );
+    let model_catalog: Value = serde_json::from_slice(
+        &fs::read(codex_home.join("gpteasy-model-catalog.json"))
+            .expect("read applied model catalog"),
+    )
+    .expect("applied model catalog is JSON");
+    let models = model_catalog["models"]
+        .as_array()
+        .expect("model catalog entries");
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0]["slug"], "fixture-model");
+    assert_eq!(
+        models[0]["input_modalities"],
+        serde_json::json!(["text", "image"])
+    );
+    assert_eq!(models[0]["supports_image_detail_original"], false);
     assert_eq!(document["model_provider"].as_str(), Some(PROVIDER_ID));
     assert_eq!(
         document["model_providers"][PROVIDER_ID]["base_url"].as_str(),

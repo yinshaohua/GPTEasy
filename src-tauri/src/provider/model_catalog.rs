@@ -21,7 +21,7 @@ pub(crate) struct ModelCatalogEntry {
     pub default_verbosity: Option<&'static str>,
     pub context_window: u64,
     pub max_context_window: u64,
-    pub input_modalities: [&'static str; 1],
+    pub input_modalities: [&'static str; 2],
     pub supports_image_detail_original: bool,
     pub supports_parallel_tool_calls: bool,
     pub truncation_policy: TruncationPolicy,
@@ -84,7 +84,7 @@ fn entry(slug: String, is_default: bool) -> ModelCatalogEntry {
         default_verbosity: None,
         context_window: 128_000,
         max_context_window: 128_000,
-        input_modalities: ["text"],
+        input_modalities: ["text", "image"],
         supports_image_detail_original: false,
         supports_parallel_tool_calls: false,
         truncation_policy: TruncationPolicy {
@@ -161,6 +161,26 @@ mod tests {
                 .is_empty()
         );
         assert!(model["default_reasoning_level"].is_null());
+    }
+
+    #[test]
+    fn every_model_optimistically_allows_text_and_image_without_original_detail() {
+        let bytes = render(
+            &["text-only-model".to_owned(), "known-gpt-model".to_owned()],
+            "fallback-model",
+        )
+        .expect("json");
+        let value: serde_json::Value = serde_json::from_slice(&bytes).expect("catalog");
+        let models = value["models"].as_array().expect("models");
+
+        assert_eq!(models.len(), 3);
+        for model in models {
+            assert_eq!(
+                model["input_modalities"],
+                serde_json::json!(["text", "image"])
+            );
+            assert_eq!(model["supports_image_detail_original"], false);
+        }
     }
 
     #[test]
