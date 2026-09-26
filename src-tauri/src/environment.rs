@@ -5005,15 +5005,22 @@ fn replace_managed_block_with_reasoning_upgrade(
     let block_document = block
         .parse::<DocumentMut>()
         .map_err(|_| managed_conflict())?;
-    if block_document.get("model_reasoning_effort").is_some()
-        || document.get("model_reasoning_effort").is_none()
-    {
+    let needs_reasoning_upgrade = block_document.get("model_reasoning_effort").is_none()
+        && document.get("model_reasoning_effort").is_some();
+    let needs_catalog_upgrade = block_document.get("model_catalog_json").is_none()
+        && document.get("model_catalog_json").is_some();
+    if !needs_reasoning_upgrade && !needs_catalog_upgrade {
         return replace_managed_block(text, managed, Some(replacement))
             .ok_or_else(managed_conflict);
     }
 
     let mut migrated = document.clone();
-    migrated.remove("model_reasoning_effort");
+    if needs_reasoning_upgrade {
+        migrated.remove("model_reasoning_effort");
+    }
+    if needs_catalog_upgrade {
+        migrated.remove("model_catalog_json");
+    }
     let migrated = normalize_newlines(&migrated.to_string(), newline);
     let ManagedBlock::Valid(migrated_block) = managed_block(&migrated) else {
         return Err(managed_conflict());

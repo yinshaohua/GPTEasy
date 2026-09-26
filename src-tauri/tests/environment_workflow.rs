@@ -836,6 +836,34 @@ fn applying_provider_migrates_matching_legacy_custom_provider_to_openai_auth() {
 }
 
 #[test]
+fn applying_provider_upgrades_legacy_managed_block_with_external_catalog_path() {
+    let (temp, _, application) = fixture();
+    let codex_home = temp.path().join(".codex");
+    fs::create_dir_all(&codex_home).expect("create Codex fixture");
+    fs::write(
+        codex_home.join("config.toml"),
+        format!(
+            "# >>> GPTEasy managed provider >>>\n# GPTEasy provider-id: {PROVIDER_ID}\nmodel = \"legacy-model\"\nmodel_provider = \"{PROVIDER_ID}\"\nmodel_providers.{PROVIDER_ID}.name = \"Fixture Provider\"\nmodel_providers.{PROVIDER_ID}.base_url = \"https://fixture.example/v1\"\nmodel_providers.{PROVIDER_ID}.wire_api = \"responses\"\nmodel_providers.{PROVIDER_ID}.requires_openai_auth = true\nmodel_providers.{PROVIDER_ID}.supports_websockets = false\n# <<< GPTEasy managed provider <<<\n\nmodel_catalog_json = \"legacy-catalog.json\"\n"
+        ),
+    )
+    .expect("write legacy managed config");
+
+    application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("apply provider and upgrade catalog path");
+
+    let config = fs::read_to_string(codex_home.join("config.toml")).expect("read config");
+    let document = config
+        .parse::<toml_edit::DocumentMut>()
+        .expect("upgraded config is TOML");
+    assert_eq!(
+        document["model_catalog_json"].as_str(),
+        Some("gpteasy-model-catalog.json")
+    );
+    assert!(config.matches("model_catalog_json = ").count() == 1);
+}
+
+#[test]
 fn managed_environment_accepts_and_preserves_changes_outside_the_managed_block() {
     let (temp, _, application) = fixture();
     let codex_home = temp.path().join(".codex");
