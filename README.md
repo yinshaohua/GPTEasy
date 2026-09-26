@@ -44,6 +44,7 @@ Get-FileHash .\GPTEasy_*_x64-setup.exe -Algorithm SHA256
 ## 主要功能
 
 - **供应商管理**：新增、编辑、排序和删除 OpenAI 兼容 API 供应商，发现可用模型，并在保存前实际验证连接。
+- **模型图片兼容**：自定义供应商的模型目录允许 Codex 继续发送文本和图片请求，但这只是解除本地门禁的兼容性声明，不代表模型已经通过图片能力验证；图片请求是否成功由上游供应商最终裁决，`image detail original` 不由 GPTEasy 声明支持。
 - **Codex 环境切换**：切换当前 Windows 用户使用的供应商，支持 OpenAI 登录模式、外部配置接管和最近一次配置恢复。
 - **WSL2 与 Linux**：为选定的 WSL2 发行版应用供应商，或导出可用于 Bash、Zsh 的 Linux 脚本。
 - **会话管理**：搜索和筛选 Codex 会话，查看详情，导出 Markdown，归档、取消归档或永久删除会话。
