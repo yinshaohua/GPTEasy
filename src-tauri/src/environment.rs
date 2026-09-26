@@ -218,6 +218,27 @@ pub struct CustomProviderRepairResult {
     pub message_id: &'static str,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelCatalogRepairPreview {
+    pub preview_id: String,
+    pub provider_name: String,
+    pub model_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelCatalogRepairStatus {
+    Succeeded,
+    NotModified,
+    RolledBack,
+    ManualRequired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelCatalogRepairResult {
+    pub status: ModelCatalogRepairStatus,
+    pub message_id: &'static str,
+}
+
 pub trait EnvironmentFaultInjector: Send + Sync {
     fn fails_at(&self, point: EnvironmentFailurePoint) -> bool;
 
@@ -550,6 +571,67 @@ impl EnvironmentApplication {
             ));
         }
         Ok(custom_repair_result(CustomProviderRepairStatus::Succeeded))
+    }
+
+    pub fn preview_model_catalog_repair(
+        &self,
+    ) -> Result<Option<ModelCatalogRepairPreview>, EnvironmentFailure> {
+        let _guard = self
+            .operation_lock
+            .lock()
+            .map_err(|_| state_unavailable())?;
+        let connection = self.open_state()?;
+        Ok(
+            PreparedModelCatalogRepair::prepare(&self.codex_home, &connection)?
+                .map(|prepared| prepared.preview),
+        )
+    }
+
+    pub fn repair_model_catalog(&self, preview_id: &str) -> ModelCatalogRepairResult {
+        self.repair_model_catalog_inner(preview_id)
+            .unwrap_or(ModelCatalogRepairResult {
+                status: ModelCatalogRepairStatus::ManualRequired,
+                message_id: "diagnostics.repair_manual_required",
+            })
+    }
+
+    fn repair_model_catalog_inner(
+        &self,
+        preview_id: &str,
+    ) -> Result<ModelCatalogRepairResult, EnvironmentFailure> {
+        let _guard = self
+            .operation_lock
+            .lock()
+            .map_err(|_| state_unavailable())?;
+        let connection = self.open_state()?;
+        let Some(prepared) = PreparedModelCatalogRepair::prepare(&self.codex_home, &connection)?
+        else {
+            return Ok(model_catalog_repair_result(
+                ModelCatalogRepairStatus::NotModified,
+            ));
+        };
+        if prepared.preview.preview_id != preview_id {
+            return Ok(model_catalog_repair_result(
+                ModelCatalogRepairStatus::NotModified,
+            ));
+        }
+        create_model_catalog_repair_backup(&self.codex_home, &prepared)?;
+        let attempt = (|| {
+            prepared.catalog.commit()?;
+            prepared.catalog.verify_new()?;
+            Ok::<(), EnvironmentFailure>(())
+        })();
+        match attempt {
+            Ok(()) => Ok(model_catalog_repair_result(
+                ModelCatalogRepairStatus::Succeeded,
+            )),
+            Err(_) if prepared.catalog.restore().is_ok() => Ok(model_catalog_repair_result(
+                ModelCatalogRepairStatus::RolledBack,
+            )),
+            Err(_) => Ok(model_catalog_repair_result(
+                ModelCatalogRepairStatus::ManualRequired,
+            )),
+        }
     }
 
     pub fn has_pending_restart(&self) -> Result<bool, EnvironmentFailure> {
@@ -2418,6 +2500,16 @@ fn custom_repair_result(status: CustomProviderRepairStatus) -> CustomProviderRep
     CustomProviderRepairResult { status, message_id }
 }
 
+fn model_catalog_repair_result(status: ModelCatalogRepairStatus) -> ModelCatalogRepairResult {
+    let message_id = match status {
+        ModelCatalogRepairStatus::Succeeded => "diagnostics.repair_succeeded",
+        ModelCatalogRepairStatus::NotModified => "diagnostics.repair_not_modified",
+        ModelCatalogRepairStatus::RolledBack => "diagnostics.repair_rolled_back",
+        ModelCatalogRepairStatus::ManualRequired => "diagnostics.repair_manual_required",
+    };
+    ModelCatalogRepairResult { status, message_id }
+}
+
 impl PreparedOpenAiSwitch {
     fn prepare(codex_home: &Path) -> Result<Self, EnvironmentFailure> {
         let current = read_artifact(&codex_home.join("config.toml"))?;
@@ -3895,6 +3987,43 @@ fn create_custom_provider_repair_backup(
         .map_err(|_| backup_failed())?;
         write_new_synced(&operation.join("manifest.json"), &manifest)
             .map_err(|_| backup_failed())?;
+        prune_backups(&root)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&operation);
+    }
+    result.map(|_| operation)
+}
+
+fn create_model_catalog_repair_backup(
+    codex_home: &Path,
+    prepared: &PreparedModelCatalogRepair,
+) -> Result<PathBuf, EnvironmentFailure> {
+    let root = codex_home.join(".gpteasy-backups");
+    reject_redirect(&root)?;
+    let operation = root.join(format!(
+        "operation-{}-{}",
+        epoch_nanos(),
+        prepared.preview.preview_id
+    ));
+    fs::create_dir_all(&operation).map_err(|_| backup_failed())?;
+    let result = (|| {
+        let original = prepared
+            .catalog
+            .old
+            .bytes
+            .as_deref()
+            .ok_or_else(backup_failed)?;
+        write_new_synced(&operation.join("gpteasy-model-catalog.json"), original)
+            .map_err(|_| backup_failed())?;
+        let manifest = serde_json::json!({
+            "format_version": BACKUP_FORMAT_VERSION,
+            "operation_kind": "repair_model_catalog",
+            "old_catalog_fingerprint": prepared.catalog.old_fingerprint,
+            "new_catalog_fingerprint": prepared.catalog.new_fingerprint,
+        });
+        let bytes = serde_json::to_vec_pretty(&manifest).map_err(|_| backup_failed())?;
+        write_new_synced(&operation.join("manifest.json"), &bytes).map_err(|_| backup_failed())?;
         prune_backups(&root)
     })();
     if result.is_err() {
@@ -5649,4 +5778,139 @@ mod tests {
 
         assert_eq!(provider.recommendation_id, None);
     }
+}
+
+#[derive(Debug, Clone)]
+struct PreparedModelCatalogRepair {
+    preview: ModelCatalogRepairPreview,
+    catalog: PreparedArtifact,
+}
+
+impl PreparedModelCatalogRepair {
+    fn prepare(
+        codex_home: &Path,
+        connection: &Connection,
+    ) -> Result<Option<Self>, EnvironmentFailure> {
+        let (provider_id, applied_config_fingerprint) = connection
+            .query_row(
+                "SELECT provider_id, config_fingerprint FROM last_applied_state WHERE singleton = 1 AND mode = 'provider'",
+                [],
+                |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()
+            .map_err(|_| state_unavailable())?
+            .unwrap_or((None, None));
+        let Some(provider_id) = provider_id else {
+            return Ok(None);
+        };
+        let provider = load_provider(connection, &provider_id)?;
+        if provider.verification_fingerprint
+            != combination_fingerprint(
+                &provider.base_url,
+                &provider.api_key,
+                &provider.default_model,
+            )
+        {
+            return Ok(None);
+        }
+        let config = read_artifact(&codex_home.join("config.toml"))?;
+        let Some(config_bytes) = config.bytes.as_deref() else {
+            return Ok(None);
+        };
+        let config_text = std::str::from_utf8(config_bytes).map_err(|_| invalid_config())?;
+        let document = config_text
+            .parse::<DocumentMut>()
+            .map_err(|_| invalid_config())?;
+        if document
+            .get("model_provider")
+            .and_then(|item| item.as_str())
+            != Some(provider_id.as_str())
+            || document
+                .get("model_catalog_json")
+                .and_then(|item| item.as_str())
+                != Some("gpteasy-model-catalog.json")
+            || !managed_config_matches_applied_evidence(
+                config_bytes,
+                applied_config_fingerprint.as_deref(),
+            )
+        {
+            return Ok(None);
+        }
+        let catalog_path = codex_home.join("gpteasy-model-catalog.json");
+        let catalog = read_artifact(&catalog_path)?;
+        let Some(old_bytes) = catalog.bytes.as_deref() else {
+            return Ok(None);
+        };
+        let new_bytes = model_catalog::render(&provider.model_catalog, &provider.default_model)
+            .map_err(|_| invalid_config())?;
+        if !legacy_catalog_matches(&old_bytes, &new_bytes) {
+            return Ok(None);
+        }
+        let model_count = serde_json::from_slice::<Value>(&new_bytes)
+            .ok()
+            .and_then(|value| value.get("models").and_then(Value::as_array).map(Vec::len))
+            .unwrap_or_default();
+        let preview_id = model_catalog_repair_preview_id(config_bytes, old_bytes, &provider_id);
+        Ok(Some(Self {
+            preview: ModelCatalogRepairPreview {
+                preview_id,
+                provider_name: provider.name,
+                model_count,
+            },
+            catalog: PreparedArtifact::new(catalog_path, catalog, new_bytes, ArtifactKind::Config),
+        }))
+    }
+}
+
+fn legacy_catalog_matches(old_bytes: &[u8], new_bytes: &[u8]) -> bool {
+    let Ok(mut old) = serde_json::from_slice::<Value>(old_bytes) else {
+        return false;
+    };
+    let Ok(new) = serde_json::from_slice::<Value>(new_bytes) else {
+        return false;
+    };
+    let (Some(old_models), Some(new_models)) = (
+        old.get_mut("models").and_then(Value::as_array_mut),
+        new.get("models").and_then(Value::as_array),
+    ) else {
+        return false;
+    };
+    if old_models.len() != new_models.len() {
+        return false;
+    }
+    for (old_model, new_model) in old_models.iter_mut().zip(new_models) {
+        let (Some(old_object), Some(new_object)) =
+            (old_model.as_object_mut(), new_model.as_object())
+        else {
+            return false;
+        };
+        let old_modalities = old_object.remove("input_modalities");
+        let old_original = old_object.remove("supports_image_detail_original");
+        if !matches!(&old_modalities, Some(Value::Array(values)) if values == &vec![Value::String("text".to_owned())])
+            && old_modalities.is_some()
+        {
+            return false;
+        }
+        if old_original.is_some_and(|value| value != Value::Bool(false)) {
+            return false;
+        }
+        let mut expected = new_object.clone();
+        expected.remove("input_modalities");
+        expected.remove("supports_image_detail_original");
+        if *old_object != expected {
+            return false;
+        }
+    }
+    true
+}
+
+fn model_catalog_repair_preview_id(config: &[u8], catalog: &[u8], provider_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"gpteasy-model-catalog-image-repair-preview-v1\0");
+    hasher.update(config);
+    hasher.update(b"\0");
+    hasher.update(catalog);
+    hasher.update(b"\0");
+    hasher.update(provider_id.as_bytes());
+    format!("{:x}", hasher.finalize())
 }

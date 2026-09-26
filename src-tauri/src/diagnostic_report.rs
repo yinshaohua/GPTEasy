@@ -10,6 +10,7 @@ use crate::consumer::{ConsumerScanner, ConsumerStatus, WindowsConsumerScanner};
 use crate::diagnostics::IssueLogRecord;
 use crate::environment::{
     CustomProviderRepairSource, CustomProviderRepairStatus, EnvironmentApplication,
+    ModelCatalogRepairStatus,
 };
 
 mod commands;
@@ -63,7 +64,8 @@ impl DiagnosticApplication {
             Some(_) => CodexHomeOverrideStatus::Differs,
         };
         let config = inspect_config(&self.codex_home.join("config.toml"));
-        let repair_preview = (codex_home_override_status != CodexHomeOverrideStatus::Differs)
+        let provider_repair_preview = (codex_home_override_status
+            != CodexHomeOverrideStatus::Differs)
             .then(|| {
                 self.environment.as_ref().and_then(|environment| {
                     environment.preview_custom_provider_repair().ok().flatten()
@@ -71,6 +73,16 @@ impl DiagnosticApplication {
             })
             .flatten()
             .map(DiagnosticRepairPreview::from);
+        let catalog_repair_preview = (codex_home_override_status
+            != CodexHomeOverrideStatus::Differs)
+            .then(|| {
+                self.environment.as_ref().and_then(|environment| {
+                    environment.preview_model_catalog_repair().ok().flatten()
+                })
+            })
+            .flatten()
+            .map(DiagnosticRepairPreview::from);
+        let repair_preview = catalog_repair_preview.clone().or(provider_repair_preview);
         let mut findings: Vec<DiagnosticFinding> =
             config_status_finding(config.status).into_iter().collect();
         if let Some(active_provider) = config.active_provider.as_deref()
@@ -88,6 +100,16 @@ impl DiagnosticApplication {
                     "config.toml 使用模型供应商“{active_provider}”，但没有声明同名 model_providers 配置。"
                 ),
                 repairable: active_provider == "custom" && repair_preview.is_some(),
+            });
+        }
+        if catalog_repair_preview.is_some() {
+            findings.push(DiagnosticFinding {
+                code: "model_catalog_image_compatibility",
+                origin: DiagnosticOrigin::Local,
+                severity: DiagnosticSeverity::Warning,
+                title: "模型图片兼容配置需要更新".to_owned(),
+                summary: "当前供应商的 GPTEasy 模型目录仍使用旧的图片输入声明；确认后只更新该目录并创建备份。".to_owned(),
+                repairable: true,
             });
         }
         if codex_home_override_status == CodexHomeOverrideStatus::Differs {
@@ -160,11 +182,25 @@ impl DiagnosticApplication {
                 message_id: "diagnostics.repair_manual_required",
             };
         };
-        let result = environment.repair_custom_provider(preview_id);
-        DiagnosticRepairResult {
-            status: result.status.into(),
-            message_id: result.message_id,
-        }
+        let result = if environment
+            .preview_model_catalog_repair()
+            .ok()
+            .flatten()
+            .is_some_and(|preview| preview.preview_id == preview_id)
+        {
+            let result = environment.repair_model_catalog(preview_id);
+            DiagnosticRepairResult {
+                status: result.status.into(),
+                message_id: result.message_id,
+            }
+        } else {
+            let result = environment.repair_custom_provider(preview_id);
+            DiagnosticRepairResult {
+                status: result.status.into(),
+                message_id: result.message_id,
+            }
+        };
+        result
     }
 }
 
@@ -309,6 +345,17 @@ impl From<CustomProviderRepairStatus> for DiagnosticRepairStatus {
     }
 }
 
+impl From<ModelCatalogRepairStatus> for DiagnosticRepairStatus {
+    fn from(status: ModelCatalogRepairStatus) -> Self {
+        match status {
+            ModelCatalogRepairStatus::Succeeded => Self::Succeeded,
+            ModelCatalogRepairStatus::NotModified => Self::NotModified,
+            ModelCatalogRepairStatus::RolledBack => Self::RolledBack,
+            ModelCatalogRepairStatus::ManualRequired => Self::ManualRequired,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiagnosticRepairPreview {
@@ -319,6 +366,7 @@ pub struct DiagnosticRepairPreview {
     pub model: String,
     pub authentication: &'static str,
     pub changes: Vec<&'static str>,
+    pub kind: &'static str,
 }
 
 impl From<crate::environment::CustomProviderRepairPreview> for DiagnosticRepairPreview {
@@ -335,6 +383,26 @@ impl From<crate::environment::CustomProviderRepairPreview> for DiagnosticRepairP
                 "add_custom_provider_definition",
                 "verify_and_rediagnose",
             ],
+            kind: "custom_provider",
+        }
+    }
+}
+
+impl From<crate::environment::ModelCatalogRepairPreview> for DiagnosticRepairPreview {
+    fn from(preview: crate::environment::ModelCatalogRepairPreview) -> Self {
+        Self {
+            preview_id: preview.preview_id,
+            source: DiagnosticRepairSource::CurrentConfig,
+            provider_name: preview.provider_name,
+            base_url: String::new(),
+            model: format!("{} 个模型", preview.model_count),
+            authentication: "not_changed",
+            changes: vec![
+                "backup_model_catalog",
+                "update_image_compatibility",
+                "restart_codex_if_running",
+            ],
+            kind: "model_catalog",
         }
     }
 }

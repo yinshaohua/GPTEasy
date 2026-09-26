@@ -651,6 +651,58 @@ fn reports_a_dangling_custom_model_provider_as_a_local_configuration_finding() {
 }
 
 #[test]
+fn detects_and_repairs_legacy_model_catalog_image_declaration() {
+    let directory = tempdir().expect("create catalog repair fixture");
+    let store = StateStore::new(StatePaths::from_root(directory.path().join("state")));
+    assert!(store.bootstrap().is_ready());
+    insert_verified_provider(
+        &store,
+        CURRENT_SOURCE_PROVIDER_ID,
+        "Current Provider",
+        "https://provider.example/v1",
+        "local-secret",
+        "gpt-5",
+        true,
+    );
+    let environment = EnvironmentApplication::new(store, directory.path());
+    environment
+        .apply_provider(CURRENT_SOURCE_PROVIDER_ID, true)
+        .expect("apply current provider");
+    let catalog_path = directory.path().join("gpteasy-model-catalog.json");
+    let mut catalog: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&catalog_path).expect("read catalog"))
+            .expect("parse catalog");
+    for model in catalog["models"].as_array_mut().expect("models") {
+        model["input_modalities"] = serde_json::json!(["text"]);
+        model["supports_image_detail_original"] = serde_json::Value::Bool(false);
+    }
+    std::fs::write(
+        &catalog_path,
+        serde_json::to_vec_pretty(&catalog).expect("render legacy catalog"),
+    )
+    .expect("write legacy catalog");
+
+    let application = DiagnosticApplication::with_environment(directory.path(), None, environment);
+    let report = application.inspect_with(&stopped_observations(), &[]);
+    let preview = report.repair_preview.expect("catalog repair preview");
+    assert_eq!(preview.kind, "model_catalog");
+    assert!(report.findings.iter().any(|finding| {
+        finding.code == "model_catalog_image_compatibility" && finding.repairable
+    }));
+
+    let result = application.repair_custom_provider(&preview.preview_id);
+    assert_eq!(result.status, DiagnosticRepairStatus::Succeeded);
+    let repaired: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&catalog_path).expect("read repaired catalog"))
+            .expect("parse repaired catalog");
+    assert!(repaired["models"].as_array().unwrap().iter().all(|model| {
+        model["input_modalities"] == serde_json::json!(["text", "image"])
+            && model["supports_image_detail_original"] == false
+    }));
+    assert!(directory.path().join(".gpteasy-backups").is_dir());
+}
+
+#[test]
 fn distinguishes_missing_unreadable_encoding_and_toml_syntax_failures() {
     let missing = tempdir().expect("create missing fixture");
     let unreadable = tempdir().expect("create unreadable fixture");

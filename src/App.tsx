@@ -35,7 +35,12 @@ import {
   type UpdateSnapshot,
 } from "./contracts/update";
 import { listen } from "@tauri-apps/api/event";
-import { recordFrontendFailure } from "./contracts/diagnostics";
+import {
+  getDiagnosticReport,
+  recordFrontendFailure,
+  repairDiagnosticCustomProvider,
+  type DiagnosticRepairPreview,
+} from "./contracts/diagnostics";
 
 type ViewState =
   | { kind: "loading" }
@@ -52,6 +57,8 @@ export default function App() {
   const [installingUpdate, setInstallingUpdate] = useState(false);
   const [installError, setInstallError] = useState<string | null>(null);
   const [currentProviderName, setCurrentProviderName] = useState<string | null>(null);
+  const [catalogRepair, setCatalogRepair] = useState<DiagnosticRepairPreview | null>(null);
+  const [catalogRepairBusy, setCatalogRepairBusy] = useState(false);
   const installInFlight = useRef(false);
 
   const handleInstall = useCallback(() => {
@@ -80,6 +87,16 @@ export default function App() {
         ? await refreshStartupSnapshot()
         : await getStartupSnapshot();
       setState({ kind: "loaded", snapshot });
+      if (snapshot.mode === "ready") {
+        try {
+          const report = await getDiagnosticReport();
+          setCatalogRepair(report.repairPreview?.kind === "model_catalog" ? report.repairPreview : null);
+        } catch {
+          setCatalogRepair(null);
+        }
+      } else {
+        setCatalogRepair(null);
+      }
     } catch {
       setState({ kind: "error" });
     }
@@ -88,6 +105,17 @@ export default function App() {
   useEffect(() => {
     void load(false);
   }, [load]);
+
+  const applyCatalogRepair = useCallback(() => {
+    if (!catalogRepair || catalogRepairBusy) return;
+    if (!window.confirm("当前模型目录由 GPTEasy 生成，但仍使用旧的图片输入声明。确认备份并更新为 text/image 兼容配置吗？")) return;
+    setCatalogRepairBusy(true);
+    void repairDiagnosticCustomProvider(catalogRepair.previewId)
+      .then((execution) => {
+        setCatalogRepair(execution.report.repairPreview?.kind === "model_catalog" ? execution.report.repairPreview : null);
+      })
+      .finally(() => setCatalogRepairBusy(false));
+  }, [catalogRepair, catalogRepairBusy]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -125,6 +153,7 @@ export default function App() {
         currentProviderName={currentProviderName}
         update={updateSidebar}
       >
+        {catalogRepair && <CatalogRepairNotice preview={catalogRepair} busy={catalogRepairBusy} onApply={applyCatalogRepair} />}
         {page === "logs" ? (
           <IssueLogPage active />
         ) : (
@@ -153,6 +182,7 @@ export default function App() {
       currentProviderName={currentProviderName}
       update={updateSidebar}
     >
+      {catalogRepair && <CatalogRepairNotice preview={catalogRepair} busy={catalogRepairBusy} onApply={applyCatalogRepair} />}
       <div className="app-view" hidden={page !== "providers"}>
         <ProviderPage
           onOpenAiActionChange={setOpenAiAction}
@@ -371,6 +401,28 @@ function BlockedState({ snapshot, onRetry }: { snapshot: StartupSnapshot; onRetr
           重新检查
         </button>
       </div>
+    </section>
+  );
+}
+
+function CatalogRepairNotice({
+  preview,
+  busy,
+  onApply,
+}: {
+  preview: DiagnosticRepairPreview;
+  busy: boolean;
+  onApply: () => void;
+}) {
+  return (
+    <section className="app-notice app-notice-warning" role="status">
+      <div>
+        <strong>发现旧的模型图片兼容配置</strong>
+        <p>供应商“{preview.providerName}”的 {preview.model} 目录仍会阻止 Codex 发送图片请求。GPTEasy 可以只备份并更新模型目录，不会修改供应商、凭据或模型列表；若 Codex 正在运行，更新后请重启 Codex。</p>
+      </div>
+      <button className="command-button" type="button" onClick={onApply} disabled={busy}>
+        {busy ? "正在更新" : "更新兼容配置"}
+      </button>
     </section>
   );
 }

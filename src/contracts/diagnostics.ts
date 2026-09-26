@@ -44,7 +44,11 @@ export interface DiagnosticRepairPreview {
     | "backup_config"
     | "add_custom_provider_definition"
     | "verify_and_rediagnose"
+    | "backup_model_catalog"
+    | "update_image_compatibility"
+    | "restart_codex_if_running"
   >;
+  kind?: "custom_provider" | "model_catalog";
 }
 
 export interface DiagnosticReport {
@@ -160,6 +164,7 @@ const browserDiagnosticReport: DiagnosticReport = {
       "add_custom_provider_definition",
       "verify_and_rediagnose",
     ],
+    kind: "custom_provider",
   },
 };
 

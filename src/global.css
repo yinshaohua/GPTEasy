@@ -415,6 +415,35 @@ select {
   gap: 8px;
 }
 
+.app-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 14px 20px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border-color, #d7dce3);
+  background: #fffdf5;
+}
+
+.app-notice strong {
+  display: block;
+  color: #6b4e00;
+}
+
+.app-notice p {
+  margin: 4px 0 0;
+  color: var(--text-muted, #5c6675);
+  font-size: 13px;
+}
+
+@media (max-width: 720px) {
+  .app-notice {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
+
 .app-header-actions .desktop-control {
   gap: 0;
 }
