@@ -25,3 +25,9 @@
 ### Spike findings
 
 - **Spike findings for GPTEasy** (implementation patterns, constraints, gotchas) → `Skill("spike-findings-gpteasy")`
+
+### Codex Windows 终端约定
+
+- 普通命令默认使用管道执行，不要强制设置 `tty=true`；在 Windows 上分配 PTY 可能创建可见控制台并导致闪窗。
+- 只有需要交互式输入、实时终端控制或持续占用终端的命令才使用 `tty=true`；能使用非交互参数时优先使用非交互方式。
+- 这条约定只影响模型选择终端工具的参数，不能修复 Codex 执行器本身的窗口创建问题；若非交互命令仍闪窗，应在 Codex/执行器实现层使用隐藏窗口或管道句柄解决。

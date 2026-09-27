@@ -16,6 +16,7 @@ use crate::codex_config::{STATUS_LINE_TOML, apply_status_line, has_expected_stat
 pub use crate::consumer::ConsumerStatus;
 use crate::consumer::{ConsumerIdentity, ConsumerScan, ConsumerScanner, WindowsConsumerScanner};
 use crate::provider::model_catalog;
+use crate::provider::reasoning::{self, ReasoningSelection};
 use crate::provider::{ProviderSummary, combination_fingerprint};
 use crate::state::StateStore;
 
@@ -136,6 +137,7 @@ pub enum EnvironmentFailureCategory {
     ManagedConflict,
     UnsupportedCredentialStore,
     InvalidConfig,
+    CatalogSchemaIncompatible,
     InvalidCredentials,
     BackupFailed,
     ConcurrentModification,
@@ -284,6 +286,18 @@ pub struct EnvironmentApplication {
 }
 
 impl EnvironmentApplication {
+    pub(crate) fn reasoning_audit_context(
+        &self,
+        provider_id: &str,
+    ) -> Result<reasoning::ReasoningAuditContext, EnvironmentFailure> {
+        let connection = self.open_state()?;
+        let provider = load_provider(&connection, provider_id)?;
+        Ok(reasoning::ReasoningAuditContext::new(
+            provider.id,
+            provider.base_url,
+            provider.default_model,
+        ))
+    }
     pub fn new(state_store: StateStore, codex_home: impl AsRef<Path>) -> Self {
         Self::with_dependencies_and_scanner(
             state_store,
@@ -1301,9 +1315,11 @@ pub(crate) struct ProviderTarget {
     api_key: String,
     default_model: String,
     #[serde(default)]
-    model_catalog: Vec<String>,
+    discovered_models: Vec<String>,
     verified_at_epoch_seconds: u64,
     verification_fingerprint: String,
+    #[serde(default)]
+    reasoning_selection: ReasoningSelection,
     #[serde(default)]
     recommendation_id: Option<String>,
     #[serde(default)]
@@ -1317,21 +1333,23 @@ impl ProviderTarget {
         base_url: String,
         api_key: String,
         default_model: String,
-        model_catalog: Vec<String>,
+        discovered_models: Vec<String>,
         verified_at_epoch_seconds: u64,
         verification_fingerprint: String,
         recommendation_id: Option<String>,
         recommendation_template_base_url: Option<String>,
     ) -> Self {
+        let reasoning_selection = reasoning::for_base_url(&base_url);
         Self {
             id,
             name,
             base_url,
             api_key,
             default_model,
-            model_catalog,
+            discovered_models,
             verified_at_epoch_seconds,
             verification_fingerprint,
+            reasoning_selection,
             recommendation_id,
             recommendation_template_base_url,
         }
@@ -1415,9 +1433,10 @@ fn load_provider(
                         )
                     })?,
                     verification_fingerprint: row.get(6)?,
+                    reasoning_selection: reasoning::for_base_url(&row.get::<_, String>(2)?),
                     recommendation_id: row.get(7)?,
                     recommendation_template_base_url: row.get(8)?,
-                    model_catalog: serde_json::from_str::<Vec<String>>(&row.get::<_, String>(9)?).unwrap_or_default(),
+                    discovered_models: serde_json::from_str::<Vec<String>>(&row.get::<_, String>(9)?).unwrap_or_default(),
                 })
             },
         )
@@ -2604,8 +2623,9 @@ impl PreparedSwitch {
             render_config(config.bytes.as_deref(), &provider, &provider_alias_ids)?;
         let catalog_path = codex_home.join("gpteasy-model-catalog.json");
         let catalog_old = read_artifact(&catalog_path)?;
-        let catalog_new = model_catalog::render(&provider.model_catalog, &provider.default_model)
-            .map_err(|_| invalid_config())?;
+        let catalog_new =
+            model_catalog::render(&provider.discovered_models, &provider.default_model)
+                .map_err(|_| catalog_schema_incompatible())?;
         let credentials = read_artifact(&credentials_path)?;
         let rendered_credentials =
             render_credentials(credentials.bytes.as_deref(), &provider.api_key)?;
@@ -2663,8 +2683,9 @@ impl PreparedSwitch {
         .into_bytes();
         let catalog_path = codex_home.join("gpteasy-model-catalog.json");
         let catalog_old = read_artifact(&catalog_path)?;
-        let catalog_new = model_catalog::render(&provider.model_catalog, &provider.default_model)
-            .map_err(|_| invalid_config())?;
+        let catalog_new =
+            model_catalog::render(&provider.discovered_models, &provider.default_model)
+                .map_err(|_| catalog_schema_incompatible())?;
         let rendered_credentials = render_credentials(None, &provider.api_key)?;
         Ok(Self {
             operation_id: Uuid::new_v4().to_string(),
@@ -4700,15 +4721,18 @@ fn migrate_legacy_custom_provider(
     let is_legacy_dayway = custom.get("name").and_then(|item| item.as_str()) == Some("custom")
         && custom.get("base_url").and_then(|item| item.as_str()) == Some(&provider.base_url)
         && custom.get("wire_api").and_then(|item| item.as_str()) == Some("responses");
-    if !is_legacy_dayway
-        || custom
-            .get("requires_openai_auth")
-            .and_then(|item| item.as_bool())
-            == Some(true)
-    {
+    if !is_legacy_dayway {
         return Ok(original.to_owned());
     }
     custom["requires_openai_auth"] = toml_edit::value(true);
+    for field in [
+        "default_model",
+        "models",
+        "model_catalog_json",
+        "windows_helper",
+    ] {
+        custom.remove(field);
+    }
     Ok(normalize_newlines(&document.to_string(), newline))
 }
 
@@ -4721,7 +4745,7 @@ fn render_managed_block(provider: &ProviderTarget, aliases: &[String], newline: 
         "model_catalog_json = \"gpteasy-model-catalog.json\"".to_owned(),
         format!("model_provider = {}", string(&provider.id)),
     ];
-    if let Some(effort) = model_catalog::default_reasoning_effort(&provider.default_model) {
+    if let Some(effort) = provider.reasoning_selection.effort.as_deref() {
         lines.insert(3, format!("model_reasoning_effort = {}", string(&effort)));
     }
     for id in std::iter::once(&provider.id).chain(aliases.iter()) {
@@ -5054,9 +5078,10 @@ fn managed_block_has_expected_shape(block: &str, provider_id: &str) -> bool {
             .get("model")
             .and_then(|item| item.as_str())
             .is_none()
-        || document
-            .get("model_reasoning_effort")
-            .is_some_and(|item| !matches!(item.as_str(), Some("low" | "medium" | "high")))
+        || document.get("model_reasoning_effort").is_some_and(|item| {
+            item.as_str()
+                .is_none_or(|effort| !reasoning::is_valid_effort(effort))
+        })
         || document
             .get("model_catalog_json")
             .is_some_and(|item| item.as_str() != Some("gpteasy-model-catalog.json"))
@@ -5446,17 +5471,22 @@ fn managed_config_matches(document: &DocumentMut, provider: &ProviderTarget) -> 
         return false;
     };
     let reasoning_matches = if document.get("model_catalog_json").is_some() {
-        document
-            .get("model_reasoning_effort")
-            .and_then(|item| item.as_str())
-            == model_catalog::default_reasoning_effort(&provider.default_model).as_deref()
+        match provider.reasoning_selection.effort.as_deref() {
+            Some(effort) => {
+                document
+                    .get("model_reasoning_effort")
+                    .and_then(|item| item.as_str())
+                    == Some(effort)
+            }
+            None => document.get("model_reasoning_effort").is_none(),
+        }
     } else {
         // Configurations written before the model catalog migration did not
         // carry capability metadata. Preserve them as-is; the next explicit
         // GPTEasy write upgrades the managed block to the current schema.
         document
             .get("model_reasoning_effort")
-            .is_none_or(|item| item.as_str() == Some("high"))
+            .is_none_or(|item| item.as_str().is_some_and(reasoning::is_valid_effort))
     };
     document.get("model").and_then(|item| item.as_str()) == Some(&provider.default_model)
         && reasoning_matches
@@ -5691,6 +5721,12 @@ fn invalid_config() -> EnvironmentFailure {
     )
 }
 
+fn catalog_schema_incompatible() -> EnvironmentFailure {
+    EnvironmentFailure::new(
+        EnvironmentFailureCategory::CatalogSchemaIncompatible,
+        "environment.catalog_schema_incompatible",
+    )
+}
 fn requires_forced_rebuild(failure: &EnvironmentFailure) -> bool {
     matches!(
         failure.category,
@@ -5841,7 +5877,7 @@ impl PreparedModelCatalogRepair {
         let Some(old_bytes) = catalog.bytes.as_deref() else {
             return Ok(None);
         };
-        let new_bytes = model_catalog::render(&provider.model_catalog, &provider.default_model)
+        let new_bytes = model_catalog::render(&provider.discovered_models, &provider.default_model)
             .map_err(|_| invalid_config())?;
         if !legacy_catalog_matches(&old_bytes, &new_bytes) {
             return Ok(None);

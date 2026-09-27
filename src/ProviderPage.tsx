@@ -119,7 +119,7 @@ const linuxShellPresentation: Record<LinuxShell, {
 };
 
 type PageView = "catalog" | "detail";
-type Confirmation = "discard" | "validation" | null;
+type Confirmation = "discard" | "validation" | "model_discovery" | "model_selection" | null;
 type LinuxExportStep = "shell" | "success" | null;
 type PendingWslReclaim = { environmentId: string; providerId: string };
 type ConfigChangeRequest =
@@ -197,6 +197,7 @@ export default function ProviderPage({
   const [linuxExportBusy, setLinuxExportBusy] = useState(false);
   const [copyStatus, setCopyStatus] = useState("");
   const apiKeyRef = useRef<HTMLInputElement | null>(null);
+  const modelSelectRef = useRef<HTMLSelectElement | null>(null);
   const activeRequest = useRef<string | null>(null);
   const draggedProviderId = useRef<string | null>(null);
   const receiptRef = useRef<string | null>(null);
@@ -663,6 +664,14 @@ export default function ProviderPage({
 
   async function saveProvider(validatedReceipt = receipt) {
     if ((!selected || criticalDirty) && !validatedReceipt) {
+      if (models.length === 0) {
+        setConfirmation("model_discovery");
+        return;
+      }
+      if (defaultModel.length === 0) {
+        setConfirmation("model_selection");
+        return;
+      }
       setConfirmation("validation");
       return;
     }
@@ -1188,7 +1197,7 @@ export default function ProviderPage({
     models.length > 0 &&
     defaultModel.length > 0 &&
     !busy;
-  const canSave = name.trim().length > 0 && !busy && (selected ? dirty : true);
+  const canSave = name.trim().length > 0 && !busy;
   const errorId = failure ? "provider-validation-error" : undefined;
   const openAiReason = openAiLoginReason(environment);
   const openAiCurrent = environment?.mode === "openai_login";
@@ -1499,6 +1508,7 @@ export default function ProviderPage({
             <label className="form-field model-select">
               <span>{providerMessages.defaultModel}</span>
               <select
+                ref={modelSelectRef}
                 value={defaultModel}
                 onChange={(event) => changeModel(event.target.value)}
                 disabled={models.length === 0 || busy}
@@ -1600,6 +1610,33 @@ export default function ProviderPage({
           }}
           onSecondary={() => setConfirmation(null)}
           primaryDisabled={!canValidate}
+        />
+      )}
+      {confirmation === "model_discovery" && (
+        <ConfirmationDialog
+          title={providerMessages.modelDiscoveryRequiredTitle}
+          message={providerMessages.modelDiscoveryRequiredMessage}
+          primaryLabel={providerMessages.startModelDiscovery}
+          secondaryLabel={providerMessages.continueEditing}
+          onPrimary={() => {
+            setConfirmation(null);
+            void discoverModels();
+          }}
+          onSecondary={() => setConfirmation(null)}
+          primaryDisabled={!canDiscover}
+        />
+      )}
+      {confirmation === "model_selection" && (
+        <ConfirmationDialog
+          title={providerMessages.modelSelectionRequiredTitle}
+          message={providerMessages.modelSelectionRequiredMessage}
+          primaryLabel={providerMessages.chooseModelToContinue}
+          secondaryLabel={providerMessages.continueEditing}
+          onPrimary={() => {
+            setConfirmation(null);
+            window.setTimeout(() => modelSelectRef.current?.focus(), 0);
+          }}
+          onSecondary={() => setConfirmation(null)}
         />
       )}
       {configChangeRequest && (

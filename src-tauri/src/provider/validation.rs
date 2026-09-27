@@ -266,7 +266,7 @@ impl ProviderValidator {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
-            models: discovery.models,
+            discovered_models: discovery.models,
         })
     }
 

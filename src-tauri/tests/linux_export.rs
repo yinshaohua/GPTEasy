@@ -18,7 +18,7 @@ fn bash_export_captures_every_verified_provider_and_reasoning_rules() {
     fixture.insert_provider(
         "11111111-1111-4111-8111-111111111111",
         "Alpha Provider",
-        "https://alpha.example/v1",
+        "https://api.deepseek.com/v1",
         "alpha-secret-key",
         "DeepSeek-R1",
         1,
@@ -47,12 +47,12 @@ fn bash_export_captures_every_verified_provider_and_reasoning_rules() {
     assert!(script.contains("Beta Provider"));
     assert!(script.contains("alpha-secret-key"));
     assert!(script.contains("beta-secret-key"));
-    assert!(script.contains("model_reasoning_effort = \"high\""));
-    assert!(script.contains("model_reasoning_effort = \"medium\""));
+    assert!(script.contains("gpteasy__provider_reasoning_effort"));
+    assert!(!script.contains("model_reasoning_effort = \"medium\""));
     assert!(script.find("Alpha Provider") < script.find("Beta Provider"));
     assert!(
         script.contains(
-            "11111111-1111-4111-8111-111111111111\tAlpha Provider\thttps://alpha.example/v1\tDeepSeek-R1\talpha-secret-key"
+            "11111111-1111-4111-8111-111111111111\tAlpha Provider\thttps://api.deepseek.com/v1\tDeepSeek-R1\talpha-secret-key\thigh"
         ),
         "each provider must be editable as one top-of-script catalog record"
     );
@@ -77,7 +77,7 @@ fn zsh_export_captures_every_verified_provider_and_reasoning_rules() {
     fixture.insert_provider(
         "11111111-1111-4111-8111-111111111111",
         "Alpha Provider",
-        "https://alpha.example/v1",
+        "https://api.deepseek.com/v1",
         "alpha-secret-key",
         "DeepSeek-R1",
         1,
@@ -106,8 +106,8 @@ fn zsh_export_captures_every_verified_provider_and_reasoning_rules() {
     assert!(script.contains("Beta Provider"));
     assert!(script.contains("alpha-secret-key"));
     assert!(script.contains("beta-secret-key"));
-    assert!(script.contains("model_reasoning_effort = \"high\""));
-    assert!(script.contains("model_reasoning_effort = \"medium\""));
+    assert!(script.contains("gpteasy__provider_reasoning_effort"));
+    assert!(!script.contains("model_reasoning_effort = \"medium\""));
     assert!(script.find("Alpha Provider") < script.find("Beta Provider"));
     assert!(!script.contains("OpenAI 登录"));
     assert!(script.contains(
@@ -138,7 +138,7 @@ fn bash_export_does_not_replace_an_existing_file_without_confirmation() {
     fixture.insert_provider(
         "11111111-1111-4111-8111-111111111111",
         "Alpha Provider",
-        "https://alpha.example/v1",
+        "https://api.deepseek.com/v1",
         "alpha-secret-key",
         "alpha-model",
         1,
@@ -633,7 +633,7 @@ fn shell_snapshots_force_new_provider_config_over_existing_external_config() {
     fixture.insert_provider(
         "11111111-1111-4111-8111-111111111111",
         "Alpha Provider",
-        "https://alpha.example/v1",
+        "https://api.deepseek.com/v1",
         "alpha-secret-key",
         "DeepSeek-R1",
         1,
@@ -731,8 +731,7 @@ restore=$(find "$codex_home/.gpteasy-shell/shell-restore" -type f -name config.t
 qwen=$(gpteasy <<<"2")
 [[ "$qwen" == *'已切换到：Qwen Provider'* ]]
 grep -Fq 'model = "Qwen3-Coder"' "$codex_home/config.toml"
-grep -Fq 'model_reasoning_effort = "medium"' "$codex_home/config.toml"
-! grep -Fq 'model_reasoning_effort = "high"' "$codex_home/config.toml"
+! grep -Fq 'model_reasoning_effort' "$codex_home/config.toml"
 
 custom=$(gpteasy <<<"3")
 [[ "$custom" == *'已切换到：Custom Provider'* ]]

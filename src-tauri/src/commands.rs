@@ -14,6 +14,7 @@ use crate::environment::{
     EnvironmentApplication, EnvironmentFailure, EnvironmentFailureCategory, EnvironmentSnapshot,
     EnvironmentVisibilityContext,
 };
+use crate::provider::reasoning::{self, ReasoningAuditContext};
 use crate::provider::{
     AppliedProviderUpdate, DAYWAY_WEBSITE, DiscoveryInput, LinuxExportFailure, LinuxExportResult,
     LinuxShell, ModelDiscovery, ProviderApiKey, ProviderApplication, ProviderFailure,
@@ -377,6 +378,49 @@ fn finish_command<T, E: IssueLoggableFailure>(
         );
     }
     result
+}
+
+fn log_reasoning_audit(
+    store: &IssueLogStore,
+    event: &'static str,
+    context: Option<&ReasoningAuditContext>,
+    stage: &str,
+    status: &str,
+    pending_restart: Option<bool>,
+) {
+    store.append(
+        if status == "failed" {
+            IssueLogLevel::Error
+        } else {
+            IssueLogLevel::Info
+        },
+        event,
+        "reasoning.audit",
+        Some(reasoning::audit_details(
+            context,
+            stage,
+            status,
+            pending_restart,
+        )),
+    );
+}
+
+fn reasoning_failure_stage(message_id: &str) -> &'static str {
+    if message_id == "environment.catalog_schema_incompatible" {
+        "catalog_schema"
+    } else if message_id.contains("restart") {
+        "codex_restart"
+    } else {
+        "config_write"
+    }
+}
+
+fn reasoning_success_stage(context: Option<&ReasoningAuditContext>) -> &'static str {
+    if context.is_some_and(|context| context.selection.effort.is_none()) {
+        "mapping_missing"
+    } else {
+        "config_write"
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1938,25 +1982,58 @@ pub(crate) fn export_linux_script(
     destination: String,
     confirm_overwrite: bool,
 ) -> Result<LinuxExportResult, LinuxExportFailure> {
-    let Some(_activity) = app
+    let audit_contexts = state
+        .application
+        .reasoning_audit_contexts()
+        .unwrap_or_default();
+    let activity = app
         .state::<UpdateRuntime>()
         .activity
-        .try_begin("Linux 导出")
-    else {
-        return finish_command(
+        .try_begin("Linux 导出");
+    let result = match activity {
+        Some(_activity) => state.application.export_linux_script(
+            shell,
+            std::path::Path::new(&destination),
+            confirm_overwrite,
+        ),
+        None => Err(LinuxExportFailure {
+            category: crate::provider::LinuxExportFailureCategory::StateUnavailable,
+            message_id: "update.installing",
+        }),
+    };
+    let failure_stage = result
+        .as_ref()
+        .err()
+        .map(|failure| reasoning_failure_stage(failure.message_id));
+    if audit_contexts.is_empty() {
+        log_reasoning_audit(
             &logs.store,
             "linux_export.write",
-            Err(LinuxExportFailure {
-                category: crate::provider::LinuxExportFailureCategory::StateUnavailable,
-                message_id: "update.installing",
-            }),
+            None,
+            failure_stage.unwrap_or("config_write"),
+            if failure_stage.is_some() {
+                "failed"
+            } else {
+                "applied"
+            },
+            None,
         );
-    };
-    let result = state.application.export_linux_script(
-        shell,
-        std::path::Path::new(&destination),
-        confirm_overwrite,
-    );
+    } else {
+        for context in &audit_contexts {
+            log_reasoning_audit(
+                &logs.store,
+                "linux_export.write",
+                Some(context),
+                failure_stage.unwrap_or_else(|| reasoning_success_stage(Some(context))),
+                if failure_stage.is_some() {
+                    "failed"
+                } else {
+                    "applied"
+                },
+                None,
+            );
+        }
+    }
     finish_command(&logs.store, "linux_export.write", result)
 }
 
@@ -2152,15 +2229,21 @@ pub(crate) async fn apply_wsl_provider(
     expected_revision: String,
     confirm: bool,
 ) -> Result<WslApplyResult, WslFailure> {
+    let audit_context = state.application.reasoning_audit_context(&provider_id).ok();
     let Some(_activity) = app.state::<UpdateRuntime>().activity.try_begin("WSL2 应用") else {
-        return finish_command(
+        let result = Err(WslFailure::new(
+            crate::wsl::WslFailureCategory::StateUnavailable,
+            "update.installing",
+        ));
+        log_reasoning_audit(
             &logs.store,
             "wsl.apply_provider",
-            Err(WslFailure::new(
-                crate::wsl::WslFailureCategory::StateUnavailable,
-                "update.installing",
-            )),
+            audit_context.as_ref(),
+            reasoning_failure_stage("update.installing"),
+            "failed",
+            None,
         );
+        return finish_command(&logs.store, "wsl.apply_provider", result);
     };
     let application = state.application.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
@@ -2174,6 +2257,22 @@ pub(crate) async fn apply_wsl_provider(
         )
     })
     .and_then(|result| result);
+    let (stage, status, pending_restart) = match &result {
+        Ok(result) => (
+            reasoning_success_stage(audit_context.as_ref()),
+            "applied",
+            Some(result.pending_restart),
+        ),
+        Err(failure) => (reasoning_failure_stage(failure.message_id), "failed", None),
+    };
+    log_reasoning_audit(
+        &logs.store,
+        "wsl.apply_provider",
+        audit_context.as_ref(),
+        stage,
+        status,
+        pending_restart,
+    );
     finish_command(&logs.store, "wsl.apply_provider", result)
 }
 
@@ -2285,15 +2384,21 @@ pub(crate) async fn apply_environment_provider(
     provider_id: String,
     expected_revision: String,
 ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
+    let audit_context = state.application.reasoning_audit_context(&provider_id).ok();
     let Some(_activity) = app.state::<UpdateRuntime>().activity.try_begin("配置写入") else {
-        return finish_command(
+        let result = Err(EnvironmentFailure::new(
+            EnvironmentFailureCategory::StateUnavailable,
+            "update.installing",
+        ));
+        log_reasoning_audit(
             &logs.store,
             "environment.apply_provider",
-            Err(EnvironmentFailure::new(
-                EnvironmentFailureCategory::StateUnavailable,
-                "update.installing",
-            )),
+            audit_context.as_ref(),
+            reasoning_failure_stage("update.installing"),
+            "failed",
+            None,
         );
+        return finish_command(&logs.store, "environment.apply_provider", result);
     };
     let application = state.application.clone();
     let requested_provider = provider_id.clone();
@@ -2327,6 +2432,22 @@ pub(crate) async fn apply_environment_provider(
         );
         record_and_coordinate_mode_switch(&app, &logs.store).await;
     }
+    let (stage, status, pending_restart) = match &result {
+        Ok(snapshot) => (
+            reasoning_success_stage(audit_context.as_ref()),
+            "applied",
+            Some(snapshot.pending_restart),
+        ),
+        Err(failure) => (reasoning_failure_stage(failure.message_id), "failed", None),
+    };
+    log_reasoning_audit(
+        &logs.store,
+        "environment.apply_provider",
+        audit_context.as_ref(),
+        stage,
+        status,
+        pending_restart,
+    );
     let result = refresh_environment_tray_after(&app, result);
     finish_command(&logs.store, "environment.apply_provider", result)
 }
@@ -2340,19 +2461,25 @@ pub(crate) async fn force_apply_environment_provider(
     expected_revision: String,
     confirm_rebuild: bool,
 ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
+    let audit_context = state.application.reasoning_audit_context(&provider_id).ok();
     let Some(_activity) = app
         .state::<UpdateRuntime>()
         .activity
         .try_begin("强制设置供应商")
     else {
-        return finish_command(
+        let result = Err(EnvironmentFailure::new(
+            EnvironmentFailureCategory::StateUnavailable,
+            "update.installing",
+        ));
+        log_reasoning_audit(
             &logs.store,
             "environment.force_apply_provider",
-            Err(EnvironmentFailure::new(
-                EnvironmentFailureCategory::StateUnavailable,
-                "update.installing",
-            )),
+            audit_context.as_ref(),
+            reasoning_failure_stage("update.installing"),
+            "failed",
+            None,
         );
+        return finish_command(&logs.store, "environment.force_apply_provider", result);
     };
     let application = state.application.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
@@ -2368,6 +2495,22 @@ pub(crate) async fn force_apply_environment_provider(
     if result.is_ok() {
         record_and_coordinate_mode_switch(&app, &logs.store).await;
     }
+    let (stage, status, pending_restart) = match &result {
+        Ok(snapshot) => (
+            reasoning_success_stage(audit_context.as_ref()),
+            "applied",
+            Some(snapshot.pending_restart),
+        ),
+        Err(failure) => (reasoning_failure_stage(failure.message_id), "failed", None),
+    };
+    log_reasoning_audit(
+        &logs.store,
+        "environment.force_apply_provider",
+        audit_context.as_ref(),
+        stage,
+        status,
+        pending_restart,
+    );
     finish_command(&logs.store, "environment.force_apply_provider", result)
 }
 
@@ -3126,8 +3269,8 @@ mod tests {
         log_session_visibility_execution_result, log_session_visibility_preview,
         log_update_check_failure, log_update_install_failure, log_visibility_coordination,
         log_visibility_coordination_failure, log_visibility_pending_recorded,
-        log_visibility_status_event_failure, log_wsl_reclaim_phase,
-        record_mode_switch_pending_visibility, wsl_inventory_details,
+        log_visibility_status_event_failure, log_wsl_reclaim_phase, reasoning_failure_stage,
+        reasoning_success_stage, record_mode_switch_pending_visibility, wsl_inventory_details,
     };
     use crate::codex::{LoginInspection, LoginMethod, LoginStatus};
     use crate::consumer::{
@@ -3135,6 +3278,7 @@ mod tests {
     };
     use crate::desktop::{DesktopAction, DesktopFailure, DesktopFailureCategory, DesktopSnapshot};
     use crate::environment::{AuthenticationMode, EnvironmentApplication, OpenAiLoginProbe};
+    use crate::provider::reasoning::ReasoningAuditContext;
     use crate::session_visibility::{
         SessionVisibilityApplication, SessionVisibilityPreview, VisibilityAppServerCapability,
         VisibilityConsumerState, VisibilityCoordinationOutcome, VisibilityCoordinationStatus,
@@ -3191,6 +3335,37 @@ mod tests {
             manual_download_url: "https://example.invalid/download".to_owned(),
             release_notes_url: None,
         }
+    }
+
+    #[test]
+    fn reasoning_audit_stage_classification_distinguishes_schema_restart_and_mapping() {
+        assert_eq!(
+            reasoning_failure_stage("environment.catalog_schema_incompatible"),
+            "catalog_schema"
+        );
+        assert_eq!(
+            reasoning_failure_stage("environment.restart_blocked"),
+            "codex_restart"
+        );
+        assert_eq!(
+            reasoning_failure_stage("environment.artifact_write_failed"),
+            "config_write"
+        );
+
+        let mapped = ReasoningAuditContext::new(
+            "openai".to_owned(),
+            "https://api.openai.com/v1".to_owned(),
+            "gpt-5".to_owned(),
+        );
+        assert_eq!(reasoning_success_stage(Some(&mapped)), "config_write");
+
+        let unmapped = ReasoningAuditContext::new(
+            "custom".to_owned(),
+            "https://provider.example/v1".to_owned(),
+            "custom-model".to_owned(),
+        );
+        assert_eq!(reasoning_success_stage(Some(&unmapped)), "mapping_missing");
+        assert_eq!(reasoning_success_stage(None), "config_write");
     }
 
     #[test]

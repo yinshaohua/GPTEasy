@@ -7,8 +7,8 @@ gpteasy__source_id_prefix='# GPTEasy source-id:'
 gpteasy__credential_file_prefix='# GPTEasy credential-file:'
 
 gpteasy__provider_id() {
-    local expected_index=$1 index=1 provider_id name base_url model api_key
-    while IFS='	' read -r provider_id name base_url model api_key; do
+    local expected_index=$1 index=1 provider_id name base_url model api_key reasoning_effort
+    while IFS='	' read -r provider_id name base_url model api_key reasoning_effort; do
         [[ -n "$provider_id" && "$provider_id" != \#* ]] || continue
         if [[ "$index" == "$expected_index" ]]; then
             printf '%s\n' "$provider_id"
@@ -20,14 +20,15 @@ gpteasy__provider_id() {
 }
 
 gpteasy__provider_value() {
-    local expected_id=$1 field=$2 provider_id name base_url model api_key
-    while IFS='	' read -r provider_id name base_url model api_key; do
+    local expected_id=$1 field=$2 provider_id name base_url model api_key reasoning_effort
+    while IFS='	' read -r provider_id name base_url model api_key reasoning_effort; do
         [[ -n "$provider_id" && "$provider_id" != \#* ]] || continue
         [[ "$provider_id" == "$expected_id" ]] || continue
         case "$field" in
             name) printf '%s\n' "$name" ;;
             model) printf '%s\n' "$model" ;;
             base_url) printf '%s\n' "$base_url" ;;
+            reasoning_effort) printf '%s\n' "$reasoning_effort" ;;
             credential) printf '%s' "$api_key" ;;
             *) return 1 ;;
         esac
@@ -46,6 +47,10 @@ gpteasy__provider_model() {
 
 gpteasy__provider_base_url() {
     gpteasy__provider_value "$1" base_url
+}
+
+gpteasy__provider_reasoning_effort() {
+    gpteasy__provider_value "$1" reasoning_effort
 }
 
 gpteasy__print_credential() {
@@ -482,7 +487,14 @@ gpteasy__schema_v1_is_valid() {
         index(line, source) == 1 { source_count += 1; next }
         index(line, credential) == 1 { credential_count += 1; next }
         index(line, "model = ") == 1 { model_count += 1; next }
-        line == "model_reasoning_effort = \"high\"" { reasoning_count += 1; next }
+        index(line, "model_reasoning_effort = ") == 1 {
+            value = line
+            sub(/^model_reasoning_effort = "/, "", value)
+            sub(/"$/, "", value)
+            if (value !~ /^(low|medium|high|xhigh)$/) { invalid = 1 }
+            reasoning_count += 1
+            next
+        }
         line == "model_provider = \"gpteasy\"" { model_provider_count += 1; next }
         index(line, "model_providers.gpteasy.name = ") == 1 { name_count += 1; next }
         index(line, "model_providers.gpteasy.base_url = ") == 1 { base_url_count += 1; next }

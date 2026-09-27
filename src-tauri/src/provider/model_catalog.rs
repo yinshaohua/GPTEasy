@@ -41,8 +41,11 @@ pub(crate) struct ReasoningLevel {
     pub description: String,
 }
 
-pub(crate) fn render(models: &[String], default_model: &str) -> Result<Vec<u8>, serde_json::Error> {
-    let mut ids = models
+pub(crate) fn render(
+    discovered_models: &[String],
+    default_model: &str,
+) -> Result<Vec<u8>, serde_json::Error> {
+    let mut ids = discovered_models
         .iter()
         .map(|model| model.trim())
         .filter(|model| !model.is_empty())
@@ -53,28 +56,17 @@ pub(crate) fn render(models: &[String], default_model: &str) -> Result<Vec<u8>, 
     }
     ids.sort_by_key(|model| model.to_ascii_lowercase());
     ids.dedup();
-    let entries = ids
-        .into_iter()
-        .map(|slug| {
-            let is_default = slug == default_model;
-            entry(slug, is_default)
-        })
-        .collect();
+    let entries = ids.into_iter().map(entry).collect();
     serde_json::to_vec_pretty(&ModelCatalog { models: entries })
 }
 
-fn entry(slug: String, is_default: bool) -> ModelCatalogEntry {
-    let (levels, default) = reasoning_profile(&slug);
+fn entry(slug: String) -> ModelCatalogEntry {
     let display_name = slug.replace(['-', '_'], " ");
     ModelCatalogEntry {
-        description: if levels.is_empty() {
-            "能力未识别的供应商模型".to_owned()
-        } else {
-            "供应商已验证模型".to_owned()
-        },
+        description: "供应商已发现模型，能力未识别".to_owned(),
         display_name,
-        default_reasoning_level: (is_default && !levels.is_empty()).then_some(default),
-        supported_reasoning_levels: levels,
+        default_reasoning_level: None,
+        supported_reasoning_levels: Vec::new(),
         slug,
         shell_type: "default",
         visibility: "list",
@@ -96,54 +88,6 @@ fn entry(slug: String, is_default: bool) -> ModelCatalogEntry {
     }
 }
 
-fn reasoning_profile(model: &str) -> (Vec<ReasoningLevel>, String) {
-    let lower = model.to_ascii_lowercase();
-    let family = if lower.contains("deepseek") || lower.contains("reasoner") {
-        Some("deepseek")
-    } else if lower.contains("gpt")
-        || lower.starts_with("o1")
-        || lower.starts_with("o3")
-        || lower.starts_with("o4")
-    {
-        Some("gpt")
-    } else if lower.contains("claude") || lower.contains("anthropic") {
-        Some("anthropic")
-    } else if ["qwen", "gemini", "glm", "kimi", "mistral", "llama"]
-        .iter()
-        .any(|family| lower.contains(family))
-    {
-        Some("other")
-    } else {
-        None
-    };
-    let levels = family
-        .map(|_| {
-            ["low", "medium", "high"]
-                .into_iter()
-                .map(|effort| ReasoningLevel {
-                    effort: effort.to_owned(),
-                    description: effort.to_owned(),
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let default = match family {
-        Some("gpt") | Some("deepseek") => "high".to_owned(),
-        Some(_) if levels.len() >= 3 => "medium".to_owned(),
-        Some(_) => levels
-            .last()
-            .map(|level| level.effort.clone())
-            .unwrap_or_default(),
-        None => String::new(),
-    };
-    (levels, default)
-}
-
-pub(crate) fn default_reasoning_effort(model: &str) -> Option<String> {
-    let (_, default) = reasoning_profile(model);
-    (!default.is_empty()).then_some(default)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,6 +98,7 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&bytes).expect("catalog");
         let model = &value["models"][0];
         assert_eq!(model["slug"], "vendor-model");
+        assert_eq!(model["description"], "供应商已发现模型，能力未识别");
         assert!(
             model["supported_reasoning_levels"]
                 .as_array()
@@ -184,10 +129,25 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_defaults_to_high_when_supported() {
-        assert_eq!(
-            default_reasoning_effort("DeepSeek-R1"),
-            Some("high".to_owned())
-        );
+    fn model_names_never_create_reasoning_capabilities() {
+        let bytes = render(
+            &[
+                "DeepSeek-R1".to_owned(),
+                "gpt-5".to_owned(),
+                "Claude-4".to_owned(),
+            ],
+            "DeepSeek-R1",
+        )
+        .expect("json");
+        let value: serde_json::Value = serde_json::from_slice(&bytes).expect("catalog");
+        for model in value["models"].as_array().expect("models") {
+            assert!(model["default_reasoning_level"].is_null());
+            assert!(
+                model["supported_reasoning_levels"]
+                    .as_array()
+                    .expect("levels")
+                    .is_empty()
+            );
+        }
     }
 }

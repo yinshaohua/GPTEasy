@@ -9,6 +9,7 @@ use crate::codex_config::STATUS_LINE_TOML;
 use crate::state::StateStore;
 
 use super::catalog;
+use super::reasoning;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -187,16 +188,17 @@ fn render(shell: LinuxShell, export_id: &str, providers: &[catalog::ProviderReco
         "gpteasy__export_id={}\n\n",
         shell_quote(export_id)
     ));
-    script.push_str("# 供应商目录。可脱离 GPTEasy 手工维护：每行依次为供应商 ID、名称、服务地址、默认模型、API Key，并以 Tab 分隔；可使用空行和 # 注释。字段不可包含 Tab 或换行。\n");
+    script.push_str("# 供应商目录。可脱离 GPTEasy 手工维护：每行依次为供应商 ID、名称、服务地址、默认模型、API Key、推理强度，并以 Tab 分隔；可使用空行和 # 注释。字段不可包含 Tab 或换行。\n");
     script.push_str("gpteasy__provider_catalog() {\n    cat <<'GPTEASY_PROVIDER_CATALOG'\n");
     for provider in providers {
         script.push_str(&format!(
-            "{}\t{}\t{}\t{}\t{}\n",
+            "{}\t{}\t{}\t{}\t{}\t{}\n",
             provider.summary.id,
             provider.summary.name,
             provider.summary.base_url,
             provider.summary.default_model,
             provider.api_key,
+            provider.reasoning_selection.effort.as_deref().unwrap_or(""),
         ));
     }
     script.push_str("GPTEASY_PROVIDER_CATALOG\n}\n");
@@ -216,10 +218,11 @@ gpteasy__toml_string() {{
 }}
 
 gpteasy__print_block() {{
-    local provider_id=$1 name model normalized_model base_url credential_relative
+    local provider_id=$1 name model reasoning_effort base_url credential_relative
     gpteasy__provider_id_is_safe "$provider_id" || return 1
     name=$(gpteasy__provider_name "$provider_id") || return 1
     model=$(gpteasy__provider_model "$provider_id") || return 1
+    reasoning_effort=$(gpteasy__provider_reasoning_effort "$provider_id") || return 1
     base_url=$(gpteasy__provider_base_url "$provider_id") || return 1
     [[ -n "$name" && -n "$model" && -n "$base_url" ]] || return 1
     credential_relative="$gpteasy__export_credential_directory/$provider_id.token"
@@ -229,15 +232,9 @@ gpteasy__print_block() {{
     printf '# GPTEasy source-id: %s\n' "$gpteasy__export_id"
     printf '# GPTEasy credential-file: %s\n' "$credential_relative"
     printf 'model = %s\n' "$(gpteasy__toml_string "$model")"
-    normalized_model=$(printf '%s' "$model" | tr '[:upper:]' '[:lower:]')
-    case "$normalized_model" in
-        *gpt*|o1*|o3*|o4*|*deepseek*|*reasoner*)
-            printf '%s\n' 'model_reasoning_effort = "high"'
-            ;;
-        *claude*|*anthropic*|*qwen*|*gemini*|*glm*|*kimi*|*mistral*|*llama*)
-            printf '%s\n' 'model_reasoning_effort = "medium"'
-            ;;
-    esac
+    if [[ -n "$reasoning_effort" ]]; then
+        printf 'model_reasoning_effort = %s\n' "$(gpteasy__toml_string "$reasoning_effort")"
+    fi
     printf '%s\n' 'model_provider = "gpteasy"'
     printf 'model_providers.gpteasy.name = %s\n' "$(gpteasy__toml_string "$name")"
     printf 'model_providers.gpteasy.base_url = %s\n' "$(gpteasy__toml_string "$base_url")"
@@ -280,6 +277,11 @@ fn validate_snapshot(providers: &[catalog::ProviderRecord]) -> Result<(), LinuxE
             ]
             .into_iter()
             .all(|value| !value.contains(['\0', '\r', '\n', '\t']))
+            && provider
+                .reasoning_selection
+                .effort
+                .as_deref()
+                .is_none_or(reasoning::is_valid_effort)
     });
     if valid {
         Ok(())

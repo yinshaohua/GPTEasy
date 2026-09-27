@@ -149,6 +149,73 @@ describe("供应商创建", () => {
     }));
   }, 10_000);
 
+  it("无模型时保存先引导获取模型，不调用验证或保存", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([]);
+      if (command === "discover_provider_models") {
+        return Promise.resolve({
+          normalizedBaseUrl: "https://provider.example/v1",
+          models: ["model-a"],
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "添加供应商" }));
+    fireEvent.change(screen.getByLabelText("供应商名称"), { target: { value: "Example" } });
+    fireEvent.change(screen.getByLabelText("服务地址"), {
+      target: { value: "https://provider.example/v1" },
+    });
+    fireEvent.change(screen.getByLabelText("API Key"), { target: { value: "secret" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    const discoveryDialog = screen.getByRole("dialog", { name: "需要获取模型" });
+    expect(discoveryDialog).toHaveTextContent("当前还没有模型列表，请先获取模型。获取成功后请选择默认模型。");
+    expect(invoke.mock.calls.some(([command]) => command === "validate_provider")).toBe(false);
+    expect(invoke.mock.calls.some(([command]) => command === "save_verified_provider")).toBe(false);
+
+    fireEvent.click(within(discoveryDialog).getByRole("button", { name: "获取模型" }));
+    expect(await screen.findByRole("option", { name: "model-a" })).toBeInTheDocument();
+    expect(screen.getByLabelText("默认模型")).toHaveValue("");
+    expect(invoke.mock.calls.some(([command]) => command === "validate_provider")).toBe(false);
+    expect(invoke.mock.calls.some(([command]) => command === "save_verified_provider")).toBe(false);
+  });
+
+  it("有模型但未选择默认模型时只提示选择模型", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "list_providers") return Promise.resolve([]);
+      if (command === "discover_provider_models") {
+        return Promise.resolve({
+          normalizedBaseUrl: "https://provider.example/v1",
+          models: ["model-a"],
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "添加供应商" }));
+    fireEvent.change(screen.getByLabelText("供应商名称"), { target: { value: "Example" } });
+    fireEvent.change(screen.getByLabelText("服务地址"), {
+      target: { value: "https://provider.example/v1" },
+    });
+    fireEvent.change(screen.getByLabelText("API Key"), { target: { value: "secret" } });
+    fireEvent.click(screen.getByRole("button", { name: "获取模型" }));
+    await screen.findByRole("option", { name: "model-a" });
+
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    const selectionDialog = screen.getByRole("dialog", { name: "请选择默认模型" });
+    expect(selectionDialog).toHaveTextContent("已获取模型，但尚未选择默认模型，请从列表中选择后再保存。");
+    expect(invoke.mock.calls.some(([command]) => command === "validate_provider")).toBe(false);
+    expect(invoke.mock.calls.some(([command]) => command === "save_verified_provider")).toBe(false);
+
+    fireEvent.click(within(selectionDialog).getByRole("button", { name: "去选择模型" }));
+    await waitFor(() => expect(screen.getByLabelText("默认模型")).toHaveFocus());
+  });
+
   it("候选地址手动验证不保存，从保存发起验证则在采用后自动保存", async () => {
     let validationIndex = 0;
     invoke.mockImplementation((command: string) => {
@@ -789,7 +856,7 @@ describe("逐项供应商验证弹窗", () => {
 
     const revalidate = screen.getByRole("button", { name: "重新验证" });
     expect(revalidate).toBeEnabled();
-    expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "保存" })).toBeEnabled();
     fireEvent.click(revalidate);
 
     await waitFor(() => {
@@ -1210,6 +1277,12 @@ describe("供应商目录生命周期", () => {
     invoke.mockImplementation((command: string) => {
       if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
       if (command === "list_providers") return Promise.resolve([saved]);
+      if (command === "discover_provider_models_for_update") {
+        return Promise.resolve({
+          normalizedBaseUrl: "https://dayway.site/v1",
+          models: ["saved-model"],
+        });
+      }
       return Promise.resolve(undefined);
     });
 
@@ -1220,8 +1293,16 @@ describe("供应商目录生命周期", () => {
     fireEvent.click(screen.getByRole("button", { name: "采用 DayWay 推荐地址" }));
     expect(screen.getByLabelText("服务地址")).toHaveValue("https://dayway.site/v1");
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
-    expect(screen.getByRole("dialog", { name: "需要验证供应商" })).toBeInTheDocument();
+    const discoveryDialog = screen.getByRole("dialog", { name: "需要获取模型" });
+    expect(discoveryDialog).toBeInTheDocument();
     expect(invoke.mock.calls.some(([command]) => command === "save_provider_update")).toBe(false);
+    fireEvent.click(within(discoveryDialog).getByRole("button", { name: "继续编辑" }));
+    fireEvent.click(screen.getByRole("button", { name: "获取模型" }));
+    expect(await screen.findByRole("option", { name: "saved-model" })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("默认模型"), { target: { value: "saved-model" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect(screen.getByRole("dialog", { name: "需要验证供应商" })).toBeInTheDocument();
+    expect(invoke.mock.calls.some(([command]) => command === "validate_provider_update")).toBe(false);
   });
 
   it("旧普通 DayWay 名称冲突只有确认后才重试推荐保存", async () => {
@@ -1663,6 +1744,7 @@ describe("供应商目录生命周期", () => {
       await screen.findByRole("button", { name: "修改 Atlas" }, { timeout: 5_000 }),
     );
     expect(screen.getByRole("heading", { name: "修改 Atlas" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "保存" })).toBeEnabled();
     const apiKey = screen.getByLabelText("API Key") as HTMLInputElement;
     expect(apiKey).toHaveAttribute("type", "password");
     expect(apiKey).toHaveValue("");
@@ -1774,8 +1856,9 @@ describe("供应商目录生命周期", () => {
     });
     expect(screen.getByRole("button", { name: "保存" })).toBeEnabled();
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
-    expect(screen.getByRole("dialog", { name: "需要验证供应商" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "继续编辑" }));
+    const discoveryDialog = screen.getByRole("dialog", { name: "需要获取模型" });
+    expect(discoveryDialog).toBeInTheDocument();
+    fireEvent.click(within(discoveryDialog).getByRole("button", { name: "继续编辑" }));
     expect(invoke.mock.calls.some(([command]) => command === "save_provider_update")).toBe(false);
     fireEvent.click(screen.getByRole("button", { name: "获取模型" }));
     expect(await screen.findByRole("option", { name: "model-b" })).toBeInTheDocument();

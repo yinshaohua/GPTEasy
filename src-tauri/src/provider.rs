@@ -1,6 +1,7 @@
 mod catalog;
 mod linux_export;
 pub(crate) mod model_catalog;
+pub(crate) mod reasoning;
 mod validation;
 
 pub use linux_export::{
@@ -124,7 +125,8 @@ pub struct ValidationEvidence {
     pub combination_fingerprint: String,
     pub verified_at_epoch_seconds: u64,
     #[serde(default)]
-    pub models: Vec<String>,
+    #[serde(rename = "models")]
+    pub discovered_models: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -534,7 +536,7 @@ impl ProviderApplication {
             default_model: evidence.default_model,
             combination_fingerprint: evidence.combination_fingerprint,
             verified_at_epoch_seconds: evidence.verified_at_epoch_seconds,
-            models: evidence.models,
+            models: evidence.discovered_models,
         })
     }
 
@@ -811,7 +813,7 @@ impl ProviderApplication {
             candidate.evidence.normalized_base_url.clone(),
             candidate.input.api_key.clone(),
             candidate.input.default_model.clone(),
-            candidate.evidence.models.clone(),
+            candidate.evidence.discovered_models.clone(),
             candidate.evidence.verified_at_epoch_seconds,
             candidate.evidence.combination_fingerprint.clone(),
             existing.summary.recommendation_id,
@@ -928,6 +930,22 @@ impl ProviderApplication {
         linux_export::export(&self.state_store, shell, destination, confirm_overwrite)
     }
 
+    pub(crate) fn reasoning_audit_contexts(
+        &self,
+    ) -> Result<Vec<reasoning::ReasoningAuditContext>, ProviderFailure> {
+        catalog::list_provider_records(&self.state_store).map(|records| {
+            records
+                .into_iter()
+                .map(|record| {
+                    reasoning::ReasoningAuditContext::new(
+                        record.summary.id,
+                        record.summary.base_url,
+                        record.summary.default_model,
+                    )
+                })
+                .collect()
+        })
+    }
     pub fn rename_provider(
         &self,
         provider_id: &str,

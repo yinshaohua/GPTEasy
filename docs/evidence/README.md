@@ -11,3 +11,4 @@
 - [DayWay README 宣传语核验](dayway-readme-claims-2026-08-17.md)
 - [OpenAI 登录模式事故分析与需求调整](openai-login-mode-incident-analysis-2026-08-25.md)
 - [诊断助手运行手册](../diagnostics/ASSISTANT-RUNBOOK.md)
+- [Codex Model Catalog Contract (0.157.1)](codex-model-catalog-contract-2026-09-27.md)

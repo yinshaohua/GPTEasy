@@ -20,7 +20,8 @@ ADR 记录难以逆转且有真实取舍的决定。重建遵循 ADR-0009 的“
 - ADR-0044：正式发布绑定完整自动门禁、候选产物校验和维护者明确验收授权；一次性 Windows 交互式 UAT 保留为可选深度验收。
 - ADR-0045：国内分发直接切换到 Gitee；保留 updater 密钥，自动同步辅助附件、由维护者通过网页上传标准 `.exe`，并在真实匿名验证后最后推进清单。
 - ADR-0046-0047：会话可见性修复可受限改写 rollout；缺失索引优先由 App Server 协调，仅对精确识别的 SQLite schema 使用单库事务后备，并由干净 App Server 验证不变量。
-- ADR-0049：供应商模型发现列表与 Codex 模型元数据目录分层；仅为当前活动供应商生成 catalog，并按默认模型和模型能力选择推理档位。
+- ADR-0049：供应商模型发现列表与 Codex 模型元数据目录分层；仅为当前活动供应商生成 catalog，不按模型名称伪造推理能力范围。
+- ADR-0051：解耦 Codex catalog 的能力范围与根级实际 reasoning effort；OpenAI/DeepSeek 使用有官方依据的 `high` 映射，未知供应商不猜测生效值。
 - ADR-0050：不探测自定义供应商模型的图片能力；统一允许 Codex 发送 text/image 请求，并统一禁用 image detail original，由上游供应商最终裁决图片请求。
 
 ## Historical Or Deferred

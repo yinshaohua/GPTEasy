@@ -149,6 +149,18 @@ fn insert_provider(store: &StateStore) {
             ],
         )
         .expect("insert provider fixture");
+    connection
+        .execute(
+            "INSERT INTO provider_model_catalog (
+                provider_id, verification_fingerprint, models_json
+             ) VALUES (?1, ?2, ?3)",
+            params![
+                PROVIDER_ID,
+                "fixture-verification-fingerprint",
+                r#"["fixture-model","discovered-only-model"]"#,
+            ],
+        )
+        .expect("insert discovered model catalog fixture");
 }
 
 fn insert_second_provider(store: &StateStore, provider_id: &str) {
@@ -555,8 +567,21 @@ fn confirmed_takeover_preserves_external_fields_without_guessing_unknown_model_r
     let models = model_catalog["models"]
         .as_array()
         .expect("model catalog entries");
-    assert_eq!(models.len(), 1);
-    assert_eq!(models[0]["slug"], "fixture-model");
+    assert_eq!(models.len(), 2);
+    let model_slugs = models
+        .iter()
+        .map(|model| model["slug"].as_str().expect("model slug"))
+        .collect::<Vec<_>>();
+    assert!(model_slugs.contains(&"fixture-model"));
+    assert!(model_slugs.contains(&"discovered-only-model"));
+    let discovered_model = models
+        .iter()
+        .find(|model| model["slug"] == "discovered-only-model")
+        .expect("discovered model entry");
+    assert_eq!(
+        discovered_model["description"],
+        "供应商已发现模型，能力未识别"
+    );
     assert_eq!(
         models[0]["input_modalities"],
         serde_json::json!(["text", "image"])
@@ -817,7 +842,7 @@ fn applying_provider_migrates_matching_legacy_custom_provider_to_openai_auth() {
     fs::create_dir_all(&codex_home).expect("create Codex fixture");
     fs::write(
         codex_home.join("config.toml"),
-        "model_provider = \"custom\"\n[model_providers.custom]\nname = \"custom\"\nbase_url = \"https://fixture.example/v1\"\nwire_api = \"responses\"\n",
+        "model_provider = \"custom\"\n[model_providers.custom]\nname = \"custom\"\nbase_url = \"https://fixture.example/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\ndefault_model = \"legacy-model\"\nmodels = [\"legacy-model\"]\nmodel_catalog_json = \"legacy-catalog.json\"\nwindows_helper = \"legacy-helper.exe\"\n",
     )
     .expect("write legacy custom config");
 
@@ -833,6 +858,17 @@ fn applying_provider_migrates_matching_legacy_custom_provider_to_openai_auth() {
         document["model_providers"]["custom"]["requires_openai_auth"].as_bool(),
         Some(true)
     );
+    for field in [
+        "default_model",
+        "models",
+        "model_catalog_json",
+        "windows_helper",
+    ] {
+        assert!(
+            document["model_providers"]["custom"].get(field).is_none(),
+            "legacy field should be removed: {field}"
+        );
+    }
 }
 
 #[test]

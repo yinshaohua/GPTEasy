@@ -3,6 +3,7 @@ use uuid::Uuid;
 
 use crate::state::StateStore;
 
+use super::reasoning::{self, ReasoningSelection};
 use super::{
     DAYWAY_BASE_URL, DAYWAY_NAME, ProviderFailure, ProviderFailureCategory, ProviderSummary,
     ValidationEvidence, VerifiedCandidate, state_unavailable, verification_expired,
@@ -12,6 +13,7 @@ pub(super) struct ProviderRecord {
     pub summary: ProviderSummary,
     pub api_key: String,
     pub verification_fingerprint: String,
+    pub reasoning_selection: ReasoningSelection,
 }
 
 pub(super) fn list_providers(
@@ -143,7 +145,7 @@ pub(super) fn insert_provider(
         &transaction,
         &summary.id,
         &candidate.evidence.combination_fingerprint,
-        &candidate.evidence.models,
+        &candidate.evidence.discovered_models,
     )?;
     transaction.commit().map_err(|_| state_unavailable())?;
     Ok(summary)
@@ -448,7 +450,7 @@ pub(super) fn replace_provider(
         &transaction,
         provider_id,
         &candidate.evidence.combination_fingerprint,
-        &candidate.evidence.models,
+        &candidate.evidence.discovered_models,
     )?;
     transaction.commit().map_err(|_| state_unavailable())?;
     let mut summary = ProviderSummary {
@@ -505,7 +507,7 @@ pub(super) fn record_revalidation(
         &transaction,
         provider_id,
         &evidence.combination_fingerprint,
-        &evidence.models,
+        &evidence.discovered_models,
     )?;
     transaction.commit().map_err(|_| state_unavailable())?;
     Ok(ProviderSummary {
@@ -614,6 +616,7 @@ fn find_provider_record(
                     },
                     api_key: row.get(3)?,
                     verification_fingerprint: row.get(6)?,
+                    reasoning_selection: reasoning::for_base_url(&row.get::<_, String>(2)?),
                 })
             },
         )

@@ -14,10 +14,9 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::codex_config::{
-    DEFAULT_MODEL_REASONING_EFFORT, STATUS_LINE_TOML, apply_status_line, has_expected_status_line,
-};
+use crate::codex_config::{STATUS_LINE_TOML, apply_status_line, has_expected_status_line};
 use crate::provider::ProviderSummary;
+use crate::provider::reasoning::{self, ReasoningSelection};
 use crate::state::StateStore;
 
 #[cfg(windows)]
@@ -360,6 +359,18 @@ impl std::fmt::Debug for WslApplication {
 }
 
 impl WslApplication {
+    pub(crate) fn reasoning_audit_context(
+        &self,
+        provider_id: &str,
+    ) -> Result<reasoning::ReasoningAuditContext, WslFailure> {
+        let connection = self.open_state()?;
+        let provider = load_provider(&connection, provider_id)?;
+        Ok(reasoning::ReasoningAuditContext::new(
+            provider.id,
+            provider.base_url,
+            provider.default_model,
+        ))
+    }
     pub fn new(state_store: StateStore) -> Self {
         Self::with_runtime(state_store, Arc::new(SystemWslRuntime::default()))
     }
@@ -1807,6 +1818,7 @@ struct WslProvider {
     default_model: String,
     verified_at: u64,
     recommendation_id: Option<String>,
+    reasoning_selection: ReasoningSelection,
 }
 
 fn load_provider(connection: &Connection, provider_id: &str) -> Result<WslProvider, WslFailure> {
@@ -1816,10 +1828,12 @@ fn load_provider(connection: &Connection, provider_id: &str) -> Result<WslProvid
              FROM providers WHERE id = ?1",
             [provider_id],
             |row| {
+                let base_url = row.get::<_, String>(2)?;
                 Ok(WslProvider {
                     id: row.get(0)?,
                     name: row.get(1)?,
-                    base_url: row.get(2)?,
+                    reasoning_selection: reasoning::for_base_url(&base_url),
+                    base_url,
                     api_key: row.get(3)?,
                     default_model: row.get(4)?,
                     verified_at: row.get::<_, String>(5)?.parse().unwrap_or_default(),
@@ -2300,9 +2314,11 @@ fn schema_v1_block_variant(block: &[&str]) -> Option<SchemaV1Variant> {
         || !root.contains_key("model")
         || !root.contains_key("model_provider")
         || !root.contains_key("model_providers")
-        || root
-            .get("model_reasoning_effort")
-            .is_some_and(|value| value.as_str() != Some(DEFAULT_MODEL_REASONING_EFFORT))
+        || root.get("model_reasoning_effort").is_some_and(|value| {
+            value
+                .as_str()
+                .is_none_or(|effort| !reasoning::is_valid_effort(effort))
+        })
     {
         return None;
     }
@@ -2696,7 +2712,7 @@ fn render_config(
         provider.id
     );
     let auth_script = format!("cat -- \"${{CODEX_HOME:-$HOME/.codex}}/{credential_relative}\"");
-    let block = [
+    let mut block = vec![
         "# >>> GPTEasy managed provider >>>".to_owned(),
         "# GPTEasy schema-version: 1".to_owned(),
         format!("# GPTEasy provider-id: {}", provider.id),
@@ -2705,10 +2721,6 @@ fn render_config(
         format!(
             "model = {}",
             toml_edit::Value::from(provider.default_model.as_str())
-        ),
-        format!(
-            "model_reasoning_effort = {}",
-            toml_edit::Value::from(DEFAULT_MODEL_REASONING_EFFORT)
         ),
         "model_provider = \"gpteasy\"".to_owned(),
         format!(
@@ -2728,8 +2740,17 @@ fn render_config(
         ),
         "# <<< GPTEasy managed provider <<<".to_owned(),
         String::new(),
-    ]
-    .join(newline);
+    ];
+    if let Some(effort) = provider.reasoning_selection.effort.as_deref() {
+        block.insert(
+            6,
+            format!(
+                "model_reasoning_effort = {}",
+                toml_edit::Value::from(effort)
+            ),
+        );
+    }
+    let block = block.join(newline);
     let source = document.to_string();
     let start = "# >>> GPTEasy managed provider >>>";
     let end = "# <<< GPTEasy managed provider <<<";
@@ -3966,6 +3987,13 @@ mod tests {
     }
 
     fn application(runtime: Arc<FakeRuntime>) -> (TempDir, StateStore, WslApplication) {
+        application_with_base_url(runtime, "https://provider.example/v1")
+    }
+
+    fn application_with_base_url(
+        runtime: Arc<FakeRuntime>,
+        base_url: &str,
+    ) -> (TempDir, StateStore, WslApplication) {
         let temp = TempDir::new().expect("temp");
         let store = StateStore::new(crate::state::StatePaths::from_root(temp.path()));
         assert!(store.bootstrap().is_ready());
@@ -3975,9 +4003,9 @@ mod tests {
                 "INSERT INTO providers(
                     id, name, base_url, api_key, default_model, verified_at,
                     verification_fingerprint, sort_order
-                 ) VALUES (?1, 'Example', 'https://provider.example/v1', 'secret',
+                 ) VALUES (?1, 'Example', ?2, 'secret',
                     'model-a', '1', 'fingerprint', 0)",
-                ["22222222-2222-4222-8222-222222222222"],
+                params!["22222222-2222-4222-8222-222222222222", base_url],
             )
             .expect("provider");
         let application = WslApplication::with_runtime(store.clone(), runtime);
@@ -3993,6 +4021,7 @@ mod tests {
             default_model: "model-a".to_owned(),
             verified_at: 1,
             recommendation_id: None,
+            reasoning_selection: reasoning::for_base_url("https://provider.example/v1"),
         }
     }
 
@@ -4177,7 +4206,7 @@ model_providers.gpteasy.auth.command = \"sh\"\n\
     }
 
     #[test]
-    fn desktop_apply_writes_schema_v1_credentials_and_sets_default_reasoning_effort_high() {
+    fn desktop_apply_omits_reasoning_effort_for_an_unmapped_provider() {
         let provider_id = "22222222-2222-4222-8222-222222222222";
         let mut running_probe = probe();
         running_probe.running = true;
@@ -4203,9 +4232,9 @@ model_providers.gpteasy.auth.command = \"sh\"\n\
         let artifacts = runtime.artifacts.lock().expect("artifacts").clone();
         assert_eq!(artifacts.credentials.as_deref(), Some(b"secret".as_slice()));
         let config = String::from_utf8_lossy(artifacts.config.as_deref().expect("written config"));
-        assert!(config.contains("model_reasoning_effort = \"high\""));
+        assert!(!config.contains("model_reasoning_effort = "));
         assert!(!config.contains("model_reasoning_effort = \"low\""));
-        assert_eq!(config.matches("model_reasoning_effort = ").count(), 1);
+        assert_eq!(config.matches("model_reasoning_effort = ").count(), 0);
         assert!(!config.contains("requires_openai_auth"));
         assert!(matches!(
             inspect_actual_managed_state(
@@ -4214,6 +4243,38 @@ model_providers.gpteasy.auth.command = \"sh\"\n\
             ),
             ActualManagedState::Current { provider_id: actual, .. } if actual == provider_id
         ));
+    }
+
+    #[test]
+    fn desktop_apply_sets_high_for_the_official_openai_provider() {
+        let provider_id = "22222222-2222-4222-8222-222222222222";
+        let mut running_probe = probe();
+        running_probe.running = true;
+        let runtime = Arc::new(FakeRuntime::new(
+            running_probe,
+            WslArtifacts {
+                config: Some(b"custom = true\nmodel_reasoning_effort = \"low\"\n".to_vec()),
+                credentials: None,
+            },
+        ));
+        let (_temp, _store, application) =
+            application_with_base_url(runtime.clone(), "https://api.openai.com/v1");
+        let environment = application.list().expect("list").remove(0);
+
+        application
+            .apply_provider(
+                &environment.environment_id,
+                provider_id,
+                &environment.revision,
+                true,
+            )
+            .expect("apply provider");
+
+        let artifacts = runtime.artifacts.lock().expect("artifacts").clone();
+        let config = String::from_utf8_lossy(artifacts.config.as_deref().expect("written config"));
+        assert!(config.contains("model_reasoning_effort = \"high\""));
+        assert!(!config.contains("model_reasoning_effort = \"low\""));
+        assert_eq!(config.matches("model_reasoning_effort = ").count(), 1);
     }
 
     #[test]
