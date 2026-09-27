@@ -2053,11 +2053,15 @@ pub(crate) async fn get_environment_snapshot(
                 IssueLogLevel::Error,
                 "environment.inspect",
                 snapshot.message_id,
-                Some("state=conflict".to_owned()),
+                Some(environment_conflict_details(snapshot.inspection_stage)),
             );
         }
     }
     finish_command(&logs.store, "environment.inspect", result)
+}
+
+fn environment_conflict_details(stage: Option<&'static str>) -> String {
+    format!("state=conflict phase={}", stage.unwrap_or("other"))
 }
 
 #[tauri::command]
@@ -3256,6 +3260,7 @@ fn environment_task_failed() -> EnvironmentFailure {
 
 #[cfg(test)]
 mod tests {
+    use super::environment_conflict_details;
     use super::{
         DeleteProviderFailure, IssueLogLevel, IssueLogStore, ProviderFailure,
         ProviderFailureCategory, ProviderRevalidationAuditContext, ProviderRevalidationResult,
@@ -3296,6 +3301,26 @@ mod tests {
     use tempfile::tempdir;
 
     struct LoggedOutProbe;
+
+    #[test]
+    fn environment_conflict_log_distinguishes_stages_without_configuration_values() {
+        assert_eq!(
+            environment_conflict_details(Some("config_match")),
+            "state=conflict phase=config_match"
+        );
+        assert_eq!(
+            environment_conflict_details(Some("credential_match")),
+            "state=conflict phase=credential_match"
+        );
+        assert_eq!(
+            environment_conflict_details(Some("applied_evidence")),
+            "state=conflict phase=applied_evidence"
+        );
+        assert_eq!(
+            environment_conflict_details(None),
+            "state=conflict phase=other"
+        );
+    }
 
     impl OpenAiLoginProbe for LoggedOutProbe {
         fn inspect(&self) -> LoginInspection {

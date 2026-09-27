@@ -99,6 +99,15 @@ pub struct EnvironmentSnapshot {
     pub pending_restart: bool,
     pub requires_consumer_confirmation: bool,
     pub consumers: ConsumerStatuses,
+    #[serde(skip)]
+    pub(crate) inspection_stage: Option<&'static str>,
+}
+
+impl EnvironmentSnapshot {
+    fn at_inspection_stage(mut self, stage: &'static str) -> Self {
+        self.inspection_stage = Some(stage);
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1657,6 +1666,7 @@ fn inspect_environment(
             pending_restart,
             requires_consumer_confirmation: false,
             consumers: unknown_consumers(),
+            inspection_stage: None,
         });
     }
 
@@ -1827,7 +1837,8 @@ fn inspect_environment(
             &restore_preview,
             login_status,
             pending_restart,
-        ));
+        )
+        .at_inspection_stage("config_match"));
     }
     if !credentials_match(&credentials, &provider.api_key)? {
         return Ok(conflict_snapshot(
@@ -1837,7 +1848,8 @@ fn inspect_environment(
             &restore_preview,
             login_status,
             pending_restart,
-        ));
+        )
+        .at_inspection_stage("credential_match"));
     }
 
     let Some((applied_provider, applied_config, _applied_credentials)) = last_applied_provider
@@ -1861,7 +1873,8 @@ fn inspect_environment(
             &restore_preview,
             login_status,
             pending_restart,
-        ));
+        )
+        .at_inspection_stage("applied_evidence"));
     }
 
     Ok(EnvironmentSnapshot {
@@ -1879,6 +1892,7 @@ fn inspect_environment(
         pending_restart,
         requires_consumer_confirmation: false,
         consumers: unknown_consumers(),
+        inspection_stage: None,
     })
 }
 
@@ -1941,6 +1955,7 @@ fn external_snapshot(
         pending_restart,
         requires_consumer_confirmation: false,
         consumers: unknown_consumers(),
+        inspection_stage: None,
     }
 }
 
@@ -1967,6 +1982,7 @@ fn external_openai_snapshot(
         pending_restart,
         requires_consumer_confirmation: false,
         consumers: unknown_consumers(),
+        inspection_stage: None,
     }
 }
 
@@ -1993,6 +2009,7 @@ fn conflict_snapshot(
         pending_restart,
         requires_consumer_confirmation: false,
         consumers: unknown_consumers(),
+        inspection_stage: None,
     }
 }
 
@@ -5478,15 +5495,26 @@ fn managed_config_matches(document: &DocumentMut, provider: &ProviderTarget) -> 
                     .and_then(|item| item.as_str())
                     == Some(effort)
             }
-            None => document.get("model_reasoning_effort").is_none(),
+            // Older GPTEasy versions wrote a guessed effort for unmapped providers.
+            // Accept that legacy field for inspection; explicit writes still omit it.
+            None => document.get("model_reasoning_effort").is_none_or(|item| {
+                item.as_str()
+                    .is_some_and(|effort| effort == "none" || reasoning::is_valid_effort(effort))
+            }),
         }
     } else {
         // Configurations written before the model catalog migration did not
         // carry capability metadata. Preserve them as-is; the next explicit
         // GPTEasy write upgrades the managed block to the current schema.
-        document
-            .get("model_reasoning_effort")
-            .is_none_or(|item| item.as_str().is_some_and(reasoning::is_valid_effort))
+        match provider.reasoning_selection.effort.as_deref() {
+            Some(_) => document
+                .get("model_reasoning_effort")
+                .is_none_or(|item| item.as_str().is_some_and(reasoning::is_valid_effort)),
+            None => document.get("model_reasoning_effort").is_none_or(|item| {
+                item.as_str()
+                    .is_some_and(|effort| effort == "none" || reasoning::is_valid_effort(effort))
+            }),
+        }
     };
     document.get("model").and_then(|item| item.as_str()) == Some(&provider.default_model)
         && reasoning_matches

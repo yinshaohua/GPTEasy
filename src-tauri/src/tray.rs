@@ -614,6 +614,7 @@ mod tests {
                 desktop: ConsumerStatus::Stopped,
                 cli: ConsumerStatus::Stopped,
             },
+            inspection_stage: None,
         }
     }
 

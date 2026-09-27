@@ -386,6 +386,37 @@ fn session_visibility_context_keeps_last_managed_target_during_conflict() {
 }
 
 #[test]
+fn external_none_reasoning_effort_does_not_hide_current_unmapped_provider() {
+    let (temp, _, application) = fixture();
+    let config_path = temp.path().join(".codex/config.toml");
+    application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("establish provider mode");
+
+    let current = fs::read_to_string(&config_path).expect("read managed config");
+    let drifted = current.replace("model = \"fixture-model\"", "model = \"other-model\"");
+    fs::write(&config_path, &drifted).expect("simulate model drift");
+    let conflict = application.inspect().expect("inspect model drift");
+    assert_eq!(conflict.state, EnvironmentState::Conflict);
+
+    let current = format!("{current}model_reasoning_effort = \"none\"\n");
+    fs::write(&config_path, &current).expect("simulate external Codex reasoning setting");
+
+    let snapshot = application
+        .inspect()
+        .expect("inspect config with external reasoning setting");
+
+    assert_eq!(snapshot.state, EnvironmentState::Managed);
+    assert_eq!(
+        snapshot
+            .current_provider
+            .as_ref()
+            .map(|provider| provider.id.as_str()),
+        Some(PROVIDER_ID)
+    );
+}
+
+#[test]
 fn confirmed_first_provider_application_initializes_a_never_started_codex_home() {
     let (temp, _, application) = fixture();
     let codex_home = temp.path().join(".codex");
