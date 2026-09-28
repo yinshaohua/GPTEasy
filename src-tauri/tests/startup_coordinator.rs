@@ -653,6 +653,50 @@ fn provider_startup_accepts_outside_edits_but_blocks_managed_block_drift() {
 }
 
 #[test]
+fn provider_startup_ignores_managed_schema_evolution_but_checks_route_identity() {
+    let app_data = TempDir::new().expect("app data");
+    let codex_home = TempDir::new().expect("codex home");
+    let store = StateStore::new(StatePaths::from_root(app_data.path()));
+    assert!(store.bootstrap().is_ready());
+    let provider_id = "9f319739-f219-48ee-be35-22e08d5402d7";
+    let connection = rusqlite::Connection::open(store.paths().database()).expect("open state");
+    connection
+        .execute(
+            "INSERT INTO providers (id, name, base_url, api_key, default_model, verified_at, verification_fingerprint) \
+             VALUES (?1, 'Provider', 'https://provider.example/v1', 'test-key', 'model', '1775606400', 'verification')",
+            [provider_id],
+        )
+        .expect("insert provider evidence");
+    EnvironmentApplication::new(store.clone(), codex_home.path())
+        .apply_provider(provider_id, true)
+        .expect("establish managed environment");
+
+    let config_path = codex_home.path().join("config.toml");
+    let mut evolved = fs::read_to_string(&config_path).expect("read managed config");
+    evolved = evolved.replace("model = \"model\"", "model = \"new-model\"");
+    evolved = evolved.replacen(
+        "model_providers.",
+        "future_root_flag = true\nmodel_providers.",
+        1,
+    );
+    evolved = evolved.replace(
+        &format!("model_providers.{provider_id}.supports_websockets = false\n"),
+        &format!(
+            "model_providers.{provider_id}.supports_websockets = true\nmodel_providers.{provider_id}.future_route_metadata = \"v2\"\n"
+        ),
+    );
+    fs::write(&config_path, evolved).expect("write evolved managed config");
+
+    let coordinator = StartupCoordinator::new(
+        store,
+        CodexInspector::new(codex_home.path(), login_command(0)),
+    );
+    let compatible = coordinator.inspect();
+    assert_eq!(compatible.mode, ApplicationMode::Ready);
+    assert_eq!(compatible.block_reason, None);
+}
+
+#[test]
 fn provider_startup_accepts_legacy_managed_block_without_model_catalog() {
     let app_data = TempDir::new().expect("app data");
     let codex_home = TempDir::new().expect("codex home");
@@ -852,11 +896,8 @@ fn provider_startup_accepts_desktop_rewrite_that_relocates_the_end_marker() {
     let trailing_content = format!("{rewritten}[after-marker]\nenabled = true\n");
     fs::write(&config_path, trailing_content).expect("append content after relocated marker");
     let invalid_boundary = coordinator.inspect();
-    assert_eq!(invalid_boundary.mode, ApplicationMode::Blocked);
-    assert_eq!(
-        invalid_boundary.block_reason,
-        Some(StartupBlockReason::ManagedConfigConflict)
-    );
+    assert_eq!(invalid_boundary.mode, ApplicationMode::Ready);
+    assert_eq!(invalid_boundary.block_reason, None);
 
     fs::write(&config_path, rewritten).expect("restore compatible desktop rewrite");
     connection

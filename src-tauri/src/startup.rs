@@ -140,6 +140,11 @@ fn startup_block_reason(
     if codex.managed_config_state == ManagedConfigState::Conflict {
         return Some(StartupBlockReason::ManagedConfigConflict);
     }
+    if contents.last_applied_mode.is_none()
+        && codex.managed_config_state == ManagedConfigState::Present
+    {
+        return Some(StartupBlockReason::ManagedConfigConflict);
+    }
     match contents.last_applied_mode {
         Some(AppliedMode::OpenaiLogin) => {
             return (codex.managed_config_state == ManagedConfigState::Present)
@@ -161,7 +166,25 @@ fn startup_block_reason(
     if contents.last_applied_mode == Some(AppliedMode::Provider)
         && let Some(Some(_)) = &contents.last_applied_config_fingerprint
     {
-        if !config_matches_applied {
+        if codex.recovered_desktop_rewrite && !config_matches_applied {
+            return Some(StartupBlockReason::ManagedConfigConflict);
+        }
+    }
+    if contents.last_applied_mode == Some(AppliedMode::Provider)
+        && codex.managed_config_state == ManagedConfigState::Present
+    {
+        let route_matches = contents
+            .last_applied_provider_id
+            .as_deref()
+            .zip(contents.last_applied_provider_base_url.as_deref())
+            .zip(codex.managed_config_route.as_ref())
+            .is_some_and(|((provider_id, base_url), route)| {
+                route.provider_id == provider_id
+                    && route.base_url == base_url
+                    && route.wire_api == "responses"
+                    && route.requires_openai_auth
+            });
+        if !route_matches {
             return Some(StartupBlockReason::ManagedConfigConflict);
         }
     }

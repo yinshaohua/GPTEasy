@@ -881,6 +881,10 @@ pub struct DatabaseContentsSnapshot {
     pub(crate) last_applied_credentials_fingerprint: Option<Option<String>>,
     #[serde(skip)]
     pub(crate) last_applied_mode: Option<AppliedMode>,
+    #[serde(skip)]
+    pub(crate) last_applied_provider_id: Option<String>,
+    #[serde(skip)]
+    pub(crate) last_applied_provider_base_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -1136,8 +1140,11 @@ fn inspect_database_contents(
         .map_err(|_| StateFailure::new(DatabaseBlockReason::CorruptDatabase))?;
     let last_applied = connection
         .query_row(
-            "SELECT mode, config_fingerprint, credentials_fingerprint \
-             FROM last_applied_state WHERE singleton = 1",
+            "SELECT l.mode, l.provider_id, l.config_fingerprint, \
+                    l.credentials_fingerprint, p.base_url \
+             FROM last_applied_state l \
+             LEFT JOIN providers p ON p.id = l.provider_id \
+             WHERE l.singleton = 1",
             [],
             |row| {
                 let mode = match row.get::<_, String>(0)?.as_str() {
@@ -1149,6 +1156,8 @@ fn inspect_database_contents(
                     mode,
                     row.get::<_, Option<String>>(1)?,
                     row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
                 ))
             },
         )
@@ -1188,11 +1197,15 @@ fn inspect_database_contents(
         pending_config_operation,
         last_applied_config_fingerprint: last_applied
             .as_ref()
-            .map(|(_, config_fingerprint, _)| config_fingerprint.clone()),
+            .map(|(_, _, config_fingerprint, _, _)| config_fingerprint.clone()),
         last_applied_credentials_fingerprint: last_applied
             .as_ref()
-            .map(|(_, _, credentials_fingerprint)| credentials_fingerprint.clone()),
-        last_applied_mode: last_applied.map(|(mode, _, _)| mode),
+            .map(|(_, _, _, credentials_fingerprint, _)| credentials_fingerprint.clone()),
+        last_applied_mode: last_applied.as_ref().map(|(mode, _, _, _, _)| *mode),
+        last_applied_provider_id: last_applied
+            .as_ref()
+            .and_then(|(_, provider_id, _, _, _)| provider_id.clone()),
+        last_applied_provider_base_url: last_applied.and_then(|(_, _, _, _, base_url)| base_url),
     })
 }
 

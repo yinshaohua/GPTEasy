@@ -7,7 +7,10 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use toml_edit::DocumentMut;
 
-use crate::environment::{ManagedConfigState, managed_config_evidence, managed_config_state};
+use crate::environment::{
+    ManagedConfigRoute, ManagedConfigState, managed_config_evidence, managed_config_route,
+    managed_config_state,
+};
 
 #[derive(Debug, Clone)]
 pub struct CodexInspector {
@@ -47,6 +50,7 @@ impl CodexInspector {
             credential_store,
             recovered_desktop_rewrite,
             managed_config_state,
+            managed_config_route,
         ) = self.inspect_config();
         let credential_file_status = credential_file_status(&self.codex_home, credential_store);
         let login_status = self.login_command.status();
@@ -58,6 +62,7 @@ impl CodexInspector {
             login_status,
             recovered_desktop_rewrite,
             managed_config_state,
+            managed_config_route,
             credential_fingerprint: credential_fingerprint(
                 &self.codex_home,
                 credential_store,
@@ -76,6 +81,7 @@ impl CodexInspector {
         CredentialStore,
         bool,
         ManagedConfigState,
+        Option<ManagedConfigRoute>,
     ) {
         let config_path = self.codex_home.join("config.toml");
         match fs::metadata(&config_path) {
@@ -87,6 +93,7 @@ impl CodexInspector {
                     CredentialStore::Unknown,
                     false,
                     ManagedConfigState::Conflict,
+                    None,
                 );
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -96,6 +103,7 @@ impl CodexInspector {
                     CredentialStore::Unknown,
                     false,
                     ManagedConfigState::Absent,
+                    None,
                 );
             }
             Err(_) => {
@@ -105,6 +113,7 @@ impl CodexInspector {
                     CredentialStore::Unknown,
                     false,
                     ManagedConfigState::Conflict,
+                    None,
                 );
             }
         }
@@ -117,10 +126,12 @@ impl CodexInspector {
                     CredentialStore::Unknown,
                     false,
                     ManagedConfigState::Conflict,
+                    None,
                 );
             }
         };
         let config_management = managed_config_state(&bytes);
+        let config_route = managed_config_route(&bytes);
         let (fingerprint, recovered_desktop_rewrite) = match managed_config_evidence(&bytes) {
             Some(evidence) => (
                 Some(evidence.fingerprint),
@@ -140,6 +151,7 @@ impl CodexInspector {
                     CredentialStore::Unknown,
                     recovered_desktop_rewrite,
                     config_management,
+                    config_route,
                 );
             }
         };
@@ -149,6 +161,7 @@ impl CodexInspector {
             credential_store_from_document(&document),
             recovered_desktop_rewrite,
             config_management,
+            config_route,
         )
     }
 }
@@ -306,6 +319,8 @@ pub struct CodexSnapshot {
     pub(crate) recovered_desktop_rewrite: bool,
     #[serde(skip)]
     pub(crate) managed_config_state: ManagedConfigState,
+    #[serde(skip)]
+    pub(crate) managed_config_route: Option<ManagedConfigRoute>,
     #[serde(skip)]
     pub(crate) credential_fingerprint: Option<String>,
 }

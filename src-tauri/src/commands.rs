@@ -992,8 +992,9 @@ fn log_startup_inspection(store: &IssueLogStore, result: &Result<StartupSnapshot
             "startup.inspect",
             snapshot.message_id,
             Some(format!(
-                "block_reason={:?}; database_status={:?}; config_status={:?}; \
+                "phase={}; block_reason={:?}; database_status={:?}; config_status={:?}; \
                  last_applied_mode={:?}; managed_config_state={:?}; login_status={:?}",
+                startup_inspection_phase(snapshot),
                 snapshot.block_reason,
                 snapshot.database.status,
                 snapshot.codex.config_status,
@@ -1013,6 +1014,43 @@ fn log_startup_inspection(store: &IssueLogStore, result: &Result<StartupSnapshot
             None,
         ),
         _ => {}
+    }
+}
+
+fn startup_inspection_phase(snapshot: &StartupSnapshot) -> &'static str {
+    match snapshot.block_reason {
+        Some(crate::startup::StartupBlockReason::CodexConfigInvalid)
+        | Some(crate::startup::StartupBlockReason::CodexConfigUnreadable)
+        | Some(crate::startup::StartupBlockReason::UnsupportedCredentialStore) => "config_match",
+        Some(crate::startup::StartupBlockReason::PendingConfigOperation)
+        | Some(crate::startup::StartupBlockReason::DatabaseUnavailable) => "applied_evidence",
+        Some(crate::startup::StartupBlockReason::ManagedConfigConflict) => {
+            let Some(contents) = snapshot.database.contents.as_ref() else {
+                return "applied_evidence";
+            };
+            if snapshot.codex.managed_config_state
+                == crate::environment::ManagedConfigState::Conflict
+            {
+                return "config_match";
+            }
+            if contents.last_applied_mode == Some(crate::state::AppliedMode::Provider)
+                && !credentials_match(contents, &snapshot.codex)
+            {
+                return "credential_match";
+            }
+            "applied_evidence"
+        }
+        None => "other",
+    }
+}
+
+fn credentials_match(
+    contents: &crate::state::DatabaseContentsSnapshot,
+    codex: &crate::codex::CodexSnapshot,
+) -> bool {
+    match &contents.last_applied_credentials_fingerprint {
+        Some(Some(expected)) => codex.credential_fingerprint.as_ref() == Some(expected),
+        Some(None) | None => false,
     }
 }
 
@@ -3260,7 +3298,6 @@ fn environment_task_failed() -> EnvironmentFailure {
 
 #[cfg(test)]
 mod tests {
-    use super::environment_conflict_details;
     use super::{
         DeleteProviderFailure, IssueLogLevel, IssueLogStore, ProviderFailure,
         ProviderFailureCategory, ProviderRevalidationAuditContext, ProviderRevalidationResult,
@@ -3277,6 +3314,7 @@ mod tests {
         log_visibility_status_event_failure, log_wsl_reclaim_phase, reasoning_failure_stage,
         reasoning_success_stage, record_mode_switch_pending_visibility, wsl_inventory_details,
     };
+    use super::{environment_conflict_details, startup_inspection_phase};
     use crate::codex::{LoginInspection, LoginMethod, LoginStatus};
     use crate::consumer::{
         ConsumerIdentity, ConsumerRole, ConsumerScan, ConsumerScanner, ConsumerStatus,
@@ -3319,6 +3357,36 @@ mod tests {
         assert_eq!(
             environment_conflict_details(None),
             "state=conflict phase=other"
+        );
+    }
+
+    #[test]
+    fn startup_conflict_log_includes_a_redacted_diagnostic_phase() {
+        assert_eq!(
+            startup_inspection_phase(&crate::startup::StartupSnapshot {
+                mode: crate::startup::ApplicationMode::Blocked,
+                message_id: "startup.managed_config_conflict",
+                block_reason: Some(crate::startup::StartupBlockReason::ManagedConfigConflict),
+                pending_operation_resolution: None,
+                database: crate::state::DatabaseSnapshot {
+                    status: crate::state::DatabaseStatus::Ready,
+                    schema_version: None,
+                    reason: None,
+                    contents: None,
+                },
+                codex: crate::codex::CodexSnapshot {
+                    config_status: crate::codex::CodexConfigStatus::Valid,
+                    config_fingerprint: None,
+                    credential_store: crate::codex::CredentialStore::File,
+                    credential_file_status: crate::codex::CredentialFileStatus::Present,
+                    login_status: crate::codex::LoginStatus::Unavailable,
+                    recovered_desktop_rewrite: false,
+                    managed_config_state: crate::environment::ManagedConfigState::Present,
+                    managed_config_route: None,
+                    credential_fingerprint: None,
+                },
+            }),
+            "applied_evidence"
         );
     }
 

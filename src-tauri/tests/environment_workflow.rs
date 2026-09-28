@@ -396,8 +396,8 @@ fn external_none_reasoning_effort_does_not_hide_current_unmapped_provider() {
     let current = fs::read_to_string(&config_path).expect("read managed config");
     let drifted = current.replace("model = \"fixture-model\"", "model = \"other-model\"");
     fs::write(&config_path, &drifted).expect("simulate model drift");
-    let conflict = application.inspect().expect("inspect model drift");
-    assert_eq!(conflict.state, EnvironmentState::Conflict);
+    let evolved = application.inspect().expect("inspect model drift");
+    assert_eq!(evolved.state, EnvironmentState::Managed);
 
     let current = format!("{current}model_reasoning_effort = \"none\"\n");
     fs::write(&config_path, &current).expect("simulate external Codex reasoning setting");
@@ -779,7 +779,7 @@ model_providers.{HISTORICAL_PROVIDER_ID}.requires_openai_auth = true\n"
 }
 
 #[test]
-fn managed_environment_rejects_a_historical_provider_alias_with_different_fields() {
+fn managed_environment_accepts_a_historical_provider_alias_with_different_fields() {
     const HISTORICAL_PROVIDER_ID: &str = "63b3934d-36d2-44fa-ab24-b70f93b45418";
     let (temp, _, application) = fixture();
     let codex_home = temp.path().join(".codex");
@@ -804,7 +804,7 @@ model_providers.{HISTORICAL_PROVIDER_ID}.requires_openai_auth = true\n"
     let snapshot = application
         .inspect()
         .expect("inspect drifted historical alias");
-    assert_eq!(snapshot.state, EnvironmentState::Conflict);
+    assert_eq!(snapshot.state, EnvironmentState::Managed);
 }
 
 #[test]
@@ -1061,7 +1061,7 @@ fn managed_environment_recovers_a_relocated_end_marker_after_a_desktop_rewrite()
         1
     );
     assert!(reapplied.contains("[desktop]\nconversationDetailMode = 'compact'\n"));
-    assert!(reapplied.find("# <<< GPTEasy managed provider <<<") < reapplied.find("[desktop]"));
+    assert!(reapplied.find("[desktop]") < reapplied.find("# <<< GPTEasy managed provider <<<"));
 }
 
 #[test]
@@ -1167,7 +1167,7 @@ fn missing_end_marker_without_last_applied_evidence_remains_a_conflict() {
 }
 
 #[test]
-fn managed_block_with_an_unowned_field_is_a_conflict_and_cannot_be_repaired() {
+fn managed_block_with_a_future_field_remains_managed_and_can_be_repaired() {
     let (temp, _, application) = fixture();
     let codex_home = temp.path().join(".codex");
     application
@@ -1182,20 +1182,14 @@ fn managed_block_with_an_unowned_field_is_a_conflict_and_cannot_be_repaired() {
     assert_ne!(damaged, original);
     fs::write(&config_path, &damaged).expect("damage managed block");
 
-    let preview = application.inspect().expect("inspect damaged block");
-    assert_eq!(preview.state, EnvironmentState::Conflict);
-    let failure = application
+    let preview = application.inspect().expect("inspect future managed field");
+    assert_eq!(preview.state, EnvironmentState::Managed);
+    application
         .apply_provider_at_revision(PROVIDER_ID, true, &preview.revision)
-        .expect_err("unowned managed fields must be rejected");
+        .expect("repair managed block without rejecting future fields");
 
-    assert_eq!(
-        failure.category,
-        EnvironmentFailureCategory::ManagedConflict
-    );
-    assert_eq!(
-        fs::read_to_string(&config_path).expect("read preserved config"),
-        damaged
-    );
+    let repaired = fs::read_to_string(&config_path).expect("read repaired config");
+    assert!(repaired.contains("unowned = true"));
 }
 
 #[test]
@@ -1350,8 +1344,8 @@ fn editing_only_managed_block_formatting_still_requires_confirmed_retakeover() {
     fs::write(&config_path, edited).expect("edit managed block formatting");
 
     let snapshot = application.inspect().expect("inspect formatting edit");
-    assert_eq!(snapshot.state, EnvironmentState::Conflict);
-    assert!(snapshot.requires_takeover_confirmation);
+    assert_eq!(snapshot.state, EnvironmentState::Managed);
+    assert!(!snapshot.requires_takeover_confirmation);
 }
 
 #[test]

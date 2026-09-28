@@ -5073,39 +5073,10 @@ fn managed_block_has_expected_shape(block: &str, provider_id: &str) -> bool {
     let Ok(document) = block.parse::<DocumentMut>() else {
         return false;
     };
-    let has_reasoning_effort = document.get("model_reasoning_effort").is_some();
-    let has_model_catalog = document.get("model_catalog_json").is_some();
-    let expected_root_fields = match (has_model_catalog, has_reasoning_effort) {
-        (true, true) => 5,
-        (true, false) | (false, true) => 4,
-        (false, false) => 3,
-    };
-    if document.iter().count() != expected_root_fields
-        || document.iter().any(|(key, _)| {
-            !matches!(
-                key,
-                "model"
-                    | "model_reasoning_effort"
-                    | "model_catalog_json"
-                    | "model_provider"
-                    | "model_providers"
-            )
-        })
-        || document
-            .get("model")
-            .and_then(|item| item.as_str())
-            .is_none()
-        || document.get("model_reasoning_effort").is_some_and(|item| {
-            item.as_str()
-                .is_none_or(|effort| !reasoning::is_valid_effort(effort))
-        })
-        || document
-            .get("model_catalog_json")
-            .is_some_and(|item| item.as_str() != Some("gpteasy-model-catalog.json"))
-        || document
-            .get("model_provider")
-            .and_then(|item| item.as_str())
-            != Some(provider_id)
+    if document
+        .get("model_provider")
+        .and_then(|item| item.as_str())
+        != Some(provider_id)
     {
         return false;
     }
@@ -5118,16 +5089,12 @@ fn managed_block_has_expected_shape(block: &str, provider_id: &str) -> bool {
     let Some(provider) = providers.get(provider_id).and_then(|item| item.as_table()) else {
         return false;
     };
-    let Some(fields) = managed_provider_fields(provider) else {
+    let Some(_fields) = managed_provider_fields(provider) else {
         return false;
     };
-    providers.iter().all(|(id, item)| {
-        Uuid::parse_str(id).is_ok()
-            && item
-                .as_table()
-                .and_then(managed_provider_fields)
-                .is_some_and(|candidate| managed_provider_fields_match(candidate, fields))
-    })
+    providers
+        .iter()
+        .all(|(id, item)| Uuid::parse_str(id).is_ok() && item.as_table().is_some())
 }
 
 fn managed_block_is_root_scoped(
@@ -5141,12 +5108,10 @@ fn managed_block_is_root_scoped(
     let Ok(block_document) = block.parse::<DocumentMut>() else {
         return false;
     };
-    if document.get("model").and_then(|item| item.as_str())
-        != block_document.get("model").and_then(|item| item.as_str())
-        || document
-            .get("model_provider")
-            .and_then(|item| item.as_str())
-            != Some(&managed.provider_id)
+    if document
+        .get("model_provider")
+        .and_then(|item| item.as_str())
+        != Some(&managed.provider_id)
     {
         return false;
     }
@@ -5176,12 +5141,13 @@ fn replace_managed_block_with_reasoning_upgrade(
     let block_document = block
         .parse::<DocumentMut>()
         .map_err(|_| managed_conflict())?;
+    let replacement = preserve_unknown_managed_fields(&block, replacement)?;
     let needs_reasoning_upgrade = block_document.get("model_reasoning_effort").is_none()
         && document.get("model_reasoning_effort").is_some();
     let needs_catalog_upgrade = block_document.get("model_catalog_json").is_none()
         && document.get("model_catalog_json").is_some();
     if !needs_reasoning_upgrade && !needs_catalog_upgrade {
-        return replace_managed_block(text, managed, Some(replacement))
+        return replace_managed_block(text, managed, Some(&replacement))
             .ok_or_else(managed_conflict);
     }
 
@@ -5196,13 +5162,79 @@ fn replace_managed_block_with_reasoning_upgrade(
     let ManagedBlock::Valid(migrated_block) = managed_block(&migrated) else {
         return Err(managed_conflict());
     };
-    replace_managed_block(&migrated, &migrated_block, Some(replacement))
+    replace_managed_block(&migrated, &migrated_block, Some(&replacement))
         .ok_or_else(managed_conflict)
+}
+
+fn preserve_unknown_managed_fields(
+    existing: &str,
+    replacement: &str,
+) -> Result<String, EnvironmentFailure> {
+    let source = existing
+        .parse::<DocumentMut>()
+        .map_err(|_| managed_conflict())?;
+    let mut target = replacement
+        .parse::<DocumentMut>()
+        .map_err(|_| managed_conflict())?;
+
+    for (key, item) in source.iter() {
+        if !matches!(
+            key,
+            "model"
+                | "model_reasoning_effort"
+                | "model_catalog_json"
+                | "model_provider"
+                | "model_providers"
+        ) && target.get(key).is_none()
+        {
+            target.insert(key, item.clone());
+        }
+    }
+
+    let Some(source_providers) = source
+        .get("model_providers")
+        .and_then(|item| item.as_table())
+    else {
+        return Ok(replacement.to_owned());
+    };
+    let Some(target_providers) = target
+        .get_mut("model_providers")
+        .and_then(|item| item.as_table_mut())
+    else {
+        return Err(managed_conflict());
+    };
+    for (provider_id, source_item) in source_providers.iter() {
+        let Some(source_provider) = source_item.as_table() else {
+            continue;
+        };
+        let Some(target_provider) = target_providers
+            .get_mut(provider_id)
+            .and_then(|item| item.as_table_mut())
+        else {
+            continue;
+        };
+        for (key, item) in source_provider.iter() {
+            if !matches!(
+                key,
+                "name" | "base_url" | "wire_api" | "requires_openai_auth" | "supports_websockets"
+            ) && target_provider.get(key).is_none()
+            {
+                target_provider.insert(key, item.clone());
+            }
+        }
+    }
+
+    let newline = if replacement.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    Ok(normalize_newlines(&target.to_string(), newline))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ManagedProviderFields<'a> {
-    name: &'a str,
+    name: Option<&'a str>,
     base_url: &'a str,
     wire_api: &'a str,
     requires_openai_auth: bool,
@@ -5210,24 +5242,16 @@ struct ManagedProviderFields<'a> {
 }
 
 fn managed_provider_fields(table: &toml_edit::Table) -> Option<ManagedProviderFields<'_>> {
-    if !(4..=5).contains(&table.len()) {
-        return None;
-    }
     let supports_websockets = match table.get("supports_websockets") {
         Some(value) => Some(value.as_bool()?),
         None => None,
     };
     Some(ManagedProviderFields {
-        name: table.get("name")?.as_str()?,
+        name: table.get("name").and_then(|item| item.as_str()),
         base_url: table.get("base_url")?.as_str()?,
         wire_api: table.get("wire_api")?.as_str()?,
         requires_openai_auth: table.get("requires_openai_auth")?.as_bool()?,
         supports_websockets,
-    })
-    .filter(|fields| {
-        fields.wire_api == "responses"
-            && fields.requires_openai_auth
-            && fields.supports_websockets.is_none_or(|enabled| !enabled)
     })
 }
 
@@ -5235,11 +5259,9 @@ fn managed_provider_fields_match(
     left: ManagedProviderFields<'_>,
     right: ManagedProviderFields<'_>,
 ) -> bool {
-    left.name == right.name
-        && left.base_url == right.base_url
+    left.base_url == right.base_url
         && left.wire_api == right.wire_api
         && left.requires_openai_auth == right.requires_openai_auth
-        && left.supports_websockets.unwrap_or(false) == right.supports_websockets.unwrap_or(false)
 }
 
 fn managed_provider_table<'a>(
@@ -5256,6 +5278,14 @@ fn managed_provider_table<'a>(
 pub(crate) struct ManagedConfigEvidence {
     pub(crate) fingerprint: String,
     pub(crate) recovered_desktop_rewrite: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ManagedConfigRoute {
+    pub(crate) provider_id: String,
+    pub(crate) base_url: String,
+    pub(crate) wire_api: String,
+    pub(crate) requires_openai_auth: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5292,6 +5322,27 @@ pub(crate) fn managed_config_fingerprint(bytes: &[u8]) -> Option<String> {
     managed_config_evidence(bytes).map(|evidence| evidence.fingerprint)
 }
 
+pub(crate) fn managed_config_route(bytes: &[u8]) -> Option<ManagedConfigRoute> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let ManagedBlock::Valid(managed) = managed_block(text) else {
+        return None;
+    };
+    let block = canonical_managed_block(text, &managed)?;
+    let document = block.parse::<DocumentMut>().ok()?;
+    let provider_id = document.get("model_provider")?.as_str()?.to_owned();
+    if provider_id != managed.provider_id {
+        return None;
+    }
+    let fields =
+        managed_provider_table(&document, &provider_id).and_then(managed_provider_fields)?;
+    Some(ManagedConfigRoute {
+        provider_id,
+        base_url: fields.base_url.to_owned(),
+        wire_api: fields.wire_api.to_owned(),
+        requires_openai_auth: fields.requires_openai_auth,
+    })
+}
+
 pub(crate) fn managed_config_matches_applied_evidence(
     bytes: &[u8],
     applied_fingerprint: Option<&str>,
@@ -5300,6 +5351,9 @@ pub(crate) fn managed_config_matches_applied_evidence(
         return false;
     };
     if managed_config_fingerprint(bytes).as_deref() == Some(applied_fingerprint) {
+        return true;
+    }
+    if managed_config_evidence(bytes).is_some_and(|evidence| !evidence.recovered_desktop_rewrite) {
         return true;
     }
     historical_alias_free_fingerprint(bytes).as_deref() == Some(applied_fingerprint)
@@ -5382,9 +5436,11 @@ fn historical_alias_free_fingerprint(bytes: &[u8]) -> Option<String> {
             string(model_catalog_json)
         ));
     }
+    primary_lines.push(format!("model_provider = {}", string(&managed.provider_id)));
+    if let Some(name) = fields.name {
+        primary_lines.push(format!("{table}.name = {}", string(name)));
+    }
     primary_lines.extend([
-        format!("model_provider = {}", string(&managed.provider_id)),
-        format!("{table}.name = {}", string(fields.name)),
         format!("{table}.base_url = {}", string(fields.base_url)),
         format!("{table}.wire_api = {}", string(fields.wire_api)),
         format!(
@@ -5487,42 +5543,13 @@ fn managed_config_matches(document: &DocumentMut, provider: &ProviderTarget) -> 
     else {
         return false;
     };
-    let reasoning_matches = if document.get("model_catalog_json").is_some() {
-        match provider.reasoning_selection.effort.as_deref() {
-            Some(effort) => {
-                document
-                    .get("model_reasoning_effort")
-                    .and_then(|item| item.as_str())
-                    == Some(effort)
-            }
-            // Older GPTEasy versions wrote a guessed effort for unmapped providers.
-            // Accept that legacy field for inspection; explicit writes still omit it.
-            None => document.get("model_reasoning_effort").is_none_or(|item| {
-                item.as_str()
-                    .is_some_and(|effort| effort == "none" || reasoning::is_valid_effort(effort))
-            }),
-        }
-    } else {
-        // Configurations written before the model catalog migration did not
-        // carry capability metadata. Preserve them as-is; the next explicit
-        // GPTEasy write upgrades the managed block to the current schema.
-        match provider.reasoning_selection.effort.as_deref() {
-            Some(_) => document
-                .get("model_reasoning_effort")
-                .is_none_or(|item| item.as_str().is_some_and(reasoning::is_valid_effort)),
-            None => document.get("model_reasoning_effort").is_none_or(|item| {
-                item.as_str()
-                    .is_some_and(|effort| effort == "none" || reasoning::is_valid_effort(effort))
-            }),
-        }
-    };
-    document.get("model").and_then(|item| item.as_str()) == Some(&provider.default_model)
-        && reasoning_matches
-        && document
-            .get("model_provider")
-            .and_then(|item| item.as_str())
-            == Some(&provider.id)
+    document
+        .get("model_provider")
+        .and_then(|item| item.as_str())
+        == Some(&provider.id)
         && fields.base_url == provider.base_url
+        && fields.wire_api == "responses"
+        && fields.requires_openai_auth
 }
 
 fn credentials_match(
