@@ -9,7 +9,7 @@ use rusqlite::backup::Backup;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction};
 use serde::Serialize;
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 11;
+pub const CURRENT_SCHEMA_VERSION: i64 = 12;
 const APPLICATION_ID: i64 = 0x4750_5445;
 const BACKUP_LIMIT: usize = 3;
 const INSTALLATION_MARKER_CONTENT: &[u8] = b"gpteasy-state-v1\n";
@@ -178,6 +178,12 @@ ALTER TABLE pending_config_operation ADD COLUMN old_catalog_fingerprint TEXT;
 ALTER TABLE pending_config_operation ADD COLUMN new_catalog_fingerprint TEXT;
 "#;
 
+const SCHEMA_V12: &str = r#"
+ALTER TABLE wsl_pending_operation ADD COLUMN old_catalog_fingerprint TEXT;
+ALTER TABLE wsl_pending_operation ADD COLUMN new_catalog_fingerprint TEXT;
+ALTER TABLE wsl_environments ADD COLUMN catalog_fingerprint TEXT;
+"#;
+
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, SCHEMA_V1),
     (2, SCHEMA_V2),
@@ -190,6 +196,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (9, SCHEMA_V9),
     (10, SCHEMA_V10),
     (11, SCHEMA_V11),
+    (12, SCHEMA_V12),
 ];
 
 #[derive(Debug, Clone)]

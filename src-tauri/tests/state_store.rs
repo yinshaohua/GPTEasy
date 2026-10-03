@@ -620,6 +620,13 @@ fn v10_migration_preserves_pending_operations_without_inventing_catalog_hashes()
     assert!(store.bootstrap().is_ready());
     let connection = Connection::open(store.paths().database()).expect("open state database");
     connection
+        .execute_batch(
+            "ALTER TABLE wsl_pending_operation DROP COLUMN old_catalog_fingerprint;
+        ALTER TABLE wsl_pending_operation DROP COLUMN new_catalog_fingerprint;
+        ALTER TABLE wsl_environments DROP COLUMN catalog_fingerprint;",
+        )
+        .unwrap();
+    connection
         .execute(
             "ALTER TABLE pending_config_operation DROP COLUMN old_catalog_fingerprint",
             [],
@@ -659,5 +666,56 @@ fn v10_migration_preserves_pending_operations_without_inventing_catalog_hashes()
             None,
             None
         )
+    );
+}
+
+#[test]
+fn v11_migration_keeps_wsl_pending_evidence_and_leaves_catalog_hashes_unknown() {
+    let temp = TempDir::new().unwrap();
+    let store = store_in(&temp);
+    assert!(store.bootstrap().is_ready());
+    let connection = Connection::open(store.paths().database()).unwrap();
+    connection.execute_batch("ALTER TABLE wsl_pending_operation DROP COLUMN old_catalog_fingerprint;
+        ALTER TABLE wsl_pending_operation DROP COLUMN new_catalog_fingerprint;
+        ALTER TABLE wsl_environments DROP COLUMN catalog_fingerprint;
+        INSERT INTO wsl_environments(environment_id, display_name, default_uid, wsl_version,
+            availability, configuration_state, updated_at) VALUES ('guest', 'Ubuntu', 1000, 2, 'manageable', 'legacy', '123');
+        INSERT INTO wsl_pending_operation(environment_id, operation_id, stage, target_provider_id, originally_running,
+            expected_default_uid, expected_revision, started_at, lock_token,
+            old_config_fingerprint, new_config_fingerprint,
+            old_credentials_fingerprint, new_credentials_fingerprint)
+        VALUES ('guest', 'legacy-wsl-operation', 'prepared', 'legacy-provider', 1, 1000, 'revision', '123', 'owner-token',
+            'old-config', 'new-config', 'old-credential', 'new-credential');
+        PRAGMA user_version = 11;").unwrap();
+    drop(connection);
+    assert!(store.bootstrap().is_ready());
+    let connection = Connection::open(store.paths().database()).unwrap();
+    let pending = connection.query_row("SELECT operation_id, stage, lock_token,
+        old_config_fingerprint, new_config_fingerprint, old_catalog_fingerprint, new_catalog_fingerprint
+        FROM wsl_pending_operation WHERE environment_id = 'guest'", [], |row| Ok((
+            row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?, row.get::<_, String>(4)?,
+            row.get::<_, Option<String>>(5)?, row.get::<_, Option<String>>(6)?))).unwrap();
+    assert_eq!(
+        pending,
+        (
+            "legacy-wsl-operation".to_owned(),
+            "prepared".to_owned(),
+            "owner-token".to_owned(),
+            "old-config".to_owned(),
+            "new-config".to_owned(),
+            None,
+            None
+        )
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT catalog_fingerprint FROM wsl_environments WHERE environment_id = 'guest'",
+                [],
+                |row| row.get::<_, Option<String>>(0)
+            )
+            .unwrap(),
+        None
     );
 }

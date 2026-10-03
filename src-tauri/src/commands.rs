@@ -406,12 +406,27 @@ fn log_reasoning_audit(
 }
 
 fn reasoning_failure_stage(message_id: &str) -> &'static str {
-    if message_id == "environment.catalog_snapshot_invalid" {
+    if matches!(
+        message_id,
+        "environment.catalog_snapshot_invalid" | "wsl.catalog_snapshot_invalid"
+    ) {
         "catalog_snapshot"
     } else if message_id == "environment.catalog_generation_failed" {
         "catalog_generation"
-    } else if message_id == "environment.catalog_schema_incompatible" {
+    } else if matches!(
+        message_id,
+        "environment.catalog_schema_incompatible" | "wsl.catalog_cli_incompatible"
+    ) {
         "catalog_schema"
+    } else if matches!(
+        message_id,
+        "wsl.catalog_binding_invalid" | "wsl.catalog_conflict" | "wsl.catalog_unsafe"
+    ) {
+        "catalog_commit"
+    } else if message_id == "wsl.guest_reread_failed" {
+        "artifact_readback"
+    } else if matches!(message_id, "wsl.recovery_conflict" | "wsl.recovery_pending") {
+        "artifact_recovery"
     } else if message_id == "environment.artifact_write_failed" {
         "artifact_commit"
     } else if message_id.contains("restart") {
@@ -517,7 +532,10 @@ fn wsl_inventory_details(provider_count: usize, environments: &[WslEnvironmentSu
             "provider_count={} environment_count={} manageable_count={} ",
             "legacy_count={} conflict_count={} busy_count={} ",
             "unknown_schema_count={} invalid_markers_count={} ",
-            "invalid_credential_reference_count={} invalid_config_count={}"
+            "invalid_credential_reference_count={} invalid_config_count={} ",
+            "catalog_missing_count={} catalog_corrupt_count={} catalog_binding_count={} ",
+            "catalog_unsafe_count={} catalog_policy_outdated_count={} catalog_snapshot_updated_count={} ",
+            "recovery_conflict_count={} refresh_pending_count={}"
         ),
         provider_count,
         stats.environment_count,
@@ -529,6 +547,18 @@ fn wsl_inventory_details(provider_count: usize, environments: &[WslEnvironmentSu
         message_count("wsl.markers_invalid"),
         message_count("wsl.credential_reference_invalid"),
         message_count("wsl.config_invalid"),
+        message_count("wsl.catalog_missing"),
+        message_count("wsl.catalog_corrupt"),
+        message_count("wsl.catalog_binding_invalid")
+            + message_count("wsl.catalog_reference_invalid"),
+        message_count("wsl.catalog_unsafe"),
+        message_count("wsl.catalog_policy_outdated"),
+        message_count("wsl.catalog_snapshot_updated"),
+        message_count("wsl.recovery_conflict"),
+        environments
+            .iter()
+            .filter(|environment| environment.pending_restart)
+            .count(),
     )
 }
 
@@ -4234,6 +4264,61 @@ mod tests {
         assert!(!encoded.contains("provider-id"));
         assert!(!encoded.contains("Sensitive Provider"));
         assert!(!encoded.contains("provider.example"));
+    }
+
+    #[test]
+    fn wsl_catalog_inventory_preserves_failure_distinctions_without_sensitive_identity() {
+        let env = |message: &str| crate::wsl::WslEnvironmentSummary {
+            environment_id: "sensitive-canary-id".into(),
+            display_name: "sensitive-canary-name".into(),
+            command_name: Some("sensitive-canary-name".into()),
+            default_uid: Some(1000),
+            running: true,
+            availability: WslAvailability::Manageable,
+            current_provider: None,
+            actual_provider_id: None,
+            configuration_state: WslConfigurationState::Conflict,
+            requires_attention: true,
+            pending_restart: true,
+            revision: "sensitive-canary-revision".into(),
+            message_id: Some(message.into()),
+            reclaim_preview: None,
+        };
+        let environments = [
+            "wsl.catalog_missing",
+            "wsl.catalog_corrupt",
+            "wsl.catalog_binding_invalid",
+            "wsl.catalog_policy_outdated",
+            "wsl.catalog_snapshot_updated",
+            "wsl.recovery_conflict",
+        ]
+        .map(env);
+        let directory = tempdir().unwrap();
+        let store = IssueLogStore::new(directory.path());
+        store.append(
+            IssueLogLevel::Info,
+            "wsl.selection_state",
+            "wsl.selection_state_observed",
+            Some(wsl_inventory_details(2, &environments)),
+        );
+        let records = store.list(0, Some(IssueLogLevel::Info), Some("wsl.selection_state"));
+        let details = records[0].details.as_deref().unwrap();
+        for count in [
+            "catalog_missing_count=1",
+            "catalog_corrupt_count=1",
+            "catalog_binding_count=1",
+            "catalog_policy_outdated_count=1",
+            "catalog_snapshot_updated_count=1",
+            "recovery_conflict_count=1",
+            "refresh_pending_count=6",
+        ] {
+            assert!(details.contains(count), "{details}");
+        }
+        assert!(
+            !serde_json::to_string(&records)
+                .unwrap()
+                .contains("sensitive-canary")
+        );
     }
 
     #[test]

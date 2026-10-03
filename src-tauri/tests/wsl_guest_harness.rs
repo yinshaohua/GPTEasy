@@ -19,6 +19,7 @@ use gpteasy_lib::wsl::{
     WslFailurePoint, WslFaultInjector, WslLifecycleOutcome,
 };
 use rusqlite::{Connection, params};
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 const GUEST_WRITER: &[u8] = include_bytes!("../src/wsl_guest_writer.sh");
@@ -303,16 +304,55 @@ fn checked_output(distribution: &str, args: &[&str], stdin: &[u8]) -> Vec<u8> {
     output.stdout
 }
 
-fn bundle(config: &[u8], credential: &[u8]) -> Vec<u8> {
+fn config_metadata(config: &[u8], field: &str) -> String {
+    let prefix = format!("# GPTEasy {field}:");
+    String::from_utf8_lossy(config)
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix(&prefix)
+                .map(|value| value.trim().to_owned())
+        })
+        .expect("catalog metadata")
+}
+
+fn fingerprint(base_url: &str, key: &str, model: &str) -> String {
+    format!(
+        "{:x}",
+        Sha256::digest(
+            format!("gpteasy-provider-combination-v1\0{base_url}\0{model}\0{key}").as_bytes()
+        )
+    )
+}
+
+fn bundle(config: &[u8], credential: &[u8], catalog: &[u8]) -> Vec<u8> {
     let mut result = format!(
-        "GPTEASY_WSL_BUNDLE_V2\n{}\n{}\n",
+        "GPTEASY_WSL_BUNDLE_V3\n{}\n{}\n{}\n{}\n{}\n{:x}\n{}\n",
         config.len(),
-        credential.len()
+        credential.len(),
+        catalog.len(),
+        config_metadata(config, "model-catalog-file"),
+        config_metadata(config, "model-catalog-artifact"),
+        Sha256::digest(catalog),
+        config_metadata(config, "model-catalog-provider-fingerprint"),
     )
     .into_bytes();
     result.extend_from_slice(config);
     result.extend_from_slice(credential);
+    result.extend_from_slice(catalog);
     result
+}
+
+fn snapshot_catalog(snapshot: &Path, provider_id: &str) -> Vec<u8> {
+    let script = fs::read_to_string(snapshot).expect("exported snapshot");
+    let prefix = format!("gpteasy__provider_catalog_payload_{provider_id}() {{ printf '%s' '");
+    let payload = script
+        .split_once(&prefix)
+        .expect("catalog payload")
+        .1
+        .split_once("'; }\n")
+        .expect("payload end")
+        .0;
+    payload.replace("'\\''", "'").into_bytes()
 }
 
 fn distribution_is_running(distribution: &str) -> bool {
@@ -387,10 +427,18 @@ fn insert_harness_providers(connection: &Connection) {
                 "INSERT INTO providers(
                     id, name, base_url, api_key, default_model, verified_at,
                     verification_fingerprint, sort_order
-                 ) VALUES (?1, ?2, 'https://provider.example/v1', ?3, ?4, '1', 'fingerprint', ?5)",
-                params![id, name, api_key, model, sort_order],
+                 ) VALUES (?1, ?2, 'https://provider.example/v1', ?3, ?4, '1', ?6, ?5)",
+                params![
+                    id,
+                    name,
+                    api_key,
+                    model,
+                    sort_order,
+                    fingerprint("https://provider.example/v1", api_key, model)
+                ],
             )
             .expect("insert harness provider");
+        connection.execute("INSERT INTO provider_model_catalog(provider_id, verification_fingerprint, models_json) VALUES (?1, ?2, ?3)", params![id, fingerprint("https://provider.example/v1", api_key, model), serde_json::to_string(&[model, "shared-model", "vendor-new"]).unwrap()]).expect("insert harness catalog");
     }
 }
 
@@ -449,6 +497,15 @@ fn running_guest_harness_preserves_auth_and_enforces_the_shared_desktop_lock() {
     assert_distribution_is_running(&distribution);
     let (_application_temp, application_store) = wsl_application_state();
     let (_snapshot_temp, snapshot) = bash_snapshot(&application_store);
+    let catalog = snapshot_catalog(&snapshot, "22222222-2222-4222-8222-222222222222");
+    let zsh_snapshot = _snapshot_temp.path().join("gpteasy.zsh");
+    ProviderApplication::new(
+        application_store.clone(),
+        ProviderValidator::new(ValidationTimeouts::default()),
+    )
+    .export_linux_script(LinuxShell::Zsh, &zsh_snapshot, false)
+    .unwrap();
+    let zsh_snapshot = windows_path_for_wsl(&distribution, &zsh_snapshot);
     let snapshot = windows_path_for_wsl(&distribution, &snapshot);
     let home_path = String::from_utf8(checked_output(
         &distribution,
@@ -522,12 +579,29 @@ cat >"$HOME/lock" && chmod 700 "$HOME/lock"
     let credential_relative =
         format!(".gpteasy-shell/credentials/desktop-harness/{provider_id}.token");
     let auth_script = format!("cat -- \"${{CODEX_HOME:-$HOME/.codex}}/{credential_relative}\"");
+    let credential = acceptance_key("GPTEASY_ACCEPTANCE_KEY_A", "wsl-harness-secret").into_bytes();
+    let catalog_artifact = "44444444-4444-4444-8444-444444444444";
+    let catalog_relative =
+        format!(".gpteasy-shell/model-catalogs/desktop-harness/{catalog_artifact}.json");
+    let catalog_sha256 = format!("{:x}", Sha256::digest(&catalog));
+    let catalog_fingerprint = fingerprint(
+        "https://provider.example/v1",
+        std::str::from_utf8(&credential).unwrap(),
+        "model-a",
+    );
     let config = format!(
         "# >>> GPTEasy managed provider >>>\n\
-# GPTEasy schema-version: 1\n\
+# GPTEasy schema-version: 2\n\
 # GPTEasy provider-id: {provider_id}\n\
 # GPTEasy source-id: desktop-harness\n\
 # GPTEasy credential-file: {credential_relative}\n\
+# GPTEasy model-catalog-protocol: codex-model-catalog-v1\n\
+# GPTEasy model-catalog-policy: common-reasoning-selector-v1\n\
+# GPTEasy model-catalog-file: {catalog_relative}\n\
+# GPTEasy model-catalog-artifact: {catalog_artifact}\n\
+# GPTEasy model-catalog-sha256: {catalog_sha256}\n\
+# GPTEasy model-catalog-provider-fingerprint: {catalog_fingerprint}\n\
+model_catalog_json = \"{home}/.codex/{catalog_relative}\"\n\
 model = \"model-a\"\n\
 model_provider = \"gpteasy\"\n\
 model_providers.gpteasy.name = \"Harness\"\n\
@@ -535,10 +609,68 @@ model_providers.gpteasy.base_url = \"https://provider.example/v1\"\n\
 model_providers.gpteasy.wire_api = \"responses\"\n\
 model_providers.gpteasy.supports_websockets = false\n\
 model_providers.gpteasy.auth.command = \"sh\"\n\
- model_providers.gpteasy.auth.args = [\"-c\", '{auth_script}']\n\
+model_providers.gpteasy.auth.args = [\"-c\", '{auth_script}']\n\
 # <<< GPTEasy managed provider <<<\n"
     );
-    let credential = acceptance_key("GPTEASY_ACCEPTANCE_KEY_A", "wsl-harness-secret").into_bytes();
+    let write_candidate = |bytes: &[u8], expected: &str| {
+        wsl_output(
+            &distribution,
+            &[
+                "/usr/bin/env",
+                &format!("HOME={home}"),
+                "/bin/sh",
+                &format!("{home}/writer"),
+                token,
+                expected,
+            ],
+            bytes,
+        )
+    };
+    let valid_bundle = bundle(config.as_bytes(), &credential, &catalog);
+    let mut trailing = valid_bundle.clone();
+    trailing.push(b'!');
+    for invalid in [&valid_bundle[..valid_bundle.len() - 1], trailing.as_slice()] {
+        let rejected = write_candidate(invalid, "missing");
+        assert_eq!(rejected.status.code(), Some(40));
+        assert!(
+            !String::from_utf8_lossy(&rejected.stderr)
+                .contains(std::str::from_utf8(&credential).unwrap())
+        );
+    }
+    let wrong_hash = config.replace(&catalog_sha256, &"0".repeat(64));
+    assert_eq!(
+        write_candidate(
+            &bundle(wrong_hash.as_bytes(), &credential, &catalog),
+            "missing"
+        )
+        .status
+        .code(),
+        Some(48)
+    );
+    let unsafe_path = config.replace(
+        &catalog_relative,
+        ".gpteasy-shell/model-catalogs/../unsafe.json",
+    );
+    assert_eq!(
+        write_candidate(
+            &bundle(unsafe_path.as_bytes(), &credential, &catalog),
+            "missing"
+        )
+        .status
+        .code(),
+        Some(48)
+    );
+    let wrong_binding = config.replace(&catalog_fingerprint, &"0".repeat(64));
+    assert_eq!(
+        write_candidate(
+            &bundle(wrong_binding.as_bytes(), &credential, &catalog),
+            "missing"
+        )
+        .status
+        .code(),
+        Some(48)
+    );
+
     let written = wsl_output(
         &distribution,
         &[
@@ -549,7 +681,7 @@ model_providers.gpteasy.auth.command = \"sh\"\n\
             token,
             "missing",
         ],
-        &bundle(config.as_bytes(), &credential),
+        &bundle(config.as_bytes(), &credential, &catalog),
     );
     assert!(
         written.status.success(),
@@ -577,6 +709,89 @@ model_providers.gpteasy.auth.command = \"sh\"\n\
     assert!(read_file(".codex/config.toml") == config.as_bytes());
     assert!(read_file(&format!(".codex/{credential_relative}")) == credential);
     assert!(read_file(".codex/auth.json") == br#"{"login":"unchanged"}"#);
+
+    assert!(read_file(&format!(".codex/{catalog_relative}")) == catalog);
+    let public_evidence = String::from_utf8_lossy(&written.stderr);
+    for stage in [
+        "stage=catalog_commit catalog_state=ready",
+        "stage=config_commit catalog_state=ready",
+        "stage=artifact_reread catalog_state=verified",
+    ] {
+        assert!(public_evidence.contains(stage));
+    }
+    assert!(!public_evidence.contains(std::str::from_utf8(&credential).unwrap()));
+    let config_hash = format!("{:x}", Sha256::digest(config.as_bytes()));
+    let read_catalog = || {
+        wsl_output(
+            &distribution,
+            &[
+                "/usr/bin/env",
+                &format!("HOME={home}"),
+                "/bin/sh",
+                "-c",
+                GUEST_PRIVATE_READER,
+                "gpteasy",
+                &catalog_relative,
+            ],
+            &[],
+        )
+    };
+    let alter_catalog = |command: &str| {
+        checked_output(
+            &distribution,
+            &[
+                "/usr/bin/env",
+                &format!("HOME={home}"),
+                "/bin/sh",
+                "-c",
+                command,
+                "gpteasy",
+                &catalog_relative,
+            ],
+            &[],
+        );
+    };
+    assert!(read_catalog().status.success());
+    alter_catalog(
+        "file=\"$HOME/.codex/$1\"; mv \"$file\" \"$HOME/catalog-target\"; ln -s \"$HOME/catalog-target\" \"$file\"",
+    );
+    assert_eq!(read_catalog().status.code(), Some(43));
+    assert_eq!(
+        write_candidate(&valid_bundle, &config_hash).status.code(),
+        Some(47)
+    );
+    alter_catalog("file=\"$HOME/.codex/$1\"; rm \"$file\"; ln \"$HOME/catalog-target\" \"$file\"");
+    assert_eq!(read_catalog().status.code(), Some(43));
+    assert_eq!(
+        write_candidate(&valid_bundle, &config_hash).status.code(),
+        Some(47)
+    );
+    alter_catalog("rm \"$HOME/catalog-target\"; chmod 644 \"$HOME/.codex/$1\"");
+    assert_eq!(read_catalog().status.code(), Some(43));
+    assert_eq!(
+        write_candidate(&valid_bundle, &config_hash).status.code(),
+        Some(47)
+    );
+    alter_catalog(
+        "file=\"$HOME/.codex/$1\"; chmod 600 \"$file\"; cp -p \"$file\" \"$HOME/catalog-original\"; printf broken >\"$file\"",
+    );
+    assert_eq!(
+        write_candidate(&valid_bundle, &config_hash).status.code(),
+        Some(47)
+    );
+    assert!(read_file(".codex/config.toml") == config.as_bytes());
+    alter_catalog(
+        "cp -p \"$HOME/catalog-original\" \"$HOME/.codex/$1\"; rm \"$HOME/catalog-original\"",
+    );
+    assert_eq!(read_catalog().stdout, catalog);
+    alter_catalog(
+        "file=\"$HOME/.codex/$1\"; source=\"${file%/*}\"; mv \"$source\" \"$HOME/catalog-source\"; ln -s \"$HOME/catalog-source\" \"$source\"",
+    );
+    assert_eq!(read_catalog().status.code(), Some(43));
+    alter_catalog(
+        "file=\"$HOME/.codex/$1\"; source=\"${file%/*}\"; rm \"$source\"; mv \"$HOME/catalog-source\" \"$source\"",
+    );
+    assert!(read_catalog().status.success());
 
     let lock_reference =
         ".gpteasy-shell/credentials/desktop-lock/44444444-4444-4444-8444-444444444444.token";
@@ -739,7 +954,19 @@ cp -- "$snapshot" "$HOME/gpteasy.sh"
 chmod 600 "$HOME/gpteasy.sh"
 cat >"$HOME/bin/codex" <<'CODEX'
 #!/bin/sh
-printf '%s\n' 'codex-cli 0.147.0'
+case "$1" in
+  --version) printf '%s\n' 'codex-cli 0.147.0'; exit 0 ;;
+  app-server) [ "$2" = '--listen' ] || exit 2 ;;
+  *) exit 2 ;;
+esac
+[ -f "$CODEX_HOME/catalog.json" ] || exit 3
+grep -Fq '"slug": "gpteasy-catalog-schema-probe-v1"' "$CODEX_HOME/catalog.json" || exit 3
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*) printf '%s\n' '{"id":1,"result":{"userAgent":"fixture-native-linux"}}' ;;
+    *'"method":"model/list"'*) printf '%s\n' '{"id":2,"result":{"data":[{"model":"gpteasy-catalog-schema-probe-v1","defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"low"},{"reasoningEffort":"medium"},{"reasoningEffort":"high"},{"reasoningEffort":"xhigh"}]}],"nextCursor":null}}' ;;
+  esac
+done
 CODEX
 chmod 700 "$HOME/bin/codex"
 "#;
@@ -752,6 +979,18 @@ chmod 700 "$HOME/bin/codex"
             "gpteasy",
             home,
             &snapshot,
+        ],
+        &[],
+    );
+    checked_output(
+        &distribution,
+        &[
+            "/bin/sh",
+            "-c",
+            "cp -- \"$2\" \"$1/gpteasy.zsh\"; chmod 600 \"$1/gpteasy.zsh\"",
+            "gpteasy",
+            home,
+            &zsh_snapshot,
         ],
         &[],
     );
@@ -877,7 +1116,7 @@ chmod 700 "$HOME/bin/codex"
     );
     let shell_config = read_file(".codex/config.toml");
     let shell_config_text = String::from_utf8(shell_config).expect("shell config is UTF-8");
-    assert!(shell_config_text.contains("# GPTEasy schema-version: 1"));
+    assert!(shell_config_text.contains("# GPTEasy schema-version: 2"));
     assert!(shell_config_text.contains(&format!("# GPTEasy provider-id: {deleted_provider_id}")));
     assert!(shell_config_text.contains("# GPTEasy source-id:"));
     assert!(!shell_config_text.contains("shell-harness-secret"));
@@ -909,6 +1148,163 @@ chmod 700 "$HOME/bin/codex"
         "applying an old snapshot must not recreate the deleted catalog entry",
     );
 
+    let run_zsh = |command: &str, stdin: &[u8]| {
+        wsl_output(
+            &distribution,
+            &[
+                "/usr/bin/env",
+                &shell_home,
+                &shell_codex_home,
+                &shell_path,
+                "/bin/zsh",
+                "-c",
+                command,
+            ],
+            stdin,
+        )
+    };
+    let before_restore = read_file(".codex/config.toml");
+    alter_catalog("mv \"$HOME/.codex/$1\" \"$HOME/catalog-hidden\"");
+    let refused_restore = run_shell("source \"$HOME/gpteasy.sh\"; gpteasy restore", b"y\n");
+    assert!(!refused_restore.status.success());
+    assert_eq!(read_file(".codex/config.toml"), before_restore);
+    alter_catalog("mv \"$HOME/catalog-hidden\" \"$HOME/.codex/$1\"");
+    let restored = run_zsh("source \"$HOME/gpteasy.zsh\"; gpteasy restore", b"y\n");
+    assert!(
+        restored.status.success(),
+        "Zsh restore failed: {}",
+        String::from_utf8_lossy(&restored.stderr)
+    );
+    assert_eq!(read_file(".codex/config.toml"), config.as_bytes());
+    assert_eq!(read_catalog().stdout, catalog);
+    let desktop_state = recovered_application
+        .list()
+        .unwrap()
+        .into_iter()
+        .find(|env| env.environment_id == desktop_refreshed.environment_id)
+        .unwrap();
+    assert_eq!(
+        desktop_state.configuration_state,
+        WslConfigurationState::Current
+    );
+    recovered_application
+        .apply_provider(
+            &desktop_state.environment_id,
+            provider_id,
+            &desktop_state.revision,
+            true,
+        )
+        .unwrap();
+    let desktop_config = read_file(".codex/config.toml");
+    let native_cli = read_file("bin/codex");
+    let replace_cli = |bytes: &[u8]| {
+        checked_output(
+            &distribution,
+            &[
+                "/usr/bin/env",
+                &shell_home,
+                "/bin/sh",
+                "-c",
+                "cat >\"$HOME/bin/codex\"; chmod 700 \"$HOME/bin/codex\"",
+            ],
+            bytes,
+        );
+    };
+    let incompatible_cli = String::from_utf8(native_cli.clone())
+        .unwrap()
+        .replace("xhigh", "unsupported");
+    for (candidate, message_id) in [
+        (incompatible_cli.as_bytes(), "wsl.catalog_cli_incompatible"),
+        (
+            b"MZfixture-interop".as_slice(),
+            "wsl.codex_version_required",
+        ),
+    ] {
+        replace_cli(candidate);
+        let failure = recovered_application
+            .apply_provider(
+                &desktop_state.environment_id,
+                provider_id,
+                &desktop_state.revision,
+                true,
+            )
+            .unwrap_err();
+        assert_eq!(failure.message_id, message_id);
+        assert_eq!(read_file(".codex/config.toml"), desktop_config);
+        assert_eq!(
+            read_file(&format!(
+                ".codex/{}",
+                config_metadata(&desktop_config, "model-catalog-file")
+            )),
+            read_file(&format!(
+                ".codex/{}",
+                config_metadata(config.as_bytes(), "model-catalog-file")
+            ))
+        );
+        let connection = Connection::open(application_store.paths().database()).unwrap();
+        let pending: i64 = connection
+            .query_row("SELECT COUNT(*) FROM wsl_pending_operation", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            pending, 0,
+            "CLI capability rejection must precede Saga registration"
+        );
+        assert!(
+            wsl_output(
+                &distribution,
+                &[
+                    "/usr/bin/env",
+                    &shell_home,
+                    "/bin/sh",
+                    "-c",
+                    "test ! -e \"$HOME/.codex/.gpteasy-shell/lock/active\""
+                ],
+                &[]
+            )
+            .status
+            .success()
+        );
+    }
+    replace_cli(&native_cli);
+    let zsh_current = run_zsh("source \"$HOME/gpteasy.zsh\"; gpteasy current", &[]);
+    assert!(zsh_current.status.success());
+    let zsh_switch = run_zsh("source \"$HOME/gpteasy.zsh\"; gpteasy", b"2\n");
+    assert!(zsh_switch.status.success());
+    let restore_desktop = run_shell("source \"$HOME/gpteasy.sh\"; gpteasy restore", b"y\n");
+    assert!(restore_desktop.status.success());
+    assert_eq!(read_file(".codex/config.toml"), desktop_config);
+    assert!(
+        read_file(&format!(
+            ".codex/{}",
+            config_metadata(&desktop_config, "model-catalog-file")
+        ))
+        .len()
+            > 0
+    );
+    assert!(read_file(".codex/auth.json") == br#"{"login":"unchanged"}"#);
+    for output in [
+        &refused_restore,
+        &restored,
+        &zsh_current,
+        &zsh_switch,
+        &restore_desktop,
+    ] {
+        for canary in [
+            acceptance_key("GPTEASY_ACCEPTANCE_KEY_A", "wsl-harness-secret"),
+            acceptance_key("GPTEASY_ACCEPTANCE_KEY_B", "shell-harness-secret"),
+        ] {
+            assert!(!String::from_utf8_lossy(&output.stdout).contains(&canary));
+            assert!(!String::from_utf8_lossy(&output.stderr).contains(&canary));
+        }
+    }
+    assert!(
+        run_shell("source \"$HOME/gpteasy.sh\"; gpteasy", b"2\n")
+            .status
+            .success()
+    );
+
     checked_output(
         &distribution,
         &[
@@ -917,7 +1313,9 @@ chmod 700 "$HOME/bin/codex"
             "/bin/sh",
             "-c",
             r##"awk '
-$0 == "# GPTEasy schema-version: 1" { next }
+$0 == "# GPTEasy schema-version: 2" { next }
+index($0, "# GPTEasy model-catalog-") == 1 { next }
+index($0, "model_catalog_json =") == 1 { next }
 index($0, "# GPTEasy source-id:") == 1 { next }
 index($0, "# GPTEasy credential-file:") == 1 { next }
 index($0, "model_providers.gpteasy.auth.") == 1 { next }
@@ -935,7 +1333,7 @@ mv "$HOME/.codex/legacy.toml" "$HOME/.codex/config.toml""##,
     assert!(migrated.status.success());
     let migrated_config = read_file(".codex/config.toml");
     let migrated_text = String::from_utf8(migrated_config).expect("migrated config is UTF-8");
-    assert!(migrated_text.contains("# GPTEasy schema-version: 1"));
+    assert!(migrated_text.contains("# GPTEasy schema-version: 2"));
     assert!(migrated_text.contains("# GPTEasy provider-id: 22222222-2222-4222-8222-222222222222"));
     assert!(read_file(".codex/auth.json") == br#"{"login":"unchanged"}"#);
     let migrated_refreshed = recovered_application
@@ -964,7 +1362,7 @@ mv "$HOME/.codex/legacy.toml" "$HOME/.codex/config.toml""##,
             "-c",
             r##"awk '
 BEGIN { print "custom_reclaim_setting = true" }
-$0 == "# GPTEasy schema-version: 1" { print "# GPTEasy schema-version: 9"; next }
+$0 == "# GPTEasy schema-version: 2" { print "# GPTEasy schema-version: 9"; next }
 { print }
 ' "$HOME/.codex/config.toml" >"$HOME/.codex/reclaim.toml"
 chmod 600 "$HOME/.codex/reclaim.toml"
@@ -1016,7 +1414,7 @@ mv "$HOME/.codex/reclaim.toml" "$HOME/.codex/config.toml""##,
     let reclaimed_config = read_file(".codex/config.toml");
     let reclaimed_text = String::from_utf8(reclaimed_config.clone()).expect("reclaimed UTF-8");
     assert!(reclaimed_text.contains("custom_reclaim_setting = true"));
-    assert!(reclaimed_text.contains("# GPTEasy schema-version: 1"));
+    assert!(reclaimed_text.contains("# GPTEasy schema-version: 2"));
     assert!(!reclaimed_text.contains("# GPTEasy schema-version: 9"));
     assert!(read_file(".codex/auth.json") == br#"{"login":"unchanged"}"#);
     checked_output(
@@ -1060,7 +1458,10 @@ count=0
 [ ! -f "$count_file" ] || count=$(cat "$count_file")
 count=$((count + 1))
 printf '%s\n' "$count" >"$count_file"
-[ "$count" -ne 5 ] || exit 1
+case "${1-}:${2-}" in
+  -f:"$HOME/.codex")
+    if [ ! -e "$HOME/sync-failed" ]; then touch "$HOME/sync-failed"; exit 1; fi ;;
+esac
 exec /usr/bin/sync "$@"
 SYNC
 chmod 700 "$HOME/fault-bin/sync"
@@ -1103,6 +1504,10 @@ rm -f "$HOME/sync-count""#,
         &bundle(
             &failed_candidate,
             acceptance_key("GPTEASY_ACCEPTANCE_KEY_A", "wsl-harness-secret").as_bytes(),
+            &read_file(&format!(
+                ".codex/{}",
+                config_metadata(&failed_candidate, "model-catalog-file")
+            )),
         ),
     );
     assert_eq!(rollback.status.code(), Some(44));
@@ -1168,7 +1573,19 @@ printf '%s' '{"login":"unchanged"}' >"$home/.codex/auth.json"
 chmod 600 "$home/.codex/auth.json"
 cat >"$home/bin/codex" <<'CODEX'
 #!/bin/sh
-printf '%s\n' 'codex-cli 0.147.0'
+case "$1" in
+  --version) printf '%s\n' 'codex-cli 0.147.0'; exit 0 ;;
+  app-server) [ "$2" = '--listen' ] || exit 2 ;;
+  *) exit 2 ;;
+esac
+[ -f "$CODEX_HOME/catalog.json" ] || exit 3
+grep -Fq '"slug": "gpteasy-catalog-schema-probe-v1"' "$CODEX_HOME/catalog.json" || exit 3
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*) printf '%s\n' '{"id":1,"result":{"userAgent":"fixture-native-linux"}}' ;;
+    *'"method":"model/list"'*) printf '%s\n' '{"id":2,"result":{"data":[{"model":"gpteasy-catalog-schema-probe-v1","defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"low"},{"reasoningEffort":"medium"},{"reasoningEffort":"high"},{"reasoningEffort":"xhigh"}]}],"nextCursor":null}}' ;;
+  esac
+done
 CODEX
 chmod 700 "$home/bin/codex"
 "#,
@@ -1251,7 +1668,9 @@ chmod 700 "$home/bin/codex"
             "/bin/sh",
             "-c",
             r##"awk '
-$0 == "# GPTEasy schema-version: 1" { next }
+$0 == "# GPTEasy schema-version: 2" { next }
+index($0, "# GPTEasy model-catalog-") == 1 { next }
+index($0, "model_catalog_json =") == 1 { next }
 index($0, "# GPTEasy source-id:") == 1 { next }
 index($0, "# GPTEasy credential-file:") == 1 { next }
 index($0, "model_providers.gpteasy.auth.") == 1 { next }
@@ -1323,7 +1742,7 @@ mv "$HOME/.codex/stopped-legacy.toml" "$HOME/.codex/config.toml""##,
         &[],
     );
     let migrated_text = String::from_utf8(migrated_config).expect("migrated config is UTF-8");
-    assert!(migrated_text.contains("# GPTEasy schema-version: 1"));
+    assert!(migrated_text.contains("# GPTEasy schema-version: 2"));
     assert_eq!(
         checked_output(
             &distribution,
@@ -1352,7 +1771,7 @@ mv "$HOME/.codex/stopped-legacy.toml" "$HOME/.codex/config.toml""##,
             "-c",
             r##"awk '
 BEGIN { print "stopped_reclaim_setting = true" }
-$0 == "# GPTEasy schema-version: 1" { print "# GPTEasy schema-version: 9"; next }
+$0 == "# GPTEasy schema-version: 2" { print "# GPTEasy schema-version: 9"; next }
 { print }
 ' "$HOME/.codex/config.toml" >"$HOME/.codex/stopped-reclaim.toml"
 chmod 600 "$HOME/.codex/stopped-reclaim.toml"
@@ -1420,7 +1839,7 @@ mv "$HOME/.codex/stopped-reclaim.toml" "$HOME/.codex/config.toml""##,
     );
     let reclaimed_text = String::from_utf8(reclaimed_config).expect("reclaimed config is UTF-8");
     assert!(reclaimed_text.contains("stopped_reclaim_setting = true"));
-    assert!(reclaimed_text.contains("# GPTEasy schema-version: 1"));
+    assert!(reclaimed_text.contains("# GPTEasy schema-version: 2"));
     assert!(!reclaimed_text.contains("# GPTEasy schema-version: 9"));
     let auth = checked_output(
         &distribution,
@@ -1548,7 +1967,19 @@ printf '%s' '{"login":"unchanged"}' >"$home/.codex/auth.json"
 chmod 600 "$home/.codex/auth.json"
 cat >"$home/bin/codex" <<'CODEX'
 #!/bin/sh
-printf '%s\n' 'codex-cli 0.147.0'
+case "$1" in
+  --version) printf '%s\n' 'codex-cli 0.147.0'; exit 0 ;;
+  app-server) [ "$2" = '--listen' ] || exit 2 ;;
+  *) exit 2 ;;
+esac
+[ -f "$CODEX_HOME/catalog.json" ] || exit 3
+grep -Fq '"slug": "gpteasy-catalog-schema-probe-v1"' "$CODEX_HOME/catalog.json" || exit 3
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*) printf '%s\n' '{"id":1,"result":{"userAgent":"fixture-native-linux"}}' ;;
+    *'"method":"model/list"'*) printf '%s\n' '{"id":2,"result":{"data":[{"model":"gpteasy-catalog-schema-probe-v1","defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"low"},{"reasoningEffort":"medium"},{"reasoningEffort":"high"},{"reasoningEffort":"xhigh"}]}],"nextCursor":null}}' ;;
+  esac
+done
 CODEX
 chmod 700 "$home/bin/codex"
 "#,

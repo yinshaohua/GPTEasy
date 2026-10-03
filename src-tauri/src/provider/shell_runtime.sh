@@ -666,7 +666,8 @@ gpteasy__schema_v1_is_valid() {
 
 gpteasy__catalog_path_for() {
     local source=$1 artifact=$2
-    gpteasy__provider_id_is_safe "$source" && gpteasy__provider_id_is_safe "$artifact" || return 1
+    gpteasy__matches "$source" '^[A-Za-z0-9._-]+$' && [[ "$source" != *'..'* ]] &&
+        gpteasy__provider_id_is_safe "$artifact" || return 1
     printf '%s\n' "${CODEX_HOME:-"$HOME/.codex"}/.gpteasy-shell/model-catalogs/$source/$artifact.json"
 }
 

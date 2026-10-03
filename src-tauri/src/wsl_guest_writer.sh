@@ -3,7 +3,7 @@ set -eu
 
 TOKEN=${1-}
 EXPECTED_CONFIG=${2-}
-BUNDLE_MAGIC='GPTEASY_WSL_BUNDLE_V2'
+BUNDLE_MAGIC='GPTEASY_WSL_BUNDLE_V3'
 TARGET_DIR="$HOME/.codex"
 STATE_DIR="$TARGET_DIR/.gpteasy-shell"
 CONFIG_ENTRY="$TARGET_DIR/config.toml"
@@ -35,9 +35,17 @@ read -r magic
 [ "$magic" = "$BUNDLE_MAGIC" ] || fail candidate_rejected 40
 read -r config_length
 read -r credential_length
-case "$config_length:$credential_length" in
-  *[!0-9:]*|:*|*:) fail candidate_rejected 40 ;;
+read -r catalog_length
+read -r catalog_relative
+read -r catalog_artifact
+read -r catalog_sha256
+read -r catalog_fingerprint
+case "$config_length:$credential_length:$catalog_length" in
+  *[!0-9:]*|:*|*::*) fail candidate_rejected 40 ;;
 esac
+for length in "$config_length" "$credential_length" "$catalog_length"; do
+  [ -n "$length" ] && [ "$length" -gt 0 ] && [ "$length" -le 67108864 ] || fail candidate_rejected 40
+done
 
 mkdir -p "$TARGET_DIR"
 for directory in "$STATE_DIR" "$BACKUP_DIR" "$TMP_DIR"; do
@@ -49,6 +57,8 @@ done
 
 incoming_config=$(mktemp "$TMP_DIR/.config.XXXXXX")
 incoming_credential=$(mktemp "$TMP_DIR/.credential.XXXXXX")
+incoming_catalog=$(mktemp "$TMP_DIR/.catalog.XXXXXX")
+catalog_candidate=''
 config_candidate=''
 credential_candidate=''
 rollback_candidate=''
@@ -59,7 +69,8 @@ original_missing=false
 original_config_mode=''
 CREDENTIAL=''
 cleanup() {
-  rm -f "$incoming_config" "$incoming_credential"
+  rm -f "$incoming_config" "$incoming_credential" "$incoming_catalog"
+  [ -z "$catalog_candidate" ] || rm -f "$catalog_candidate"
   [ -z "$config_candidate" ] || rm -f "$config_candidate"
   [ -z "$credential_candidate" ] || rm -f "$credential_candidate"
   [ -z "$rollback_candidate" ] || rm -f "$rollback_candidate"
@@ -69,10 +80,15 @@ trap cleanup EXIT HUP INT TERM
 
 dd bs=1 count="$config_length" of="$incoming_config" 2>/dev/null
 dd bs=1 count="$credential_length" of="$incoming_credential" 2>/dev/null
+dd bs=1 count="$catalog_length" of="$incoming_catalog" 2>/dev/null
+[ "$(wc -c <"$incoming_config")" -eq "$config_length" ] &&
+  [ "$(wc -c <"$incoming_credential")" -eq "$credential_length" ] &&
+  [ "$(wc -c <"$incoming_catalog")" -eq "$catalog_length" ] || fail candidate_rejected 40
+[ "$(dd bs=1 count=1 2>/dev/null | wc -c)" -eq 0 ] || fail candidate_rejected 40
 start_count=$(sed 's/\r$//' "$incoming_config" | grep -c '^# >>> GPTEasy managed provider >>>$' || true)
 end_count=$(sed 's/\r$//' "$incoming_config" | grep -c '^# <<< GPTEasy managed provider <<<$' || true)
 [ "$start_count" -eq 1 ] && [ "$end_count" -eq 1 ] || fail candidate_rejected 40
-schema_count=$(sed 's/\r$//' "$incoming_config" | grep -c '^# GPTEasy schema-version: 1$' || true)
+schema_count=$(sed 's/\r$//' "$incoming_config" | grep -c '^# GPTEasy schema-version: 2$' || true)
 [ "$schema_count" -eq 1 ] || fail candidate_rejected 40
 
 credential_relative=$(awk '
@@ -94,6 +110,63 @@ credential_source=${credential_tail%%/*}
 credential_file=${credential_tail#*/}
 [ -n "$credential_source" ] && [ "$credential_file" != "$credential_tail" ] || fail candidate_rejected 40
 case "$credential_file" in */*) fail candidate_rejected 40 ;; esac
+
+metadata() {
+  awk -v prefix="# GPTEasy $1:" '
+    { sub(/\r$/, "", $0) }
+    index($0, prefix) == 1 { value = substr($0, length(prefix) + 1); sub(/^[[:space:]]+/, "", value); found++ }
+    END { if (found != 1 || value == "") exit 1; print value }
+  ' "$incoming_config"
+}
+# Decode the generated single-line TOML strings without evaluating shell text.
+# Rust owns full TOML/schema validation; this check binds the actual guest bytes.
+toml_string() {
+  awk -v prefix="$1 = " '
+    index($0, prefix) == 1 {
+      found++; value = substr($0, length(prefix) + 1); sub(/\r$/, "", value)
+      quote = substr(value, 1, 1)
+      if (quote != "\"" && quote != sprintf("%c", 39)) exit 1
+      if (substr(value, length(value), 1) != quote) exit 1
+      value = substr(value, 2, length(value)-2)
+      if (quote == sprintf("%c", 39)) { result=value; next }
+      for (i=1; i<=length(value); i++) {
+        c=substr(value,i,1)
+        if (c == "\\") {
+          c=substr(value,++i,1)
+          if (c == "\\" || c == "\"") result=result c
+          else if (c == "t") result=result "\t"
+          else if (c == "n") result=result "\n"
+          else if (c == "r") result=result "\r"
+          else exit 1
+        } else result=result c
+      }
+    }
+    END { if (found != 1) exit 1; printf "%s", result }
+  ' "$incoming_config"
+}
+provider_id=$(metadata provider-id) || fail catalog_binding_invalid 48
+source_id=$(metadata source-id) || fail catalog_binding_invalid 48
+[ "$credential_relative" = ".gpteasy-shell/credentials/$source_id/$provider_id.token" ] || fail catalog_binding_invalid 48
+[ "$(metadata model-catalog-protocol)" = codex-model-catalog-v1 ] &&
+  [ "$(metadata model-catalog-policy)" = common-reasoning-selector-v1 ] &&
+  [ "$(metadata model-catalog-file)" = "$catalog_relative" ] &&
+  [ "$(metadata model-catalog-artifact)" = "$catalog_artifact" ] &&
+  [ "$(metadata model-catalog-sha256)" = "$catalog_sha256" ] &&
+  [ "$(metadata model-catalog-provider-fingerprint)" = "$catalog_fingerprint" ] || fail catalog_binding_invalid 48
+case "$catalog_relative" in *..*|*//*|*[!A-Za-z0-9._/-]*) fail catalog_binding_invalid 48 ;; esac
+[ "$catalog_relative" = ".gpteasy-shell/model-catalogs/$source_id/$catalog_artifact.json" ] || fail catalog_binding_invalid 48
+for value in "$provider_id" "$catalog_artifact"; do
+  printf '%s\n' "$value" | grep -Eq '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' || fail catalog_binding_invalid 48
+done
+for value in "$catalog_sha256" "$catalog_fingerprint"; do
+  printf '%s\n' "$value" | grep -Eq '^[0-9a-f]{64}$' || fail catalog_binding_invalid 48
+done
+[ "$(sha256sum "$incoming_catalog" | awk '{print $1}')" = "$catalog_sha256" ] || fail catalog_corrupt 48
+[ "$(toml_string model_catalog_json)" = "$TARGET_DIR/$catalog_relative" ] || fail catalog_binding_invalid 48
+base_url=$(toml_string model_providers.gpteasy.base_url) || fail catalog_binding_invalid 48
+model=$(toml_string model) || fail catalog_binding_invalid 48
+actual_fingerprint=$({ printf 'gpteasy-provider-combination-v1\0%s\0%s\0' "$base_url" "$model"; cat "$incoming_credential"; } | sha256sum | awk '{print $1}')
+[ "$actual_fingerprint" = "$catalog_fingerprint" ] || fail catalog_binding_invalid 48
 
 CONFIG_TARGET=$CONFIG_ENTRY
 CONFIG_IS_SYMLINK=false
@@ -208,12 +281,42 @@ else
 fi
 sync -f "$backup_path"
 sync -f "$BACKUP_DIR"
+# Catalogs remain immutable, including unreferenced files left by interruption.
+CATALOG="$TARGET_DIR/$catalog_relative"
+catalog_root="$STATE_DIR/model-catalogs"
+catalog_directory=${CATALOG%/*}
+for directory in "$catalog_root" "$catalog_directory"; do
+  if [ ! -e "$directory" ]; then mkdir -m 700 "$directory"; fi
+  [ -d "$directory" ] && [ ! -L "$directory" ] || fail unsafe_path 43
+  set -- $(stat -c '%u %a %F' "$directory")
+  [ "$1" = "$(id -u)" ] && [ "${2#?}" = '00' ] && [ "$3" = directory ] || fail unsafe_path 43
+done
+catalog_is_safe() {
+  [ -f "$CATALOG" ] && [ ! -L "$CATALOG" ] || return 1
+  set -- $(stat -c '%u %a %h %F' "$CATALOG")
+  [ "$1" = "$(id -u)" ] && [ "$2" = 600 ] && [ "$3" = 1 ] && [ "$4 $5" = 'regular file' ]
+}
+if [ -e "$CATALOG" ] || [ -L "$CATALOG" ]; then
+  catalog_is_safe && cmp -s "$incoming_catalog" "$CATALOG" || fail catalog_conflict 47
+else
+  catalog_candidate=$(mktemp "$catalog_directory/.catalog.XXXXXX")
+  cat "$incoming_catalog" >"$catalog_candidate"
+  chmod 600 "$catalog_candidate"
+  sync -f "$catalog_candidate"
+  mv -n "$catalog_candidate" "$CATALOG" || fail catalog_conflict 47
+  [ ! -e "$catalog_candidate" ] || fail catalog_conflict 47
+  catalog_candidate=''
+  sync -f "$catalog_directory"
+fi
+catalog_is_safe && cmp -s "$incoming_catalog" "$CATALOG" || fail catalog_conflict 47
+printf '%s\n' '[GPTEasy] stage=catalog_commit catalog_state=ready' >&2
 sync -f "$config_candidate"
 validate_config_target || fail concurrent_change 41
 if [ "$(hash_file "$CONFIG_TARGET")" != "$EXPECTED_CONFIG" ]; then
   [ "$credential_created" = false ] || rm -f "$CREDENTIAL"
   fail concurrent_change 41
 fi
+catalog_is_safe && cmp -s "$incoming_catalog" "$CATALOG" || fail catalog_conflict 47
 if ! mv "$config_candidate" "$CONFIG_TARGET"; then
   [ "$credential_created" = false ] || rm -f "$CREDENTIAL"
   fail write_failed 44
@@ -228,6 +331,12 @@ if ! sync -f "$config_parent"; then
   fail rollback_failed 45
 fi
 
+printf '%s\n' '[GPTEasy] stage=config_commit catalog_state=ready' >&2
+validate_config_target && cmp -s "$incoming_config" "$CONFIG_TARGET" &&
+  cmp -s "$incoming_credential" "$CREDENTIAL" &&
+  catalog_is_safe && cmp -s "$incoming_catalog" "$CATALOG" || fail reread_failed 49
+printf '%s\n' '[GPTEasy] stage=artifact_reread catalog_state=verified' >&2
+
 find "$BACKUP_DIR" -maxdepth 1 -type f \( -name 'config-*.toml' -o -name 'config-*.missing' \) -printf '%f\n' |
   sort -r | awk 'NR > 5 { print }' | while IFS= read -r stale; do rm -f "$BACKUP_DIR/$stale"; done || true
-printf '%s\n' '{"status":"written","helper":"gpteasy-wsl-guest-writer-v2"}' || true
+printf '%s\n' '{"status":"written","helper":"gpteasy-wsl-guest-writer-v3"}' || true

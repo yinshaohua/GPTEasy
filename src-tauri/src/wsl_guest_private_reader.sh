@@ -3,7 +3,8 @@ set -eu
 
 RELATIVE=${1-}
 case "$RELATIVE" in
-  .gpteasy-shell/credentials/*/*.token) ;;
+  .gpteasy-shell/credentials/*/*.token) KIND=credentials; SUFFIX=.token ;;
+  .gpteasy-shell/model-catalogs/*/*.json) KIND=model-catalogs; SUFFIX=.json ;;
   *) exit 43 ;;
 esac
 case "$RELATIVE" in
@@ -12,9 +13,12 @@ esac
 
 CODEX_DIR="$HOME/.codex"
 STATE_DIR="$CODEX_DIR/.gpteasy-shell"
-CREDENTIALS_DIR="$STATE_DIR/credentials"
-CREDENTIAL_TAIL=${RELATIVE#'.gpteasy-shell/credentials/'}
+CREDENTIALS_DIR="$STATE_DIR/$KIND"
+CREDENTIAL_TAIL=${RELATIVE#".gpteasy-shell/$KIND/"}
 SOURCE_DIR="$CREDENTIALS_DIR/${CREDENTIAL_TAIL%%/*}"
+FILE=${CREDENTIAL_TAIL#*/}
+[ "$FILE" != "$CREDENTIAL_TAIL" ] || exit 43
+case "$FILE" in */*|"$SUFFIX") exit 43 ;; esac
 for DIRECTORY in "$STATE_DIR" "$CREDENTIALS_DIR" "$SOURCE_DIR"; do
   [ -d "$DIRECTORY" ] && [ ! -L "$DIRECTORY" ] || exit 43
   set -- $(stat -c '%u %a %F' "$DIRECTORY")
