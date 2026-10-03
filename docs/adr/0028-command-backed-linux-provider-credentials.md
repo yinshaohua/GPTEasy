@@ -4,6 +4,8 @@ status: accepted
 
 # Linux 环境使用命令式供应商凭据
 
+> #69 的独立 Linux 目录交付与兼容门禁由 [ADR-0055](0055-standalone-linux-offline-model-catalog.md) 修订；桌面 WSL 与共享服务的后续范围保持原边界。
+
 独立 GNU/Linux 导出物和桌面 GPTEasy 管理的 WSL2 发行版环境统一使用 Codex 自定义供应商的 `auth.command` 接口提供 API Key：用户明确选择供应商时，写入方只为被选择的供应商创建按来源 ID和供应商 ID隔离、权限为 `0600` 的 Linux 凭据工件，配置通过 `cat` 引用该工件。加载导出物不产生文件副作用，API Key 不进入命令参数、`config.toml`、配置备份或日志；WSL2 供应商切换也不再修改 `auth.json`，从而保留其中的 OpenAI 登录及其它字段。
 
 旧 Spike 使用的 `experimental_bearer_token` 虽然简单，但官方不推荐且会把 Key 复制到配置和每份备份；结构化修改 `auth.json` 则需要 jq、Python、额外二进制解析器或不安全地整体覆盖文件。命令式凭据保留 Bash/Zsh 导出物独立运行、无额外解析器的边界，同时使用 Codex 的正式凭据扩展点。

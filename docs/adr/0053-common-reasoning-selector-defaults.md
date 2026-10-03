@@ -4,6 +4,8 @@ status: accepted
 
 # 通用思考档位兼容默认值
 
+> #69 的独立 Linux 目录交付与兼容门禁由 [ADR-0055](0055-standalone-linux-offline-model-catalog.md) 修订；桌面 WSL 与共享服务的后续范围保持原边界。
+
 2026-10-02，用户要求恢复 Codex 中的思考深度选择，优先采用免逐模型配置的通用默认值。本机 Codex CLI 已由旧证据中的 0.157.1 更新为 0.159.3。隔离 App Server 实测和官方选择器源码表明：`supported_reasoning_levels: []` 没有可选档位；`default_reasoning_level: null` 被转换为 `none`，切换模型可以把该值持久化为根级配置。删除列表字段则触发目录解析失败。
 
 ## 决策

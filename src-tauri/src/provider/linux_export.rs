@@ -177,7 +177,7 @@ fn read_destination(destination: &Path) -> Result<Option<Vec<u8>>, LinuxExportFa
 
 fn render(shell: LinuxShell, export_id: &str, providers: &[catalog::ProviderRecord]) -> String {
     let mut script = format!(
-        "#!/usr/bin/env {}\n# GPTEasy {} Linux provider snapshot. This file contains sensitive credentials.\ngpteasy__schema_version='2'\n",
+        "#!/usr/bin/env {}\n# GPTEasy {} Linux provider snapshot. This file contains sensitive credentials.\ngpteasy__schema_version='2'\ngpteasy__catalog_protocol='codex-model-catalog-v1'\ngpteasy__catalog_policy='common-reasoning-selector-v1'\n",
         shell.executable(),
         shell.display_name(),
     );
@@ -190,7 +190,7 @@ fn render(shell: LinuxShell, export_id: &str, providers: &[catalog::ProviderReco
         "gpteasy__export_id={}\n\n",
         shell_quote(export_id)
     ));
-    script.push_str("# 供应商目录。API Key 仅用于明确切换时写入私有凭据工件；模型目录载荷不包含凭据。字段不可包含 Tab 或换行。\n");
+    script.push_str("# 供应商目录。可脱离 GPTEasy 手工维护显示名称；关键组合变更必须重新验证和导出。API Key 仅用于明确切换时写入私有凭据工件；模型目录载荷不包含凭据。字段不可包含 Tab 或换行。\n");
     script.push_str("gpteasy__provider_catalog() {\n    cat <<'GPTEASY_PROVIDER_CATALOG'\n");
     let mut payload_functions = String::new();
     for provider in providers {
@@ -221,13 +221,16 @@ fn render(shell: LinuxShell, export_id: &str, providers: &[catalog::ProviderReco
             shell_quote(std::str::from_utf8(&payload).expect("catalog JSON is UTF-8")),
         ));
         payload_functions.push_str(&format!(
-            "gpteasy__provider_catalog_binding_{}() {{ printf '%s\\t%s\\t%s\\t%s\\t%s\\n' {} {} {} {} {}; }}\n",
+            "gpteasy__provider_catalog_binding_{}() {{ printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' {} {} {} {} {} {} {} {}; }}\n",
             provider.summary.id,
             shell_quote(&provider.summary.id),
             shell_quote(&provider.summary.default_model),
             shell_quote(&artifact_id),
             shell_quote(&payload_sha256),
             shell_quote(&provider.verification_fingerprint),
+            shell_quote(export_id),
+            shell_quote("codex-model-catalog-v1"),
+            shell_quote(model_catalog::REASONING_SELECTOR_POLICY),
         ));
     }
     script.push_str("GPTEASY_PROVIDER_CATALOG\n}\n");
@@ -248,9 +251,16 @@ fn render(shell: LinuxShell, export_id: &str, providers: &[catalog::ProviderReco
         ));
     }
     script.push_str("        *) return 1 ;;\n    esac\n}\n");
-    script.push_str(
-        "gpteasy__provider_count=$(gpteasy__provider_catalog | awk 'NF && $1 !~ /^#/ { count += 1 } END { print count + 0 }')\n\n",
-    );
+    script.push_str(&format!("gpteasy__provider_count={}\n\n", providers.len()));
+    let probe_payload = model_catalog::render(
+        &["gpteasy-catalog-schema-probe-v1".to_owned()],
+        "gpteasy-catalog-schema-probe-v1",
+    )
+    .expect("fixed probe model catalog");
+    script.push_str(&format!(
+        "gpteasy__catalog_probe_payload() {{ printf '%s' {}; }}\n",
+        shell_quote(std::str::from_utf8(&probe_payload).expect("probe JSON is UTF-8")),
+    ));
     script.push_str(&format!(
         r#"
 gpteasy__export_credential_directory='.gpteasy-shell/credentials/{export_id}'
@@ -273,7 +283,7 @@ gpteasy__print_block() {{
     artifact_id=$(gpteasy__provider_catalog_artifact "$provider_id") || return 1
     catalog_sha256=$(gpteasy__provider_catalog_sha256 "$provider_id") || return 1
     verification_fingerprint=$(gpteasy__provider_verification_fingerprint "$provider_id") || return 1
-    catalog_path=${{gpteasy__model_catalog_path:-/dev/null}}
+    catalog_path=${{gpteasy__model_catalog_path:-}}
     [[ -n "$name" && -n "$model" && -n "$base_url" && -n "$catalog_path" ]] || return 1
     credential_relative="$gpteasy__export_credential_directory/$provider_id.token"
     printf '%s\n' '# >>> GPTEasy managed provider >>>'
@@ -281,6 +291,9 @@ gpteasy__print_block() {{
     printf '# GPTEasy provider-id: %s\n' "$provider_id"
     printf '# GPTEasy source-id: %s\n' "$gpteasy__export_id"
     printf '# GPTEasy credential-file: %s\n' "$credential_relative"
+    printf '# GPTEasy model-catalog-protocol: %s\n' "$gpteasy__catalog_protocol"
+    printf '# GPTEasy model-catalog-policy: %s\n' "$gpteasy__catalog_policy"
+    printf '# GPTEasy model-catalog-file: .gpteasy-shell/model-catalogs/%s/%s.json\n' "$gpteasy__export_id" "$artifact_id"
     printf '# GPTEasy model-catalog-artifact: %s\n' "$artifact_id"
     printf '# GPTEasy model-catalog-sha256: %s\n' "$catalog_sha256"
     printf '# GPTEasy model-catalog-provider-fingerprint: %s\n' "$verification_fingerprint"
@@ -326,11 +339,17 @@ fn validate_snapshot(providers: &[catalog::ProviderRecord]) -> Result<(), LinuxE
             && [
                 &provider.summary.name,
                 &provider.summary.base_url,
-                &provider.summary.default_model,
                 &provider.api_key,
+                &provider.summary.default_model,
             ]
             .into_iter()
-            .all(|value| !value.contains(['\0', '\r', '\n', '\t']))
+            .all(|value| !value.chars().any(char::is_control))
+            && provider.verification_fingerprint
+                == super::combination_fingerprint(
+                    &provider.summary.base_url,
+                    &provider.api_key,
+                    &provider.summary.default_model,
+                )
             && provider
                 .reasoning_selection
                 .effort

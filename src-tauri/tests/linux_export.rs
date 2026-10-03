@@ -9,6 +9,7 @@ use gpteasy_lib::provider::{
 };
 use gpteasy_lib::state::{StatePaths, StateStore};
 use rusqlite::{Connection, params};
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -244,7 +245,10 @@ auth_before=$(sha256sum "$codex_home/auth.json")
 export CODEX_HOME="$codex_home"
 # shellcheck disable=SC1090
 pushd "$workspace" >/dev/null
+saved_path=$PATH
+export PATH=/gpteasy-source-must-not-execute-tools
 source ./gpteasy.sh
+export PATH=$saved_path
 popd >/dev/null
 after=$(sha256sum "$codex_home/config.toml")
 [[ "$before" == "$after" ]]
@@ -296,7 +300,7 @@ gpteasy help >/dev/null
 }
 
 #[test]
-fn shell_snapshots_preconfigure_without_codex_and_reject_incompatible_versions() {
+fn shell_snapshots_require_native_catalog_capability_and_reject_version_only_clis() {
     let fixture = ExportFixture::new();
     fixture.insert_provider_with_models(
         "11111111-1111-4111-8111-111111111111",
@@ -356,26 +360,17 @@ export CODEX_HOME="$codex_home"
 source "$script"
 fresh_home="$workspace/fresh codex home"
 export CODEX_HOME="$fresh_home"
-fresh=$(PATH="$fake_bin:/usr/bin:/bin" gpteasy <<<"3" 2>&1)
-[[ "$fresh" == *'已预先配置：Manual Provider'* ]]
-[[ -f "$fresh_home/config.toml" ]]
-[[ $(stat -c '%a' "$fresh_home") == '700' ]]
-[[ $(find "$fresh_home/.gpteasy-shell/credentials" -type f -name '*.token' | wc -l) -eq 1 ]]
-grep -Fq '# GPTEasy provider-id: 33333333-3333-4333-8333-333333333333' "$fresh_home/config.toml"
-manual_credential=$(find "$fresh_home/.gpteasy-shell/credentials" -type f -name '*.token' -print -quit)
-[[ $(cat "$manual_credential") == 'manual-secret-key' ]]
+if PATH="$fake_bin:/usr/bin:/bin" gpteasy <<<"3" >/dev/null 2>&1; then exit 1; fi
+[[ ! -e "$fresh_home/config.toml" ]]
 export CODEX_HOME="$codex_home"
 missing=$(PATH="$fake_bin:/usr/bin:/bin" gpteasy <<<"1" 2>&1 || true)
-[[ "$missing" == *'已预先配置：Alpha Provider'* ]]
-[[ "$missing" == *'当前未安装 Codex CLI'* ]]
-[[ "$missing" != *'版本过低'* ]]
+[[ "$missing" == *'未找到原生 Linux Codex CLI'* ]]
+[[ "$config_before" == "$(sha256sum "$codex_home/config.toml")" ]]
 [[ "$auth_before" == "$(sha256sum "$codex_home/auth.json")" ]]
-grep -Fq '# GPTEasy schema-version: 2' "$codex_home/config.toml"
-missing_config=$(sha256sum "$codex_home/config.toml")
-[[ -e "$codex_home/.gpteasy-shell" ]]
+missing_config=$config_before
 cat >"$fake_bin/codex" <<'OLD_CODEX'
 #!/usr/bin/env bash
-printf '%s\n' 'codex-cli 0.146.0'
+printf '%s\n' 'codex-cli 99.0.0'
 OLD_CODEX
 chmod 700 "$fake_bin/codex"
 if (gpteasy <<<"1" >/dev/null 2>&1); then
@@ -383,17 +378,20 @@ if (gpteasy <<<"1" >/dev/null 2>&1); then
     exit 1
 fi
 too_old=$(gpteasy <<<"1" 2>&1 || true)
-[[ "$too_old" == *'Codex CLI 版本过低，请升级到 0.147.0 或更高版本'* ]]
+[[ "$too_old" == *'模型目录/schema 能力核验失败'* ]]
 [[ "$too_old" != *'未找到 Codex CLI'* ]]
 [[ "$missing_config" == "$(sha256sum "$codex_home/config.toml")" ]]
 [[ "$auth_before" == "$(sha256sum "$codex_home/auth.json")" ]]
 
-cat >"$fake_bin/codex" <<'SUPPORTED_CODEX'
-#!/usr/bin/env bash
-printf '%s\n' 'codex-cli 0.147.0'
-SUPPORTED_CODEX
+printf 'MZfixture' >"$fake_bin/codex"
 chmod 700 "$fake_bin/codex"
+interop=$(gpteasy <<<"1" 2>&1 || true)
+[[ "$interop" == *'拒绝 Windows 互操作入口'* ]]
+[[ "$missing_config" == "$(sha256sum "$codex_home/config.toml")" ]]
+make_compatible_codex "$fake_bin/codex"
+codex() { printf '%s\n' 'shell function must not select the CLI' >&2; return 97; }
 menu=$(gpteasy <<<"1")
+unset -f codex
 [[ "$menu" == *'Alpha Provider (alpha-model)'* ]]
 grep -Fq '# GPTEasy schema-version: 2' "$codex_home/config.toml"
 grep -Fq 'model_catalog_json = ' "$codex_home/config.toml"
@@ -419,7 +417,7 @@ credential_count=$(find "$codex_home/.gpteasy-shell/credentials" -type f -name '
 credential=$(find "$codex_home/.gpteasy-shell/credentials" -type f -name '*.token' -print -quit)
 [[ $(cat "$credential") == 'alpha-secret-key' ]]
 [[ $(stat -c '%a' "$credential") == '600' ]]
-[[ $(find "$codex_home/.gpteasy-shell/shell-restore" -mindepth 1 -maxdepth 1 -type d | wc -l) -eq 2 ]]
+[[ $(find "$codex_home/.gpteasy-shell/shell-restore" -mindepth 1 -maxdepth 1 -type d | wc -l) -eq 1 ]]
 [[ $(gpteasy current) == *'Alpha Provider'* ]]
 [[ $(gpteasy <<<"q") == *'Alpha Provider (alpha-model) [当前]'* ]]
 restore_without_codex=$(PATH=/usr/bin:/bin gpteasy restore <<<"n" 2>&1 || true)
@@ -491,11 +489,22 @@ mkdir -p -- "$codex_home" "$fake_bin"
 printf '%s\n' 'custom_setting = true' >"$codex_home/config.toml"
 printf '%s\n' '{"tokens":{"access_token":"keep-me"}}' >"$codex_home/auth.json"
 auth_before=$(sha256sum "$codex_home/auth.json")
-cat >"$fake_bin/codex" <<'SUPPORTED_CODEX'
-#!/usr/bin/env bash
-printf '%s\n' 'codex-cli 0.147.0'
-SUPPORTED_CODEX
-chmod 700 "$fake_bin/codex"
+make_compatible_codex "$fake_bin/codex"
+cat >"$fake_bin/date" <<'BACKWARDS_CLOCK'
+#!/bin/sh
+if [ "$*" = '-u +%Y%m%dT%H%M%S%N' ]; then
+    if [ -f "$GPTEASY_CLOCK_MARKER" ]; then
+        printf '%s\n' 20200101T000000000000000
+    else
+        printf '%s\n' 20990101T000000000000000
+        touch "$GPTEASY_CLOCK_MARKER"
+    fi
+else
+    exec /usr/bin/date "$@"
+fi
+BACKWARDS_CLOCK
+chmod 700 "$fake_bin/date"
+export GPTEASY_CLOCK_MARKER="$workspace/clock-once"
 export PATH="$fake_bin:$PATH"
 export CODEX_HOME="$codex_home"
 # shellcheck disable=SC1090
@@ -599,11 +608,7 @@ mkdir -p -- "$codex_home" "$fake_bin"
 printf '%s\n' 'custom_setting = true' >"$codex_home/config.toml"
 printf '%s\n' '{"tokens":{"access_token":"keep-me"}}' >"$codex_home/auth.json"
 auth_before=$(sha256sum "$codex_home/auth.json")
-cat >"$fake_bin/codex" <<'SUPPORTED_CODEX'
-#!/usr/bin/env bash
-printf '%s\n' 'codex-cli 0.147.0'
-SUPPORTED_CODEX
-chmod 700 "$fake_bin/codex"
+make_compatible_codex "$fake_bin/codex"
 export PATH="$fake_bin:$PATH"
 export CODEX_HOME="$codex_home"
 # shellcheck disable=SC1090
@@ -751,11 +756,7 @@ trust_level = "trusted"
 command = "/data/opt/mcp-remote/mcp-remote"
 args = ["https://developers.openai.com/mcp", "--silent"]
 EXTERNAL_CONFIG
-cat >"$fake_bin/codex" <<'SUPPORTED_CODEX'
-#!/usr/bin/env bash
-printf '%s\n' 'codex-cli 0.147.0'
-SUPPORTED_CODEX
-chmod 700 "$fake_bin/codex"
+make_compatible_codex "$fake_bin/codex"
 export PATH="$fake_bin:$PATH"
 export CODEX_HOME="$codex_home"
 # shellcheck disable=SC1090
@@ -809,7 +810,7 @@ model = "unterminated
 MALFORMED_CONFIG
 malformed=$(gpteasy <<<"1" 2>&1)
 [[ "$malformed" == *'已切换到：Alpha Provider'* ]]
-[[ "$malformed" == *'新配置已经生效'* ]]
+[[ "$malformed" == *'配置已保存，但 CLI/共享后台服务可能仍使用旧配置'* ]]
 grep -Fq 'model = "DeepSeek-R1"' "$codex_home/config.toml"
 grep -Fq '# <<< GPTEasy managed provider <<<' "$codex_home/config.toml"
 cp -- "$codex_home/config.toml" "$1"
@@ -896,10 +897,7 @@ chmod 600 "$script"
 mkdir -p -- "$codex_home" "$real_home" "$fake_bin"
 printf '%s\n' 'custom_setting = true' >"$real_home/config.toml"
 ln -s '../real target/config.toml' "$codex_home/config.toml"
-cat >"$fake_bin/codex" <<'SUPPORTED_CODEX'
-#!/usr/bin/env bash
-printf '%s\n' 'codex-cli 0.147.0'
-SUPPORTED_CODEX
+make_compatible_codex "$fake_bin/codex"
 cat >"$fake_bin/sync" <<'SYNC_WRAPPER'
 #!/usr/bin/env bash
 if [[ -n "${GPTEASY_CONCURRENT_TARGET:-}" && -f "${GPTEASY_CONCURRENT_ONCE:-}" && "$*" == *'.config.toml.gpteasy.'* ]]; then
@@ -1022,11 +1020,7 @@ cp -- "$1" "$script"
 chmod 600 "$script"
 mkdir -p -- "$codex_home" "$fake_bin"
 printf '%s\n' 'custom_setting = true' >"$codex_home/config.toml"
-cat >"$fake_bin/codex" <<'SUPPORTED_CODEX'
-#!/usr/bin/env bash
-printf '%s\n' 'codex-cli 0.147.0'
-SUPPORTED_CODEX
-chmod 700 "$fake_bin/codex"
+make_compatible_codex "$fake_bin/codex"
 export PATH="$fake_bin:$PATH"
 export CODEX_HOME="$codex_home"
 # shellcheck disable=SC1090
@@ -1037,7 +1031,7 @@ info=$(gpteasy info)
 [[ "$info" == *"目标环境：$codex_home"* ]]
 [[ "$info" == *"Shell：$3"* ]]
 [[ "$info" == *'供应商数量：1'* ]]
-[[ "$info" == *'Codex CLI 最低版本：0.147.0'* ]]
+[[ "$info" == *'Codex CLI：明确切换时核验原生 Linux 目录/schema 能力'* ]]
 [[ "$info" != *'alpha-secret-key'* ]]
 [[ $("$2" "$script" current) == *'Alpha Provider'* ]]
 
@@ -1139,11 +1133,7 @@ mkdir -p -- "$codex_home" "$fake_bin" "$workspace/glob"
 touch "$workspace/glob/model-expanded" "$workspace/glob/provider-expanded"
 printf '%s\n' '{{"tokens":{{"access_token":"keep-me"}}}}' >"$codex_home/auth.json"
 auth_before=$(sha256sum "$codex_home/auth.json")
-cat >"$fake_bin/codex" <<'SUPPORTED_CODEX'
-#!/usr/bin/env bash
-printf '%s\n' 'codex-cli 0.147.0'
-SUPPORTED_CODEX
-chmod 700 "$fake_bin/codex"
+make_compatible_codex "$fake_bin/codex"
 export PATH="$fake_bin:$PATH"
 export CODEX_HOME="$codex_home"
 source "$script"
@@ -1225,11 +1215,7 @@ chmod 600 "$script"
 mkdir -p -- "$codex_home" "$fake_bin"
 printf '%s' '{"login":"unchanged"}' >"$codex_home/auth.json"
 auth_before=$(sha256sum "$codex_home/auth.json")
-cat >"$fake_bin/codex" <<'SUPPORTED_CODEX'
-#!/usr/bin/env sh
-printf '%s\n' 'codex-cli 0.147.0'
-SUPPORTED_CODEX
-chmod 700 "$fake_bin/codex"
+make_compatible_codex "$fake_bin/codex"
 export PATH="$fake_bin:$PATH"
 export CODEX_HOME="$codex_home"
 source "$script"
@@ -1246,11 +1232,434 @@ credential=$(find "$codex_home/.gpteasy-shell/credentials" -type f -name '*.toke
     }
 }
 
+#[test]
+fn shell_snapshots_reject_stale_combinations_and_payloads_before_config_commit() {
+    let fixture = ExportFixture::new();
+    fixture.insert_provider(
+        "11111111-1111-4111-8111-111111111111",
+        "Alpha Provider",
+        "https://alpha.example/v1",
+        "alpha-secret-key",
+        "alpha-model",
+        1,
+    );
+    for shell in shell_matrix_targets() {
+        let destination = fixture.temp.path().join(format!("binding-{shell:?}"));
+        fixture
+            .application
+            .export_linux_script(shell, &destination, false)
+            .unwrap();
+        run_shell_black_box(
+            shell,
+            &destination,
+            r#"
+set -euo pipefail
+workspace=$(mktemp -d)
+trap 'rm -rf -- "$workspace"' EXIT
+script="$workspace/export"
+cp -- "$1" "$script"
+export CODEX_HOME="$workspace/home"
+mkdir -m 700 "$CODEX_HOME"
+printf '%s\n' 'old = true' >"$CODEX_HOME/config.toml"
+before=$(sha256sum "$CODEX_HOME/config.toml")
+mkdir -m 700 "$workspace/bin"
+make_compatible_codex "$workspace/bin/codex"
+export PATH="$workspace/bin:$PATH"
+cp -- "$1" "$script"
+source "$script"
+# First prove the original snapshot passes both the CLI and binding gates.
+gpteasy <<<"1" >"$workspace/output" 2>&1 || { cat "$workspace/output" >&2; exit 1; }
+gpteasy restore <<<"y" >"$workspace/output" 2>&1 || { cat "$workspace/output" >&2; exit 1; }
+[[ "$before" == "$(sha256sum "$CODEX_HOME/config.toml")" ]]
+for change in base_url credential model protocol policy source; do
+    case "$change" in
+        base_url) sed 's@https://alpha.example/v1@https://changed.example/v1@g' "$1" >"$script" ;;
+        credential) sed 's/alpha-secret-key/changed-secret-key/g' "$1" >"$script" ;;
+        model) sed 's/alpha-model\t/changed-model\t/' "$1" >"$script" ;;
+        protocol) sed "s/gpteasy__catalog_protocol='codex-model-catalog-v1'/gpteasy__catalog_protocol='codex-model-catalog-v99'/" "$1" >"$script" ;;
+        policy) sed "s/gpteasy__catalog_policy='common-reasoning-selector-v1'/gpteasy__catalog_policy='changed-policy'/" "$1" >"$script" ;;
+        source) sed "s/^gpteasy__export_id=.*/gpteasy__export_id='99999999-9999-4999-8999-999999999999'/" "$1" >"$script" ;;
+    esac
+    source "$script"
+    if gpteasy <<<"1" >"$workspace/output" 2>&1; then
+        printf 'stale %s was accepted\n' "$change" >&2
+        exit 1
+    fi
+    grep -Fq '载荷与供应商快照绑定不一致' "$workspace/output"
+    [[ "$before" == "$(sha256sum "$CODEX_HOME/config.toml")" ]]
+done
+sed 's/Alpha Provider/Display Renamed/g' "$1" >"$script"
+source "$script"
+gpteasy <<<"1" >"$workspace/output" 2>&1
+grep -Fq 'Display Renamed' "$CODEX_HOME/config.toml"
+gpteasy restore <<<"y" >"$workspace/output" 2>&1
+cp -- "$1" "$script"
+sed -i 's/"context_window": 128000/"context_window": 127999/g' "$script"
+source "$script"
+if gpteasy <<<"1" >"$workspace/output" 2>&1; then exit 1; fi
+[[ "$before" == "$(sha256sum "$CODEX_HOME/config.toml")" ]]
+"#,
+        );
+    }
+}
+
+#[test]
+fn export_rejects_missing_corrupt_stale_and_control_character_snapshots() {
+    for mutation in [
+        "DELETE FROM provider_model_catalog",
+        "UPDATE provider_model_catalog SET models_json = 'broken'",
+        "UPDATE provider_model_catalog SET models_json = '[]'",
+        "UPDATE provider_model_catalog SET verification_fingerprint = 'stale'",
+        "UPDATE providers SET api_key = 'changed'",
+        "UPDATE providers SET name = 'unsafe' || char(1)",
+    ] {
+        let fixture = ExportFixture::new();
+        fixture.insert_provider(
+            "11111111-1111-4111-8111-111111111111",
+            "Alpha",
+            "https://alpha.example/v1",
+            "private-key",
+            "alpha-model",
+            1,
+        );
+        Connection::open(fixture.store.paths().database())
+            .unwrap()
+            .execute(mutation, [])
+            .unwrap();
+        let destination = fixture.temp.path().join("rejected.sh");
+        assert!(
+            fixture
+                .application
+                .export_linux_script(LinuxShell::Bash, &destination, false)
+                .is_err(),
+            "{mutation}"
+        );
+        assert!(!destination.exists());
+    }
+}
+
+#[test]
+fn shell_snapshots_restore_catalogs_from_another_export_without_the_old_provider() {
+    for shell in shell_matrix_targets() {
+        let fixture = ExportFixture::new();
+        fixture.insert_provider(
+            "11111111-1111-4111-8111-111111111111",
+            "Alpha",
+            "https://alpha.example/v1",
+            "private-alpha",
+            "alpha-model",
+            1,
+        );
+        let destination = fixture.temp.path().join(format!("cross-{shell:?}"));
+        fixture
+            .application
+            .export_linux_script(shell, &destination, false)
+            .unwrap();
+        Connection::open(fixture.store.paths().database())
+            .unwrap()
+            .execute("DELETE FROM providers", [])
+            .unwrap();
+        fixture.insert_provider(
+            "22222222-2222-4222-8222-222222222222",
+            "Beta",
+            "https://beta.example/v1",
+            "private-beta",
+            "beta-model",
+            1,
+        );
+        let second = destination.with_file_name(format!("cross-{shell:?}.second"));
+        fixture
+            .application
+            .export_linux_script(shell, &second, false)
+            .unwrap();
+        run_shell_black_box(
+            shell,
+            &destination,
+            r#"
+set -euo pipefail
+workspace=$(mktemp -d)
+trap 'rm -rf -- "$workspace"' EXIT
+export CODEX_HOME="$workspace/中文 home \ quote\""
+mkdir -m 700 "$CODEX_HOME" "$workspace/bin"
+make_compatible_codex "$workspace/bin/codex"
+export PATH="$workspace/bin:$PATH"
+# The external catalog is preserved byte for byte, without being adopted.
+printf '%s\n' 'external catalog bytes' >"$workspace/external.json"
+printf 'model_catalog_json = "%s/external.json"\ncustom = true\n' "$workspace" >"$CODEX_HOME/config.toml"
+cp "$CODEX_HOME/config.toml" "$workspace/original"
+external_hash=$(sha256sum "$workspace/external.json")
+source "$1"
+gpteasy <<<"1" >"$workspace/output" 2>&1
+cp "$CODEX_HOME/config.toml" "$workspace/alpha"
+old_catalog=$(find "$CODEX_HOME/.gpteasy-shell/model-catalogs" -type f -name '*.json' -print -quit)
+cp "$old_catalog" "$workspace/catalog"
+source "$1.second"
+gpteasy <<<"1" >"$workspace/output" 2>&1
+before=$(sha256sum <"$CODEX_HOME/config.toml")
+for corruption in missing bytes symlink hardlink; do
+    rm -f "$old_catalog"
+    case "$corruption" in
+        missing) ;;
+        bytes) printf '%s' 'broken' >"$old_catalog" ;;
+        symlink) ln -s "$workspace/catalog" "$old_catalog" ;;
+        hardlink) ln "$workspace/catalog" "$old_catalog" ;;
+    esac
+    if gpteasy restore <<<"y" >"$workspace/output" 2>&1; then exit 1; fi
+    [[ "$before" == "$(sha256sum <"$CODEX_HOME/config.toml")" ]]
+    [[ ! -d "$CODEX_HOME/.gpteasy-shell/lock/active" ]]
+done
+rm -f "$old_catalog"
+cp "$workspace/catalog" "$old_catalog"
+gpteasy restore <<<"y" >"$workspace/output" 2>&1
+cmp -s "$workspace/alpha" "$CODEX_HOME/config.toml"
+grep -Fq '配置已保存，但 CLI/共享后台服务可能仍使用旧配置' "$workspace/output"
+gpteasy restore <<<"y" >"$workspace/output" 2>&1
+cmp -s "$workspace/original" "$CODEX_HOME/config.toml"
+[[ "$external_hash" == "$(sha256sum "$workspace/external.json")" ]]
+[[ -f "$old_catalog" ]]
+# A previously missing config is restored to absence, without adding a catalog.
+export CODEX_HOME="$workspace/empty"
+gpteasy <<<"1" >"$workspace/output" 2>&1
+gpteasy restore <<<"y" >"$workspace/output" 2>&1
+[[ ! -e "$CODEX_HOME/config.toml" ]]
+"#,
+        );
+    }
+}
+
+#[test]
+fn shell_snapshots_keep_references_safe_at_both_atomic_commit_boundaries() {
+    let fixture = ExportFixture::new();
+    fixture.insert_provider(
+        "11111111-1111-4111-8111-111111111111",
+        "Alpha",
+        "https://alpha.example/v1",
+        "private-key",
+        "alpha-model",
+        1,
+    );
+    for shell in shell_matrix_targets() {
+        let destination = fixture.temp.path().join(format!("fault-{shell:?}"));
+        fixture
+            .application
+            .export_linux_script(shell, &destination, false)
+            .unwrap();
+        run_shell_black_box(
+            shell,
+            &destination,
+            r#"
+set -euo pipefail
+workspace=$(mktemp -d)
+trap 'rm -rf -- "$workspace"' EXIT
+mkdir -m 700 "$workspace/bin"
+make_compatible_codex "$workspace/bin/codex"
+cat >"$workspace/bin/mv" <<'MV'
+#!/bin/sh
+case "$GPTEASY_FAULT:$*" in
+    catalog_move:*'.model-catalog.'*) exit 1 ;;
+    config_move:*'.config.toml.gpteasy.'*) exit 1 ;;
+esac
+exec /usr/bin/mv "$@"
+MV
+cat >"$workspace/bin/sync" <<'SYNC'
+#!/bin/sh
+if [ "$GPTEASY_FAULT" = after_commit ] && [ "$2" = "$CODEX_HOME" ] && grep -Fq '# GPTEasy schema-version: 2' "$CODEX_HOME/config.toml"; then exit 1; fi
+if [ "$GPTEASY_FAULT" = corrupt_catalog ] && [ "$2" = "$CODEX_HOME"/.gpteasy-shell/model-catalogs/* ]; then
+    find "$2" -type f -name '*.json' -exec sh -c 'printf broken >"$1"' sh {} \;
+fi
+exec /usr/bin/sync "$@"
+SYNC
+chmod 700 "$workspace/bin/mv" "$workspace/bin/sync"
+export PATH="$workspace/bin:$PATH"
+source "$1"
+for GPTEASY_FAULT in catalog_move config_move after_commit corrupt_catalog broad_private; do
+    export GPTEASY_FAULT CODEX_HOME="$workspace/$GPTEASY_FAULT"
+    mkdir -m 700 "$CODEX_HOME"
+    printf '%s\n' 'old_config = true' >"$CODEX_HOME/config.toml"
+    cp "$CODEX_HOME/config.toml" "$workspace/original"
+    if [[ "$GPTEASY_FAULT" == broad_private ]]; then
+        mkdir -m 755 "$CODEX_HOME/.gpteasy-shell"
+    fi
+    if gpteasy <<<"1" >"$workspace/output" 2>&1; then exit 1; fi
+    [[ ! -d "$CODEX_HOME/.gpteasy-shell/lock/active" ]]
+    if [[ "$GPTEASY_FAULT" == after_commit ]]; then
+        grep -Fq '# GPTEasy schema-version: 2' "$CODEX_HOME/config.toml"
+        grep -Fq 'stage=config_readback catalog_state=indeterminate' "$workspace/output"
+        grep -Fq '配置已保存，但 CLI/共享后台服务可能仍使用旧配置' "$workspace/output"
+        catalog=$(sed -n 's/^model_catalog_json = "\(.*\)"$/\1/p' "$CODEX_HOME/config.toml")
+        [[ -s "$catalog" ]]
+        [[ $(find "$CODEX_HOME/.gpteasy-shell/shell-restore" -name config.toml | wc -l) -eq 1 ]]
+        export GPTEASY_FAULT=none
+        gpteasy restore <<<"y" >"$workspace/output" 2>&1
+        cmp -s "$workspace/original" "$CODEX_HOME/config.toml"
+    else
+        cmp -s "$workspace/original" "$CODEX_HOME/config.toml"
+        if [[ "$GPTEASY_FAULT" == config_move ]]; then
+            [[ $(find "$CODEX_HOME/.gpteasy-shell/model-catalogs" -name '*.json' | wc -l) -eq 1 ]]
+        fi
+    fi
+done
+"#,
+        );
+    }
+}
+
+#[test]
+fn shell_snapshots_reject_restore_point_changes_during_confirmation() {
+    let fixture = ExportFixture::new();
+    fixture.insert_provider(
+        "11111111-1111-4111-8111-111111111111",
+        "Alpha",
+        "https://alpha.example/v1",
+        "private-key",
+        "alpha-model",
+        1,
+    );
+    for shell in shell_matrix_targets() {
+        let destination = fixture.temp.path().join(format!("confirmation-{shell:?}"));
+        fixture
+            .application
+            .export_linux_script(shell, &destination, false)
+            .unwrap();
+        run_shell_black_box(
+            shell,
+            &destination,
+            r#"
+set -euo pipefail
+workspace=$(mktemp -d)
+trap 'rm -rf -- "$workspace"' EXIT
+export CODEX_HOME="$workspace/home"
+mkdir -m 700 "$CODEX_HOME" "$workspace/bin"
+make_compatible_codex "$workspace/bin/codex"
+export PATH="$workspace/bin:$PATH"
+printf '%s\n' 'original = true' >"$CODEX_HOME/config.toml"
+source "$1"
+gpteasy <<<"1" >/dev/null
+before=$(sha256sum "$CODEX_HOME/config.toml")
+backup=$(find "$CODEX_HOME/.gpteasy-shell/shell-restore" -name config.toml -print -quit)
+mkfifo "$workspace/input"
+exec 7<>"$workspace/input"
+(gpteasy restore <"$workspace/input" >"$workspace/output" 2>&1) &
+restore_pid=$!
+ready=0
+for attempt in $(seq 1 100); do
+    if grep -Fq '警告：恢复可能覆盖' "$workspace/output"; then ready=1; break; fi
+    sleep 0.05
+done
+[[ "$ready" == 1 ]]
+printf '%s\n' 'changed = true' >"$backup"
+printf '%s\n' y >&7
+if wait "$restore_pid"; then exit 1; fi
+exec 7>&-
+grep -Fq '恢复点在确认期间发生变化' "$workspace/output"
+grep -Fq 'stage=restore_precommit catalog_state=backup_rejected' "$workspace/output"
+[[ "$before" == "$(sha256sum "$CODEX_HOME/config.toml")" ]]
+[[ ! -d "$CODEX_HOME/.gpteasy-shell/lock/active" ]]
+"#,
+        );
+    }
+}
+
+#[test]
+fn shell_snapshots_survive_process_death_between_and_after_catalog_commits() {
+    let fixture = ExportFixture::new();
+    fixture.insert_provider(
+        "11111111-1111-4111-8111-111111111111",
+        "Alpha",
+        "https://alpha.example/v1",
+        "private-key",
+        "alpha-model",
+        1,
+    );
+    for shell in shell_matrix_targets() {
+        let destination = fixture.temp.path().join(format!("crash-{shell:?}"));
+        fixture
+            .application
+            .export_linux_script(shell, &destination, false)
+            .unwrap();
+        run_shell_black_box(
+            shell,
+            &destination,
+            r#"
+set -euo pipefail
+workspace=$(mktemp -d)
+trap 'rm -rf -- "$workspace"' EXIT
+mkdir -m 700 "$workspace/bin"
+make_compatible_codex "$workspace/bin/codex"
+cat >"$workspace/bin/mv" <<'CRASH_MV'
+#!/bin/sh
+case "$GPTEASY_CRASH:$*" in
+    after_catalog:*'.model-catalog.'*|after_config:*'.config.toml.gpteasy.'*)
+        /usr/bin/mv "$@" || exit 1
+        kill -KILL "$PPID"
+        exit 0
+        ;;
+esac
+exec /usr/bin/mv "$@"
+CRASH_MV
+chmod 700 "$workspace/bin/mv"
+export PATH="$workspace/bin:$PATH"
+source "$1"
+for GPTEASY_CRASH in after_catalog after_config; do
+    export GPTEASY_CRASH CODEX_HOME="$workspace/$GPTEASY_CRASH"
+    mkdir -m 700 "$CODEX_HOME"
+    printf '%s\n' 'original = true' >"$CODEX_HOME/config.toml"
+    cp "$CODEX_HOME/config.toml" "$workspace/original"
+    if "$2" "$1" <<<"1" >"$workspace/output" 2>&1; then exit 1; fi
+    [[ -d "$CODEX_HOME/.gpteasy-shell/lock/active" ]]
+    catalog=$(find "$CODEX_HOME/.gpteasy-shell/model-catalogs" -type f -name '*.json' -print -quit)
+    [[ -s "$catalog" ]]
+    grep -Fq '"context_window": 128000' "$catalog"
+    [[ $(find "$CODEX_HOME/.gpteasy-shell/shell-restore" -name config.toml | wc -l) -eq 1 ]]
+    if [[ "$GPTEASY_CRASH" == after_catalog ]]; then
+        cmp -s "$workspace/original" "$CODEX_HOME/config.toml"
+    else
+        grep -Fq '# GPTEasy schema-version: 2' "$CODEX_HOME/config.toml"
+        grep -Fq "$catalog" "$CODEX_HOME/config.toml"
+    fi
+    gpteasy unlock <<<"y" >"$workspace/output" 2>&1
+    [[ ! -d "$CODEX_HOME/.gpteasy-shell/lock/active" ]]
+    export GPTEASY_CRASH=none
+    gpteasy restore <<<"y" >"$workspace/output" 2>&1
+    cmp -s "$workspace/original" "$CODEX_HOME/config.toml"
+    [[ -s "$catalog" ]]
+done
+"#,
+        );
+    }
+}
+
 struct ExportFixture {
     temp: TempDir,
     store: StateStore,
     application: ProviderApplication,
 }
+
+const SHELL_FIXTURE_SETUP: &str = r###"umask 077
+trap 'printf "black-box failed at line %s\n" "$LINENO" >&2' ERR
+
+make_compatible_codex() {
+    cat >"$1" <<'GPTEASY_TEST_NATIVE_CODEX'
+#!/bin/sh
+case "$1" in
+  --version) printf '%s\n' 'codex-cli 0.147.0'; exit 0 ;;
+  app-server) [ "$2" = '--listen' ] || exit 2 ;;
+  *) exit 2 ;;
+esac
+[ -f "$CODEX_HOME/catalog.json" ] || exit 3
+grep -Fq '"slug": "gpteasy-catalog-schema-probe-v1"' "$CODEX_HOME/catalog.json" || exit 3
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*) printf '%s\n' '{"id":1,"result":{"userAgent":"fixture-native-linux"}}' ;;
+    *'"method":"model/list"'*)
+      printf '%s\n' '{"id":2,"result":{"data":[{"model":"gpteasy-catalog-schema-probe-v1","defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"low"},{"reasoningEffort":"medium"},{"reasoningEffort":"high"},{"reasoningEffort":"xhigh"}]}],"nextCursor":null}}'
+      ;;
+  esac
+done
+GPTEASY_TEST_NATIVE_CODEX
+    chmod 700 "$1"
+}
+"###;
 
 fn run_shell_black_box(shell: LinuxShell, script: &Path, harness: &str) {
     run_shell_black_box_with_canaries(shell, script, harness, &[]);
@@ -1326,7 +1735,7 @@ fn run_shell_black_box_with_canaries(
         .take()
         .unwrap_or_else(|| panic!("{label} stdin"));
     stdin
-        .write_all(b"umask 077\n")
+        .write_all(SHELL_FIXTURE_SETUP.as_bytes())
         .unwrap_or_else(|error| panic!("set a private {label} fixture umask: {error}"));
     stdin
         .write_all(harness.as_bytes())
@@ -1486,22 +1895,46 @@ impl ExportFixture {
         models: &[&str],
     ) {
         let connection = Connection::open(self.store.paths().database()).expect("open state");
+        let fingerprint = combination_fingerprint(base_url, default_model, api_key);
         connection
             .execute(
                 "INSERT INTO providers (
                     id, name, base_url, api_key, default_model, verified_at,
                     verification_fingerprint, sort_order
-            ) VALUES (?1, ?2, ?3, ?4, ?5, '1786800000', 'verified', ?6)",
-                params![id, name, base_url, api_key, default_model, sort_order],
+            ) VALUES (?1, ?2, ?3, ?4, ?5, '1786800000', ?7, ?6)",
+                params![
+                    id,
+                    name,
+                    base_url,
+                    api_key,
+                    default_model,
+                    sort_order,
+                    fingerprint
+                ],
             )
             .expect("insert verified provider fixture");
         connection
             .execute(
                 "INSERT INTO provider_model_catalog(
                      provider_id, verification_fingerprint, models_json
-                 ) VALUES (?1, 'verified', ?2)",
-                params![id, serde_json::to_string(models).expect("encode models")],
+                 ) VALUES (?1, ?3, ?2)",
+                params![
+                    id,
+                    serde_json::to_string(models).expect("encode models"),
+                    fingerprint
+                ],
             )
             .expect("insert provider model catalog fixture");
     }
+}
+
+fn combination_fingerprint(base_url: &str, model: &str, api_key: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"gpteasy-provider-combination-v1\0");
+    hasher.update(base_url.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(model.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(api_key.as_bytes());
+    format!("{:x}", hasher.finalize())
 }

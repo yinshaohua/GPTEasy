@@ -8,7 +8,7 @@ npm run acceptance:linux-wsl -- `
   -Bash44Path <GNU Bash 4.4 路径> `
   -BashCurrentPath <当前 GNU Bash 路径> `
   -Zsh59Path <Zsh 5.9 路径> `
-  -CodexPath <Codex CLI 0.147.0 或更高版本路径> `
+  -CodexPath <支持完整离线目录 schema 的原生 Linux Codex 路径> `
   -ConfirmDisposableWsl
 ```
 
@@ -16,7 +16,7 @@ Windows Full 模式在执行任何 guest 命令前检查 `-ConfirmDisposableWsl`
 
 它生成两个随机 API Key canary，在内存中捕获并扫描进程参数、标准输出/错误、React DOM、通知、错误详情、测试日志、应用后端日志、截图辅助和最终报告。应用后端日志来自 WSL 协调、删除与凭据清理以及真实 Running/Stopped guest 步骤的进程输出；每个受验后端进程都由 runner 捕获 stdout/stderr。只有全部扫描面不含 canary 后，才把日志与 `evidence.json` 写入 `src-tauri/target/acceptance/linux-wsl/<session>/`；检测到泄漏时返回非零状态，且不持久化本轮日志或证据。
 
-矩阵运行 Linux 导出生成器、三个 shell 的同一套公开黑盒行为、WSL2 共享协议与生命周期、SQLite schema/迁移、供应商删除与凭据清理、React Linux/WSL2 用户流程，以及领域/ADR/界面/GitHub PRD 合同检查。公开 shell 黑盒覆盖直接执行、source 零写入、无 Codex 时预配置、已安装但不兼容的 Codex 版本拒绝、恢复与锁、身份和权限诊断、symlink、hardlink、并发修改和 `auth.json` 逐字节不变。
+矩阵运行 Linux 导出生成器、三个 shell 的同一套公开黑盒行为、WSL2 共享协议与生命周期、SQLite schema/迁移、供应商删除与凭据清理、React Linux/WSL2 用户流程，以及领域/ADR/界面/GitHub PRD 合同检查。公开 shell 黑盒覆盖直接执行、source 零写入、缺少原生 Codex 或目录/schema 不兼容时拒绝提交、恢复与锁、身份和权限诊断、symlink、hardlink、并发修改和 `auth.json` 逐字节不变。
 
 只运行可重复自动化与当前 Bash、并把未执行的真实环境门禁写入报告时，使用开发子集：
 
@@ -24,7 +24,7 @@ Windows Full 模式在执行任何 guest 命令前检查 `-ConfirmDisposableWsl`
 npm run acceptance:linux-wsl:automated
 ```
 
-在原生 GNU/Linux 上以 `-Mode Full` 运行同一脚本时，三个 shell 目标计入独立 GNU/Linux 门禁；Windows 上计入 WSL2 shell 矩阵。Full 模式还会在隔离的 `CODEX_HOME` 中调用所选真实 Codex 的 `app-server config/read`，验证生成配置实际被目标版本接受。原生 Linux 门禁拒绝 WSL 内核，不能用 WSL2 冒充独立 GNU/Linux。报告始终列出平台前置条件、各 shell 版本、真实 Codex 版本、Running/Stopped WSL2 结果和未执行的真实环境门禁。
+在原生 GNU/Linux 上以 `-Mode Full` 运行同一脚本时，三个 shell 目标计入独立 GNU/Linux 门禁；Windows 上计入 WSL2 shell 矩阵。Full 模式还会在隔离的 `CODEX_HOME` 中调用所选真实 Codex 的 `app-server config/read`，验证生成配置实际被目标版本接受；#69 同时通过 model/list 核验完整模型集合和四档元数据，版本下限只是历史前置条件。原生 Linux 门禁拒绝 WSL 内核，不能用 WSL2 冒充独立 GNU/Linux。报告始终列出平台前置条件、各 shell 版本、真实 Codex 版本、Running/Stopped WSL2 结果和未执行的真实环境门禁。
 
 Issue #31 的真实环境、执行矩阵、脱敏证据路径和 #29 可追溯关系记录在 [真实 UAT 证据](linux-wsl-real-uat.md)。
 
@@ -42,7 +42,7 @@ npm run acceptance:all -- `
   -Bash44Path <GNU Bash 4.4 路径> `
   -BashCurrentPath <当前 GNU Bash 路径> `
   -Zsh59Path <Zsh 5.9 路径> `
-  -CodexPath <Codex CLI 0.147.0 或更高版本路径> `
+  -CodexPath <支持完整离线目录 schema 的原生 Linux Codex 路径> `
   -ConfirmDisposableWsl
 ```
 

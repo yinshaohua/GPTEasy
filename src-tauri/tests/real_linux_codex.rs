@@ -9,6 +9,7 @@ use gpteasy_lib::provider::{
 use gpteasy_lib::state::{StatePaths, StateStore};
 use rusqlite::{Connection, params};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 const PROVIDER_ID: &str = "31313131-3131-4131-8131-313131313131";
@@ -79,6 +80,27 @@ fn exported_provider_is_effective_in_real_codex_cli() {
         config["model_providers"]["gpteasy"]["wire_api"],
         "responses"
     );
+    let models = stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|message| message["id"] == 3)
+        .expect("real model/list reply");
+    assert!(models.get("error").is_none(), "model/list failed");
+    let models = models["result"]["data"].as_array().expect("real models");
+    for id in [MODEL, "gpteasy-real-codex-alternate"] {
+        let model = models
+            .iter()
+            .find(|model| model["model"] == id)
+            .expect("discovered model visible");
+        assert_eq!(model["defaultReasoningEffort"], "high");
+        let efforts = model["supportedReasoningEfforts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|choice| choice["reasoningEffort"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(efforts, ["low", "medium", "high", "xhigh"]);
+    }
 }
 
 fn real_codex_harness() -> &'static str {
@@ -127,6 +149,11 @@ printf '%s\n' '{"method":"config/read","id":2,"params":{"includeLayers":true}}' 
 while IFS= read -r -u "$server_out" line; do
   printf '%s\n' "$line"
   [[ "$line" == *'"id":2'* ]] && break
+done
+printf '%s\n' '{"method":"model/list","id":3,"params":{"includeHidden":true,"limit":100}}' >&$server_in
+while IFS= read -r -u "$server_out" line; do
+  printf '%s\n' "$line"
+  [[ "$line" == *'"id":3'* ]] && break
 done
 [[ "$auth_before" == "$(sha256sum "$workspace/codex/auth.json")" ]]
 "#
@@ -224,15 +251,32 @@ impl RealCodexFixture {
         let store = StateStore::new(StatePaths::from_root(temp.path().join("state")));
         assert!(store.bootstrap().is_ready());
         let connection = Connection::open(store.paths().database()).expect("open fixture state");
+        let mut hasher = Sha256::new();
+        hasher.update(b"gpteasy-provider-combination-v1\0");
+        hasher.update(BASE_URL.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(MODEL.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(canary.as_bytes());
+        let fingerprint = format!("{:x}", hasher.finalize());
         connection
             .execute(
                 "INSERT INTO providers (
                     id, name, base_url, api_key, default_model, verified_at,
                     verification_fingerprint, sort_order
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, '1786800000', 'verified', 0)",
-                params![PROVIDER_ID, PROVIDER_NAME, BASE_URL, canary, MODEL],
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, '1786800000', ?6, 0)",
+                params![
+                    PROVIDER_ID,
+                    PROVIDER_NAME,
+                    BASE_URL,
+                    canary,
+                    MODEL,
+                    fingerprint
+                ],
             )
             .expect("insert real Codex provider fixture");
+        connection.execute("INSERT INTO provider_model_catalog(provider_id, verification_fingerprint, models_json) VALUES (?1, ?2, ?3)",
+            params![PROVIDER_ID, fingerprint, serde_json::to_string(&[MODEL, "gpteasy-real-codex-alternate"]).unwrap()]).unwrap();
         drop(connection);
         let application =
             ProviderApplication::new(store, ProviderValidator::new(ValidationTimeouts::default()));

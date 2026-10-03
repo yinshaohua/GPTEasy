@@ -26,9 +26,11 @@ ADR 记录难以逆转且有真实取舍的决定。重建遵循 ADR-0009 的“
 
 - [ADR-0053](0053-common-reasoning-selector-defaults.md)：原生当前用户 Codex 目录统一提供四档思考选择、默认 `high`；GPTEasy 保留权威配置与验证快照，Codex JSON 为派生工件，替代 ADR-0049/0051 的空列表策略。
 
+- [ADR-0055](0055-standalone-linux-offline-model-catalog.md)：独立 Linux 的完整离线目录、schema v2 与原生 CLI 能力门禁；保留目录引用及操作内核验。
+
 ## Proposed
 
-- [ADR-0054](0054-shared-daemon-refresh-and-confirmed-restart.md)：共享后台服务待刷新与用户确认重启；尚未实现，不改变当前配置操作或 CLI 控制边界。详细交接见 [设计文档](../design/codex-shared-daemon-refresh.md)。
+- [ADR-0054](0054-shared-daemon-refresh-and-confirmed-restart.md)：共享后台服务待刷新与用户确认重启；独立 Linux 目录部分已由 ADR-0055 接受；WSL 共同管理与共享后台服务控制仍未完成。详细交接见 [设计文档](../design/codex-shared-daemon-refresh.md)。
 
 ## Historical Or Deferred
 

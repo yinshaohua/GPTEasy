@@ -8,6 +8,9 @@ gpteasy__credential_file_prefix='# GPTEasy credential-file:'
 gpteasy__catalog_artifact_prefix='# GPTEasy model-catalog-artifact:'
 gpteasy__catalog_sha256_prefix='# GPTEasy model-catalog-sha256:'
 gpteasy__catalog_fingerprint_prefix='# GPTEasy model-catalog-provider-fingerprint:'
+gpteasy__catalog_protocol_prefix='# GPTEasy model-catalog-protocol:'
+gpteasy__catalog_policy_prefix='# GPTEasy model-catalog-policy:'
+gpteasy__catalog_file_prefix='# GPTEasy model-catalog-file:'
 
 # Read the complete v2 catalog row so metadata and credentials cannot be
 # truncated by the legacy six-column format.
@@ -119,31 +122,149 @@ gpteasy__matches() {
 }
 
 gpteasy__check_codex_compatibility() {
-    local output version remainder major minor patch
-    if ! command -v codex >/dev/null 2>&1; then
-        gpteasy__codex_cli_state=missing
-        return 0
-    fi
-    if ! output=$(codex --version 2>/dev/null); then
-        printf '%s\n' '无法确认 Codex CLI 版本，未写入任何内容。' >&2
+    local entry resolved magic
+    # Search PATH through an external shell: aliases/functions cannot select the CLI.
+    entry=$(sh -c 'command -v codex' 2>/dev/null) || {
+        printf '%s\n' '未找到原生 Linux Codex CLI；目录能力未核验，未修改配置。' >&2
+        gpteasy__evidence cli_probe unavailable
+        return 1
+    }
+    case "$entry" in /*) ;; *) return 1 ;; esac
+    resolved=$(readlink -f -- "$entry") || return 1
+    magic=$(head -c 2 -- "$resolved" 2>/dev/null) || return 1
+    case "$resolved" in *.exe | *.EXE | *.cmd | *.bat) magic=MZ ;; esac
+    if [[ "$magic" == MZ || ! -f "$resolved" || ! -x "$resolved" ]]; then
+        printf '%s\n' '拒绝 Windows 互操作入口；请在目标 Linux 用户环境安装原生 Codex CLI。' >&2
+        gpteasy__evidence cli_probe interop_rejected
         return 1
     fi
-    if ! gpteasy__matches "$output" '^codex-cli[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+([-+][^[:space:]]+)?$'; then
-        printf '%s\n' '无法识别 Codex CLI 版本，未写入任何内容。' >&2
+    gpteasy__native_codex=$resolved
+    if ! gpteasy__probe_catalog_capability; then
+        printf '%s\n' 'Codex CLI 的模型目录/schema 能力核验失败，未修改配置。请按该 CLI 的官方说明检查兼容性。' >&2
+        gpteasy__evidence cli_probe schema_rejected
         return 1
     fi
-    version=${output#codex-cli }
-    version=${version%%[-+]*}
-    major=${version%%.*}
-    remainder=${version#*.}
-    minor=${remainder%%.*}
-    patch=${remainder#*.}
-    if ((major == 0 && (minor < 147 || (minor == 147 && patch < 0)))); then
-        printf '%s\n' 'Codex CLI 版本过低，请升级到 0.147.0 或更高版本；未写入任何内容。' >&2
-        return 1
-    fi
-    gpteasy__codex_cli_state=ready
+    gpteasy__evidence cli_probe compatible
 }
+
+gpteasy__evidence() {
+    # Only fixed stage/state labels enter public diagnostics; never provider data.
+    printf '[GPTEasy] stage=%s catalog_state=%s\n' "$1" "$2" >&2
+}
+
+gpteasy__refresh_pending() {
+    printf '%s\n' '配置已保存，但 CLI/共享后台服务可能仍使用旧配置。'
+    printf '人工刷新目标：uid=%s，CODEX_HOME=%s。请在该用户和 home 下，按所安装原生 CLI 的官方管理说明刷新。\n' "$(gpteasy__current_uid)" "${CODEX_HOME:-"$HOME/.codex"}"
+}
+
+
+gpteasy__probe_reply_is_valid() {
+    # Parse JSON for observation only. No JSON is reconstructed and no supplier
+    # text is executed. The isolated probe must return exactly its one model.
+    awk -v expected_id="${1:-2}" '
+        function fail() { bad = 1; exit 1 }
+        function ws() { while (substr(text, pos, 1) ~ /[ \t\r\n]/ && pos <= length(text)) pos++ }
+        function string(    start,c,escaped) {
+            if (substr(text,pos++,1) != "\"") fail()
+            start = pos
+            while (pos <= length(text)) {
+                c = substr(text,pos++,1)
+                if (c == "\"") return substr(text,start,pos-start-1)
+                if (c == "\\") {
+                    c = substr(text,pos++,1)
+                    if (c == "u") {
+                        if (substr(text,pos,4) !~ /^[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]$/) fail()
+                        pos += 4
+                    } else if (c !~ /^["\\\/bfnrt]$/) fail()
+                } else if (c ~ /[[:cntrl:]]/) fail()
+            }
+            fail()
+        }
+        function value(path,depth,    c,k,n,v,start,token) {
+            if (depth > 32) fail()
+            ws(); c = substr(text,pos,1)
+            if (c == "{") {
+                pos++; ws()
+                if (substr(text,pos,1) == "}") { pos++; return }
+                do {
+                    ws(); k = string(); ws()
+                    if (seen[path "/" k]++) fail()
+                    if (substr(text,pos++,1) != ":") fail()
+                    value(path "/" k,depth+1); ws(); c = substr(text,pos++,1)
+                    if (c != "," && c != "}") fail()
+                } while (c == ",")
+            } else if (c == "[") {
+                pos++; ws(); n = 0
+                if (substr(text,pos,1) == "]") { pos++; sizes[path]=0; return }
+                do {
+                    value(path "/" n++,depth+1); ws(); c = substr(text,pos++,1)
+                    if (c != "," && c != "]") fail()
+                } while (c == ",")
+                sizes[path] = n
+            } else if (c == "\"") {
+                leaves[path] = string()
+            } else {
+                start = pos
+                while (pos <= length(text) && substr(text,pos,1) !~ /[]},[:space:]]/) pos++
+                token = substr(text,start,pos-start)
+                if (token !~ /^(true|false|null|-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?)$/) fail()
+                leaves[path] = token
+            }
+        }
+        { text = text $0 }
+        END {
+            if (bad) exit 1
+            pos = 1; value("",0); ws()
+            if (expected_id == 1) exit pos > length(text) && leaves["/id"] == "1" && seen["/result"] && !seen["/error"] ? 0 : 1
+            valid = pos > length(text) && leaves["/id"] == "2" && !seen["/error"] &&
+                sizes["/result/data"] == 1 && leaves["/result/data/0/model"] == "gpteasy-catalog-schema-probe-v1" &&
+                leaves["/result/data/0/defaultReasoningEffort"] == "high" &&
+                sizes["/result/data/0/supportedReasoningEfforts"] == 4 &&
+                leaves["/result/data/0/supportedReasoningEfforts/0/reasoningEffort"] == "low" &&
+                leaves["/result/data/0/supportedReasoningEfforts/1/reasoningEffort"] == "medium" &&
+                leaves["/result/data/0/supportedReasoningEfforts/2/reasoningEffort"] == "high" &&
+                leaves["/result/data/0/supportedReasoningEfforts/3/reasoningEffort"] == "xhigh"
+            exit valid ? 0 : 1
+        }
+    '
+}
+
+gpteasy__probe_catalog_capability() (
+    local probe pid= line attempts=0 initialized=0
+    command -v timeout >/dev/null 2>&1 || return 1
+    probe=$(mktemp -d "$gpteasy__tmp_root/.catalog-probe.XXXXXX") || return 1
+    trap 'if [[ -n "$pid" ]]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi; exec 8>&- 9>&-; rm -rf -- "$probe"' EXIT
+    chmod 700 "$probe" || return 1
+    gpteasy__catalog_probe_payload >"$probe/catalog.json" || return 1
+    {
+        printf '%s\n' 'model = "gpteasy-catalog-schema-probe-v1"'
+        printf 'model_catalog_json = %s\n' "$(gpteasy__toml_string "$probe/catalog.json")"
+        printf '%s\n' 'model_provider = "gpteasy_probe"' '[model_providers.gpteasy_probe]' 'name = "GPTEasy schema probe"' \
+            'base_url = "http://127.0.0.1:9/v1"' 'wire_api = "responses"' 'requires_openai_auth = true' 'supports_websockets = false'
+    } >"$probe/config.toml"
+    printf '%s' '{"auth_mode":"apikey","OPENAI_API_KEY":"gpteasy-isolated-probe"}' >"$probe/auth.json"
+    chmod 600 "$probe/catalog.json" "$probe/config.toml" "$probe/auth.json" || return 1
+    mkfifo -m 600 "$probe/input" "$probe/output" || return 1
+    exec 8<>"$probe/input" 9<>"$probe/output" || return 1
+    cd -- "$probe" || return 1
+    CODEX_HOME="$probe" timeout -k 1 8 "$gpteasy__native_codex" app-server --listen stdio:// <"$probe/input" >"$probe/output" 2>"$probe/diagnostics" &
+    pid=$!
+    printf '%s\n' '{"id":1,"method":"initialize","params":{"clientInfo":{"name":"gpteasy_catalog_probe","version":"1"}}}' >&8
+    while (( attempts < 30 )); do
+        if ! IFS= read -r -t 1 -u 9 line; then
+            kill -0 "$pid" 2>/dev/null || return 1
+        elif [[ "$initialized" == 0 ]] && printf '%s\n' "$line" | gpteasy__probe_reply_is_valid 1; then
+            initialized=1
+            printf '%s\n' '{"method":"initialized"}' '{"id":2,"method":"model/list","params":{"includeHidden":true,"limit":100}}' >&8
+        elif [[ "$initialized" == 1 ]] && printf '%s\n' "$line" | gpteasy__probe_reply_is_valid 2; then
+            exec 9>&-
+            return 0
+        fi
+        attempts=$((attempts + 1))
+    done
+    exec 9>&-
+    return 1
+)
 
 gpteasy__current_uid() {
     id -u
@@ -167,18 +288,18 @@ gpteasy__directory_is_owned() {
 }
 
 gpteasy__warn_if_permissions_are_broad() {
-    local path=$1 mode
-    mode=$(stat -c '%a' -- "$path" 2>/dev/null) || return
+    local target_path=$1 mode
+    mode=$(stat -c '%a' -- "$target_path" 2>/dev/null) || return
     if (( (8#$mode & 8#77) != 0 )); then
         gpteasy__permission_warning=1
     fi
 }
 
 gpteasy__report_identity_mismatch() {
-    local path=$1 owner sudo_user=${SUDO_USER:-}
-    owner=$(stat -c '%u' -- "$path" 2>/dev/null) || return
+    local target_path=$1 owner sudo_user=${SUDO_USER:-}
+    owner=$(stat -c '%u' -- "$target_path" 2>/dev/null) || return
     printf '目标环境身份不匹配：当前用户 %s（uid=%s）不能管理 %s（所有者 %s）。请以该所有者身份执行；例如 sudo -u <用户> -H。' \
-        "$(id -un)" "$(gpteasy__current_uid)" "$path" "$(gpteasy__owner_label "$owner")" >&2
+        "$(id -un)" "$(gpteasy__current_uid)" "$target_path" "$(gpteasy__owner_label "$owner")" >&2
     if [[ -n "$sudo_user" ]]; then
         printf ' 检测到 SUDO_USER=%s；sudo 可能正在为错误的用户环境写入。' "$sudo_user" >&2
     fi
@@ -187,6 +308,11 @@ gpteasy__report_identity_mismatch() {
 
 gpteasy__require_codex_home() {
     local codex_home=${CODEX_HOME:-"$HOME/.codex"} parent owner
+    case "$codex_home" in /*) ;; *) printf '%s\n' 'CODEX_HOME 必须为 Linux 绝对路径。' >&2; return 1 ;; esac
+    if printf '%s' "$codex_home" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+        printf '%s\n' 'CODEX_HOME 包含不支持的控制字符。' >&2
+        return 1
+    fi
     gpteasy__codex_home=$codex_home
     if [[ -L "$codex_home" ]]; then
         printf 'CODEX_HOME 不能是符号链接：%s\n' "$codex_home" >&2
@@ -347,7 +473,7 @@ gpteasy__release_lock() {
 
 gpteasy__file_hash() {
     if [[ -f "$1" ]]; then
-        sha256sum -- "$1" | awk '{print $1}'
+        sha256sum <"$1" | awk '{print $1}'
     else
         printf '%s\n' 'missing'
     fi
@@ -540,38 +666,55 @@ gpteasy__schema_v1_is_valid() {
 
 gpteasy__catalog_path_for() {
     local source=$1 artifact=$2
+    gpteasy__provider_id_is_safe "$source" && gpteasy__provider_id_is_safe "$artifact" || return 1
     printf '%s\n' "${CODEX_HOME:-"$HOME/.codex"}/.gpteasy-shell/model-catalogs/$source/$artifact.json"
 }
 
 gpteasy__catalog_binding_is_valid() {
     local provider_id=$1 source=$2 artifact=$3 expected_hash=$4 expected_fingerprint=$5
-    local binding binding_provider binding_model binding_artifact binding_hash binding_fingerprint expected_model
-    gpteasy__matches "$source" '^[[:alnum:]][[:alnum:].:_-]*$' || return 1
-    gpteasy__matches "$artifact" '^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$' || return 1
+    local binding binding_provider binding_model binding_artifact binding_hash binding_fingerprint binding_source binding_protocol binding_policy expected_model actual_fingerprint base_url credential
+    [[ "$source" == "$gpteasy__export_id" ]] || return 1
+    gpteasy__catalog_path_for "$source" "$artifact" >/dev/null || return 1
     gpteasy__matches "$expected_hash" '^[[:xdigit:]]{64}$' || return 1
-    [[ -n "$expected_fingerprint" && "$expected_fingerprint" != *$'\n'* && "$expected_fingerprint" != *$'\t'* ]] || return 1
     expected_model=$(gpteasy__provider_model "$provider_id") || return 1
+    base_url=$(gpteasy__provider_base_url "$provider_id") || return 1
+    credential=$(gpteasy__print_credential "$provider_id") || return 1
+    actual_fingerprint=$(printf 'gpteasy-provider-combination-v1\0%s\0%s\0%s' "$base_url" "$expected_model" "$credential" | sha256sum | awk '{print $1}') || return 1
+    [[ "$actual_fingerprint" == "$expected_fingerprint" ]] || return 1
     binding=$(gpteasy__provider_catalog_binding "$provider_id") || return 1
-    IFS="$(printf '\t')" read -r binding_provider binding_model binding_artifact binding_hash binding_fingerprint <<<"$binding"
+    IFS="$(printf '\t')" read -r binding_provider binding_model binding_artifact binding_hash binding_fingerprint binding_source binding_protocol binding_policy <<<"$binding"
     [[ "$binding_provider" == "$provider_id" && "$binding_model" == "$expected_model" &&
-        "$binding_artifact" == "$artifact" &&
-        "$binding_hash" == "$expected_hash" && "$binding_fingerprint" == "$expected_fingerprint" ]]
+        "$binding_artifact" == "$artifact" && "$binding_hash" == "$expected_hash" && "$binding_fingerprint" == "$expected_fingerprint" &&
+        "$binding_source" == "$source" && "$binding_protocol" == "$gpteasy__catalog_protocol" && "$binding_policy" == "$gpteasy__catalog_policy" ]]
+}
+
+gpteasy__catalog_directory_is_private() {
+    local directory=$1 mode
+    gpteasy__directory_is_owned "$directory" || return 1
+    mode=$(stat -c '%a' -- "$directory") || return 1
+    (( (8#$mode & 8#77) == 0 ))
 }
 
 gpteasy__catalog_file_is_valid() {
-    local provider_id=$1 source=$2 artifact=$3 expected_hash=$4 expected_fingerprint=$5 path payload_hash mode
-    gpteasy__catalog_binding_is_valid "$provider_id" "$source" "$artifact" "$expected_hash" "$expected_fingerprint" || return 1
-    path=$(gpteasy__catalog_path_for "$source" "$artifact") || return
-    gpteasy__private_file_is_safe "$path" || return 1
-    mode=$(stat -c '%a' -- "$path" 2>/dev/null) || return 1
-    [[ "$((8#$mode))" -eq $((8#$mode & 8#700)) ]] || return 1
-    payload_hash=$(gpteasy__file_hash "$path") || return
-    [[ "$payload_hash" == "$expected_hash" ]] || return 1
-    cmp -s -- "$path" <(gpteasy__provider_catalog_payload "$provider_id")
+    # Committed artifacts are checked independently of the currently sourced export.
+    # Restore may reference another export or a supplier no longer in this snapshot.
+    local provider_id=$1 source=$2 artifact=$3 expected_hash=$4 expected_fingerprint=$5 target_path mode directory
+    gpteasy__provider_id_is_safe "$provider_id" || return 1
+    gpteasy__matches "$expected_hash" '^[[:xdigit:]]{64}$' || return 1
+    gpteasy__matches "$expected_fingerprint" '^[[:xdigit:]]{64}$' || return 1
+    target_path=$(gpteasy__catalog_path_for "$source" "$artifact") || return 1
+    directory=${target_path%/*}
+    gpteasy__catalog_directory_is_private "${directory%/*/*}" &&
+        gpteasy__catalog_directory_is_private "${directory%/*}" &&
+        gpteasy__catalog_directory_is_private "$directory" || return 1
+    gpteasy__private_file_is_safe "$target_path" || return 1
+    mode=$(stat -c '%a' -- "$target_path" 2>/dev/null) || return 1
+    (( (8#$mode & 8#77) == 0 )) || return 1
+    [[ "$(gpteasy__file_hash "$target_path")" == "$expected_hash" ]]
 }
 
 gpteasy__install_model_catalog() {
-    local provider_id=$1 source artifact expected_hash fingerprint payload path directory temporary
+    local provider_id=$1 source artifact expected_hash fingerprint payload target_path directory temporary
     source="$gpteasy__export_id"
     artifact=$(gpteasy__provider_catalog_artifact "$provider_id") || return 1
     expected_hash=$(gpteasy__provider_catalog_sha256 "$provider_id") || return 1
@@ -587,11 +730,14 @@ gpteasy__install_model_catalog() {
     }
     directory="$gpteasy__model_catalog_root/$source"
     gpteasy__ensure_private_dir "$directory" || return 1
-    path="$directory/$artifact.json"
+    gpteasy__catalog_directory_is_private "${directory%/*/*}" &&
+        gpteasy__catalog_directory_is_private "${directory%/*}" &&
+        gpteasy__catalog_directory_is_private "$directory" || return 1
+    target_path="$directory/$artifact.json"
     gpteasy__model_catalog_created=0
-    if [[ -e "$path" || -L "$path" ]]; then
+    if [[ -e "$target_path" || -L "$target_path" ]]; then
         if ! gpteasy__catalog_file_is_valid "$provider_id" "$source" "$artifact" "$expected_hash" "$fingerprint" ||
-            ! cmp -s -- "$path" <(printf '%s' "$payload"); then
+            ! cmp -s -- "$target_path" <(printf '%s' "$payload"); then
             printf '%s\n' '已有 Linux 模型目录工件不安全或内容不一致。' >&2
             return 1
         fi
@@ -601,13 +747,20 @@ gpteasy__install_model_catalog() {
             rm -f -- "$temporary"
             return 1
         fi
-        mv -- "$temporary" "$path" || {
+        mv -n -- "$temporary" "$target_path" || {
             rm -f -- "$temporary"
             return 1
         }
+        if [[ -e "$temporary" ]]; then
+            rm -f -- "$temporary"
+            return 1
+        fi
         gpteasy__model_catalog_created=1
+        sync -f "$directory" || return 1
     fi
-    gpteasy__model_catalog_path="$path"
+    gpteasy__catalog_file_is_valid "$provider_id" "$source" "$artifact" "$expected_hash" "$fingerprint" || return 1
+    gpteasy__model_catalog_path="$target_path"
+    gpteasy__evidence catalog_commit ready
 }
 
 gpteasy__schema_v2_is_valid() {
@@ -618,8 +771,12 @@ gpteasy__schema_v2_is_valid() {
     artifact=$(gpteasy__managed_metadata "$config" "$gpteasy__catalog_artifact_prefix" 2>/dev/null) || return 1
     expected_hash=$(gpteasy__managed_metadata "$config" "$gpteasy__catalog_sha256_prefix" 2>/dev/null) || return 1
     fingerprint=$(gpteasy__managed_metadata "$config" "$gpteasy__catalog_fingerprint_prefix" 2>/dev/null) || return 1
+    [[ "$(gpteasy__managed_metadata "$config" "$gpteasy__catalog_protocol_prefix" 2>/dev/null)" == "$gpteasy__catalog_protocol" &&
+        "$(gpteasy__managed_metadata "$config" "$gpteasy__catalog_policy_prefix" 2>/dev/null)" == "$gpteasy__catalog_policy" &&
+        "$(gpteasy__managed_metadata "$config" "$gpteasy__catalog_file_prefix" 2>/dev/null)" == ".gpteasy-shell/model-catalogs/$source/$artifact.json" ]] || return 1
+    [[ "$(awk '/^[[:space:]]*model_catalog_json[[:space:]]*=/ {n++} END {print n+0}' "$config")" == 1 ]] || return 1
     catalog_path=$(gpteasy__managed_line "$config" 'model_catalog_json = ' 2>/dev/null) || return 1
-    expected_catalog_line="model_catalog_json = \"$(gpteasy__catalog_path_for "$source" "$artifact")\""
+    expected_catalog_line="model_catalog_json = $(gpteasy__toml_string "$(gpteasy__catalog_path_for "$source" "$artifact")")"
     [[ "$catalog_path" == "$expected_catalog_line" ]] || return 1
     gpteasy__matches "$provider_id" '^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$' || return 1
     [[ "$relative" == ".gpteasy-shell/credentials/$source/$provider_id.token" ]] || return 1
@@ -629,7 +786,9 @@ gpteasy__schema_v2_is_valid() {
         -v schema="$gpteasy__schema_prefix" -v provider="$gpteasy__provider_id_prefix" \
         -v source="$gpteasy__source_id_prefix" -v credential="$gpteasy__credential_file_prefix" \
         -v artifact="$gpteasy__catalog_artifact_prefix" -v hash="$gpteasy__catalog_sha256_prefix" \
-        -v fingerprint="$gpteasy__catalog_fingerprint_prefix" '
+        -v fingerprint="$gpteasy__catalog_fingerprint_prefix" \
+        -v protocol="$gpteasy__catalog_protocol_prefix" -v policy="$gpteasy__catalog_policy_prefix" \
+        -v catalog_file="$gpteasy__catalog_file_prefix" '
         { line = $0; sub(/\r$/, "", line) }
         line == start { inside = 1; next }
         inside && line == end { inside = 0; next }
@@ -641,6 +800,9 @@ gpteasy__schema_v2_is_valid() {
         index(line, artifact) == 1 { artifact_count += 1; next }
         index(line, hash) == 1 { hash_count += 1; next }
         index(line, fingerprint) == 1 { fingerprint_count += 1; next }
+        index(line, protocol) == 1 { protocol_count += 1; next }
+        index(line, policy) == 1 { policy_count += 1; next }
+        index(line, catalog_file) == 1 { catalog_file_count += 1; next }
         index(line, "model = ") == 1 { model_count += 1; next }
         index(line, "model_reasoning_effort = ") == 1 {
             value = line
@@ -662,6 +824,7 @@ gpteasy__schema_v2_is_valid() {
         END {
             valid = !invalid && schema_count == 1 && provider_count == 1 && source_count == 1 &&
                 credential_count == 1 && artifact_count == 1 && hash_count == 1 && fingerprint_count == 1 &&
+                protocol_count == 1 && policy_count == 1 && catalog_file_count == 1 &&
                 model_count == 1 && reasoning_count <= 1 && model_provider_count == 1 &&
                 name_count == 1 && base_url_count == 1 && wire_count == 1 && websocket_count == 1 &&
                 auth_command_count == 1 && auth_args_count == 1 && catalog_count == 1
@@ -753,8 +916,9 @@ gpteasy__current_state() {
                 printf '%s\n' 'conflict'
                 return
             }
-            gpteasy__model_catalog_path=${catalog_line#model_catalog_json = \"}
-            gpteasy__model_catalog_path=${gpteasy__model_catalog_path%\"}
+            gpteasy__model_catalog_path=$(gpteasy__catalog_path_for \
+                "$(gpteasy__managed_metadata "$config" "$gpteasy__source_id_prefix")" \
+                "$(gpteasy__managed_metadata "$config" "$gpteasy__catalog_artifact_prefix")") || return 1
             ;;
         *)
             printf '%s\n' 'conflict'
@@ -846,10 +1010,20 @@ gpteasy__prepare_candidate() {
 }
 
 gpteasy__create_restore_point() {
-    local stamp process_id
+    local stamp process_id previous sequence=0
     process_id=$$
-    stamp=$(date -u +%Y%m%dT%H%M%S%N)
-    gpteasy__restore_point="$gpteasy__restore_root/switch-$stamp-$process_id-${RANDOM:-0}"
+    # Wall clocks can move backwards; the shared lock serializes this ordinal.
+    previous=$(find "$gpteasy__restore_root" -mindepth 1 -maxdepth 1 -type d -name 'switch-v2-*' -print | sort -r | head -n 1) || return
+    if [[ -n "$previous" ]]; then
+        sequence=${previous##*/switch-v2-}
+        sequence=${sequence%%-*}
+        gpteasy__matches "$sequence" '^[0-9]{18}$' || return 1
+        sequence=$((10#$sequence))
+    fi
+    (( sequence < 999999999999999999 )) || return 1
+    sequence=$(printf '%018d' "$((sequence + 1))") || return
+    stamp=$(date -u +%Y%m%dT%H%M%S%N) || return
+    gpteasy__restore_point="$gpteasy__restore_root/switch-v2-$sequence-$stamp-$process_id-${RANDOM:-0}"
     mkdir -m 700 -- "$gpteasy__restore_point" || return
     printf '%s\n' "$gpteasy__config_kind" >"$gpteasy__restore_point/config-kind" || return
     if [[ -f "$gpteasy__config_target" ]]; then
@@ -862,6 +1036,12 @@ gpteasy__create_restore_point() {
         chmod 600 "$gpteasy__restore_point/symlink-target" || return
     fi
     chmod 600 "$gpteasy__restore_point/config-kind" || return
+    sync -f "$gpteasy__restore_point/config-kind" || return
+    if [[ "$gpteasy__config_kind" == symlink ]]; then
+        sync -f "$gpteasy__restore_point/symlink-target" || return
+    fi
+    sync -f "$gpteasy__restore_point" && sync -f "$gpteasy__restore_root" || return
+    [[ "$(gpteasy__file_hash "$gpteasy__restore_point/config.toml")" == "$gpteasy__config_original_hash" ]] || return 1
 }
 
 gpteasy__discard_restore_point() {
@@ -1026,9 +1206,7 @@ gpteasy__cleanup_failed_apply() {
     if [[ "${gpteasy__credential_created:-0}" -eq 1 && -n "${gpteasy__credential_path:-}" ]]; then
         rm -f -- "$gpteasy__credential_path" 2>/dev/null || true
     fi
-    if [[ "${gpteasy__model_catalog_created:-0}" -eq 1 && -n "${gpteasy__model_catalog_path:-}" ]]; then
-        rm -f -- "$gpteasy__model_catalog_path" 2>/dev/null || true
-    fi
+    # Keep complete unreferenced catalogs: no catalog GC in this protocol.
     if [[ -n "${gpteasy__restore_point:-}" && -d "$gpteasy__restore_point" ]]; then
         gpteasy__discard_restore_point "$gpteasy__restore_point" 2>/dev/null || true
     fi
@@ -1042,24 +1220,30 @@ gpteasy__apply_provider_locked() {
     gpteasy__credential_path=
     gpteasy__model_catalog_created=0
     gpteasy__model_catalog_path=
+    gpteasy__check_codex_compatibility || return
     gpteasy__resolve_config_target || return
+    gpteasy__create_restore_point || {
+        gpteasy__cleanup_failed_apply
+        gpteasy__evidence restore_point failed
+        return 1
+    }
+    gpteasy__evidence restore_point ready
     gpteasy__install_model_catalog "$provider_id" || {
         gpteasy__cleanup_failed_apply
+        gpteasy__evidence catalog_commit rejected
         return 1
     }
     gpteasy__prepare_candidate "$provider_id" || {
         gpteasy__cleanup_failed_apply
-        return 1
-    }
-    gpteasy__create_restore_point || {
-        gpteasy__cleanup_failed_apply
+        gpteasy__evidence config_candidate failed
         return 1
     }
     gpteasy__install_credential "$provider_id" || {
         gpteasy__cleanup_failed_apply
         return 1
     }
-    if ! gpteasy__config_target_unchanged; then
+    if ! gpteasy__schema_v2_is_valid "$gpteasy__candidate" || ! gpteasy__config_target_unchanged; then
+        gpteasy__evidence config_precommit changed
         printf '%s\n' 'Codex 配置在操作期间发生变化，已停止覆盖。' >&2
         gpteasy__cleanup_failed_apply
         return 1
@@ -1067,23 +1251,26 @@ gpteasy__apply_provider_locked() {
     target_dir=${gpteasy__config_target%/*}
     if ! mv -f -- "$gpteasy__candidate" "$gpteasy__config_target"; then
         gpteasy__cleanup_failed_apply
+        gpteasy__evidence config_commit failed
         return 1
     fi
     gpteasy__candidate=
     gpteasy__model_catalog_created=0
-    if ! sync -f "$target_dir" 2>/dev/null || [[ "$(gpteasy__file_hash "$gpteasy__config_target")" != "$gpteasy__candidate_hash" ]]; then
+    gpteasy__evidence config_commit committed
+    if ! sync -f "$target_dir" 2>/dev/null || [[ "$(gpteasy__file_hash "$gpteasy__config_target")" != "$gpteasy__candidate_hash" ]] ||
+        ! gpteasy__schema_v2_is_valid "$gpteasy__config_target"; then
+        gpteasy__evidence config_readback indeterminate
+        gpteasy__refresh_pending >&2
         printf '%s\n' '配置替换后的复核失败，请使用 restore 检查最近恢复点。' >&2
         return 1
     fi
+    gpteasy__evidence config_readback verified
+    gpteasy__refresh_pending
     gpteasy__prune_restore_points || return
     if ! gpteasy__cleanup_credentials; then
-        printf '%s\n' '警告：旧凭据清理无法安全完成，已保留相关文件；新配置已经生效。' >&2
+        printf '%s\n' '警告：旧凭据清理无法安全完成，已保留相关文件。配置已保存，但 CLI/共享后台服务可能仍使用旧配置。' >&2
     fi
-    if [[ "${gpteasy__codex_cli_state:-ready}" == missing ]]; then
-        printf '已预先配置：%s。当前未安装 Codex CLI；安装 0.147.0 或更高版本后即可使用。\n' "$(gpteasy__provider_name "$provider_id")"
-    else
-        printf '已切换到：%s\n' "$(gpteasy__provider_name "$provider_id")"
-    fi
+    printf '已切换到：%s\n' "$(gpteasy__provider_name "$provider_id")"
     if [[ "${gpteasy__permission_warning:-0}" -eq 1 ]]; then
         printf '%s\n' '警告：目标环境中已有文件或目录权限允许其他用户访问，请按需收紧；本次新建的凭据和恢复点仍使用私有权限。' >&2
     fi
@@ -1094,14 +1281,12 @@ gpteasy__apply_provider_locked() {
 
 gpteasy__switch_provider() {
     local provider_id=$1 result
-    gpteasy__check_codex_compatibility || return
     gpteasy__require_codex_home || return
     gpteasy__resolve_config_target || return
     gpteasy__require_existing_private_state_safe || return
     gpteasy__prepare_private_state || return
     gpteasy__acquire_lock switch || return
-    gpteasy__apply_provider_locked "$provider_id"
-    result=$?
+    if gpteasy__apply_provider_locked "$provider_id"; then result=0; else result=$?; fi
     gpteasy__release_lock || {
         printf '%s\n' '配置已处理，但 shell 锁释放失败；请检查 gpteasy unlock。' >&2
         return 1
@@ -1176,7 +1361,7 @@ gpteasy__provider_label_for_file() {
 }
 
 gpteasy__restore_locked() {
-    local latest kind expected_link current_label target_label choice candidate= candidate_hash= target_dir
+    local latest kind expected_link current_label target_label choice candidate= candidate_hash= target_dir backup_hash= backup_identity= kind_hash= link_hash=
     latest=$(find "$gpteasy__restore_root" -mindepth 1 -maxdepth 1 -type d -name 'switch-*' -print | sort -r | head -n 1)
     if [[ -z "$latest" ]]; then
         printf '%s\n' '没有可恢复的 Linux 恢复点。' >&2
@@ -1211,6 +1396,14 @@ gpteasy__restore_locked() {
             return 1
             ;;
     esac
+    kind_hash=$(gpteasy__file_hash "$latest/config-kind") || return
+    if [[ "$kind" != missing ]]; then
+        backup_hash=$(gpteasy__file_hash "$latest/config.toml") || return
+        backup_identity=$(stat -c '%d:%i:%u:%a:%h:%F' -- "$latest/config.toml") || return
+    fi
+    if [[ "$kind" == symlink ]]; then
+        link_hash=$(gpteasy__file_hash "$latest/symlink-target") || return
+    fi
     gpteasy__resolve_config_target || return
     if [[ "$kind" == symlink ]]; then
         expected_link=$(cat -- "$latest/symlink-target") || return
@@ -1242,6 +1435,17 @@ gpteasy__restore_locked() {
             return
             ;;
     esac
+    if ! gpteasy__private_file_is_safe "$latest/config-kind" ||
+        [[ "$(gpteasy__file_hash "$latest/config-kind")" != "$kind_hash" ]] ||
+        { [[ "$kind" != missing ]] && { ! gpteasy__private_file_is_safe "$latest/config.toml" ||
+            [[ "$(gpteasy__file_hash "$latest/config.toml")" != "$backup_hash" ]] ||
+            [[ "$(stat -c '%d:%i:%u:%a:%h:%F' -- "$latest/config.toml")" != "$backup_identity" ]]; }; } ||
+        { [[ "$kind" == symlink ]] && { ! gpteasy__private_file_is_safe "$latest/symlink-target" ||
+            [[ "$(gpteasy__file_hash "$latest/symlink-target")" != "$link_hash" ]]; }; }; then
+        printf '%s\n' '恢复点在确认期间发生变化，恢复已停止。' >&2
+        gpteasy__evidence restore_precommit backup_rejected
+        return 1
+    fi
     target_dir=${gpteasy__config_target%/*}
     if [[ "$kind" != missing ]]; then
         candidate=$(mktemp "$target_dir/.config.toml.gpteasy-restore.XXXXXX") || return
@@ -1259,6 +1463,18 @@ gpteasy__restore_locked() {
             return 1
         }
         candidate_hash=$(gpteasy__file_hash "$candidate") || return
+        if [[ "$candidate_hash" != "$backup_hash" ]]; then
+            rm -f -- "$candidate"
+            gpteasy__evidence restore_precommit backup_rejected
+            return 1
+        fi
+    fi
+    if [[ "$kind" != missing && "$(gpteasy__managed_metadata "$candidate" "$gpteasy__schema_prefix" 2>/dev/null || true)" == 2 ]] &&
+        ! gpteasy__schema_v2_is_valid "$candidate"; then
+        printf '%s\n' '恢复点引用的 Linux 模型目录在确认期间变化，恢复已停止。' >&2
+        gpteasy__evidence restore_precommit catalog_rejected
+        rm -f -- "$candidate"
+        return 1
     fi
     if ! gpteasy__config_target_unchanged; then
         printf '%s\n' 'Codex 配置在确认期间发生变化，恢复已停止。' >&2
@@ -1275,9 +1491,17 @@ gpteasy__restore_locked() {
         }
         [[ "$(gpteasy__file_hash "$gpteasy__config_target")" == "$candidate_hash" ]] || return 1
     fi
+    gpteasy__evidence restore_commit committed
+    gpteasy__refresh_pending
     sync -f "$target_dir" 2>/dev/null || return
+    if [[ "$kind" != missing && "$(gpteasy__managed_metadata "$gpteasy__config_target" "$gpteasy__schema_prefix" 2>/dev/null || true)" == 2 ]]; then
+        gpteasy__schema_v2_is_valid "$gpteasy__config_target" || return 1
+    fi
     gpteasy__discard_restore_point "$latest" || return
-    gpteasy__cleanup_credentials || return
+    if ! gpteasy__cleanup_credentials; then
+        printf '%s\n' '警告：旧凭据清理无法安全完成，已保留相关文件。配置已保存，但 CLI/共享后台服务可能仍使用旧配置。' >&2
+    fi
+    gpteasy__evidence restore_readback verified
     printf '%s\n' '已恢复最近一次 shell 切换前的配置。'
 }
 
@@ -1286,8 +1510,7 @@ gpteasy__restore() {
     gpteasy__require_codex_home || return
     gpteasy__prepare_private_state || return
     gpteasy__acquire_lock restore || return
-    gpteasy__restore_locked
-    result=$?
+    if gpteasy__restore_locked; then result=0; else result=$?; fi
     gpteasy__release_lock || {
         printf '%s\n' '恢复已处理，但 shell 锁释放失败；请检查 gpteasy unlock。' >&2
         return 1
@@ -1305,7 +1528,7 @@ gpteasy__info() {
     printf '%s\n' '管理区块 schema：2'
     printf '%s\n' 'Shell：{{GPTEASY_SHELL_LABEL}}'
     printf '供应商数量：%s\n' "$gpteasy__provider_count"
-    printf '%s\n' 'Codex CLI 最低版本：0.147.0'
+    printf '%s\n' 'Codex CLI：明确切换时核验原生 Linux 目录/schema 能力'
     if [[ "${gpteasy__permission_warning:-0}" -eq 1 ]]; then
         printf '%s\n' '权限风险：是（已有文件或目录允许其他用户访问）'
     else

@@ -331,7 +331,7 @@ export const providerMessages = {
   linuxExportChooseLocation: "选择保存位置",
   linuxExportSuccessTitle: (shell: string) => `${shell} 脚本已导出`,
   linuxExportSuccessMessage: (count: number) =>
-    `已固化 ${count} 个已验证供应商。目标 Linux 尚未安装 Codex 时仍可预先配置；桌面应用不会修改任何 shell 启动文件。`,
+    `已固化 ${count} 个已验证供应商。已包含完整离线模型目录；切换前需安装支持该目录的原生 Linux Codex。加载脚本不会修改配置或启动文件。`,
   linuxExportPermissions: "建议保护权限",
   linuxExportDirect: "直接执行",
   linuxExportCurrentSession: "当前会话 source",
