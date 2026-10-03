@@ -15,13 +15,14 @@ use uuid::Uuid;
 #[test]
 fn bash_export_captures_every_verified_provider_and_reasoning_rules() {
     let fixture = ExportFixture::new();
-    fixture.insert_provider(
+    fixture.insert_provider_with_models(
         "11111111-1111-4111-8111-111111111111",
         "Alpha Provider",
         "https://api.deepseek.com/v1",
         "alpha-secret-key",
         "DeepSeek-R1",
         1,
+        &["DeepSeek-R1", "deepseek-chat"],
     );
     fixture.insert_provider(
         "22222222-2222-4222-8222-222222222222",
@@ -52,10 +53,25 @@ fn bash_export_captures_every_verified_provider_and_reasoning_rules() {
     assert!(script.find("Alpha Provider") < script.find("Beta Provider"));
     assert!(
         script.contains(
-            "11111111-1111-4111-8111-111111111111\tAlpha Provider\thttps://api.deepseek.com/v1\tDeepSeek-R1\talpha-secret-key\thigh"
+            "11111111-1111-4111-8111-111111111111\tAlpha Provider\thttps://api.deepseek.com/v1\tDeepSeek-R1\talpha-secret-key\thigh\t"
         ),
         "each provider must be editable as one top-of-script catalog record"
     );
+    let alpha_payload_start = script
+        .find("gpteasy__provider_catalog_payload_11111111-1111-4111-8111-111111111111()")
+        .expect("alpha model payload function");
+    let alpha_payload_end = script[alpha_payload_start..]
+        .find("\n}\n")
+        .map(|offset| alpha_payload_start + offset)
+        .expect("end of alpha model payload function");
+    let alpha_payload = &script[alpha_payload_start..alpha_payload_end];
+    assert!(alpha_payload.contains("DeepSeek-R1"));
+    assert!(alpha_payload.contains("deepseek-chat"));
+    assert!(alpha_payload.contains("low"));
+    assert!(alpha_payload.contains("medium"));
+    assert!(alpha_payload.contains("high"));
+    assert!(alpha_payload.contains("xhigh"));
+    assert!(!alpha_payload.contains("alpha-secret-key"));
     assert!(
         script.find("# 供应商目录。可脱离 GPTEasy 手工维护") < script.find("gpteasy__start_marker"),
         "the editable provider catalog must precede the runtime implementation"
@@ -74,13 +90,14 @@ fn bash_export_captures_every_verified_provider_and_reasoning_rules() {
 #[test]
 fn zsh_export_captures_every_verified_provider_and_reasoning_rules() {
     let fixture = ExportFixture::new();
-    fixture.insert_provider(
+    fixture.insert_provider_with_models(
         "11111111-1111-4111-8111-111111111111",
         "Alpha Provider",
         "https://api.deepseek.com/v1",
         "alpha-secret-key",
         "DeepSeek-R1",
         1,
+        &["DeepSeek-R1", "deepseek-chat"],
     );
     fixture.insert_provider(
         "22222222-2222-4222-8222-222222222222",
@@ -164,13 +181,14 @@ fn bash_export_does_not_replace_an_existing_file_without_confirmation() {
 #[test]
 fn bash_export_replaces_an_existing_file_after_native_confirmation() {
     let fixture = ExportFixture::new();
-    fixture.insert_provider(
+    fixture.insert_provider_with_models(
         "11111111-1111-4111-8111-111111111111",
         "Alpha Provider",
         "https://alpha.example/v1",
         "alpha-secret-key",
         "alpha-model",
         1,
+        &["alpha-model", "alpha-alt-model"],
     );
     let destination = fixture.temp.path().join("gpteasy.sh");
     fs::write(&destination, b"user-owned original\n").expect("seed existing file");
@@ -280,13 +298,14 @@ gpteasy help >/dev/null
 #[test]
 fn shell_snapshots_preconfigure_without_codex_and_reject_incompatible_versions() {
     let fixture = ExportFixture::new();
-    fixture.insert_provider(
+    fixture.insert_provider_with_models(
         "11111111-1111-4111-8111-111111111111",
         "Alpha Provider",
         "https://alpha.example/v1",
         "alpha-secret-key",
         "alpha-model",
         1,
+        &["alpha-model", "alpha-alt-model"],
     );
     fixture.insert_provider(
         "22222222-2222-4222-8222-222222222222",
@@ -295,6 +314,14 @@ fn shell_snapshots_preconfigure_without_codex_and_reject_incompatible_versions()
         "beta-secret-key",
         "beta-model",
         2,
+    );
+    fixture.insert_provider(
+        "33333333-3333-4333-8333-333333333333",
+        "Manual Provider",
+        "https://manual.example/v1",
+        "manual-secret-key",
+        "manual-model",
+        3,
     );
     for shell in shell_matrix_targets() {
         let destination = fixture.temp.path().join(match shell {
@@ -318,8 +345,6 @@ codex_home="$workspace/codex home"
 fake_bin="$workspace/bin"
 cp -- "$1" "$script"
 chmod 600 "$script"
-# The catalog is the sole maintenance point: this provider did not exist when GPTEasy exported the script.
-sed -i '/^GPTEASY_PROVIDER_CATALOG$/i 33333333-3333-4333-8333-333333333333\tManual Provider\thttps://manual.example/v1\tmanual-model\tmanual-secret-key' "$script"
 mkdir -p -- "$codex_home" "$fake_bin"
 printf '%s\n' 'custom_setting = true' >"$codex_home/config.toml"
 printf '%s\n' '{"tokens":{"access_token":"keep-me"}}' >"$codex_home/auth.json"
@@ -345,7 +370,7 @@ missing=$(PATH="$fake_bin:/usr/bin:/bin" gpteasy <<<"1" 2>&1 || true)
 [[ "$missing" == *'当前未安装 Codex CLI'* ]]
 [[ "$missing" != *'版本过低'* ]]
 [[ "$auth_before" == "$(sha256sum "$codex_home/auth.json")" ]]
-grep -Fq '# GPTEasy schema-version: 1' "$codex_home/config.toml"
+grep -Fq '# GPTEasy schema-version: 2' "$codex_home/config.toml"
 missing_config=$(sha256sum "$codex_home/config.toml")
 [[ -e "$codex_home/.gpteasy-shell" ]]
 cat >"$fake_bin/codex" <<'OLD_CODEX'
@@ -370,7 +395,18 @@ SUPPORTED_CODEX
 chmod 700 "$fake_bin/codex"
 menu=$(gpteasy <<<"1")
 [[ "$menu" == *'Alpha Provider (alpha-model)'* ]]
-grep -Fq '# GPTEasy schema-version: 1' "$codex_home/config.toml"
+grep -Fq '# GPTEasy schema-version: 2' "$codex_home/config.toml"
+grep -Fq 'model_catalog_json = ' "$codex_home/config.toml"
+catalog_path=$(sed -n 's/^model_catalog_json = "\(.*\)"$/\1/p' "$codex_home/config.toml")
+[[ -f "$catalog_path" ]]
+[[ $(stat -c '%a' "$catalog_path") == '600' ]]
+grep -Fq 'alpha-model' "$catalog_path"
+grep -Fq 'alpha-alt-model' "$catalog_path"
+grep -Fq '"effort": "low"' "$catalog_path"
+grep -Fq '"effort": "medium"' "$catalog_path"
+grep -Fq '"effort": "high"' "$catalog_path"
+grep -Fq '"effort": "xhigh"' "$catalog_path"
+! grep -Fq 'alpha-secret-key' "$catalog_path"
 grep -Fq '# GPTEasy provider-id: 11111111-1111-4111-8111-111111111111' "$codex_home/config.toml"
 grep -Fq '# GPTEasy source-id:' "$codex_home/config.toml"
 grep -Fq 'model_providers.gpteasy.auth.command = "sh"' "$codex_home/config.toml"
@@ -494,6 +530,15 @@ cmp -s -- "$workspace/alpha-config" "$codex_home/config.toml"
 [[ $(find "$credentials_root" -type f -name '*.token' | wc -l) -eq 2 ]]
 [[ "$auth_before" == "$(sha256sum "$codex_home/auth.json")" ]]
 
+alpha_catalog=$(sed -n 's/^model_catalog_json = "\(.*\)"$/\1/p' "$codex_home/config.toml")
+[[ -f "$alpha_catalog" ]]
+gpteasy <<<"2" >/dev/null
+beta_before_missing_restore=$(sha256sum "$codex_home/config.toml")
+rm -f -- "$alpha_catalog"
+missing_catalog_restore=$(gpteasy restore <<<"y" 2>&1 || true)
+[[ "$missing_catalog_restore" == *'模型目录缺失、篡改或绑定失效'* ]]
+[[ "$beta_before_missing_restore" == "$(sha256sum "$codex_home/config.toml")" ]]
+
 rm -f -- "$desktop_backups/config-desktop.toml"
 gpteasy <<<"2" >/dev/null
 [[ ! -e "$codex_home/$orphan_relative" ]]
@@ -586,9 +631,11 @@ menu=$(gpteasy <<<"q")
 printf '%s' 'alpha-secret-key' >"$credential"
 
 awk '
-    $0 == "# GPTEasy schema-version: 1" { next }
+    $0 == "# GPTEasy schema-version: 2" { next }
     index($0, "# GPTEasy source-id:") == 1 { next }
     index($0, "# GPTEasy credential-file:") == 1 { next }
+    index($0, "# GPTEasy model-catalog-") == 1 { next }
+    index($0, "model_catalog_json = ") == 1 { next }
     index($0, "model_providers.gpteasy.auth.") == 1 { next }
     { print }
 ' "$workspace/current-config" >"$codex_home/config.toml"
@@ -606,9 +653,10 @@ menu=$(gpteasy <<<"q")
 [[ "$menu" != *'[当前]'* ]]
 
 cp -- "$workspace/current-config" "$codex_home/config.toml"
-sed -i 's/# GPTEasy schema-version: 1/# GPTEasy schema-version: 2/' "$codex_home/config.toml"
+sed -i 's/# GPTEasy schema-version: 2/# GPTEasy schema-version: 99/' "$codex_home/config.toml"
+[[ "$(gpteasy current)" == *'管理冲突'* ]]
 gpteasy <<<"2" >/dev/null
-grep -Fq '# GPTEasy schema-version: 1' "$codex_home/config.toml"
+grep -Fq '# GPTEasy schema-version: 2' "$codex_home/config.toml"
 grep -Fq '# GPTEasy provider-id: 22222222-2222-4222-8222-222222222222' "$codex_home/config.toml"
 
 printf '%s\n' '# >>> GPTEasy managed provider >>>' 'model = "broken"' >"$codex_home/config.toml"
@@ -1416,15 +1464,44 @@ impl ExportFixture {
         default_model: &str,
         sort_order: i64,
     ) {
+        self.insert_provider_with_models(
+            id,
+            name,
+            base_url,
+            api_key,
+            default_model,
+            sort_order,
+            &[default_model],
+        );
+    }
+
+    fn insert_provider_with_models(
+        &self,
+        id: &str,
+        name: &str,
+        base_url: &str,
+        api_key: &str,
+        default_model: &str,
+        sort_order: i64,
+        models: &[&str],
+    ) {
         let connection = Connection::open(self.store.paths().database()).expect("open state");
         connection
             .execute(
                 "INSERT INTO providers (
                     id, name, base_url, api_key, default_model, verified_at,
                     verification_fingerprint, sort_order
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, '1786800000', 'verified', ?6)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, '1786800000', 'verified', ?6)",
                 params![id, name, base_url, api_key, default_model, sort_order],
             )
             .expect("insert verified provider fixture");
+        connection
+            .execute(
+                "INSERT INTO provider_model_catalog(
+                     provider_id, verification_fingerprint, models_json
+                 ) VALUES (?1, 'verified', ?2)",
+                params![id, serde_json::to_string(models).expect("encode models")],
+            )
+            .expect("insert provider model catalog fixture");
     }
 }

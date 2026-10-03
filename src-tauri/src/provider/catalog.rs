@@ -14,6 +14,7 @@ pub(super) struct ProviderRecord {
     pub api_key: String,
     pub verification_fingerprint: String,
     pub reasoning_selection: ReasoningSelection,
+    pub discovered_models: Vec<String>,
 }
 
 pub(super) fn list_providers(
@@ -592,11 +593,25 @@ fn find_provider_record(
                         WHERE current.singleton = 1 \
                           AND current.mode = 'provider' \
                           AND current.provider_id = p.id\
-                    ) \
-             FROM providers p WHERE p.id = ?1",
+                    ), c.provider_id, c.verification_fingerprint, c.models_json \
+             FROM providers p \
+             JOIN provider_model_catalog c ON c.provider_id = p.id \
+             WHERE p.id = ?1",
             [provider_id],
             |row| {
                 let verified_at = row.get::<_, String>(5)?;
+                let snapshot_provider_id = row.get::<_, String>(10)?;
+                let snapshot_fingerprint = row.get::<_, String>(11)?;
+                let models_json = row.get::<_, String>(12)?;
+                let discovered_models = super::model_catalog::validate_snapshot(
+                    &row.get::<_, String>(0)?,
+                    &row.get::<_, String>(6)?,
+                    &row.get::<_, String>(4)?,
+                    &snapshot_provider_id,
+                    &snapshot_fingerprint,
+                    &models_json,
+                )
+                .map_err(|_| SqliteError::InvalidQuery)?;
                 Ok(ProviderRecord {
                     summary: {
                         let mut summary = ProviderSummary {
@@ -622,6 +637,7 @@ fn find_provider_record(
                     api_key: row.get(3)?,
                     verification_fingerprint: row.get(6)?,
                     reasoning_selection: reasoning::for_base_url(&row.get::<_, String>(2)?),
+                    discovered_models,
                 })
             },
         )

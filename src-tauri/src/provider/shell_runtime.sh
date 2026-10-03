@@ -5,10 +5,15 @@ gpteasy__provider_id_prefix='# GPTEasy provider-id:'
 gpteasy__schema_prefix='# GPTEasy schema-version:'
 gpteasy__source_id_prefix='# GPTEasy source-id:'
 gpteasy__credential_file_prefix='# GPTEasy credential-file:'
+gpteasy__catalog_artifact_prefix='# GPTEasy model-catalog-artifact:'
+gpteasy__catalog_sha256_prefix='# GPTEasy model-catalog-sha256:'
+gpteasy__catalog_fingerprint_prefix='# GPTEasy model-catalog-provider-fingerprint:'
 
+# Read the complete v2 catalog row so metadata and credentials cannot be
+# truncated by the legacy six-column format.
 gpteasy__provider_id() {
-    local expected_index=$1 index=1 provider_id name base_url model api_key reasoning_effort
-    while IFS='	' read -r provider_id name base_url model api_key reasoning_effort; do
+    local expected_index=$1 index=1 provider_id
+    while IFS="$(printf '\t')" read -r provider_id _; do
         [[ -n "$provider_id" && "$provider_id" != \#* ]] || continue
         if [[ "$index" == "$expected_index" ]]; then
             printf '%s\n' "$provider_id"
@@ -20,16 +25,18 @@ gpteasy__provider_id() {
 }
 
 gpteasy__provider_value() {
-    local expected_id=$1 field=$2 provider_id name base_url model api_key reasoning_effort
-    while IFS='	' read -r provider_id name base_url model api_key reasoning_effort; do
-        [[ -n "$provider_id" && "$provider_id" != \#* ]] || continue
-        [[ "$provider_id" == "$expected_id" ]] || continue
+    local expected_id=$1 field=$2 provider_id name base_url model api_key reasoning_effort artifact sha256 fingerprint
+    while IFS="$(printf '\t')" read -r provider_id name base_url model api_key reasoning_effort artifact sha256 fingerprint; do
+        [[ -n "$provider_id" && "$provider_id" != \#* && "$provider_id" == "$expected_id" ]] || continue
         case "$field" in
             name) printf '%s\n' "$name" ;;
             model) printf '%s\n' "$model" ;;
             base_url) printf '%s\n' "$base_url" ;;
-            reasoning_effort) printf '%s\n' "$reasoning_effort" ;;
+            reasoning_effort) [[ "$reasoning_effort" != '-' ]] && printf '%s\n' "$reasoning_effort" ;;
             credential) printf '%s' "$api_key" ;;
+            artifact) printf '%s\n' "$artifact" ;;
+            catalog_sha256) printf '%s\n' "$sha256" ;;
+            verification_fingerprint) printf '%s\n' "$fingerprint" ;;
             *) return 1 ;;
         esac
         return 0
@@ -51,6 +58,18 @@ gpteasy__provider_base_url() {
 
 gpteasy__provider_reasoning_effort() {
     gpteasy__provider_value "$1" reasoning_effort
+}
+
+gpteasy__provider_catalog_artifact() {
+    gpteasy__provider_value "$1" artifact
+}
+
+gpteasy__provider_catalog_sha256() {
+    gpteasy__provider_value "$1" catalog_sha256
+}
+
+gpteasy__provider_verification_fingerprint() {
+    gpteasy__provider_value "$1" verification_fingerprint
 }
 
 gpteasy__print_credential() {
@@ -234,11 +253,13 @@ gpteasy__prepare_private_state() {
     fi
     gpteasy__state_root="$codex_home/.gpteasy-shell"
     gpteasy__credentials_root="$gpteasy__state_root/credentials"
+    gpteasy__model_catalog_root="$gpteasy__state_root/model-catalogs"
     gpteasy__restore_root="$gpteasy__state_root/shell-restore"
     gpteasy__tmp_root="$gpteasy__state_root/tmp"
     gpteasy__lock_root="$gpteasy__state_root/lock"
     gpteasy__ensure_private_dir "$gpteasy__state_root" || return
     gpteasy__ensure_private_dir "$gpteasy__credentials_root" || return
+    gpteasy__ensure_private_dir "$gpteasy__model_catalog_root" || return
     gpteasy__ensure_private_dir "$gpteasy__restore_root" || return
     gpteasy__ensure_private_dir "$gpteasy__tmp_root" || return
     gpteasy__ensure_private_dir "$gpteasy__lock_root" || return
@@ -517,6 +538,141 @@ gpteasy__schema_v1_is_valid() {
     [[ "$auth_args" == "$expected_auth_args" ]]
 }
 
+gpteasy__catalog_path_for() {
+    local source=$1 artifact=$2
+    printf '%s\n' "${CODEX_HOME:-"$HOME/.codex"}/.gpteasy-shell/model-catalogs/$source/$artifact.json"
+}
+
+gpteasy__catalog_binding_is_valid() {
+    local provider_id=$1 source=$2 artifact=$3 expected_hash=$4 expected_fingerprint=$5
+    local binding binding_provider binding_model binding_artifact binding_hash binding_fingerprint expected_model
+    gpteasy__matches "$source" '^[[:alnum:]][[:alnum:].:_-]*$' || return 1
+    gpteasy__matches "$artifact" '^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$' || return 1
+    gpteasy__matches "$expected_hash" '^[[:xdigit:]]{64}$' || return 1
+    [[ -n "$expected_fingerprint" && "$expected_fingerprint" != *$'\n'* && "$expected_fingerprint" != *$'\t'* ]] || return 1
+    expected_model=$(gpteasy__provider_model "$provider_id") || return 1
+    binding=$(gpteasy__provider_catalog_binding "$provider_id") || return 1
+    IFS="$(printf '\t')" read -r binding_provider binding_model binding_artifact binding_hash binding_fingerprint <<<"$binding"
+    [[ "$binding_provider" == "$provider_id" && "$binding_model" == "$expected_model" &&
+        "$binding_artifact" == "$artifact" &&
+        "$binding_hash" == "$expected_hash" && "$binding_fingerprint" == "$expected_fingerprint" ]]
+}
+
+gpteasy__catalog_file_is_valid() {
+    local provider_id=$1 source=$2 artifact=$3 expected_hash=$4 expected_fingerprint=$5 path payload_hash mode
+    gpteasy__catalog_binding_is_valid "$provider_id" "$source" "$artifact" "$expected_hash" "$expected_fingerprint" || return 1
+    path=$(gpteasy__catalog_path_for "$source" "$artifact") || return
+    gpteasy__private_file_is_safe "$path" || return 1
+    mode=$(stat -c '%a' -- "$path" 2>/dev/null) || return 1
+    [[ "$((8#$mode))" -eq $((8#$mode & 8#700)) ]] || return 1
+    payload_hash=$(gpteasy__file_hash "$path") || return
+    [[ "$payload_hash" == "$expected_hash" ]] || return 1
+    cmp -s -- "$path" <(gpteasy__provider_catalog_payload "$provider_id")
+}
+
+gpteasy__install_model_catalog() {
+    local provider_id=$1 source artifact expected_hash fingerprint payload path directory temporary
+    source="$gpteasy__export_id"
+    artifact=$(gpteasy__provider_catalog_artifact "$provider_id") || return 1
+    expected_hash=$(gpteasy__provider_catalog_sha256 "$provider_id") || return 1
+    fingerprint=$(gpteasy__provider_verification_fingerprint "$provider_id") || return 1
+    gpteasy__catalog_binding_is_valid "$provider_id" "$source" "$artifact" "$expected_hash" "$fingerprint" || {
+        printf '%s\n' '模型目录载荷与供应商快照绑定不一致，已停止写入。' >&2
+        return 1
+    }
+    payload=$(gpteasy__provider_catalog_payload "$provider_id") || return 1
+    [[ "$(printf '%s' "$payload" | sha256sum | awk '{print $1}')" == "$expected_hash" ]] || {
+        printf '%s\n' '模型目录载荷摘要校验失败，已停止写入。' >&2
+        return 1
+    }
+    directory="$gpteasy__model_catalog_root/$source"
+    gpteasy__ensure_private_dir "$directory" || return 1
+    path="$directory/$artifact.json"
+    gpteasy__model_catalog_created=0
+    if [[ -e "$path" || -L "$path" ]]; then
+        if ! gpteasy__catalog_file_is_valid "$provider_id" "$source" "$artifact" "$expected_hash" "$fingerprint" ||
+            ! cmp -s -- "$path" <(printf '%s' "$payload"); then
+            printf '%s\n' '已有 Linux 模型目录工件不安全或内容不一致。' >&2
+            return 1
+        fi
+    else
+        temporary=$(mktemp "$directory/.model-catalog.XXXXXX") || return 1
+        if ! printf '%s' "$payload" >"$temporary" || ! chmod 600 "$temporary" || ! sync -f "$temporary"; then
+            rm -f -- "$temporary"
+            return 1
+        fi
+        mv -- "$temporary" "$path" || {
+            rm -f -- "$temporary"
+            return 1
+        }
+        gpteasy__model_catalog_created=1
+    fi
+    gpteasy__model_catalog_path="$path"
+}
+
+gpteasy__schema_v2_is_valid() {
+    local config=$1 provider_id source relative artifact expected_hash fingerprint catalog_path expected_catalog_line auth_args expected_auth_args
+    provider_id=$(gpteasy__managed_metadata "$config" "$gpteasy__provider_id_prefix" 2>/dev/null) || return 1
+    source=$(gpteasy__managed_metadata "$config" "$gpteasy__source_id_prefix" 2>/dev/null) || return 1
+    relative=$(gpteasy__managed_metadata "$config" "$gpteasy__credential_file_prefix" 2>/dev/null) || return 1
+    artifact=$(gpteasy__managed_metadata "$config" "$gpteasy__catalog_artifact_prefix" 2>/dev/null) || return 1
+    expected_hash=$(gpteasy__managed_metadata "$config" "$gpteasy__catalog_sha256_prefix" 2>/dev/null) || return 1
+    fingerprint=$(gpteasy__managed_metadata "$config" "$gpteasy__catalog_fingerprint_prefix" 2>/dev/null) || return 1
+    catalog_path=$(gpteasy__managed_line "$config" 'model_catalog_json = ' 2>/dev/null) || return 1
+    expected_catalog_line="model_catalog_json = \"$(gpteasy__catalog_path_for "$source" "$artifact")\""
+    [[ "$catalog_path" == "$expected_catalog_line" ]] || return 1
+    gpteasy__matches "$provider_id" '^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$' || return 1
+    [[ "$relative" == ".gpteasy-shell/credentials/$source/$provider_id.token" ]] || return 1
+    [[ "$relative" != *'..'* && "$relative" != *'//'* ]] || return 1
+    gpteasy__catalog_file_is_valid "$provider_id" "$source" "$artifact" "$expected_hash" "$fingerprint" || return 1
+    awk -v start="$gpteasy__start_marker" -v end="$gpteasy__end_marker" \
+        -v schema="$gpteasy__schema_prefix" -v provider="$gpteasy__provider_id_prefix" \
+        -v source="$gpteasy__source_id_prefix" -v credential="$gpteasy__credential_file_prefix" \
+        -v artifact="$gpteasy__catalog_artifact_prefix" -v hash="$gpteasy__catalog_sha256_prefix" \
+        -v fingerprint="$gpteasy__catalog_fingerprint_prefix" '
+        { line = $0; sub(/\r$/, "", line) }
+        line == start { inside = 1; next }
+        inside && line == end { inside = 0; next }
+        !inside { next }
+        index(line, schema) == 1 { schema_count += 1; next }
+        index(line, provider) == 1 { provider_count += 1; next }
+        index(line, source) == 1 { source_count += 1; next }
+        index(line, credential) == 1 { credential_count += 1; next }
+        index(line, artifact) == 1 { artifact_count += 1; next }
+        index(line, hash) == 1 { hash_count += 1; next }
+        index(line, fingerprint) == 1 { fingerprint_count += 1; next }
+        index(line, "model = ") == 1 { model_count += 1; next }
+        index(line, "model_reasoning_effort = ") == 1 {
+            value = line
+            sub(/^model_reasoning_effort = "/, "", value)
+            sub(/"$/, "", value)
+            if (value !~ /^(low|medium|high|xhigh)$/) { invalid = 1 }
+            reasoning_count += 1
+            next
+        }
+        line == "model_provider = \"gpteasy\"" { model_provider_count += 1; next }
+        index(line, "model_providers.gpteasy.name = ") == 1 { name_count += 1; next }
+        index(line, "model_providers.gpteasy.base_url = ") == 1 { base_url_count += 1; next }
+        line == "model_providers.gpteasy.wire_api = \"responses\"" { wire_count += 1; next }
+        line == "model_providers.gpteasy.supports_websockets = false" { websocket_count += 1; next }
+        line == "model_providers.gpteasy.auth.command = \"sh\"" { auth_command_count += 1; next }
+        index(line, "model_providers.gpteasy.auth.args = ") == 1 { auth_args_count += 1; next }
+        index(line, "model_catalog_json = ") == 1 { catalog_count += 1; next }
+        { invalid = 1 }
+        END {
+            valid = !invalid && schema_count == 1 && provider_count == 1 && source_count == 1 &&
+                credential_count == 1 && artifact_count == 1 && hash_count == 1 && fingerprint_count == 1 &&
+                model_count == 1 && reasoning_count <= 1 && model_provider_count == 1 &&
+                name_count == 1 && base_url_count == 1 && wire_count == 1 && websocket_count == 1 &&
+                auth_command_count == 1 && auth_args_count == 1 && catalog_count == 1
+            exit valid ? 0 : 1
+        }
+    ' "$config" || return 1
+    auth_args=$(gpteasy__managed_line "$config" 'model_providers.gpteasy.auth.args = ' 2>/dev/null) || return 1
+    expected_auth_args="model_providers.gpteasy.auth.args = [\"-c\", 'cat -- \"\${CODEX_HOME:-\$HOME/.codex}/$relative\"']"
+    [[ "$auth_args" == "$expected_auth_args" ]]
+}
+
 gpteasy__current_provider_id() {
     local config marker_info starts ends start_line end_line
     config=$(gpteasy__config_path) || return
@@ -547,7 +703,7 @@ gpteasy__snapshot_line() {
 }
 
 gpteasy__current_state() {
-    local config marker_info starts ends start_line end_line provider_id schema schema_count source relative credential
+    local config marker_info starts ends start_line end_line provider_id schema schema_count source relative credential catalog_line
     local prefix current_line expected_line
     config=$(gpteasy__config_path) || return
     if [[ ! -f "$config" ]]; then
@@ -581,10 +737,30 @@ gpteasy__current_state() {
         printf '%s\n' 'conflict'
         return
     }
-    if [[ "$schema" != 1 ]] || ! gpteasy__schema_v1_is_valid "$config"; then
-        printf '%s\n' 'conflict'
-        return
-    fi
+    case "$schema" in
+        1)
+            gpteasy__schema_v1_is_valid "$config" || {
+                printf '%s\n' 'conflict'
+                return
+            }
+            ;;
+        2)
+            gpteasy__schema_v2_is_valid "$config" || {
+                printf '%s\n' 'conflict'
+                return
+            }
+            catalog_line=$(gpteasy__managed_line "$config" 'model_catalog_json = ' 2>/dev/null) || {
+                printf '%s\n' 'conflict'
+                return
+            }
+            gpteasy__model_catalog_path=${catalog_line#model_catalog_json = \"}
+            gpteasy__model_catalog_path=${gpteasy__model_catalog_path%\"}
+            ;;
+        *)
+            printf '%s\n' 'conflict'
+            return
+            ;;
+    esac
     source=$(gpteasy__managed_metadata "$config" "$gpteasy__source_id_prefix" 2>/dev/null) || {
         printf '%s\n' 'conflict'
         return
@@ -850,6 +1026,9 @@ gpteasy__cleanup_failed_apply() {
     if [[ "${gpteasy__credential_created:-0}" -eq 1 && -n "${gpteasy__credential_path:-}" ]]; then
         rm -f -- "$gpteasy__credential_path" 2>/dev/null || true
     fi
+    if [[ "${gpteasy__model_catalog_created:-0}" -eq 1 && -n "${gpteasy__model_catalog_path:-}" ]]; then
+        rm -f -- "$gpteasy__model_catalog_path" 2>/dev/null || true
+    fi
     if [[ -n "${gpteasy__restore_point:-}" && -d "$gpteasy__restore_point" ]]; then
         gpteasy__discard_restore_point "$gpteasy__restore_point" 2>/dev/null || true
     fi
@@ -861,7 +1040,13 @@ gpteasy__apply_provider_locked() {
     gpteasy__restore_point=
     gpteasy__credential_created=0
     gpteasy__credential_path=
+    gpteasy__model_catalog_created=0
+    gpteasy__model_catalog_path=
     gpteasy__resolve_config_target || return
+    gpteasy__install_model_catalog "$provider_id" || {
+        gpteasy__cleanup_failed_apply
+        return 1
+    }
     gpteasy__prepare_candidate "$provider_id" || {
         gpteasy__cleanup_failed_apply
         return 1
@@ -885,6 +1070,7 @@ gpteasy__apply_provider_locked() {
         return 1
     fi
     gpteasy__candidate=
+    gpteasy__model_catalog_created=0
     if ! sync -f "$target_dir" 2>/dev/null || [[ "$(gpteasy__file_hash "$gpteasy__config_target")" != "$gpteasy__candidate_hash" ]]; then
         printf '%s\n' '配置替换后的复核失败，请使用 restore 检查最近恢复点。' >&2
         return 1
@@ -1005,10 +1191,20 @@ gpteasy__restore_locked() {
         missing) ;;
         regular)
             gpteasy__private_file_is_safe "$latest/config.toml" || return 1
+            if [[ "$(gpteasy__managed_metadata "$latest/config.toml" "$gpteasy__schema_prefix" 2>/dev/null || true)" == 2 ]] &&
+                ! gpteasy__schema_v2_is_valid "$latest/config.toml"; then
+                printf '%s\n' '恢复点引用的 Linux 模型目录缺失、篡改或绑定失效，恢复已停止。' >&2
+                return 1
+            fi
             ;;
         symlink)
             gpteasy__private_file_is_safe "$latest/config.toml" || return 1
             gpteasy__private_file_is_safe "$latest/symlink-target" || return 1
+            if [[ "$(gpteasy__managed_metadata "$latest/config.toml" "$gpteasy__schema_prefix" 2>/dev/null || true)" == 2 ]] &&
+                ! gpteasy__schema_v2_is_valid "$latest/config.toml"; then
+                printf '%s\n' '恢复点引用的 Linux 模型目录缺失、篡改或绑定失效，恢复已停止。' >&2
+                return 1
+            fi
             ;;
         *)
             printf '%s\n' '最新 Linux 恢复点格式损坏。' >&2
@@ -1106,7 +1302,7 @@ gpteasy__info() {
     [[ ! -e "$config" ]] || gpteasy__warn_if_permissions_are_broad "$config"
     printf '目标环境：%s\n' "${CODEX_HOME:-"$HOME/.codex"}"
     printf 'Linux 导出 ID：%s\n' "$gpteasy__export_id"
-    printf '%s\n' '管理区块 schema：1'
+    printf '%s\n' '管理区块 schema：2'
     printf '%s\n' 'Shell：{{GPTEASY_SHELL_LABEL}}'
     printf '供应商数量：%s\n' "$gpteasy__provider_count"
     printf '%s\n' 'Codex CLI 最低版本：0.147.0'

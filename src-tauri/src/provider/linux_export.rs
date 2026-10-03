@@ -3,12 +3,14 @@ use std::io::Write;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::codex_config::STATUS_LINE_TOML;
 use crate::state::StateStore;
 
 use super::catalog;
+use super::model_catalog;
 use super::reasoning;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -175,7 +177,7 @@ fn read_destination(destination: &Path) -> Result<Option<Vec<u8>>, LinuxExportFa
 
 fn render(shell: LinuxShell, export_id: &str, providers: &[catalog::ProviderRecord]) -> String {
     let mut script = format!(
-        "#!/usr/bin/env {}\n# GPTEasy {} Linux provider snapshot. This file contains sensitive credentials.\ngpteasy__schema_version='1'\n",
+        "#!/usr/bin/env {}\n# GPTEasy {} Linux provider snapshot. This file contains sensitive credentials.\ngpteasy__schema_version='2'\n",
         shell.executable(),
         shell.display_name(),
     );
@@ -188,20 +190,64 @@ fn render(shell: LinuxShell, export_id: &str, providers: &[catalog::ProviderReco
         "gpteasy__export_id={}\n\n",
         shell_quote(export_id)
     ));
-    script.push_str("# 供应商目录。可脱离 GPTEasy 手工维护：每行依次为供应商 ID、名称、服务地址、默认模型、API Key、推理强度，并以 Tab 分隔；可使用空行和 # 注释。字段不可包含 Tab 或换行。\n");
+    script.push_str("# 供应商目录。API Key 仅用于明确切换时写入私有凭据工件；模型目录载荷不包含凭据。字段不可包含 Tab 或换行。\n");
     script.push_str("gpteasy__provider_catalog() {\n    cat <<'GPTEASY_PROVIDER_CATALOG'\n");
+    let mut payload_functions = String::new();
     for provider in providers {
+        let payload =
+            model_catalog::render(&provider.discovered_models, &provider.summary.default_model)
+                .expect("validated provider model catalog");
+        let artifact_id = Uuid::new_v4().to_string();
+        let payload_sha256 = sha256_hex(&payload);
         script.push_str(&format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\n",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             provider.summary.id,
             provider.summary.name,
             provider.summary.base_url,
             provider.summary.default_model,
             provider.api_key,
-            provider.reasoning_selection.effort.as_deref().unwrap_or(""),
+            provider
+                .reasoning_selection
+                .effort
+                .as_deref()
+                .unwrap_or("-"),
+            artifact_id,
+            payload_sha256,
+            provider.verification_fingerprint,
+        ));
+        payload_functions.push_str(&format!(
+            "gpteasy__provider_catalog_payload_{}() {{ printf '%s' {}; }}\n",
+            provider.summary.id,
+            shell_quote(std::str::from_utf8(&payload).expect("catalog JSON is UTF-8")),
+        ));
+        payload_functions.push_str(&format!(
+            "gpteasy__provider_catalog_binding_{}() {{ printf '%s\\t%s\\t%s\\t%s\\t%s\\n' {} {} {} {} {}; }}\n",
+            provider.summary.id,
+            shell_quote(&provider.summary.id),
+            shell_quote(&provider.summary.default_model),
+            shell_quote(&artifact_id),
+            shell_quote(&payload_sha256),
+            shell_quote(&provider.verification_fingerprint),
         ));
     }
     script.push_str("GPTEASY_PROVIDER_CATALOG\n}\n");
+    script.push_str(&payload_functions);
+    script.push_str("\ngpteasy__provider_catalog_payload() {\n    case \"$1\" in\n");
+    for provider in providers {
+        script.push_str(&format!(
+            "        {}) gpteasy__provider_catalog_payload_{} ;;\n",
+            provider.summary.id, provider.summary.id,
+        ));
+    }
+    script.push_str("        *) return 1 ;;\n    esac\n}\n");
+    script.push_str("\ngpteasy__provider_catalog_binding() {\n    case \"$1\" in\n");
+    for provider in providers {
+        script.push_str(&format!(
+            "        {}) gpteasy__provider_catalog_binding_{} ;;\n",
+            provider.summary.id, provider.summary.id,
+        ));
+    }
+    script.push_str("        *) return 1 ;;\n    esac\n}\n");
     script.push_str(
         "gpteasy__provider_count=$(gpteasy__provider_catalog | awk 'NF && $1 !~ /^#/ { count += 1 } END { print count + 0 }')\n\n",
     );
@@ -218,24 +264,32 @@ gpteasy__toml_string() {{
 }}
 
 gpteasy__print_block() {{
-    local provider_id=$1 name model reasoning_effort base_url credential_relative
+    local provider_id=$1 name model reasoning_effort base_url credential_relative catalog_path artifact_id catalog_sha256 verification_fingerprint
     gpteasy__provider_id_is_safe "$provider_id" || return 1
     name=$(gpteasy__provider_name "$provider_id") || return 1
     model=$(gpteasy__provider_model "$provider_id") || return 1
     reasoning_effort=$(gpteasy__provider_reasoning_effort "$provider_id") || return 1
     base_url=$(gpteasy__provider_base_url "$provider_id") || return 1
-    [[ -n "$name" && -n "$model" && -n "$base_url" ]] || return 1
+    artifact_id=$(gpteasy__provider_catalog_artifact "$provider_id") || return 1
+    catalog_sha256=$(gpteasy__provider_catalog_sha256 "$provider_id") || return 1
+    verification_fingerprint=$(gpteasy__provider_verification_fingerprint "$provider_id") || return 1
+    catalog_path=${{gpteasy__model_catalog_path:-/dev/null}}
+    [[ -n "$name" && -n "$model" && -n "$base_url" && -n "$catalog_path" ]] || return 1
     credential_relative="$gpteasy__export_credential_directory/$provider_id.token"
     printf '%s\n' '# >>> GPTEasy managed provider >>>'
-    printf '%s\n' '# GPTEasy schema-version: 1'
+    printf '%s\n' '# GPTEasy schema-version: 2'
     printf '# GPTEasy provider-id: %s\n' "$provider_id"
     printf '# GPTEasy source-id: %s\n' "$gpteasy__export_id"
     printf '# GPTEasy credential-file: %s\n' "$credential_relative"
+    printf '# GPTEasy model-catalog-artifact: %s\n' "$artifact_id"
+    printf '# GPTEasy model-catalog-sha256: %s\n' "$catalog_sha256"
+    printf '# GPTEasy model-catalog-provider-fingerprint: %s\n' "$verification_fingerprint"
     printf 'model = %s\n' "$(gpteasy__toml_string "$model")"
     if [[ -n "$reasoning_effort" ]]; then
         printf 'model_reasoning_effort = %s\n' "$(gpteasy__toml_string "$reasoning_effort")"
     fi
     printf '%s\n' 'model_provider = "gpteasy"'
+    printf 'model_catalog_json = %s\n' "$(gpteasy__toml_string "$catalog_path")"
     printf 'model_providers.gpteasy.name = %s\n' "$(gpteasy__toml_string "$name")"
     printf 'model_providers.gpteasy.base_url = %s\n' "$(gpteasy__toml_string "$base_url")"
     printf '%s\n' 'model_providers.gpteasy.wire_api = "responses"'
@@ -295,6 +349,10 @@ fn validate_snapshot(providers: &[catalog::ProviderRecord]) -> Result<(), LinuxE
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 fn atomic_write(
