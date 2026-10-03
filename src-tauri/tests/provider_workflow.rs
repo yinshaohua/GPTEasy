@@ -1185,12 +1185,16 @@ async fn failed_catalog_revalidation_keeps_verification_time_and_current_provide
     )
     .await;
     mark_current_provider(&store, &provider.id);
+    let before_snapshot = persisted_snapshot(&store, &provider.id);
     let before = application
         .list_providers()
         .expect("catalog before failure");
 
     let failure = application
-        .revalidate_provider("failed-catalog-revalidation".to_owned(), provider.id)
+        .revalidate_provider(
+            "failed-catalog-revalidation".to_owned(),
+            provider.id.clone(),
+        )
         .await
         .expect_err("unavailable provider fails revalidation");
 
@@ -1198,6 +1202,7 @@ async fn failed_catalog_revalidation_keeps_verification_time_and_current_provide
         failure.category,
         ProviderFailureCategory::Transport | ProviderFailureCategory::ResponseHeaderTimeout
     ));
+    assert_eq!(persisted_snapshot(&store, &provider.id), before_snapshot);
     assert_eq!(
         application.list_providers().expect("catalog after failure"),
         before
@@ -1572,6 +1577,8 @@ async fn current_provider_update_commits_catalog_and_codex_artifacts_together() 
         .expect("apply original provider");
     let original_config = std::fs::read(codex_home.join("config.toml")).expect("read old config");
     let original_auth = std::fs::read(codex_home.join("auth.json")).expect("read old auth");
+    let original_catalog = std::fs::read(codex_home.join("gpteasy-model-catalog.json")).unwrap();
+    let original_snapshot = persisted_snapshot(&store, &original.id);
 
     let update_server = ValidationServer::start(ValidationScenario::Success);
     let receipt = application
@@ -1631,6 +1638,11 @@ async fn current_provider_update_commits_catalog_and_codex_artifacts_together() 
         std::fs::read(codex_home.join("auth.json")).expect("read rolled back auth"),
         original_auth
     );
+    assert_eq!(persisted_snapshot(&store, &original.id), original_snapshot);
+    assert_eq!(
+        std::fs::read(codex_home.join("gpteasy-model-catalog.json")).unwrap(),
+        original_catalog
+    );
     let unchanged = application
         .list_providers()
         .expect("list unchanged provider");
@@ -1674,6 +1686,17 @@ async fn current_provider_update_commits_catalog_and_codex_artifacts_together() 
     )
     .expect("updated auth is JSON");
     assert_eq!(auth["OPENAI_API_KEY"], "replacement-current-key");
+    let (provider_fingerprint, snapshot_fingerprint, models_json) =
+        persisted_snapshot(&store, &original.id);
+    assert_eq!(provider_fingerprint, snapshot_fingerprint);
+    assert_ne!(provider_fingerprint, original_snapshot.0);
+    assert_eq!(
+        serde_json::from_str::<Vec<String>>(&models_json).unwrap(),
+        ["model-a"]
+    );
+    environment
+        .apply_provider(&original.id, true)
+        .expect("strict read of newly saved snapshot succeeds");
 }
 
 #[tokio::test]
@@ -2394,4 +2417,238 @@ fn extract_backtick_value(text: &str) -> Option<&str> {
     let start = text.find('`')? + 1;
     let end = text[start..].find('`')? + start;
     Some(&text[start..end])
+}
+
+fn persisted_snapshot(store: &StateStore, provider_id: &str) -> (String, String, String) {
+    Connection::open(store.paths().database()).unwrap().query_row(
+        "SELECT p.verification_fingerprint, c.verification_fingerprint, c.models_json FROM providers p JOIN provider_model_catalog c ON c.provider_id=p.id WHERE p.id=?1", [provider_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap()
+}
+
+#[tokio::test]
+async fn revalidation_repairs_missing_and_malformed_snapshots_without_loading_them_first() {
+    for damaged in [None, Some("invalid-json")] {
+        let temp = TempDir::new().unwrap();
+        let store = StateStore::new(StatePaths::from_root(temp.path().join("state")));
+        assert!(store.bootstrap().is_ready());
+        let server = ValidationServer::start(ValidationScenario::Success);
+        let id = "6cde0dd7-9725-462a-ac79-864f5cf63f76";
+        insert_provider_record(&store, id, &server.base_url, "repair-key", 1);
+        if let Some(json) = damaged {
+            Connection::open(store.paths().database())
+                .unwrap()
+                .execute(
+                    "INSERT INTO provider_model_catalog VALUES (?1, 'stale', ?2)",
+                    rusqlite::params![id, json],
+                )
+                .unwrap();
+        }
+        let application = ProviderApplication::new(store.clone(), validator());
+        let result = application
+            .revalidate_provider("repair-snapshot".to_owned(), id.to_owned())
+            .await
+            .unwrap();
+        assert!(result.validation_receipt.is_none());
+        let (verified, bound, json) = persisted_snapshot(&store, id);
+        assert_eq!(verified, bound);
+        assert_eq!(
+            serde_json::from_str::<Vec<String>>(&json).unwrap(),
+            ["model-a"]
+        );
+        EnvironmentApplication::new(store, temp.path().join(".codex"))
+            .apply_provider(id, true)
+            .unwrap();
+    }
+}
+
+struct InterruptBeforeDatabaseCommit;
+impl EnvironmentFaultInjector for InterruptBeforeDatabaseCommit {
+    fn fails_at(&self, _: EnvironmentFailurePoint) -> bool {
+        false
+    }
+    fn interrupts_at(&self, point: EnvironmentFailurePoint) -> bool {
+        point == EnvironmentFailurePoint::BeforeDatabaseCommit
+    }
+}
+
+#[tokio::test]
+async fn save_and_apply_recovery_updates_snapshot_atomically_or_preserves_a_newer_revision() {
+    for concurrent_change in [false, true] {
+        let temp = TempDir::new().unwrap();
+        let store = StateStore::new(StatePaths::from_root(temp.path().join("state")));
+        assert!(store.bootstrap().is_ready());
+        let application = ProviderApplication::new(store.clone(), validator());
+        let creation = ValidationServer::start(ValidationScenario::Success);
+        let original = create_provider(
+            &application,
+            "create",
+            creation.base_url,
+            "Recover Current",
+            "original-key",
+        )
+        .await;
+        let home = temp.path().join(".codex");
+        let environment = EnvironmentApplication::new(store.clone(), &home);
+        environment.apply_provider(&original.id, true).unwrap();
+        let old = persisted_snapshot(&store, &original.id);
+        let update = ValidationServer::start(ValidationScenario::Success);
+        let receipt = application
+            .validate_provider_update(
+                "update".to_owned(),
+                ProviderUpdateValidationInput {
+                    provider_id: original.id.clone(),
+                    base_url: update.base_url,
+                    api_key: Some("replacement-key".to_owned()),
+                    default_model: "model-a".to_owned(),
+                },
+            )
+            .await
+            .unwrap();
+        let interrupted = EnvironmentApplication::with_fault_injector(
+            store.clone(),
+            &home,
+            Arc::new(InterruptBeforeDatabaseCommit),
+        );
+        application
+            .save_and_apply_provider_update(
+                &interrupted,
+                &receipt.validation_id,
+                &original.id,
+                "Updated",
+                true,
+            )
+            .expect_err("simulate crash with new outputs and old SQLite");
+        assert_eq!(persisted_snapshot(&store, &original.id), old);
+        if concurrent_change {
+            Connection::open(store.paths().database()).unwrap().execute("UPDATE provider_model_catalog SET models_json='[\"model-a\",\"newer-model\"]' WHERE provider_id=?1", [&original.id]).unwrap();
+        }
+        let newer = persisted_snapshot(&store, &original.id);
+        let recovery = environment.recover_pending().unwrap();
+        if concurrent_change {
+            assert_eq!(
+                recovery,
+                gpteasy_lib::environment::EnvironmentRecovery::Conflict
+            );
+            assert_eq!(persisted_snapshot(&store, &original.id), newer);
+        } else {
+            assert_eq!(
+                recovery,
+                gpteasy_lib::environment::EnvironmentRecovery::CompletedNewState
+            );
+            let recovered = persisted_snapshot(&store, &original.id);
+            assert_eq!(recovered.0, recovered.1);
+            assert_ne!(recovered.0, old.0);
+            environment.apply_provider(&original.id, true).unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn revalidation_cannot_replace_snapshot_during_a_pending_native_saga() {
+    let temp = TempDir::new().unwrap();
+    let store = StateStore::new(StatePaths::from_root(temp.path().join("state")));
+    assert!(store.bootstrap().is_ready());
+    let server = ValidationServer::start(ValidationScenario::Success);
+    let id = "6cde0dd7-9725-462a-ac79-864f5cf63f76";
+    insert_provider_record(&store, id, &server.base_url, "key", 1);
+    let connection = Connection::open(store.paths().database()).unwrap();
+    connection.execute("INSERT INTO provider_model_catalog VALUES (?1, 'original-fingerprint', '[\"model-a\"]')", [id]).unwrap();
+    let old = persisted_snapshot(&store, id);
+    connection.execute("INSERT INTO pending_config_operation(singleton, operation_id, operation_kind, stage, target_provider_id, backup_reference, target_snapshot_json, started_at) VALUES (1, 'test', 'repair_model_catalog', 'prepared', ?1, 'backup', '{}', '1')", [id]).unwrap();
+    let application = ProviderApplication::new(store.clone(), validator());
+    assert_eq!(
+        application
+            .revalidate_provider("pending".to_owned(), id.to_owned())
+            .await
+            .unwrap_err()
+            .category,
+        ProviderFailureCategory::StateUnavailable
+    );
+    assert_eq!(persisted_snapshot(&store, id), old);
+}
+
+struct ReplaceSnapshotBeforeDatabaseCommit {
+    database: std::path::PathBuf,
+    provider_id: String,
+}
+
+impl EnvironmentFaultInjector for ReplaceSnapshotBeforeDatabaseCommit {
+    fn fails_at(&self, point: EnvironmentFailurePoint) -> bool {
+        if point == EnvironmentFailurePoint::BeforeDatabaseCommit {
+            Connection::open(&self.database).unwrap().execute(
+                "UPDATE provider_model_catalog SET models_json='[\"model-a\",\"newer-model\"]' WHERE provider_id=?1",
+                [&self.provider_id],
+            ).unwrap();
+        }
+        false
+    }
+}
+
+#[tokio::test]
+async fn save_and_apply_commit_preserves_a_concurrently_replaced_snapshot_and_rolls_back_outputs() {
+    let temp = TempDir::new().unwrap();
+    let store = StateStore::new(StatePaths::from_root(temp.path().join("state")));
+    assert!(store.bootstrap().is_ready());
+    let application = ProviderApplication::new(store.clone(), validator());
+    let creation = ValidationServer::start(ValidationScenario::Success);
+    let original = create_provider(
+        &application,
+        "create",
+        creation.base_url,
+        "Current",
+        "original-key",
+    )
+    .await;
+    let home = temp.path().join(".codex");
+    let environment = EnvironmentApplication::new(store.clone(), &home);
+    environment.apply_provider(&original.id, true).unwrap();
+    let old_snapshot = persisted_snapshot(&store, &original.id);
+    let artifact_names = ["config.toml", "auth.json", "gpteasy-model-catalog.json"];
+    let old_outputs = artifact_names.map(|name| std::fs::read(home.join(name)).unwrap());
+    let update = ValidationServer::start(ValidationScenario::Success);
+    let receipt = application
+        .validate_provider_update(
+            "update".to_owned(),
+            ProviderUpdateValidationInput {
+                provider_id: original.id.clone(),
+                base_url: update.base_url,
+                api_key: Some("replacement-key".to_owned()),
+                default_model: "model-a".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+    let concurrent_environment = EnvironmentApplication::with_fault_injector(
+        store.clone(),
+        &home,
+        Arc::new(ReplaceSnapshotBeforeDatabaseCommit {
+            database: store.paths().database().to_path_buf(),
+            provider_id: original.id.clone(),
+        }),
+    );
+    let failure = application
+        .save_and_apply_provider_update(
+            &concurrent_environment,
+            &receipt.validation_id,
+            &original.id,
+            "Updated",
+            true,
+        )
+        .expect_err("concurrent snapshot revision must prevent SQLite overwrite");
+    assert_eq!(failure.message_id, "environment.concurrent_modification");
+    let retained = persisted_snapshot(&store, &original.id);
+    assert_eq!(retained.0, old_snapshot.0);
+    assert_eq!(retained.1, old_snapshot.1);
+    assert_eq!(
+        serde_json::from_str::<Vec<String>>(&retained.2).unwrap(),
+        ["model-a", "newer-model"]
+    );
+    for (name, old_bytes) in artifact_names.into_iter().zip(old_outputs) {
+        assert_eq!(std::fs::read(home.join(name)).unwrap(), old_bytes);
+    }
+    assert_eq!(application.list_providers().unwrap()[0].name, original.name);
+    assert_eq!(
+        environment.recover_pending().unwrap(),
+        gpteasy_lib::environment::EnvironmentRecovery::NoPendingOperation
+    );
 }

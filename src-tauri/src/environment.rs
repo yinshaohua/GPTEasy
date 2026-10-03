@@ -64,6 +64,7 @@ struct PendingRestartContext {
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactKind {
     Config,
+    ModelCatalog,
     Credentials,
 }
 
@@ -146,6 +147,8 @@ pub enum EnvironmentFailureCategory {
     ManagedConflict,
     UnsupportedCredentialStore,
     InvalidConfig,
+    CatalogSnapshotInvalid,
+    CatalogGenerationFailed,
     CatalogSchemaIncompatible,
     InvalidCredentials,
     BackupFailed,
@@ -186,6 +189,8 @@ pub enum EnvironmentFailurePoint {
     AfterPendingRegistered,
     BeforeConfigReplace,
     AfterConfigReplaced,
+    BeforeModelCatalogReplace,
+    AfterModelCatalogReplaced,
     BeforeCredentialsReplace,
     AfterAllArtifactsReplaced,
     BeforeDatabaseCommit,
@@ -301,11 +306,16 @@ impl EnvironmentApplication {
     ) -> Result<reasoning::ReasoningAuditContext, EnvironmentFailure> {
         let connection = self.open_state()?;
         let provider = load_provider(&connection, provider_id)?;
-        Ok(reasoning::ReasoningAuditContext::new(
+        let model_count = provider.discovered_models.len();
+        let default_present = provider.discovered_models.contains(&provider.default_model);
+        let mut context = reasoning::ReasoningAuditContext::new(
             provider.id,
             provider.base_url,
             provider.default_model,
-        ))
+        );
+        context.model_count = Some(model_count);
+        context.default_model_present = Some(default_present);
+        Ok(context)
     }
     pub fn new(state_store: StateStore, codex_home: impl AsRef<Path>) -> Self {
         Self::with_dependencies_and_scanner(
@@ -626,7 +636,10 @@ impl EnvironmentApplication {
             .operation_lock
             .lock()
             .map_err(|_| state_unavailable())?;
-        let connection = self.open_state()?;
+        let mut connection = self.open_state()?;
+        if has_pending_operation(&connection)? {
+            return Err(state_unavailable());
+        }
         let Some(prepared) = PreparedModelCatalogRepair::prepare(&self.codex_home, &connection)?
         else {
             return Ok(model_catalog_repair_result(
@@ -638,19 +651,58 @@ impl EnvironmentApplication {
                 ModelCatalogRepairStatus::NotModified,
             ));
         }
-        create_model_catalog_repair_backup(&self.codex_home, &prepared)?;
+        if self.faults.fails_backup_creation() {
+            return Err(backup_failed());
+        }
+        let backup = create_model_catalog_repair_backup(&self.codex_home, &prepared)?;
+        self.check_interruption(EnvironmentFailurePoint::AfterBackupCompleted)?;
+        persist_pending_catalog_repair(&mut connection, &prepared, &backup)?;
+        self.check_interruption(EnvironmentFailurePoint::AfterPendingRegistered)?;
         let attempt = (|| {
+            if !artifact_matches(
+                &self.codex_home.join("config.toml"),
+                prepared.config.bytes.as_deref(),
+            )? {
+                return Err(concurrent_modification());
+            }
+            self.check_fault(EnvironmentFailurePoint::BeforeModelCatalogReplace)?;
             prepared.catalog.commit()?;
+            self.check_interruption(EnvironmentFailurePoint::AfterModelCatalogReplaced)?;
+            self.check_fault(EnvironmentFailurePoint::AfterModelCatalogReplaced)?;
             prepared.catalog.verify_new()?;
+            mark_backup_completed(&backup)?;
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|_| state_unavailable())?;
+            if !same_provider_target(
+                &load_provider(&transaction, &prepared.provider.id)?,
+                &prepared.provider,
+            ) || !artifact_matches(
+                &self.codex_home.join("config.toml"),
+                prepared.config.bytes.as_deref(),
+            )? {
+                return Err(concurrent_modification());
+            }
+            clear_pending(&transaction, &prepared.operation_id)?;
+            transaction.commit().map_err(|_| state_unavailable())?;
             Ok::<(), EnvironmentFailure>(())
         })();
         match attempt {
             Ok(()) => Ok(model_catalog_repair_result(
                 ModelCatalogRepairStatus::Succeeded,
             )),
-            Err(_) if prepared.catalog.restore().is_ok() => Ok(model_catalog_repair_result(
-                ModelCatalogRepairStatus::RolledBack,
-            )),
+            Err(failure)
+                if failure.category == EnvironmentFailureCategory::OperationInterrupted =>
+            {
+                Err(failure)
+            }
+            Err(_) if !self.faults.fails_rollback() && prepared.catalog.restore().is_ok() => {
+                unmark_backup_completed(&backup)?;
+                clear_pending(&connection, &prepared.operation_id)?;
+                Ok(model_catalog_repair_result(
+                    ModelCatalogRepairStatus::RolledBack,
+                ))
+            }
             Err(_) => Ok(model_catalog_repair_result(
                 ModelCatalogRepairStatus::ManualRequired,
             )),
@@ -676,23 +728,26 @@ impl EnvironmentApplication {
         let mut connection = self.open_state()?;
         let pending = connection
             .query_row(
-                "SELECT operation_id, operation_kind, old_config_fingerprint,
+                "SELECT operation_id, operation_kind, target_provider_id, old_config_fingerprint,
                         new_config_fingerprint, old_credentials_fingerprint,
                         new_credentials_fingerprint, backup_reference, target_snapshot_json,
-                        restart_context
+                        restart_context, old_catalog_fingerprint, new_catalog_fingerprint
                  FROM pending_config_operation WHERE singleton = 1",
                 [],
                 |row| {
                     Ok(PendingRecovery {
                         operation_id: row.get(0)?,
                         operation_kind: row.get(1)?,
-                        old_config_fingerprint: row.get(2)?,
-                        new_config_fingerprint: row.get(3)?,
-                        old_credentials_fingerprint: row.get(4)?,
-                        new_credentials_fingerprint: row.get(5)?,
-                        backup_reference: PathBuf::from(row.get::<_, String>(6)?),
-                        target_snapshot_json: row.get(7)?,
-                        restart_context: row.get::<_, Option<String>>(8)?,
+                        target_provider_id: row.get(2)?,
+                        old_config_fingerprint: row.get(3)?,
+                        new_config_fingerprint: row.get(4)?,
+                        old_credentials_fingerprint: row.get(5)?,
+                        new_credentials_fingerprint: row.get(6)?,
+                        backup_reference: PathBuf::from(row.get::<_, String>(7)?),
+                        target_snapshot_json: row.get(8)?,
+                        restart_context: row.get::<_, Option<String>>(9)?,
+                        old_catalog_fingerprint: row.get(10)?,
+                        new_catalog_fingerprint: row.get(11)?,
                     })
                 },
             )
@@ -709,6 +764,7 @@ impl EnvironmentApplication {
             }
         };
         let config = read_artifact(&self.codex_home.join("config.toml"))?;
+        let catalog = read_artifact(&self.codex_home.join("gpteasy-model-catalog.json"))?;
         if pending.operation_kind == "repair_custom_provider" {
             return recover_interrupted_custom_provider_repair(
                 &self.codex_home,
@@ -720,14 +776,18 @@ impl EnvironmentApplication {
         }
         let credentials_affected = pending.old_credentials_fingerprint.is_some()
             || pending.new_credentials_fingerprint.is_some();
-        let credentials = if credentials_affected {
-            read_artifact(&self.codex_home.join("auth.json"))?
-        } else {
-            ArtifactBytes { bytes: None }
-        };
+        let credentials = read_artifact(&self.codex_home.join("auth.json"))?;
         let current_config = config.fingerprint(ArtifactKind::Config);
+        let current_catalog = catalog.fingerprint(ArtifactKind::ModelCatalog);
         let current_credentials = credentials.fingerprint(ArtifactKind::Credentials);
+        let catalog_affected =
+            pending.old_catalog_fingerprint.is_some() || pending.new_catalog_fingerprint.is_some();
         if fingerprints_match(&current_config, &pending.old_config_fingerprint, true)
+            && fingerprints_match(
+                &current_catalog,
+                &pending.old_catalog_fingerprint,
+                catalog_affected,
+            )
             && fingerprints_match(
                 &current_credentials,
                 &pending.old_credentials_fingerprint,
@@ -740,13 +800,25 @@ impl EnvironmentApplication {
         }
         if fingerprints_match(&current_config, &pending.new_config_fingerprint, true)
             && fingerprints_match(
+                &current_catalog,
+                &pending.new_catalog_fingerprint,
+                catalog_affected,
+            )
+            && fingerprints_match(
                 &current_credentials,
                 &pending.new_credentials_fingerprint,
                 credentials_affected,
             )
         {
             if mark_backup_completed(&backup).is_ok()
-                && commit_recovered_state(&mut connection, &pending, &config, &credentials).is_ok()
+                && commit_recovered_state(
+                    &mut connection,
+                    &pending,
+                    &config,
+                    &catalog,
+                    &credentials,
+                )
+                .is_ok()
             {
                 return Ok(EnvironmentRecovery::CompletedNewState);
             }
@@ -778,8 +850,9 @@ impl EnvironmentApplication {
         }
         let before = self.inspect_environment(&connection)?;
         let config = read_artifact(&self.codex_home.join("config.toml"))?;
+        let catalog = read_artifact(&self.codex_home.join("gpteasy-model-catalog.json"))?;
         let credentials = read_artifact(&self.codex_home.join("auth.json"))?;
-        if environment_revision(&config, &credentials) != expected_revision {
+        if environment_revision(&config, &catalog, &credentials) != expected_revision {
             return Err(concurrent_modification());
         }
         let mut consumer_scan = self.consumer_scanner.scan();
@@ -787,8 +860,9 @@ impl EnvironmentApplication {
         let backup = latest_completed_backup(&self.codex_home)?.ok_or_else(restore_unavailable)?;
         let restore_target = backup.restore_target(&connection)?;
         let managed_current =
-            reconciled_applied_provider(&connection, &config, Some(&credentials))?.is_some();
-        if !backup.matches_current(&config, &credentials, managed_current) {
+            reconciled_applied_provider(&connection, &config, Some(&credentials), &catalog)?
+                .is_some();
+        if !backup.matches_current(&config, &catalog, &credentials, managed_current) {
             return Err(EnvironmentFailure::new(
                 EnvironmentFailureCategory::ManagedConflict,
                 "environment.restore_conflict",
@@ -797,6 +871,7 @@ impl EnvironmentApplication {
         let prepared = PreparedRestore::new(
             &self.codex_home,
             config,
+            catalog,
             credentials,
             backup,
             restore_target,
@@ -815,6 +890,7 @@ impl EnvironmentApplication {
         self.check_interruption(EnvironmentFailurePoint::AfterPendingRegistered)?;
 
         let mut config_applied = false;
+        let mut catalog_applied = false;
         let mut credentials_applied = false;
         let mut interrupted = false;
         let mut backup_completed = false;
@@ -822,6 +898,10 @@ impl EnvironmentApplication {
             self.check_fault(EnvironmentFailurePoint::BeforeConfigReplace)?;
             prepared.config.commit()?;
             config_applied = true;
+            if let Some(catalog) = &prepared.catalog {
+                catalog.commit()?;
+                catalog_applied = true;
+            }
             update_pending_stage(&connection, &prepared.operation_id, "config_replaced")?;
             self.check_interruption(EnvironmentFailurePoint::AfterConfigReplaced)
                 .inspect_err(|_| {
@@ -868,7 +948,13 @@ impl EnvironmentApplication {
                 unmark_backup_completed(&rollback_backup)?;
             }
             if self.faults.fails_rollback()
-                || rollback_restore(&prepared, config_applied, credentials_applied).is_err()
+                || rollback_restore(
+                    &prepared,
+                    config_applied,
+                    catalog_applied,
+                    credentials_applied,
+                )
+                .is_err()
             {
                 return Err(EnvironmentFailure::new(
                     EnvironmentFailureCategory::RollbackFailed,
@@ -1182,8 +1268,14 @@ impl EnvironmentApplication {
             self.check_fault(EnvironmentFailurePoint::BeforeConfigReplace)?;
             prepared.config.commit()?;
             config_applied = true;
+            self.check_fault(EnvironmentFailurePoint::BeforeModelCatalogReplace)?;
             prepared.catalog.commit()?;
             catalog_applied = true;
+            self.check_interruption(EnvironmentFailurePoint::AfterModelCatalogReplaced)
+                .inspect_err(|_| {
+                    interrupted = true;
+                })?;
+            self.check_fault(EnvironmentFailurePoint::AfterModelCatalogReplaced)?;
             update_pending_stage(connection, &prepared.operation_id, "config_replaced")?;
             self.check_interruption(EnvironmentFailurePoint::AfterConfigReplaced)
                 .inspect_err(|_| {
@@ -1365,9 +1457,40 @@ impl ProviderTarget {
     }
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PendingProviderTarget {
+    #[serde(flatten)]
+    provider: ProviderTarget,
+    #[serde(default)]
+    original_revision: Option<String>,
+}
+
+fn validate_original_provider_revision(
+    connection: &Connection,
+    provider_id: &str,
+    original_revision: Option<&str>,
+) -> Result<(), EnvironmentFailure> {
+    if original_revision != Some(provider_state_revision(connection, provider_id)?.as_str()) {
+        return Err(concurrent_modification());
+    }
+    Ok(())
+}
+
+fn provider_state_revision(
+    connection: &Connection,
+    id: &str,
+) -> Result<String, EnvironmentFailure> {
+    let provider = load_provider_record(connection, id)?;
+    let snapshot = connection.query_row("SELECT verification_fingerprint, models_json FROM provider_model_catalog WHERE provider_id=?1", [id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).optional().map_err(|_| state_unavailable())?;
+    let bytes = serde_json::to_vec(&(provider, snapshot)).map_err(|_| state_unavailable())?;
+    Ok(format!("{:x}", Sha256::digest(&bytes)))
+}
+
 struct PendingRecovery {
     operation_id: String,
     operation_kind: String,
+    target_provider_id: Option<String>,
     old_config_fingerprint: Option<String>,
     new_config_fingerprint: Option<String>,
     old_credentials_fingerprint: Option<String>,
@@ -1375,6 +1498,8 @@ struct PendingRecovery {
     backup_reference: PathBuf,
     target_snapshot_json: String,
     restart_context: Option<String>,
+    old_catalog_fingerprint: Option<String>,
+    new_catalog_fingerprint: Option<String>,
 }
 
 pub(crate) struct VerifiedProviderUpdate {
@@ -1415,23 +1540,23 @@ impl ProviderTarget {
     }
 }
 
-fn load_provider(
+fn load_provider_record(
     connection: &Connection,
     provider_id: &str,
 ) -> Result<ProviderTarget, EnvironmentFailure> {
-    connection
+    let provider = connection
         .query_row(
-            "SELECT p.id, p.name, p.base_url, p.api_key, p.default_model, p.verified_at,
-                    p.verification_fingerprint, p.recommendation_id, p.recommendation_template_base_url,
-                    COALESCE(c.models_json, '[]')
-             FROM providers p LEFT JOIN provider_model_catalog c ON c.provider_id = p.id WHERE p.id = ?1",
+            "SELECT id, name, base_url, api_key, default_model, verified_at,
+                    verification_fingerprint, recommendation_id, recommendation_template_base_url
+             FROM providers WHERE id = ?1",
             [provider_id],
             |row| {
                 let verified_at = row.get::<_, String>(5)?;
+                let base_url = row.get::<_, String>(2)?;
                 Ok(ProviderTarget {
                     id: row.get(0)?,
                     name: row.get(1)?,
-                    base_url: row.get(2)?,
+                    base_url: base_url.clone(),
                     api_key: row.get(3)?,
                     default_model: row.get(4)?,
                     verified_at_epoch_seconds: verified_at.parse().map_err(|error| {
@@ -1442,10 +1567,10 @@ fn load_provider(
                         )
                     })?,
                     verification_fingerprint: row.get(6)?,
-                    reasoning_selection: reasoning::for_base_url(&row.get::<_, String>(2)?),
+                    reasoning_selection: reasoning::for_base_url(&base_url),
                     recommendation_id: row.get(7)?,
                     recommendation_template_base_url: row.get(8)?,
-                    discovered_models: serde_json::from_str::<Vec<String>>(&row.get::<_, String>(9)?).unwrap_or_default(),
+                    discovered_models: Vec::new(),
                 })
             },
         )
@@ -1456,7 +1581,100 @@ fn load_provider(
                 EnvironmentFailureCategory::ProviderNotFound,
                 "environment.provider_not_found",
             )
-        })
+        })?;
+
+    Ok(provider)
+}
+
+fn load_provider(
+    connection: &Connection,
+    provider_id: &str,
+) -> Result<ProviderTarget, EnvironmentFailure> {
+    let mut provider = load_provider_record(connection, provider_id)?;
+    validate_provider_target_binding(&provider)?;
+    let (snapshot_provider_id, snapshot_fingerprint, models_json) = connection
+        .query_row(
+            "SELECT provider_id, verification_fingerprint, models_json
+             FROM provider_model_catalog WHERE provider_id = ?1",
+            [provider_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|_| state_unavailable())?
+        .ok_or_else(catalog_snapshot_invalid)?;
+    provider.discovered_models = model_catalog::validate_snapshot(
+        &provider.id,
+        &provider.verification_fingerprint,
+        &provider.default_model,
+        &snapshot_provider_id,
+        &snapshot_fingerprint,
+        &models_json,
+    )
+    .map_err(|_| catalog_snapshot_invalid())?;
+    Ok(provider)
+}
+
+fn validate_provider_target_binding(provider: &ProviderTarget) -> Result<(), EnvironmentFailure> {
+    if provider.default_model.trim() != provider.default_model
+        || provider.verification_fingerprint
+            != combination_fingerprint(
+                &provider.base_url,
+                &provider.api_key,
+                &provider.default_model,
+            )
+    {
+        return Err(catalog_snapshot_invalid());
+    }
+    Ok(())
+}
+
+fn validate_provider_target(provider: &mut ProviderTarget) -> Result<(), EnvironmentFailure> {
+    validate_provider_target_binding(provider)?;
+    provider.discovered_models = model_catalog::normalize_discovered_models(
+        &provider.discovered_models,
+        &provider.default_model,
+    )
+    .map_err(|_| catalog_snapshot_invalid())?;
+    provider.reasoning_selection = reasoning::for_base_url(&provider.base_url);
+    Ok(())
+}
+
+fn same_provider_target(left: &ProviderTarget, right: &ProviderTarget) -> bool {
+    left.id == right.id
+        && left.name == right.name
+        && left.base_url == right.base_url
+        && left.api_key == right.api_key
+        && left.default_model == right.default_model
+        && left.discovered_models == right.discovered_models
+        && left.verified_at_epoch_seconds == right.verified_at_epoch_seconds
+        && left.verification_fingerprint == right.verification_fingerprint
+        && left.recommendation_id == right.recommendation_id
+        && left.recommendation_template_base_url == right.recommendation_template_base_url
+}
+
+fn store_provider_model_catalog(
+    transaction: &rusqlite::Transaction<'_>,
+    provider: &ProviderTarget,
+) -> Result<(), EnvironmentFailure> {
+    let models_json = serde_json::to_string(&provider.discovered_models)
+        .map_err(|_| catalog_schema_incompatible())?;
+    transaction
+        .execute(
+            "INSERT INTO provider_model_catalog(provider_id, verification_fingerprint, models_json)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(provider_id) DO UPDATE SET
+                verification_fingerprint = excluded.verification_fingerprint,
+                models_json = excluded.models_json",
+            params![provider.id, provider.verification_fingerprint, models_json],
+        )
+        .map_err(|_| state_unavailable())?;
+    Ok(())
 }
 
 fn known_provider_ids(connection: &Connection) -> Result<Vec<String>, EnvironmentFailure> {
@@ -1494,6 +1712,7 @@ fn inspect_restore(
     connection: &Connection,
     codex_home: &Path,
     config: &ArtifactBytes,
+    catalog: &ArtifactBytes,
     credentials: &ArtifactBytes,
 ) -> (RestoreAvailability, Option<RestorePreview>) {
     match has_pending_operation(connection) {
@@ -1504,11 +1723,11 @@ fn inspect_restore(
     match latest_completed_backup(codex_home) {
         Ok(Some(backup)) => {
             let managed_current =
-                reconciled_applied_provider(connection, config, Some(credentials))
+                reconciled_applied_provider(connection, config, Some(credentials), catalog)
                     .ok()
                     .flatten()
                     .is_some();
-            if backup.matches_current(config, credentials, managed_current) {
+            if backup.matches_current(config, catalog, credentials, managed_current) {
                 match backup.restore_preview(connection) {
                     Ok(preview) => (RestoreAvailability::Available, Some(preview)),
                     Err(_) => (RestoreAvailability::InvalidBackup, None),
@@ -1528,10 +1747,11 @@ fn inspect_environment(
     login_status: LoginStatus,
 ) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
     let config = read_artifact(&codex_home.join("config.toml"))?;
+    let catalog = read_artifact(&codex_home.join("gpteasy-model-catalog.json"))?;
     let credentials = read_artifact(&codex_home.join("auth.json"))?;
-    let revision = environment_revision(&config, &credentials);
+    let revision = environment_revision(&config, &catalog, &credentials);
     let (restore_availability, restore_preview) =
-        inspect_restore(connection, codex_home, &config, &credentials);
+        inspect_restore(connection, codex_home, &config, &catalog, &credentials);
     let impacts = vec![
         ArtifactImpact {
             artifact: ArtifactKind::Config,
@@ -1542,6 +1762,11 @@ fn inspect_environment(
                 "model_provider",
                 "model_providers.<provider-id>",
             ],
+        },
+        ArtifactImpact {
+            artifact: ArtifactKind::ModelCatalog,
+            action: action_for(&catalog),
+            fields: vec!["models"],
         },
         ArtifactImpact {
             artifact: ArtifactKind::Credentials,
@@ -1804,7 +2029,7 @@ fn inspect_environment(
             pending_restart,
         ));
     }
-    let provider = match load_provider(connection, &managed.provider_id) {
+    let provider = match load_provider_record(connection, &managed.provider_id) {
         Ok(provider) => provider,
         Err(failure) if failure.category == EnvironmentFailureCategory::ProviderNotFound => {
             return Ok(if last_applied_provider.is_some() {
@@ -2575,7 +2800,7 @@ impl PreparedOpenAiSwitch {
                     catalog_path,
                     catalog_current,
                     ArtifactBytes { bytes: None },
-                    ArtifactKind::Config,
+                    ArtifactKind::ModelCatalog,
                 )
             }),
             credentials: (credentials.bytes != credential_target.bytes).then(|| {
@@ -2625,6 +2850,8 @@ impl PreparedSwitch {
         mut provider_alias_ids: Vec<String>,
         update_guard: Option<UpdateGuard>,
     ) -> Result<Self, EnvironmentFailure> {
+        let mut provider = provider;
+        validate_provider_target(&mut provider)?;
         if Uuid::parse_str(&provider.id).is_err() {
             return Err(EnvironmentFailure::new(
                 EnvironmentFailureCategory::InvalidConfig,
@@ -2642,7 +2869,7 @@ impl PreparedSwitch {
         let catalog_old = read_artifact(&catalog_path)?;
         let catalog_new =
             model_catalog::render(&provider.discovered_models, &provider.default_model)
-                .map_err(|_| catalog_schema_incompatible())?;
+                .map_err(map_model_catalog_error)?;
         let credentials = read_artifact(&credentials_path)?;
         let rendered_credentials =
             render_credentials(credentials.bytes.as_deref(), &provider.api_key)?;
@@ -2671,7 +2898,7 @@ impl PreparedSwitch {
                 catalog_path,
                 catalog_old,
                 catalog_new,
-                ArtifactKind::Config,
+                ArtifactKind::ModelCatalog,
             ),
             credentials: PreparedArtifact::new(
                 credentials_path,
@@ -2689,6 +2916,8 @@ impl PreparedSwitch {
         codex_home: &Path,
         provider: ProviderTarget,
     ) -> Result<Self, EnvironmentFailure> {
+        let mut provider = provider;
+        validate_provider_target(&mut provider)?;
         let config_path = codex_home.join("config.toml");
         let credentials_path = codex_home.join("auth.json");
         let config = read_artifact(&config_path)?;
@@ -2702,7 +2931,7 @@ impl PreparedSwitch {
         let catalog_old = read_artifact(&catalog_path)?;
         let catalog_new =
             model_catalog::render(&provider.discovered_models, &provider.default_model)
-                .map_err(|_| catalog_schema_incompatible())?;
+                .map_err(map_model_catalog_error)?;
         let rendered_credentials = render_credentials(None, &provider.api_key)?;
         Ok(Self {
             operation_id: Uuid::new_v4().to_string(),
@@ -2717,7 +2946,7 @@ impl PreparedSwitch {
                 catalog_path,
                 catalog_old,
                 catalog_new,
-                ArtifactKind::Config,
+                ArtifactKind::ModelCatalog,
             ),
             credentials: PreparedArtifact::new(
                 credentials_path,
@@ -2742,7 +2971,7 @@ impl PreparedSwitch {
     }
 
     fn old_revision(&self) -> String {
-        environment_revision(&self.config.old, &self.credentials.old)
+        environment_revision(&self.config.old, &self.catalog.old, &self.credentials.old)
     }
 }
 
@@ -2821,9 +3050,14 @@ impl PreparedArtifact {
         match self.old.bytes.as_deref() {
             Some(old) => {
                 let temporary = write_temporary(&self.path, old)?;
-                atomic_replace(&self.path, &temporary, true)
+                atomic_replace(&self.path, &temporary, true)?;
             }
-            None => fs::remove_file(&self.path).map_err(|_| artifact_write_failed()),
+            None => fs::remove_file(&self.path).map_err(|_| artifact_write_failed())?,
+        }
+        if artifact_matches(&self.path, self.old.bytes.as_deref())? {
+            Ok(())
+        } else {
+            Err(artifact_write_failed())
         }
     }
 }
@@ -2832,6 +3066,7 @@ impl PreparedArtifact {
 struct CompletedBackup {
     manifest: BackupManifest,
     config: ArtifactBytes,
+    catalog: ArtifactBytes,
     credentials: ArtifactBytes,
 }
 
@@ -2839,6 +3074,7 @@ impl CompletedBackup {
     fn matches_current(
         &self,
         config: &ArtifactBytes,
+        catalog: &ArtifactBytes,
         credentials: &ArtifactBytes,
         managed_current: bool,
     ) -> bool {
@@ -2847,6 +3083,12 @@ impl CompletedBackup {
             self.manifest.old_config_fingerprint.as_deref(),
             self.manifest.new_config_fingerprint.as_deref(),
             self.manifest.config_affected,
+            managed_current,
+        ) && artifact_matches_completed_operation(
+            catalog.fingerprint(ArtifactKind::ModelCatalog),
+            self.manifest.old_catalog_fingerprint.as_deref(),
+            self.manifest.new_catalog_fingerprint.as_deref(),
+            self.manifest.catalog_affected,
             managed_current,
         ) && artifact_matches_completed_operation(
             credentials.fingerprint(ArtifactKind::Credentials),
@@ -2866,6 +3108,9 @@ impl CompletedBackup {
                 .config_affected
                 .then_some(ArtifactKind::Config),
             self.manifest
+                .catalog_affected
+                .then_some(ArtifactKind::ModelCatalog),
+            self.manifest
                 .credentials_affected
                 .then_some(ArtifactKind::Credentials),
         ]
@@ -2875,7 +3120,7 @@ impl CompletedBackup {
         let target = self.restore_target(connection)?;
         let target_provider = match (target.mode, target.provider_id.as_deref()) {
             (Some(AuthenticationMode::Provider), Some(provider_id)) => Some(
-                load_provider(connection, provider_id)
+                load_provider_record(connection, provider_id)
                     .map_err(|_| backup_invalid())?
                     .summary(false),
             ),
@@ -2895,7 +3140,7 @@ impl CompletedBackup {
                 provider_id: self.manifest.previous_provider_id.clone(),
             };
             if let Some(provider_id) = target.provider_id.as_deref() {
-                load_provider(connection, provider_id).map_err(|_| backup_invalid())?;
+                load_provider_record(connection, provider_id).map_err(|_| backup_invalid())?;
             }
             return Ok(target);
         }
@@ -2964,6 +3209,7 @@ fn artifact_matches_completed_operation(
 struct PreparedRestore {
     operation_id: String,
     config: PreparedRestoreArtifact,
+    catalog: Option<PreparedRestoreArtifact>,
     credentials: Option<PreparedRestoreArtifact>,
     target: RestoreTarget,
 }
@@ -2979,14 +3225,24 @@ impl PreparedRestore {
     fn new(
         codex_home: &Path,
         config: ArtifactBytes,
+        catalog: ArtifactBytes,
         credentials: ArtifactBytes,
         backup: CompletedBackup,
         target: RestoreTarget,
     ) -> Result<Self, EnvironmentFailure> {
         let preserve_current_config =
             backup.manifest.old_config_fingerprint == backup.manifest.new_config_fingerprint;
+        let preserve_current_catalog =
+            backup.manifest.old_catalog_fingerprint == backup.manifest.new_catalog_fingerprint;
         let preserve_current_credentials = backup.manifest.old_credentials_fingerprint
             == backup.manifest.new_credentials_fingerprint;
+        let catalog_target = backup.manifest.catalog_affected.then(|| {
+            if preserve_current_catalog {
+                catalog.clone()
+            } else {
+                backup.catalog.clone()
+            }
+        });
         let credential_target = if !backup.manifest.credentials_affected {
             None
         } else if preserve_current_credentials {
@@ -3012,6 +3268,14 @@ impl PreparedRestore {
                 },
                 ArtifactKind::Config,
             ),
+            catalog: catalog_target.map(|target| {
+                PreparedRestoreArtifact::new(
+                    codex_home.join("gpteasy-model-catalog.json"),
+                    catalog,
+                    target,
+                    ArtifactKind::ModelCatalog,
+                )
+            }),
             credentials: credential_target.map(|target| {
                 PreparedRestoreArtifact::new(
                     codex_home.join("auth.json"),
@@ -3026,6 +3290,9 @@ impl PreparedRestore {
 
     fn verify_committed(&self) -> Result<(), EnvironmentFailure> {
         self.config.verify_target()?;
+        if let Some(catalog) = &self.catalog {
+            catalog.verify_target()?;
+        }
         if let Some(credentials) = &self.credentials {
             credentials.verify_target()?;
         }
@@ -3129,7 +3396,12 @@ impl PreparedRestoreArtifact {
             &self.path,
             self.current.bytes.as_deref(),
             self.target.bytes.is_some(),
-        )
+        )?;
+        if artifact_matches(&self.path, self.current.bytes.as_deref())? {
+            Ok(())
+        } else {
+            Err(artifact_write_failed())
+        }
     }
 }
 
@@ -3162,6 +3434,7 @@ fn rollback_switch(
 fn rollback_restore(
     prepared: &PreparedRestore,
     config_applied: bool,
+    catalog_applied: bool,
     credentials_applied: bool,
 ) -> Result<(), EnvironmentFailure> {
     if credentials_applied {
@@ -3173,6 +3446,13 @@ fn rollback_restore(
     }
     if config_applied {
         prepared.config.rollback()?;
+    }
+    if catalog_applied {
+        prepared
+            .catalog
+            .as_ref()
+            .ok_or_else(state_unavailable)?
+            .rollback()?;
     }
     Ok(())
 }
@@ -3217,7 +3497,6 @@ fn persist_pending(
     backup: &Path,
     restart_context: Option<&PendingRestartContext>,
 ) -> Result<(), EnvironmentFailure> {
-    let snapshot = serde_json::to_string(&prepared.provider).map_err(|_| state_unavailable())?;
     let restart_context = serialize_restart_context(restart_context)?;
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -3247,14 +3526,30 @@ fn persist_pending(
     {
         return Err(state_unavailable());
     }
+    if prepared.update_guard.is_none()
+        && !same_provider_target(
+            &load_provider(&transaction, &prepared.provider.id)?,
+            &prepared.provider,
+        )
+    {
+        return Err(concurrent_modification());
+    }
+    let snapshot = serde_json::to_string(&PendingProviderTarget {
+        provider: prepared.provider.clone(),
+        original_revision: Some(provider_state_revision(
+            &transaction,
+            &prepared.provider.id,
+        )?),
+    })
+    .map_err(|_| state_unavailable())?;
     transaction
         .execute(
             "INSERT INTO pending_config_operation (
                 singleton, operation_id, operation_kind, stage, target_provider_id,
                 old_config_fingerprint, new_config_fingerprint,
                 old_credentials_fingerprint, new_credentials_fingerprint,
-                backup_reference, target_snapshot_json, started_at, restart_context
-             ) VALUES (1, ?1, ?2, 'prepared', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                backup_reference, target_snapshot_json, started_at, restart_context, old_catalog_fingerprint, new_catalog_fingerprint
+             ) VALUES (1, ?1, ?2, 'prepared', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 prepared.operation_id,
                 if prepared.update_guard.is_some() {
@@ -3271,6 +3566,8 @@ fn persist_pending(
                 snapshot,
                 epoch_seconds().to_string(),
                 restart_context,
+                prepared.catalog.old_fingerprint,
+                prepared.catalog.new_fingerprint,
             ],
         )
         .map_err(|_| state_unavailable())?;
@@ -3293,9 +3590,9 @@ fn persist_pending_openai(
                 singleton, operation_id, operation_kind, stage,
                 old_config_fingerprint, new_config_fingerprint,
                 old_credentials_fingerprint, new_credentials_fingerprint,
-                backup_reference, target_snapshot_json, started_at, restart_context
+                backup_reference, target_snapshot_json, started_at, restart_context, old_catalog_fingerprint, new_catalog_fingerprint
              ) VALUES (1, ?1, 'switch_openai_login', 'prepared', ?2, ?3,
-                       ?4, ?5, ?6, '{}', ?7, ?8)",
+                       ?4, ?5, ?6, '{}', ?7, ?8, ?9, ?10)",
             params![
                 prepared.operation_id,
                 prepared.config.current_fingerprint,
@@ -3311,6 +3608,8 @@ fn persist_pending_openai(
                 backup.to_string_lossy(),
                 epoch_seconds().to_string(),
                 restart_context,
+                prepared.catalog.as_ref().and_then(|catalog| catalog.current_fingerprint.clone()),
+                prepared.catalog.as_ref().and_then(|catalog| catalog.target_fingerprint.clone()),
             ],
         )
         .map_err(|_| state_unavailable())?;
@@ -3335,8 +3634,9 @@ fn persist_pending_restore(
                 singleton, operation_id, operation_kind, stage,
                 old_config_fingerprint, new_config_fingerprint,
                 old_credentials_fingerprint, new_credentials_fingerprint,
-                backup_reference, target_snapshot_json, started_at, restart_context
-             ) VALUES (1, ?1, 'restore_latest', 'prepared', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                backup_reference, target_snapshot_json, started_at, restart_context,
+                old_catalog_fingerprint, new_catalog_fingerprint
+             ) VALUES (1, ?1, 'restore_latest', 'prepared', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 prepared.operation_id,
                 prepared.config.current_fingerprint,
@@ -3353,9 +3653,35 @@ fn persist_pending_restore(
                 target_snapshot,
                 epoch_seconds().to_string(),
                 restart_context,
+                prepared
+                    .catalog
+                    .as_ref()
+                    .and_then(|catalog| catalog.current_fingerprint.clone()),
+                prepared
+                    .catalog
+                    .as_ref()
+                    .and_then(|catalog| catalog.target_fingerprint.clone()),
             ],
         )
         .map_err(|_| state_unavailable())?;
+    transaction.commit().map_err(|_| state_unavailable())
+}
+
+fn persist_pending_catalog_repair(
+    connection: &mut Connection,
+    prepared: &PreparedModelCatalogRepair,
+    backup: &Path,
+) -> Result<(), EnvironmentFailure> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| state_unavailable())?;
+    if !same_provider_target(
+        &load_provider(&transaction, &prepared.provider.id)?,
+        &prepared.provider,
+    ) {
+        return Err(concurrent_modification());
+    }
+    transaction.execute("INSERT INTO pending_config_operation (singleton, operation_id, operation_kind, stage, target_provider_id, old_config_fingerprint, new_config_fingerprint, old_catalog_fingerprint, new_catalog_fingerprint, backup_reference, target_snapshot_json, started_at) VALUES (1, ?1, 'repair_model_catalog', 'prepared', ?2, ?3, ?3, ?4, ?5, ?6, ?7, ?8)", params![prepared.operation_id, prepared.provider.id, prepared.config.fingerprint(ArtifactKind::Config), prepared.catalog.old_fingerprint, prepared.catalog.new_fingerprint, backup.to_string_lossy(), serde_json::to_string(&prepared.provider).map_err(|_| state_unavailable())?, epoch_seconds().to_string()]).map_err(|_| state_unavailable())?;
     transaction.commit().map_err(|_| state_unavailable())
 }
 
@@ -3395,6 +3721,25 @@ fn commit_applied_state(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| state_unavailable())?;
     if let Some(guard) = &prepared.update_guard {
+        let snapshot: String = transaction
+            .query_row(
+                "SELECT target_snapshot_json FROM pending_config_operation
+                 WHERE singleton = 1 AND operation_id = ?1 AND operation_kind = 'save_and_apply'
+                 AND target_provider_id = ?2",
+                params![prepared.operation_id, prepared.provider.id],
+                |row| row.get(0),
+            )
+            .map_err(|_| state_unavailable())?;
+        let pending_target: PendingProviderTarget =
+            serde_json::from_str(&snapshot).map_err(|_| state_unavailable())?;
+        if !same_provider_target(&pending_target.provider, &prepared.provider) {
+            return Err(concurrent_modification());
+        }
+        validate_original_provider_revision(
+            &transaction,
+            &prepared.provider.id,
+            pending_target.original_revision.as_deref(),
+        )?;
         let changed = transaction
             .execute(
                 "UPDATE providers SET
@@ -3419,7 +3764,13 @@ fn commit_applied_state(
         if changed != 1 {
             return Err(state_unavailable());
         }
+    } else if !same_provider_target(
+        &load_provider(&transaction, &prepared.provider.id)?,
+        &prepared.provider,
+    ) {
+        return Err(concurrent_modification());
     }
+    store_provider_model_catalog(&transaction, &prepared.provider)?;
     transaction
         .execute(
             "INSERT INTO last_applied_state (
@@ -3573,6 +3924,7 @@ fn commit_recovered_state(
     connection: &mut Connection,
     pending: &PendingRecovery,
     config: &ArtifactBytes,
+    catalog: &ArtifactBytes,
     credentials: &ArtifactBytes,
 ) -> Result<(), EnvironmentFailure> {
     let restart_context = pending
@@ -3581,17 +3933,37 @@ fn commit_recovered_state(
         .map(serde_json::from_str::<PendingRestartContext>)
         .transpose()
         .map_err(|_| state_unavailable())?;
+    if pending.operation_kind == "repair_model_catalog" {
+        let mut provider: ProviderTarget =
+            serde_json::from_str(&pending.target_snapshot_json).map_err(|_| state_unavailable())?;
+        validate_provider_target(&mut provider)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| state_unavailable())?;
+        if pending.target_provider_id.as_deref() != Some(provider.id.as_str())
+            || !same_provider_target(&load_provider(&transaction, &provider.id)?, &provider)
+            || catalog.bytes.as_deref()
+                != Some(
+                    model_catalog::render(&provider.discovered_models, &provider.default_model)
+                        .map_err(map_model_catalog_error)?
+                        .as_slice(),
+                )
+        {
+            return Err(catalog_snapshot_invalid());
+        }
+        clear_pending(&transaction, &pending.operation_id)?;
+        return transaction.commit().map_err(|_| state_unavailable());
+    }
     if pending.operation_kind == "restore_latest" {
         let target: RestoreTarget =
             serde_json::from_str(&pending.target_snapshot_json).map_err(|_| state_unavailable())?;
-        let credentials = (pending.old_credentials_fingerprint.is_some()
-            || pending.new_credentials_fingerprint.is_some())
-        .then_some(credentials);
+        let credentials = Some(credentials);
         return commit_reconciled_state(
             connection,
             &pending.operation_id,
             config,
             credentials,
+            Some(catalog),
             restart_context.as_ref(),
             Some(&target),
         );
@@ -3603,8 +3975,21 @@ fn commit_recovered_state(
             restart_context.as_ref(),
         );
     }
-    let provider: ProviderTarget =
+    let target: PendingProviderTarget =
         serde_json::from_str(&pending.target_snapshot_json).map_err(|_| state_unavailable())?;
+    let mut provider = target.provider;
+    validate_provider_target(&mut provider)?;
+    if pending.target_provider_id.as_deref() != Some(provider.id.as_str())
+        || catalog.bytes.as_deref()
+            != Some(
+                model_catalog::render(&provider.discovered_models, &provider.default_model)
+                    .map_err(map_model_catalog_error)?
+                    .as_slice(),
+            )
+        || !credentials_match(credentials, &provider.api_key)?
+    {
+        return Err(catalog_snapshot_invalid());
+    }
     let config_fingerprint = config
         .bytes
         .as_deref()
@@ -3618,6 +4003,11 @@ fn commit_recovered_state(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| state_unavailable())?;
     if pending.operation_kind == "save_and_apply" {
+        validate_original_provider_revision(
+            &transaction,
+            &provider.id,
+            target.original_revision.as_deref(),
+        )?;
         let changed = transaction
             .execute(
                 "UPDATE providers SET
@@ -3643,6 +4033,12 @@ fn commit_recovered_state(
     } else if pending.operation_kind != "switch_provider" {
         return Err(state_unavailable());
     }
+    if pending.operation_kind == "switch_provider"
+        && !same_provider_target(&load_provider(&transaction, &provider.id)?, &provider)
+    {
+        return Err(concurrent_modification());
+    }
+    store_provider_model_catalog(&transaction, &provider)?;
     transaction
         .execute(
             "INSERT INTO last_applied_state (
@@ -3713,14 +4109,19 @@ fn commit_restored_state(
     prepared: &PreparedRestore,
     restart_context: Option<&PendingRestartContext>,
 ) -> Result<(), EnvironmentFailure> {
+    let home = prepared
+        .config
+        .path
+        .parent()
+        .ok_or_else(state_unavailable)?;
+    let credentials = read_artifact(&home.join("auth.json"))?;
+    let catalog = read_artifact(&home.join("gpteasy-model-catalog.json"))?;
     commit_reconciled_state(
         connection,
         &prepared.operation_id,
         &prepared.config.target,
-        prepared
-            .credentials
-            .as_ref()
-            .map(|credentials| &credentials.target),
+        Some(&credentials),
+        Some(&catalog),
         restart_context,
         Some(&prepared.target),
     )
@@ -3731,13 +4132,19 @@ fn commit_reconciled_state(
     operation_id: &str,
     config: &ArtifactBytes,
     credentials: Option<&ArtifactBytes>,
+    catalog: Option<&ArtifactBytes>,
     restart_context: Option<&PendingRestartContext>,
     restore_target: Option<&RestoreTarget>,
 ) -> Result<(), EnvironmentFailure> {
     if restore_target.is_some_and(|target| target.mode == Some(AuthenticationMode::OpenaiLogin)) {
         return commit_recovered_openai_state(connection, operation_id, restart_context);
     }
-    let applied = reconciled_applied_provider(connection, config, credentials)?;
+    let applied = reconciled_applied_provider(
+        connection,
+        config,
+        credentials,
+        catalog.unwrap_or(&ArtifactBytes { bytes: None }),
+    )?;
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| state_unavailable())?;
@@ -3784,6 +4191,7 @@ fn reconciled_applied_provider(
     connection: &Connection,
     config: &ArtifactBytes,
     credentials: Option<&ArtifactBytes>,
+    catalog: &ArtifactBytes,
 ) -> Result<Option<(String, String, String)>, EnvironmentFailure> {
     let Some(credentials) = credentials else {
         return Ok(None);
@@ -3811,6 +4219,12 @@ fn reconciled_applied_provider(
         Err(failure) => return Err(failure),
     };
     if !managed_config_matches(&document, &provider)
+        || catalog.bytes.as_deref()
+            != Some(
+                model_catalog::render(&provider.discovered_models, &provider.default_model)
+                    .map_err(map_model_catalog_error)?
+                    .as_slice(),
+            )
         || !credentials_match(credentials, &provider.api_key)?
     {
         return Ok(None);
@@ -3855,6 +4269,14 @@ struct BackupManifest {
     config_affected: bool,
     #[serde(default = "default_true")]
     credentials_affected: bool,
+    #[serde(default)]
+    catalog_affected: bool,
+    #[serde(default)]
+    catalog_existed: bool,
+    #[serde(default)]
+    old_catalog_fingerprint: Option<String>,
+    #[serde(default)]
+    new_catalog_fingerprint: Option<String>,
     config_existed: bool,
     credentials_existed: bool,
     old_config_fingerprint: Option<String>,
@@ -3934,6 +4356,10 @@ fn create_backup(
                     .map_err(|_| backup_failed())?;
             }
         }
+        if let Some(bytes) = prepared.catalog.old.bytes.as_deref() {
+            write_new_synced(&operation.join("gpteasy-model-catalog.json"), bytes)
+                .map_err(|_| backup_failed())?;
+        }
         let manifest = serde_json::to_vec_pretty(&BackupManifest {
             format_version: BACKUP_FORMAT_VERSION,
             operation_id: prepared.operation_id.clone(),
@@ -3943,6 +4369,10 @@ fn create_backup(
                 "switch_provider".to_owned()
             },
             config_affected: true,
+            catalog_affected: true,
+            catalog_existed: prepared.catalog.old.bytes.is_some(),
+            old_catalog_fingerprint: prepared.catalog.old_fingerprint.clone(),
+            new_catalog_fingerprint: Some(prepared.catalog.new_fingerprint.clone()),
             credentials_affected: true,
             config_existed: prepared.config.old.bytes.is_some(),
             credentials_existed: prepared.credentials.old.bytes.is_some(),
@@ -4010,6 +4440,10 @@ fn create_custom_provider_repair_backup(
             operation_id: prepared.operation_id.clone(),
             operation_kind: "repair_custom_provider".to_owned(),
             config_affected: true,
+            catalog_affected: false,
+            catalog_existed: false,
+            old_catalog_fingerprint: None,
+            new_catalog_fingerprint: None,
             credentials_affected: false,
             config_existed: true,
             credentials_existed: false,
@@ -4042,7 +4476,7 @@ fn create_model_catalog_repair_backup(
     let operation = root.join(format!(
         "operation-{}-{}",
         epoch_nanos(),
-        prepared.preview.preview_id
+        prepared.operation_id
     ));
     fs::create_dir_all(&operation).map_err(|_| backup_failed())?;
     let result = (|| {
@@ -4054,12 +4488,30 @@ fn create_model_catalog_repair_backup(
             .ok_or_else(backup_failed)?;
         write_new_synced(&operation.join("gpteasy-model-catalog.json"), original)
             .map_err(|_| backup_failed())?;
-        let manifest = serde_json::json!({
-            "format_version": BACKUP_FORMAT_VERSION,
-            "operation_kind": "repair_model_catalog",
-            "old_catalog_fingerprint": prepared.catalog.old_fingerprint,
-            "new_catalog_fingerprint": prepared.catalog.new_fingerprint,
-        });
+        let config_bytes = prepared.config.bytes.as_deref().ok_or_else(backup_failed)?;
+        write_new_synced(&operation.join("config.toml"), config_bytes)
+            .map_err(|_| backup_failed())?;
+        let manifest = BackupManifest {
+            format_version: BACKUP_FORMAT_VERSION,
+            operation_id: prepared.operation_id.clone(),
+            operation_kind: "repair_model_catalog".to_owned(),
+            config_affected: true,
+            config_existed: true,
+            old_config_fingerprint: prepared.config.fingerprint(ArtifactKind::Config),
+            new_config_fingerprint: prepared.config.fingerprint(ArtifactKind::Config),
+            catalog_affected: true,
+            catalog_existed: true,
+            old_catalog_fingerprint: prepared.catalog.old_fingerprint.clone(),
+            new_catalog_fingerprint: Some(prepared.catalog.new_fingerprint.clone()),
+            credentials_affected: false,
+            credentials_existed: false,
+            old_credentials_fingerprint: None,
+            new_credentials_fingerprint: None,
+            credential_fields: None,
+            previous_mode: Some(AuthenticationMode::Provider),
+            previous_provider_id: Some(prepared.provider.id.clone()),
+            restore_target_recorded: true,
+        };
         let bytes = serde_json::to_vec_pretty(&manifest).map_err(|_| backup_failed())?;
         write_new_synced(&operation.join("manifest.json"), &bytes).map_err(|_| backup_failed())?;
         prune_backups(&root)
@@ -4093,11 +4545,32 @@ fn create_openai_backup(
             .map(|credentials| credential_fields_backup(&credentials.current))
             .transpose()?
             .flatten();
+        if let Some(bytes) = prepared
+            .catalog
+            .as_ref()
+            .and_then(|catalog| catalog.current.bytes.as_deref())
+        {
+            write_new_synced(&operation.join("gpteasy-model-catalog.json"), bytes)
+                .map_err(|_| backup_failed())?;
+        }
         let manifest = serde_json::to_vec_pretty(&BackupManifest {
             format_version: BACKUP_FORMAT_VERSION,
             operation_id: prepared.operation_id.clone(),
             operation_kind: "switch_openai_login".to_owned(),
             config_affected: true,
+            catalog_affected: prepared.catalog.is_some(),
+            catalog_existed: prepared
+                .catalog
+                .as_ref()
+                .is_some_and(|catalog| catalog.current.bytes.is_some()),
+            old_catalog_fingerprint: prepared
+                .catalog
+                .as_ref()
+                .and_then(|catalog| catalog.current_fingerprint.clone()),
+            new_catalog_fingerprint: prepared
+                .catalog
+                .as_ref()
+                .and_then(|catalog| catalog.target_fingerprint.clone()),
             credentials_affected: prepared.credentials.is_some(),
             config_existed: prepared.config.current.bytes.is_some(),
             credentials_existed: prepared
@@ -4166,11 +4639,32 @@ fn create_restore_backup(
                     .map_err(|_| backup_failed())?;
             }
         }
+        if let Some(bytes) = prepared
+            .catalog
+            .as_ref()
+            .and_then(|catalog| catalog.current.bytes.as_deref())
+        {
+            write_new_synced(&operation.join("gpteasy-model-catalog.json"), bytes)
+                .map_err(|_| backup_failed())?;
+        }
         let manifest = serde_json::to_vec_pretty(&BackupManifest {
             format_version: BACKUP_FORMAT_VERSION,
             operation_id: prepared.operation_id.clone(),
             operation_kind: "restore_latest".to_owned(),
             config_affected: true,
+            catalog_affected: prepared.catalog.is_some(),
+            catalog_existed: prepared
+                .catalog
+                .as_ref()
+                .is_some_and(|catalog| catalog.current.bytes.is_some()),
+            old_catalog_fingerprint: prepared
+                .catalog
+                .as_ref()
+                .and_then(|catalog| catalog.current_fingerprint.clone()),
+            new_catalog_fingerprint: prepared
+                .catalog
+                .as_ref()
+                .and_then(|catalog| catalog.target_fingerprint.clone()),
             credentials_affected: prepared.credentials.is_some(),
             config_existed: prepared.config.current.bytes.is_some(),
             credentials_existed: prepared
@@ -4371,6 +4865,7 @@ fn load_completed_backup(path: PathBuf) -> Result<CompletedBackup, EnvironmentFa
             | "restore_latest"
             | "switch_openai_login"
             | "repair_custom_provider"
+            | "repair_model_catalog"
     );
     let operation_name_matches = path
         .file_name()
@@ -4394,6 +4889,12 @@ fn load_completed_backup(path: PathBuf) -> Result<CompletedBackup, EnvironmentFa
         || !operation_name_matches
         || !previous_target_valid
         || !manifest.config_affected
+        || (manifest.catalog_affected
+            && manifest.catalog_existed != manifest.old_catalog_fingerprint.is_some())
+        || (!manifest.catalog_affected
+            && (manifest.catalog_existed
+                || manifest.old_catalog_fingerprint.is_some()
+                || manifest.new_catalog_fingerprint.is_some()))
         || manifest.config_existed != manifest.old_config_fingerprint.is_some()
         || (manifest.credentials_affected
             && manifest.credentials_existed != manifest.old_credentials_fingerprint.is_some())
@@ -4435,9 +4936,16 @@ fn load_completed_backup(path: PathBuf) -> Result<CompletedBackup, EnvironmentFa
             ArtifactKind::Credentials,
         )?
     };
+    let catalog = read_backup_artifact(
+        &path.join("gpteasy-model-catalog.json"),
+        manifest.catalog_existed,
+        manifest.old_catalog_fingerprint.as_deref(),
+        ArtifactKind::ModelCatalog,
+    )?;
     Ok(CompletedBackup {
         manifest,
         config,
+        catalog,
         credentials,
     })
 }
@@ -4464,6 +4972,7 @@ fn read_backup_artifact(
             let text = std::str::from_utf8(&bytes).map_err(|_| backup_invalid())?;
             text.parse::<DocumentMut>().map_err(|_| backup_invalid())?;
         }
+        ArtifactKind::ModelCatalog => {} // Back up raw output, including damaged artifacts, for exact rollback.
         ArtifactKind::Credentials => {
             let value: Value = serde_json::from_slice(&bytes).map_err(|_| backup_invalid())?;
             if !value.is_object() {
@@ -5720,11 +6229,16 @@ fn artifact_hash(kind: ArtifactKind, bytes: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-fn environment_revision(config: &ArtifactBytes, credentials: &ArtifactBytes) -> String {
+fn environment_revision(
+    config: &ArtifactBytes,
+    catalog: &ArtifactBytes,
+    credentials: &ArtifactBytes,
+) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"gpteasy-environment-revision-v1\0");
+    hasher.update(b"gpteasy-environment-revision-v2\0");
     for (label, artifact) in [
         (b"config".as_slice(), config),
+        (b"model_catalog", catalog),
         (b"credentials", credentials),
     ] {
         hasher.update(label);
@@ -5776,11 +6290,32 @@ fn invalid_config() -> EnvironmentFailure {
     )
 }
 
+fn catalog_snapshot_invalid() -> EnvironmentFailure {
+    EnvironmentFailure::new(
+        EnvironmentFailureCategory::CatalogSnapshotInvalid,
+        "environment.catalog_snapshot_invalid",
+    )
+}
+
+fn catalog_generation_failed() -> EnvironmentFailure {
+    EnvironmentFailure::new(
+        EnvironmentFailureCategory::CatalogGenerationFailed,
+        "environment.catalog_generation_failed",
+    )
+}
+
 fn catalog_schema_incompatible() -> EnvironmentFailure {
     EnvironmentFailure::new(
         EnvironmentFailureCategory::CatalogSchemaIncompatible,
         "environment.catalog_schema_incompatible",
     )
+}
+
+fn map_model_catalog_error(error: model_catalog::ModelCatalogError) -> EnvironmentFailure {
+    match error {
+        model_catalog::ModelCatalogError::InvalidModelSet => catalog_generation_failed(),
+        model_catalog::ModelCatalogError::Serialization => catalog_schema_incompatible(),
+    }
 }
 fn requires_forced_rebuild(failure: &EnvironmentFailure) -> bool {
     matches!(
@@ -5853,6 +6388,31 @@ mod tests {
     use super::ProviderTarget;
 
     #[test]
+    fn legacy_image_catalog_with_unknown_reasoning_remains_repairable() {
+        let current =
+            crate::provider::model_catalog::render(&["vendor-model".to_owned()], "vendor-model")
+                .expect("catalog");
+        let mut legacy: serde_json::Value = serde_json::from_slice(&current).expect("catalog");
+        let model = &mut legacy["models"][0];
+        model["input_modalities"] = serde_json::json!(["text"]);
+        model["default_reasoning_level"] = serde_json::Value::Null;
+        model["supported_reasoning_levels"] = serde_json::json!([]);
+        assert!(super::legacy_catalog_matches(
+            &serde_json::to_vec(&legacy).unwrap(),
+            &current
+        ));
+
+        // External reasoning declarations must not be treated as GPTEasy's legacy template.
+        legacy["models"][0]["supported_reasoning_levels"] = serde_json::json!([
+            {"effort": "low", "description": "user declaration"}
+        ]);
+        assert!(!super::legacy_catalog_matches(
+            &serde_json::to_vec(&legacy).unwrap(),
+            &current
+        ));
+    }
+
+    #[test]
     fn legacy_pending_provider_snapshot_defaults_to_no_recommendation_identity() {
         let provider: ProviderTarget = serde_json::from_str(
             r#"{
@@ -5873,6 +6433,9 @@ mod tests {
 
 #[derive(Debug, Clone)]
 struct PreparedModelCatalogRepair {
+    operation_id: String,
+    provider: ProviderTarget,
+    config: ArtifactBytes,
     preview: ModelCatalogRepairPreview,
     catalog: PreparedArtifact,
 }
@@ -5933,7 +6496,7 @@ impl PreparedModelCatalogRepair {
             return Ok(None);
         };
         let new_bytes = model_catalog::render(&provider.discovered_models, &provider.default_model)
-            .map_err(|_| invalid_config())?;
+            .map_err(map_model_catalog_error)?;
         if !legacy_catalog_matches(&old_bytes, &new_bytes) {
             return Ok(None);
         }
@@ -5943,12 +6506,20 @@ impl PreparedModelCatalogRepair {
             .unwrap_or_default();
         let preview_id = model_catalog_repair_preview_id(config_bytes, old_bytes, &provider_id);
         Ok(Some(Self {
+            operation_id: Uuid::new_v4().to_string(),
+            provider: provider.clone(),
+            config,
             preview: ModelCatalogRepairPreview {
                 preview_id,
                 provider_name: provider.name,
                 model_count,
             },
-            catalog: PreparedArtifact::new(catalog_path, catalog, new_bytes, ArtifactKind::Config),
+            catalog: PreparedArtifact::new(
+                catalog_path,
+                catalog,
+                new_bytes,
+                ArtifactKind::ModelCatalog,
+            ),
         }))
     }
 }
@@ -5969,6 +6540,7 @@ fn legacy_catalog_matches(old_bytes: &[u8], new_bytes: &[u8]) -> bool {
     if old_models.len() != new_models.len() {
         return false;
     }
+    let mut needs_upgrade = false;
     for (old_model, new_model) in old_models.iter_mut().zip(new_models) {
         let (Some(old_object), Some(new_object)) =
             (old_model.as_object_mut(), new_model.as_object())
@@ -5977,22 +6549,37 @@ fn legacy_catalog_matches(old_bytes: &[u8], new_bytes: &[u8]) -> bool {
         };
         let old_modalities = old_object.remove("input_modalities");
         let old_original = old_object.remove("supports_image_detail_original");
-        if !matches!(&old_modalities, Some(Value::Array(values)) if values == &vec![Value::String("text".to_owned())])
-            && old_modalities.is_some()
+        let legacy_reasoning = old_object.get("default_reasoning_level") == Some(&Value::Null)
+            && old_object
+                .get("supported_reasoning_levels")
+                .and_then(Value::as_array)
+                .is_some_and(Vec::is_empty);
+        let legacy_image =
+            old_modalities.is_none() || old_modalities == Some(serde_json::json!(["text"]));
+        if !legacy_image
+            && !(legacy_reasoning && old_modalities == Some(serde_json::json!(["text", "image"])))
         {
             return false;
         }
+        needs_upgrade |= legacy_image || legacy_reasoning;
         if old_original.is_some_and(|value| value != Value::Bool(false)) {
             return false;
         }
         let mut expected = new_object.clone();
         expected.remove("input_modalities");
         expected.remove("supports_image_detail_original");
+        // Preserve recognition of the exact historical GPTEasy image template.
+        // Accept only its null/empty reasoning pair, never external declarations.
+        if legacy_reasoning {
+            for field in ["default_reasoning_level", "supported_reasoning_levels"] {
+                old_object.insert(field.to_owned(), expected[field].clone());
+            }
+        }
         if *old_object != expected {
             return false;
         }
     }
-    true
+    needs_upgrade
 }
 
 fn model_catalog_repair_preview_id(config: &[u8], catalog: &[u8], provider_id: &str) -> String {

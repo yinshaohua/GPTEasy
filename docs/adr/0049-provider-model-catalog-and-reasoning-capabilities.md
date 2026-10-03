@@ -4,6 +4,8 @@ status: accepted
 
 # 按当前供应商生成 Codex 模型目录并按模型选择推理档位
 
+> 2026-10-02 修订：[ADR-0053](0053-common-reasoning-selector-defaults.md) 已替代本文关于未知模型使用 null/空 reasoning列表、或必须有逐模型 profile才能开放选择器的规则。当前原生目录采用通用四档、默认 high，作为客户端兼容声明；本文其余能力证据分层继续适用。高级能力快照和逐模型覆盖仍为未实现的后续探索。
+
 GPTEasy 的供应商模型发现和 Codex 的模型元数据是两种不同的数据。供应商验证目前请求供应商的 `/models` 接口，并从响应中取得模型 ID；`model_providers` 只定义请求端点，不会把这些 ID 注册为 Codex 的模型。Codex 找不到自定义模型的元数据时会使用内置目录的 fallback，因此兼容模型会出现 `Model metadata ... not found`，也不会出现在 `/model` 选择器中。
 
 ## 决策

@@ -24,6 +24,8 @@ ADR 记录难以逆转且有真实取舍的决定。重建遵循 ADR-0009 的“
 - ADR-0051：解耦 Codex catalog 的能力范围与根级实际 reasoning effort；OpenAI/DeepSeek 使用有官方依据的 `high` 映射，未知供应商不猜测生效值。
 - ADR-0050：不探测自定义供应商模型的图片能力；统一允许 Codex 发送 text/image 请求，并统一禁用 image detail original，由上游供应商最终裁决图片请求。
 
+- [ADR-0053](0053-common-reasoning-selector-defaults.md)：原生当前用户 Codex 目录统一提供四档思考选择、默认 `high`；GPTEasy 保留权威配置与验证快照，Codex JSON 为派生工件，替代 ADR-0049/0051 的空列表策略。
+
 ## Historical Or Deferred
 
 - ADR-0001 已被 ADR-0013 取代。

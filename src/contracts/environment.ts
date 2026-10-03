@@ -7,7 +7,7 @@ import type { LoginStatus } from "./startup";
 export type EnvironmentState = "external" | "managed" | "conflict";
 export type AuthenticationMode = "provider" | "openai_login";
 export type ConsumerStatus = "running" | "stopped" | "unknown";
-export type ArtifactKind = "config" | "credentials";
+export type ArtifactKind = "config" | "model_catalog" | "credentials";
 export type ArtifactAction = "create" | "update";
 export type RestoreAvailability =
   | "available"

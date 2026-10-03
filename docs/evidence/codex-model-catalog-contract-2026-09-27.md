@@ -1,5 +1,7 @@
 # Codex Model Catalog Contract Evidence
 
+> Historical schema evidence. The null/empty implementation choice below was replaced on 2026-10-02 after verifying Codex 0.159.3 selector behavior; see [updated evidence](codex-reasoning-selector-defaults-2026-10-02.md) and [ADR-0053](../adr/0053-common-reasoning-selector-defaults.md).
+
 - Investigation date: 2026-09-27
 - Local Codex CLI: `codex-cli 0.157.1`
 - npm package: `@openai/codex@0.157.1`

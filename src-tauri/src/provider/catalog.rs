@@ -180,6 +180,7 @@ pub(super) fn rename_provider(
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| state_unavailable())?;
+    ensure_no_pending_native_operation(&transaction, provider_id)?;
     let mut summary = find_provider(&transaction, provider_id)?.ok_or_else(provider_not_found)?;
     if summary.recommendation_id.is_none() && name.eq_ignore_ascii_case(DAYWAY_NAME) {
         return Err(ProviderFailure::new(
@@ -400,6 +401,7 @@ pub(super) fn replace_provider(
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| state_unavailable())?;
+    ensure_no_pending_native_operation(&transaction, provider_id)?;
     let record = find_provider_record(&transaction, provider_id)?.ok_or_else(provider_not_found)?;
     if record.summary.recommendation_id.is_none() && name.eq_ignore_ascii_case(DAYWAY_NAME) {
         return Err(ProviderFailure::new(
@@ -484,19 +486,21 @@ pub(super) fn record_revalidation(
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| state_unavailable())?;
+    ensure_no_pending_native_operation(&transaction, provider_id)?;
     let record = find_provider_record(&transaction, provider_id)?.ok_or_else(provider_not_found)?;
     if record.verification_fingerprint != original_fingerprint {
         return Err(verification_expired());
     }
     let changed = transaction
         .execute(
-            "UPDATE providers SET verified_at = ?1, verification_fingerprint = ?2 \
+            "UPDATE providers SET verified_at = ?1, verification_fingerprint = ?2, base_url = ?5 \
              WHERE id = ?3 AND verification_fingerprint = ?4",
             params![
                 evidence.verified_at_epoch_seconds.to_string(),
                 evidence.combination_fingerprint,
                 provider_id,
                 original_fingerprint,
+                evidence.normalized_base_url,
             ],
         )
         .map_err(|_| state_unavailable())?;
@@ -511,6 +515,7 @@ pub(super) fn record_revalidation(
     )?;
     transaction.commit().map_err(|_| state_unavailable())?;
     Ok(ProviderSummary {
+        base_url: evidence.normalized_base_url.clone(),
         verified_at_epoch_seconds: evidence.verified_at_epoch_seconds,
         ..record.summary
     })
@@ -681,4 +686,22 @@ fn open_catalog(state_store: &StateStore) -> Result<Connection, ProviderFailure>
         .execute_batch("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;")
         .map_err(|_| state_unavailable())?;
     Ok(connection)
+}
+
+fn ensure_no_pending_native_operation(
+    connection: &Connection,
+    provider_id: &str,
+) -> Result<(), ProviderFailure> {
+    let pending = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pending_config_operation WHERE target_provider_id=?1)",
+            [provider_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|_| state_unavailable())?;
+    if pending {
+        Err(state_unavailable())
+    } else {
+        Ok(())
+    }
 }

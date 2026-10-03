@@ -167,6 +167,7 @@ fn pending_config_operation_blocks_startup_coordination() {
             [],
         )
         .expect("insert provider evidence");
+    seal_provider_snapshots(&store);
     connection
         .execute(
             "INSERT INTO last_applied_state (singleton, mode, provider_id, config_fingerprint, credentials_fingerprint, applied_at) \
@@ -353,6 +354,7 @@ fn missing_codex_environment_with_saved_provider_evidence_opens_settings_for_rea
             [],
         )
         .expect("insert provider evidence");
+    seal_provider_snapshots(&store);
     connection
         .execute(
             "INSERT INTO last_applied_state (singleton, mode, provider_id, config_fingerprint, credentials_fingerprint, applied_at) \
@@ -485,6 +487,7 @@ fn externally_restored_chatgpt_login_opens_settings_for_reconciliation() {
             [],
         )
         .expect("insert provider evidence");
+    seal_provider_snapshots(&store);
     connection
         .execute(
             "INSERT INTO last_applied_state (
@@ -583,6 +586,7 @@ fn matching_provider_config_and_credential_evidence_is_ready() {
             [],
         )
         .expect("insert provider evidence");
+    seal_provider_snapshots(&store);
     connection
         .execute(
             "INSERT INTO last_applied_state (singleton, mode, provider_id, config_fingerprint, credentials_fingerprint, applied_at) \
@@ -616,6 +620,7 @@ fn provider_startup_accepts_outside_edits_but_blocks_managed_block_drift() {
             [provider_id],
         )
         .expect("insert provider evidence");
+    seal_provider_snapshots(&store);
     EnvironmentApplication::new(store.clone(), codex_home.path())
         .apply_provider(provider_id, true)
         .expect("establish managed environment");
@@ -667,6 +672,7 @@ fn provider_startup_ignores_managed_schema_evolution_but_checks_route_identity()
             [provider_id],
         )
         .expect("insert provider evidence");
+    seal_provider_snapshots(&store);
     EnvironmentApplication::new(store.clone(), codex_home.path())
         .apply_provider(provider_id, true)
         .expect("establish managed environment");
@@ -711,6 +717,7 @@ fn provider_startup_accepts_legacy_managed_block_without_model_catalog() {
             [provider_id],
         )
         .expect("insert provider evidence");
+    seal_provider_snapshots(&store);
     EnvironmentApplication::new(store.clone(), codex_home.path())
         .apply_provider(provider_id, true)
         .expect("establish managed environment");
@@ -765,6 +772,7 @@ fn provider_startup_accepts_an_equivalent_historical_provider_alias() {
             [provider_id],
         )
         .expect("insert provider evidence");
+    seal_provider_snapshots(&store);
     EnvironmentApplication::new(store.clone(), codex_home.path())
         .apply_provider(provider_id, true)
         .expect("establish managed environment");
@@ -807,6 +815,7 @@ fn provider_startup_accepts_desktop_rewrite_that_drops_only_the_end_marker() {
             [provider_id],
         )
         .expect("insert provider evidence");
+    seal_provider_snapshots(&store);
     EnvironmentApplication::new(store.clone(), codex_home.path())
         .apply_provider(provider_id, true)
         .expect("establish managed environment");
@@ -864,6 +873,7 @@ fn provider_startup_accepts_desktop_rewrite_that_relocates_the_end_marker() {
             [provider_id],
         )
         .expect("insert provider evidence");
+    seal_provider_snapshots(&store);
     EnvironmentApplication::new(store.clone(), codex_home.path())
         .apply_provider(provider_id, true)
         .expect("establish managed environment");
@@ -931,6 +941,7 @@ fn provider_mode_with_unverifiable_keyring_evidence_blocks_startup() {
             [],
         )
         .expect("insert provider evidence");
+    seal_provider_snapshots(&store);
     connection
         .execute(
             "INSERT INTO last_applied_state (singleton, mode, provider_id, config_fingerprint, applied_at) \
@@ -950,4 +961,44 @@ fn provider_mode_with_unverifiable_keyring_evidence_blocks_startup() {
         snapshot.block_reason,
         Some(StartupBlockReason::ManagedConfigConflict)
     );
+}
+
+fn seal_provider_snapshots(store: &StateStore) {
+    let connection = rusqlite::Connection::open(store.paths().database()).unwrap();
+    let records = connection
+        .prepare("SELECT id, base_url, api_key, default_model FROM providers")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    for (id, url, key, model) in records {
+        let mut hasher = Sha256::new();
+        hasher.update(b"gpteasy-provider-combination-v1\0");
+        hasher.update(url.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(model.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(key.as_bytes());
+        let fingerprint = format!("{:x}", hasher.finalize());
+        connection
+            .execute(
+                "UPDATE providers SET verification_fingerprint=?1 WHERE id=?2",
+                rusqlite::params![fingerprint, id],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT OR REPLACE INTO provider_model_catalog VALUES (?1, ?2, ?3)",
+                rusqlite::params![id, fingerprint, serde_json::to_string(&[model]).unwrap()],
+            )
+            .unwrap();
+    }
 }

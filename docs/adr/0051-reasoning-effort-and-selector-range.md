@@ -4,6 +4,8 @@ status: accepted
 
 # 解耦思考强度生效值与 Codex 可选范围
 
+> 2026-10-02 修订：[ADR-0053](0053-common-reasoning-selector-defaults.md) 已替代本文关于未知模型使用 null/空 reasoning列表、或必须有逐模型 profile才能开放选择器的规则。当前原生目录采用通用四档、默认 high，作为客户端兼容声明；本文其余能力证据分层继续适用。高级能力快照和逐模型覆盖仍为未实现的后续探索。
+
 此前 GPTEasy 曾为已识别的模型按模型家族生成固定的 `low`、`medium`、`high` 三档，并把结果写入 Codex 模型目录的 `supported_reasoning_levels`。该目录通过 `model_catalog_json` 被 Codex 读取，因此这项生成逻辑不只是描述默认值，还会改变 Codex 模型选择器可见的思考强度范围。
 
 这混淆了两个不同问题：

@@ -406,8 +406,14 @@ fn log_reasoning_audit(
 }
 
 fn reasoning_failure_stage(message_id: &str) -> &'static str {
-    if message_id == "environment.catalog_schema_incompatible" {
+    if message_id == "environment.catalog_snapshot_invalid" {
+        "catalog_snapshot"
+    } else if message_id == "environment.catalog_generation_failed" {
+        "catalog_generation"
+    } else if message_id == "environment.catalog_schema_incompatible" {
         "catalog_schema"
+    } else if message_id == "environment.artifact_write_failed" {
+        "artifact_commit"
     } else if message_id.contains("restart") {
         "codex_restart"
     } else {
@@ -3081,6 +3087,12 @@ pub(crate) async fn save_and_apply_provider_update(
             )),
         );
     };
+    let audit_provider_id = provider_id.clone();
+    let audit_context = app
+        .state::<EnvironmentRuntime>()
+        .application
+        .reasoning_audit_context(&audit_provider_id)
+        .ok();
     let task_app = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let provider_state = task_app.state::<ProviderRuntime>();
@@ -3108,6 +3120,30 @@ pub(crate) async fn save_and_apply_provider_update(
         }
         Err(failure) => Err(failure),
     };
+    let context = if result.is_ok() {
+        app.state::<EnvironmentRuntime>()
+            .application
+            .reasoning_audit_context(&audit_provider_id)
+            .ok()
+    } else {
+        audit_context
+    };
+    let (stage, status, pending_restart) = match &result {
+        Ok(applied) => (
+            reasoning_success_stage(context.as_ref()),
+            "applied",
+            Some(applied.environment.pending_restart),
+        ),
+        Err(failure) => (reasoning_failure_stage(failure.message_id), "failed", None),
+    };
+    log_reasoning_audit(
+        &logs.store,
+        "provider.save_and_apply_update",
+        context.as_ref(),
+        stage,
+        status,
+        pending_restart,
+    );
     finish_command(&logs.store, "provider.save_and_apply_update", result)
 }
 
@@ -3441,8 +3477,16 @@ mod tests {
             "codex_restart"
         );
         assert_eq!(
+            reasoning_failure_stage("environment.catalog_snapshot_invalid"),
+            "catalog_snapshot"
+        );
+        assert_eq!(
+            reasoning_failure_stage("environment.catalog_generation_failed"),
+            "catalog_generation"
+        );
+        assert_eq!(
             reasoning_failure_stage("environment.artifact_write_failed"),
-            "config_write"
+            "artifact_commit"
         );
 
         let mapped = ReasoningAuditContext::new(
@@ -3700,10 +3744,31 @@ mod tests {
                     verification_fingerprint
                  ) VALUES (?1, 'Fixture Provider', 'https://fixture.example/v1',
                            'test-key-not-real', 'fixture-model', '1775606400',
-                           'fixture-verification-fingerprint')",
-                params![PROVIDER_ID],
+                           ?2)",
+                params![
+                    PROVIDER_ID,
+                    crate::provider::combination_fingerprint(
+                        "https://fixture.example/v1",
+                        "test-key-not-real",
+                        "fixture-model"
+                    )
+                ],
             )
             .expect("insert provider fixture");
+        Connection::open(store.paths().database())
+            .unwrap()
+            .execute(
+                "INSERT INTO provider_model_catalog VALUES (?1, ?2, '[\"fixture-model\"]')",
+                params![
+                    PROVIDER_ID,
+                    crate::provider::combination_fingerprint(
+                        "https://fixture.example/v1",
+                        "test-key-not-real",
+                        "fixture-model"
+                    )
+                ],
+            )
+            .unwrap();
         let codex_home = directory.path().join(".codex");
         let environment = EnvironmentApplication::with_runtime_probes(
             store.clone(),

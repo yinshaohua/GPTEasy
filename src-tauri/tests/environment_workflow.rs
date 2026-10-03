@@ -145,7 +145,7 @@ fn insert_provider(store: &StateStore) {
                 API_KEY,
                 "fixture-model",
                 "1775606400",
-                "fixture-verification-fingerprint",
+                test_fingerprint("https://fixture.example/v1", API_KEY, "fixture-model"),
             ],
         )
         .expect("insert provider fixture");
@@ -156,7 +156,7 @@ fn insert_provider(store: &StateStore) {
              ) VALUES (?1, ?2, ?3)",
             params![
                 PROVIDER_ID,
-                "fixture-verification-fingerprint",
+                test_fingerprint("https://fixture.example/v1", API_KEY, "fixture-model"),
                 r#"["fixture-model","discovered-only-model"]"#,
             ],
         )
@@ -171,10 +171,20 @@ fn insert_second_provider(store: &StateStore, provider_id: &str) {
                 id, name, base_url, api_key, default_model, verified_at,
                 verification_fingerprint
              ) VALUES (?1, 'Second Provider', 'https://second.example/v1',
-                       'second-key', 'second-model', '1775606500', 'second-fingerprint')",
-            [provider_id],
+                       'second-key', 'second-model', '1775606500', ?2)",
+            params![
+                provider_id,
+                test_fingerprint("https://second.example/v1", "second-key", "second-model")
+            ],
         )
         .expect("insert second provider fixture");
+    insert_snapshot(
+        &connection,
+        provider_id,
+        "https://second.example/v1",
+        "second-key",
+        "second-model",
+    );
 }
 
 fn running_cli(pid: u32, started_at_epoch_millis: u64) -> ConsumerScan {
@@ -233,6 +243,7 @@ fn missing_codex_artifacts_are_previewed_without_being_created() {
             .collect::<Vec<_>>(),
         [
             (ArtifactKind::Config, ArtifactAction::Create),
+            (ArtifactKind::ModelCatalog, ArtifactAction::Create),
             (ArtifactKind::Credentials, ArtifactAction::Create),
         ]
     );
@@ -413,6 +424,36 @@ fn external_none_reasoning_effort_does_not_hide_current_unmapped_provider() {
             .as_ref()
             .map(|provider| provider.id.as_str()),
         Some(PROVIDER_ID)
+    );
+    assert_eq!(
+        fs::read_to_string(&config_path).expect("read after inspect"),
+        current
+    );
+    application
+        .apply_provider(PROVIDER_ID, false)
+        .expect("reapply provider");
+    let reapplied = fs::read_to_string(&config_path)
+        .expect("read after reapply")
+        .parse::<toml_edit::DocumentMut>()
+        .expect("TOML");
+    assert!(reapplied.get("model_reasoning_effort").is_none());
+    let catalog: Value = serde_json::from_slice(
+        &fs::read(temp.path().join(".codex/gpteasy-model-catalog.json")).expect("read catalog"),
+    )
+    .expect("catalog");
+    assert!(
+        catalog["models"]
+            .as_array()
+            .expect("models")
+            .iter()
+            .all(|model| {
+                model["default_reasoning_level"] == "high"
+                    && model["supported_reasoning_levels"]
+                        .as_array()
+                        .expect("choices")
+                        .len()
+                        == 4
+            })
     );
 }
 
@@ -605,6 +646,16 @@ fn confirmed_takeover_preserves_external_fields_without_guessing_unknown_model_r
         .collect::<Vec<_>>();
     assert!(model_slugs.contains(&"fixture-model"));
     assert!(model_slugs.contains(&"discovered-only-model"));
+    for model in models {
+        assert_eq!(model["default_reasoning_level"], "high");
+        let efforts = model["supported_reasoning_levels"]
+            .as_array()
+            .expect("reasoning choices")
+            .iter()
+            .map(|level| level["effort"].as_str().expect("effort"))
+            .collect::<Vec<_>>();
+        assert_eq!(efforts, ["low", "medium", "high", "xhigh"]);
+    }
     let discovered_model = models
         .iter()
         .find(|model| model["slug"] == "discovered-only-model")
@@ -722,7 +773,6 @@ fn switching_provider_keeps_prior_managed_provider_id_as_current_provider_alias(
         "https://previous.example/v1",
         "previous-key",
         "previous-model",
-        "previous-fingerprint",
     );
     let codex_home = temp.path().join(".codex");
 
@@ -820,7 +870,6 @@ fn applying_provider_keeps_older_managed_provider_ids_from_completed_backups() {
         "https://historical.example/v1",
         "historical-key",
         "historical-model",
-        "historical-fingerprint",
     );
     insert_provider_values(
         &store,
@@ -829,7 +878,6 @@ fn applying_provider_keeps_older_managed_provider_ids_from_completed_backups() {
         "https://intermediate.example/v1",
         "intermediate-key",
         "intermediate-model",
-        "intermediate-fingerprint",
     );
 
     application
@@ -1920,7 +1968,6 @@ fn recovery_completes_the_database_commit_when_both_new_artifacts_are_present() 
         "https://next.example/v1",
         "next-key-not-real",
         "next-model",
-        "next-verification-fingerprint",
     );
     let next = application
         .apply_provider(next_id, true)
@@ -1943,7 +1990,8 @@ fn recovery_completes_the_database_commit_when_both_new_artifacts_are_present() 
         "apiKey": "next-key-not-real",
         "defaultModel": "next-model",
         "verifiedAtEpochSeconds": 1_775_606_400_u64,
-        "verificationFingerprint": "next-verification-fingerprint",
+        "verificationFingerprint": test_fingerprint("https://next.example/v1", "next-key-not-real", "next-model"),
+        "discoveredModels": ["next-model"],
     });
     connection
         .execute(
@@ -2013,7 +2061,6 @@ fn recovery_stops_on_a_mixed_artifact_state_without_overwriting_it() {
         "https://next.example/v1",
         "next-key-not-real",
         "next-model",
-        "next-verification-fingerprint",
     );
     application
         .apply_provider(next_id, true)
@@ -2046,7 +2093,8 @@ fn recovery_stops_on_a_mixed_artifact_state_without_overwriting_it() {
         "apiKey": "next-key-not-real",
         "defaultModel": "next-model",
         "verifiedAtEpochSeconds": 1_775_606_400_u64,
-        "verificationFingerprint": "next-verification-fingerprint",
+        "verificationFingerprint": test_fingerprint("https://next.example/v1", "next-key-not-real", "next-model"),
+        "discoveredModels": ["next-model"],
     });
     connection
         .execute(
@@ -2200,7 +2248,11 @@ fn confirmed_restore_returns_only_the_latest_managed_artifacts_to_their_previous
     let preview = applied.restore_preview.expect("available restore preview");
     assert_eq!(
         preview.artifacts,
-        vec![ArtifactKind::Config, ArtifactKind::Credentials]
+        vec![
+            ArtifactKind::Config,
+            ArtifactKind::ModelCatalog,
+            ArtifactKind::Credentials
+        ]
     );
     assert_eq!(preview.target_mode, None);
     assert!(preview.target_provider.is_none());
@@ -2366,7 +2418,6 @@ fn legacy_backup_without_restore_metadata_infers_its_provider_target() {
         "https://next.example/v1",
         "next-key",
         "next-model",
-        "next-fingerprint",
     );
     application
         .apply_provider(PROVIDER_ID, true)
@@ -2419,7 +2470,6 @@ fn restore_uses_only_the_immediately_previous_completed_configuration() {
         "https://next.example/v1",
         "next-key-not-real",
         "next-model",
-        "next-verification-fingerprint",
     );
     let second = application
         .apply_provider(next_id, true)
@@ -2471,7 +2521,6 @@ fn restore_is_disabled_when_its_previous_provider_no_longer_exists() {
         "https://next.example/v1",
         "next-key",
         "next-model",
-        "next-fingerprint",
     );
     application
         .apply_provider(PROVIDER_ID, true)
@@ -2992,7 +3041,6 @@ fn insert_provider_values(
     base_url: &str,
     api_key: &str,
     default_model: &str,
-    fingerprint: &str,
 ) {
     let connection = Connection::open(store.paths().database()).expect("open state database");
     connection
@@ -3001,9 +3049,17 @@ fn insert_provider_values(
                 id, name, base_url, api_key, default_model, verified_at,
                 verification_fingerprint
              ) VALUES (?1, ?2, ?3, ?4, ?5, '1775606400', ?6)",
-            params![id, name, base_url, api_key, default_model, fingerprint],
+            params![
+                id,
+                name,
+                base_url,
+                api_key,
+                default_model,
+                test_fingerprint(base_url, api_key, default_model)
+            ],
         )
         .expect("insert provider fixture");
+    insert_snapshot(&connection, id, base_url, api_key, default_model);
 }
 
 #[test]
@@ -3259,4 +3315,306 @@ fn unknown_detection_stays_pending_until_a_trustworthy_scan() {
             .expect("trustworthy stopped scan clears pending restart")
             .pending_restart
     );
+}
+
+fn test_fingerprint(base_url: &str, api_key: &str, model: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"gpteasy-provider-combination-v1\0");
+    hasher.update(base_url.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(model.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(api_key.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn insert_snapshot(connection: &Connection, id: &str, base_url: &str, key: &str, model: &str) {
+    connection.execute("INSERT INTO provider_model_catalog(provider_id, verification_fingerprint, models_json) VALUES (?1, ?2, ?3)",
+        params![id, test_fingerprint(base_url, key, model), serde_json::to_string(&[model]).unwrap()]).unwrap();
+}
+
+#[test]
+fn invalid_model_snapshots_stop_normal_and_force_apply_without_touching_outputs() {
+    for invalid in [
+        None,
+        Some("broken"),
+        Some("[]"),
+        Some(r#"{"version":99,"models":[]}"#),
+        Some(r#"[" ",""]"#),
+    ] {
+        let (temp, store, application) = fixture();
+        application.apply_provider(PROVIDER_ID, true).unwrap();
+        let home = temp.path().join(".codex");
+        let before = ["config.toml", "auth.json", "gpteasy-model-catalog.json"]
+            .map(|name| fs::read(home.join(name)).unwrap());
+        let connection = Connection::open(store.paths().database()).unwrap();
+        match invalid {
+            None => {
+                connection
+                    .execute("DELETE FROM provider_model_catalog", [])
+                    .unwrap();
+            }
+            Some(json) => {
+                connection
+                    .execute("UPDATE provider_model_catalog SET models_json=?1", [json])
+                    .unwrap();
+            }
+        }
+        let snapshot = application
+            .inspect()
+            .expect("inspection must permit revalidation of a broken snapshot");
+        for failure in [
+            application.apply_provider(PROVIDER_ID, true).unwrap_err(),
+            application
+                .force_apply_provider_at_revision(PROVIDER_ID, &snapshot.revision, true)
+                .unwrap_err(),
+        ] {
+            assert_eq!(
+                failure.category,
+                EnvironmentFailureCategory::CatalogSnapshotInvalid
+            );
+            assert_eq!(failure.message_id, "environment.catalog_snapshot_invalid");
+        }
+        assert_eq!(
+            before,
+            ["config.toml", "auth.json", "gpteasy-model-catalog.json"]
+                .map(|name| fs::read(home.join(name)).unwrap())
+        );
+        assert!(
+            !store
+                .bootstrap()
+                .contents
+                .unwrap()
+                .has_pending_config_operation
+        );
+    }
+}
+
+#[test]
+fn stale_snapshot_binding_and_changed_verified_combination_are_rejected() {
+    for sql in [
+        "UPDATE provider_model_catalog SET verification_fingerprint='stale'",
+        "UPDATE providers SET api_key='changed-secret'",
+    ] {
+        let (temp, store, application) = fixture();
+        Connection::open(store.paths().database())
+            .unwrap()
+            .execute(sql, [])
+            .unwrap();
+        let failure = application.apply_provider(PROVIDER_ID, true).unwrap_err();
+        assert_eq!(
+            failure.category,
+            EnvironmentFailureCategory::CatalogSnapshotInvalid
+        );
+        assert!(!temp.path().join(".codex").exists());
+        assert!(!format!("{failure:?}").contains("changed-secret"));
+    }
+}
+
+#[test]
+fn normalized_complete_snapshot_is_provider_scoped_even_for_identical_model_ids() {
+    let (temp, store, application) = fixture();
+    let second_id = "6cde0dd7-9725-462a-ac79-864f5cf63f76";
+    insert_second_provider(&store, second_id);
+    let connection = Connection::open(store.paths().database()).unwrap();
+    connection
+        .execute(
+            "UPDATE provider_model_catalog SET models_json=?1 WHERE provider_id=?2",
+            params![
+                r#"[" Shared-Unknown ","Shared-Unknown","only-first"," "]"#,
+                PROVIDER_ID
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE provider_model_catalog SET models_json=?1 WHERE provider_id=?2",
+            params![r#"["Shared-Unknown","only-second"]"#, second_id],
+        )
+        .unwrap();
+    for (id, expected, absent) in [
+        (PROVIDER_ID, "only-first", "only-second"),
+        (second_id, "only-second", "only-first"),
+    ] {
+        application.apply_provider(id, true).unwrap();
+        let catalog: Value = serde_json::from_slice(
+            &fs::read(temp.path().join(".codex/gpteasy-model-catalog.json")).unwrap(),
+        )
+        .unwrap();
+        let models = catalog["models"].as_array().unwrap();
+        assert_eq!(models.len(), 3);
+        assert!(models.iter().any(|model| model["slug"] == expected));
+        assert!(!models.iter().any(|model| model["slug"] == absent));
+        let shared = models
+            .iter()
+            .find(|model| model["slug"] == "Shared-Unknown")
+            .unwrap();
+        assert_eq!(shared["default_reasoning_level"], "high");
+        assert_eq!(
+            shared["supported_reasoning_levels"]
+                .as_array()
+                .unwrap()
+                .len(),
+            4
+        );
+        let config = fs::read_to_string(temp.path().join(".codex/config.toml"))
+            .unwrap()
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        assert_eq!(config["model_provider"].as_str(), Some(id));
+    }
+}
+
+#[test]
+fn directory_changes_invalidate_revision_and_restore_guard() {
+    let (temp, _, application) = fixture();
+    let applied = application.apply_provider(PROVIDER_ID, true).unwrap();
+    fs::write(
+        temp.path().join(".codex/gpteasy-model-catalog.json"),
+        b"external-change",
+    )
+    .unwrap();
+    assert_ne!(application.inspect().unwrap().revision, applied.revision);
+    assert_eq!(
+        application
+            .apply_provider_at_revision(PROVIDER_ID, true, &applied.revision)
+            .unwrap_err()
+            .category,
+        EnvironmentFailureCategory::ConcurrentModification
+    );
+    assert_eq!(
+        application
+            .restore_last_config(true, &applied.revision)
+            .unwrap_err()
+            .category,
+        EnvironmentFailureCategory::ConcurrentModification
+    );
+}
+
+fn make_legacy_catalog(home: &Path) -> Vec<u8> {
+    let path = home.join("gpteasy-model-catalog.json");
+    let mut catalog: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    for model in catalog["models"].as_array_mut().unwrap() {
+        model["default_reasoning_level"] = Value::Null;
+        model["supported_reasoning_levels"] = serde_json::json!([]);
+    }
+    let bytes = serde_json::to_vec_pretty(&catalog).unwrap();
+    fs::write(path, &bytes).unwrap();
+    bytes
+}
+
+#[test]
+fn reasoning_only_historical_catalog_repair_is_read_only_until_confirmed_and_recoverable() {
+    for point in [
+        EnvironmentFailurePoint::AfterPendingRegistered,
+        EnvironmentFailurePoint::AfterModelCatalogReplaced,
+    ] {
+        let (temp, store, application) = fixture();
+        let home = temp.path().join(".codex");
+        application.apply_provider(PROVIDER_ID, true).unwrap();
+        let legacy = make_legacy_catalog(&home);
+        let config = fs::read(home.join("config.toml")).unwrap();
+        let auth = fs::read(home.join("auth.json")).unwrap();
+        let preview = application
+            .preview_model_catalog_repair()
+            .unwrap()
+            .expect("null/empty pair in historical text/image template can be upgraded");
+        assert_eq!(
+            fs::read(home.join("gpteasy-model-catalog.json")).unwrap(),
+            legacy
+        );
+        let interrupted = EnvironmentApplication::with_fault_injector(
+            store.clone(),
+            &home,
+            Arc::new(InterruptAt(point)),
+        );
+        interrupted.repair_model_catalog(&preview.preview_id);
+        assert!(
+            store
+                .bootstrap()
+                .contents
+                .unwrap()
+                .has_pending_config_operation
+        );
+        let recovery = application.recover_pending().unwrap();
+        assert_eq!(
+            recovery,
+            if point == EnvironmentFailurePoint::AfterPendingRegistered {
+                EnvironmentRecovery::KeptOldState
+            } else {
+                EnvironmentRecovery::CompletedNewState
+            }
+        );
+        assert_eq!(fs::read(home.join("config.toml")).unwrap(), config);
+        assert_eq!(fs::read(home.join("auth.json")).unwrap(), auth);
+        assert!(
+            !store
+                .bootstrap()
+                .contents
+                .unwrap()
+                .has_pending_config_operation
+        );
+        if point == EnvironmentFailurePoint::AfterModelCatalogReplaced {
+            let catalog: Value =
+                serde_json::from_slice(&fs::read(home.join("gpteasy-model-catalog.json")).unwrap())
+                    .unwrap();
+            assert!(
+                catalog["models"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|model| model["default_reasoning_level"] == "high")
+            );
+            assert!(
+                application
+                    .preview_model_catalog_repair()
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+}
+
+#[test]
+fn model_catalog_replace_failure_rolls_back_all_outputs_and_snapshot() {
+    let (temp, store, application) = fixture();
+    let home = temp.path().join(".codex");
+    application.apply_provider(PROVIDER_ID, true).unwrap();
+    let before = ["config.toml", "auth.json", "gpteasy-model-catalog.json"]
+        .map(|name| fs::read(home.join(name)).unwrap());
+    let next_id = "6cde0dd7-9725-462a-ac79-864f5cf63f76";
+    insert_second_provider(&store, next_id);
+    let failing = EnvironmentApplication::with_fault_injector(
+        store.clone(),
+        &home,
+        Arc::new(FailAt(EnvironmentFailurePoint::AfterModelCatalogReplaced)),
+    );
+    let failure = failing.apply_provider(next_id, true).unwrap_err();
+    assert_eq!(
+        failure.category,
+        EnvironmentFailureCategory::ArtifactWriteFailed
+    );
+    assert_eq!(
+        before,
+        ["config.toml", "auth.json", "gpteasy-model-catalog.json"]
+            .map(|name| fs::read(home.join(name)).unwrap())
+    );
+    assert_eq!(
+        application.inspect().unwrap().current_provider.unwrap().id,
+        PROVIDER_ID
+    );
+    assert!(
+        !store
+            .bootstrap()
+            .contents
+            .unwrap()
+            .has_pending_config_operation
+    );
+}
+
+struct FailAt(EnvironmentFailurePoint);
+impl EnvironmentFaultInjector for FailAt {
+    fn fails_at(&self, point: EnvironmentFailurePoint) -> bool {
+        self.0 == point
+    }
 }

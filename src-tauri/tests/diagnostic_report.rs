@@ -63,6 +63,16 @@ fn insert_verified_provider(
             ],
         )
         .expect("insert provider fixture");
+    connection
+        .execute(
+            "INSERT INTO provider_model_catalog VALUES (?1, ?2, ?3)",
+            params![
+                provider_id,
+                fingerprint,
+                serde_json::to_string(&[model]).unwrap()
+            ],
+        )
+        .unwrap();
     if current {
         connection
             .execute(

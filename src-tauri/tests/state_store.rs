@@ -273,6 +273,18 @@ fn recommendation_migration_never_claims_or_overwrites_an_existing_dayway_name()
     assert!(store.bootstrap().is_ready());
     let connection = Connection::open(store.paths().database()).expect("open state database");
     connection
+        .execute(
+            "ALTER TABLE pending_config_operation DROP COLUMN old_catalog_fingerprint",
+            [],
+        )
+        .expect("remove v11 old catalog fingerprint");
+    connection
+        .execute(
+            "ALTER TABLE pending_config_operation DROP COLUMN new_catalog_fingerprint",
+            [],
+        )
+        .expect("remove v11 new catalog fingerprint");
+    connection
         .execute("DROP TABLE provider_model_catalog", [])
         .expect("remove v10 provider model catalog");
     connection
@@ -598,5 +610,54 @@ fn formal_v001_fixture_is_empty_valid_and_upgradeable() {
     assert_eq!(
         provider_count, 0,
         "historical fixtures must contain no credentials"
+    );
+}
+
+#[test]
+fn v10_migration_preserves_pending_operations_without_inventing_catalog_hashes() {
+    let temp = TempDir::new().expect("temp dir");
+    let store = store_in(&temp);
+    assert!(store.bootstrap().is_ready());
+    let connection = Connection::open(store.paths().database()).expect("open state database");
+    connection
+        .execute(
+            "ALTER TABLE pending_config_operation DROP COLUMN old_catalog_fingerprint",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "ALTER TABLE pending_config_operation DROP COLUMN new_catalog_fingerprint",
+            [],
+        )
+        .unwrap();
+    connection.execute(
+        "INSERT INTO pending_config_operation (singleton, operation_id, operation_kind, target_provider_id,
+         old_config_fingerprint, new_config_fingerprint, backup_reference, stage, target_snapshot_json, started_at)
+         VALUES (1, 'legacy-operation', 'switch_provider', NULL, 'old-config', 'new-config', 'legacy-backup', 'prepared', '{}', '123')",
+        [],
+    ).expect("insert v10 pending operation");
+    connection
+        .pragma_update(None, "user_version", 10_i64)
+        .unwrap();
+    drop(connection);
+    assert_eq!(store.bootstrap().status, DatabaseStatus::Ready);
+    let connection = Connection::open(store.paths().database()).unwrap();
+    let pending = connection.query_row(
+        "SELECT operation_id, old_config_fingerprint, new_config_fingerprint,
+         old_catalog_fingerprint, new_catalog_fingerprint FROM pending_config_operation WHERE singleton = 1",
+        [],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?,
+                  row.get::<_, Option<String>>(3)?, row.get::<_, Option<String>>(4)?)),
+    ).unwrap();
+    assert_eq!(
+        pending,
+        (
+            "legacy-operation".to_owned(),
+            "old-config".to_owned(),
+            "new-config".to_owned(),
+            None,
+            None
+        )
     );
 }

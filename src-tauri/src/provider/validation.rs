@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 use url::{Host, Url};
 use uuid::Uuid;
 
+use super::model_catalog;
 use super::{
     DiscoveryInput, ModelDiscovery, ProviderFailure, ProviderFailureCategory,
     ProviderValidationInput, ProviderValidationProgress, ProviderValidationStage,
@@ -226,16 +227,14 @@ impl ProviderValidator {
                 cancellation.clone(),
             )
             .await?;
-        if !discovery
-            .models
-            .iter()
-            .any(|model| model == &input.default_model)
-        {
-            return Err(ProviderFailure::new(
-                ProviderFailureCategory::ModelDiscovery,
-                "provider.default_model_missing",
-            ));
-        }
+        let discovered_models =
+            model_catalog::normalize_discovered_models(&discovery.models, &input.default_model)
+                .map_err(|_| {
+                    ProviderFailure::new(
+                        ProviderFailureCategory::ModelDiscovery,
+                        "provider.models_empty",
+                    )
+                })?;
         progress(ProviderValidationStage::ModelsConfirmed);
         let base_url = Url::parse(&discovery.normalized_base_url).map_err(|_| {
             ProviderFailure::new(
@@ -266,7 +265,7 @@ impl ProviderValidator {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
-            discovered_models: discovery.models,
+            discovered_models,
         })
     }
 

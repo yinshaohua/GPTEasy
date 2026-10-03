@@ -182,6 +182,8 @@ export const providerFailureMessages: Record<string, string> = {
     "配置变更失败，且无法重新读取环境实际状态。页面已清除过期状态，请稍后重试。",
   "environment.artifact_redirected": "Codex 工件使用了路径重定向，当前操作已停止。",
   "environment.artifact_write_failed": "无法安全写入 Codex 工件，旧状态已保留。",
+  "environment.catalog_snapshot_invalid": "供应商模型目录快照缺失、损坏或已过期；配置未更改，请重新验证供应商。",
+  "environment.catalog_generation_failed": "无法根据已验证的模型目录生成 Codex 模型目录；配置未更改。",
   "environment.catalog_schema_incompatible": "当前 Codex 模型目录格式不兼容，旧状态已保留。",
   "environment.rollback_failed": "Codex 工件恢复未完成，请重新启动 GPTEasy 进行协调。",
   "provider.clipboard_unavailable": "无法写入系统剪贴板。",
