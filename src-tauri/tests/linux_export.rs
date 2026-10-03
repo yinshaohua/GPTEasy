@@ -1629,6 +1629,187 @@ done
     }
 }
 
+#[test]
+fn shell_snapshots_review_regressions_reject_control_character_homes_before_writes() {
+    let fixture = ExportFixture::new();
+    fixture.insert_provider(
+        "11111111-1111-4111-8111-111111111111",
+        "Alpha",
+        "https://alpha.example/v1",
+        "private-key",
+        "alpha-model",
+        1,
+    );
+    for shell in shell_matrix_targets() {
+        let destination = fixture.temp.path().join(format!("home-controls-{shell:?}"));
+        fixture
+            .application
+            .export_linux_script(shell, &destination, false)
+            .unwrap();
+        run_shell_black_box(
+            shell,
+            &destination,
+            r#"
+set -euo pipefail
+workspace=$(mktemp -d)
+trap 'rm -rf -- "$workspace"' EXIT
+source "$1"
+for control in $'\n' $'\r' $'\t'; do
+    export CODEX_HOME="$workspace/bad$control home"
+    if gpteasy <<<"1" >"$workspace/output" 2>&1; then exit 1; fi
+    grep -Fq 'CODEX_HOME 包含不支持的控制字符' "$workspace/output"
+    [[ ! -e "$CODEX_HOME" ]]
+done
+"#,
+        );
+    }
+}
+
+#[test]
+fn shell_snapshots_review_regressions_distinguish_restore_readback_failures() {
+    let fixture = ExportFixture::new();
+    fixture.insert_provider(
+        "11111111-1111-4111-8111-111111111111",
+        "Alpha",
+        "https://alpha.example/v1",
+        "private-key",
+        "alpha-model",
+        1,
+    );
+    for shell in shell_matrix_targets() {
+        let destination = fixture
+            .temp
+            .path()
+            .join(format!("restore-readback-{shell:?}"));
+        fixture
+            .application
+            .export_linux_script(shell, &destination, false)
+            .unwrap();
+        run_shell_black_box(
+            shell,
+            &destination,
+            r#"
+set -euo pipefail
+workspace=$(mktemp -d)
+trap 'rm -rf -- "$workspace"' EXIT
+mkdir -m 700 "$workspace/bin"
+make_compatible_codex "$workspace/bin/codex"
+cat >"$workspace/bin/sync" <<'SYNC'
+#!/bin/sh
+if [ "$2" = "$CODEX_HOME" ]; then
+    case "$GPTEASY_RESTORE_FAULT" in
+        sync_failed) exit 1 ;;
+        config_changed) printf '%s\n' 'external_change = true' >"$CODEX_HOME/config.toml" ;;
+        catalog_rejected) find "$CODEX_HOME/.gpteasy-shell/model-catalogs" -name '*.json' -type f -exec sh -c 'printf broken >"$1"' sh {} \; ;;
+    esac
+fi
+exec /usr/bin/sync "$@"
+SYNC
+chmod 700 "$workspace/bin/sync"
+export PATH="$workspace/bin:$PATH"
+source "$1"
+for fault in sync_failed config_changed catalog_rejected; do
+    export CODEX_HOME="$workspace/$fault" GPTEASY_RESTORE_FAULT=none
+    mkdir -m 700 "$CODEX_HOME"
+    printf '%s\n' 'original = true' >"$CODEX_HOME/config.toml"
+    gpteasy <<<"1" >"$workspace/output" 2>&1
+    gpteasy <<<"1" >"$workspace/output" 2>&1
+    export GPTEASY_RESTORE_FAULT="$fault"
+    if gpteasy restore <<<"y" >"$workspace/output" 2>&1; then exit 1; fi
+    grep -Fq 'stage=restore_commit catalog_state=committed' "$workspace/output"
+    grep -Fq "stage=restore_readback catalog_state=$fault" "$workspace/output"
+    grep -Fq '配置已保存，但 CLI/共享后台服务可能仍使用旧配置' "$workspace/output"
+    ! grep -Eq 'private-key|alpha-model|https://alpha.example' "$workspace/output"
+    [[ $(find "$CODEX_HOME/.gpteasy-shell/shell-restore" -name config.toml | wc -l) -eq 2 ]]
+    [[ ! -d "$CODEX_HOME/.gpteasy-shell/lock/active" ]]
+done
+"#,
+        );
+    }
+}
+
+#[test]
+fn shell_snapshots_review_regressions_read_v1_and_compare_catalog_content_across_exports() {
+    for shell in shell_matrix_targets() {
+        let fixture = ExportFixture::new();
+        fixture.insert_provider_with_models(
+            "11111111-1111-4111-8111-111111111111",
+            "Alpha",
+            "https://alpha.example/v1",
+            "private-key",
+            "alpha-model",
+            1,
+            &["alpha-model", "alpha-second"],
+        );
+        let destination = fixture.temp.path().join(format!("state-catalog-{shell:?}"));
+        fixture
+            .application
+            .export_linux_script(shell, &destination, false)
+            .unwrap();
+        let equivalent = destination.with_file_name(format!("state-catalog-{shell:?}.equivalent"));
+        fixture
+            .application
+            .export_linux_script(shell, &equivalent, false)
+            .unwrap();
+        Connection::open(fixture.store.paths().database())
+            .unwrap()
+            .execute(
+                "UPDATE provider_model_catalog SET models_json = ?1",
+                [r#"["alpha-model","alpha-second","alpha-third"]"#],
+            )
+            .unwrap();
+        let updated = destination.with_file_name(format!("state-catalog-{shell:?}.updated"));
+        fixture
+            .application
+            .export_linux_script(shell, &updated, false)
+            .unwrap();
+        run_shell_black_box(
+            shell,
+            &destination,
+            r###"
+set -euo pipefail
+workspace=$(mktemp -d)
+trap 'rm -rf -- "$workspace"' EXIT
+export CODEX_HOME="$workspace/home"
+mkdir -m 700 "$CODEX_HOME" "$workspace/bin"
+make_compatible_codex "$workspace/bin/codex"
+export PATH="$workspace/bin:$PATH"
+source "$1"
+gpteasy <<<"1" >"$workspace/output" 2>&1
+cp "$CODEX_HOME/config.toml" "$workspace/current"
+# A fresh shell reading a valid v1 must not depend on a v2 write candidate.
+awk '
+    $0 == "# GPTEasy schema-version: 2" { print "# GPTEasy schema-version: 1"; next }
+    index($0, "# GPTEasy model-catalog-") == 1 { next }
+    index($0, "model_catalog_json = ") == 1 { next }
+    { print }
+' "$workspace/current" >"$CODEX_HOME/config.toml"
+v1_before=$(sha256sum "$CODEX_HOME/config.toml")
+v1_result=$("$2" -c 'source "$1"; gpteasy current' state-reader "$1")
+[[ "$v1_result" == *'Alpha'* && "$v1_result" != *'管理冲突'* ]]
+[[ "$v1_before" == "$(sha256sum "$CODEX_HOME/config.toml")" ]]
+cp "$workspace/current" "$CODEX_HOME/config.toml"
+before=$(sha256sum "$CODEX_HOME/config.toml")
+source "$1.equivalent"
+menu=$(gpteasy <<<"q")
+[[ "$menu" == *'Alpha (alpha-model) [当前]'* ]]
+[[ "$menu" != *'有更新'* ]]
+source "$1.updated"
+menu=$(gpteasy <<<"q")
+[[ "$menu" == *'Alpha (alpha-model) [当前，有更新]'* ]]
+[[ "$before" == "$(sha256sum "$CODEX_HOME/config.toml")" ]]
+gpteasy <<<"1" >"$workspace/output" 2>&1
+menu=$(gpteasy <<<"q")
+[[ "$menu" == *'Alpha (alpha-model) [当前]'* ]]
+gpteasy restore <<<"y" >"$workspace/output" 2>&1
+cmp -s "$workspace/current" "$CODEX_HOME/config.toml"
+menu=$(gpteasy <<<"q")
+[[ "$menu" == *'Alpha (alpha-model) [当前，有更新]'* ]]
+"###,
+        );
+    }
+}
+
 struct ExportFixture {
     temp: TempDir,
     store: StateStore,

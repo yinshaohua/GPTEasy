@@ -13,6 +13,8 @@ use super::catalog;
 use super::model_catalog;
 use super::reasoning;
 
+const MODEL_CATALOG_PROTOCOL: &str = "codex-model-catalog-v1";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LinuxShell {
@@ -177,9 +179,11 @@ fn read_destination(destination: &Path) -> Result<Option<Vec<u8>>, LinuxExportFa
 
 fn render(shell: LinuxShell, export_id: &str, providers: &[catalog::ProviderRecord]) -> String {
     let mut script = format!(
-        "#!/usr/bin/env {}\n# GPTEasy {} Linux provider snapshot. This file contains sensitive credentials.\ngpteasy__schema_version='2'\ngpteasy__catalog_protocol='codex-model-catalog-v1'\ngpteasy__catalog_policy='common-reasoning-selector-v1'\n",
+        "#!/usr/bin/env {}\n# GPTEasy {} Linux provider snapshot. This file contains sensitive credentials.\ngpteasy__schema_version='2'\ngpteasy__catalog_protocol={}\ngpteasy__catalog_policy={}\n",
         shell.executable(),
         shell.display_name(),
+        shell_quote(MODEL_CATALOG_PROTOCOL),
+        shell_quote(model_catalog::REASONING_SELECTOR_POLICY),
     );
     let status_line = STATUS_LINE_TOML
         .lines()
@@ -229,7 +233,7 @@ fn render(shell: LinuxShell, export_id: &str, providers: &[catalog::ProviderReco
             shell_quote(&payload_sha256),
             shell_quote(&provider.verification_fingerprint),
             shell_quote(export_id),
-            shell_quote("codex-model-catalog-v1"),
+            shell_quote(MODEL_CATALOG_PROTOCOL),
             shell_quote(model_catalog::REASONING_SELECTOR_POLICY),
         ));
     }

@@ -309,7 +309,7 @@ gpteasy__report_identity_mismatch() {
 gpteasy__require_codex_home() {
     local codex_home=${CODEX_HOME:-"$HOME/.codex"} parent owner
     case "$codex_home" in /*) ;; *) printf '%s\n' 'CODEX_HOME 必须为 Linux 绝对路径。' >&2; return 1 ;; esac
-    if printf '%s' "$codex_home" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+    if [[ "$codex_home" == *$'\n'* ]] || printf '%s' "$codex_home" | LC_ALL=C grep -q '[[:cntrl:]]'; then
         printf '%s\n' 'CODEX_HOME 包含不支持的控制字符。' >&2
         return 1
     fi
@@ -865,9 +865,38 @@ gpteasy__snapshot_line() {
     '
 }
 
+gpteasy__expected_snapshot_line() {
+    local provider_id=$1 prefix=$2 value
+    case "$prefix" in
+        'model = ')
+            value=$(gpteasy__provider_model "$provider_id") || return 1
+            printf 'model = %s\n' "$(gpteasy__toml_string "$value")"
+            ;;
+        'model_providers.gpteasy.name = ')
+            value=$(gpteasy__provider_name "$provider_id") || return 1
+            printf 'model_providers.gpteasy.name = %s\n' "$(gpteasy__toml_string "$value")"
+            ;;
+        'model_providers.gpteasy.base_url = ')
+            value=$(gpteasy__provider_base_url "$provider_id") || return 1
+            printf 'model_providers.gpteasy.base_url = %s\n' "$(gpteasy__toml_string "$value")"
+            ;;
+        *)
+            gpteasy__snapshot_line "$provider_id" "$prefix"
+            ;;
+    esac
+}
+
+gpteasy__catalog_content_is_current() {
+    local provider_id=$1 catalog_path=$2 expected_hash actual_hash
+    expected_hash=$(gpteasy__provider_catalog_sha256 "$provider_id") || return 1
+    actual_hash=$(gpteasy__file_hash "$catalog_path") || return 1
+    [[ "$actual_hash" == "$expected_hash" ]]
+}
+
 gpteasy__current_state() {
     local config marker_info starts ends start_line end_line provider_id schema schema_count source relative credential catalog_line
     local prefix current_line expected_line
+    gpteasy__model_catalog_path=
     config=$(gpteasy__config_path) || return
     if [[ ! -f "$config" ]]; then
         printf '%s\n' 'external'
@@ -942,7 +971,12 @@ gpteasy__current_state() {
             printf '%s\n' 'conflict'
             return
         }
-        expected_line=$(gpteasy__snapshot_line "$provider_id" "$prefix" 2>/dev/null) || {
+        if [[ "$schema" == 1 ]]; then
+            expected_line=$(gpteasy__expected_snapshot_line "$provider_id" "$prefix" 2>/dev/null)
+        else
+            expected_line=$(gpteasy__snapshot_line "$provider_id" "$prefix" 2>/dev/null)
+        fi
+        [[ -n "$expected_line" ]] || {
             printf '%s\n' 'conflict'
             return
         }
@@ -978,6 +1012,10 @@ gpteasy__current_state() {
     credential="${CODEX_HOME:-"$HOME/.codex"}/$relative"
     if ! gpteasy__private_file_is_safe "$credential"; then
         printf '%s\n' 'conflict'
+        return
+    fi
+    if [[ "$schema" == 2 ]] && ! gpteasy__catalog_content_is_current "$provider_id" "$gpteasy__model_catalog_path"; then
+        printf '%s\n' 'updated'
         return
     fi
     if cmp -s -- "$credential" <(gpteasy__print_credential "$provider_id"); then
@@ -1482,20 +1520,33 @@ gpteasy__restore_locked() {
         return 1
     fi
     if [[ "$kind" == missing ]]; then
-        rm -f -- "$gpteasy__config_target" || return
-        [[ ! -e "$gpteasy__config_target" ]] || return 1
+        rm -f -- "$gpteasy__config_target" || {
+            gpteasy__evidence restore_commit failed
+            return 1
+        }
     else
         mv -f -- "$candidate" "$gpteasy__config_target" || {
             rm -f -- "$candidate"
+            gpteasy__evidence restore_commit failed
             return 1
         }
-        [[ "$(gpteasy__file_hash "$gpteasy__config_target")" == "$candidate_hash" ]] || return 1
     fi
     gpteasy__evidence restore_commit committed
     gpteasy__refresh_pending
-    sync -f "$target_dir" 2>/dev/null || return
+    sync -f "$target_dir" 2>/dev/null || {
+        gpteasy__evidence restore_readback sync_failed
+        return 1
+    }
+    if { [[ "$kind" == missing ]] && [[ -e "$gpteasy__config_target" || -L "$gpteasy__config_target" ]]; } ||
+        { [[ "$kind" != missing ]] && [[ "$(gpteasy__file_hash "$gpteasy__config_target")" != "$candidate_hash" ]]; }; then
+        gpteasy__evidence restore_readback config_changed
+        return 1
+    fi
     if [[ "$kind" != missing && "$(gpteasy__managed_metadata "$gpteasy__config_target" "$gpteasy__schema_prefix" 2>/dev/null || true)" == 2 ]]; then
-        gpteasy__schema_v2_is_valid "$gpteasy__config_target" || return 1
+        gpteasy__schema_v2_is_valid "$gpteasy__config_target" || {
+            gpteasy__evidence restore_readback catalog_rejected
+            return 1
+        }
     fi
     gpteasy__discard_restore_point "$latest" || return
     if ! gpteasy__cleanup_credentials; then
