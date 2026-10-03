@@ -17,6 +17,12 @@ pub(super) struct ProviderRecord {
     pub discovered_models: Vec<String>,
 }
 
+pub(super) struct ProviderRevalidationRecord {
+    pub summary: ProviderSummary,
+    pub api_key: String,
+    pub verification_fingerprint: String,
+}
+
 pub(super) fn list_providers(
     state_store: &StateStore,
 ) -> Result<Vec<ProviderSummary>, ProviderFailure> {
@@ -389,6 +395,14 @@ pub(super) fn get_provider(
     find_provider_record(&connection, provider_id)?.ok_or_else(provider_not_found)
 }
 
+pub(super) fn get_provider_for_revalidation(
+    state_store: &StateStore,
+    provider_id: &str,
+) -> Result<ProviderRevalidationRecord, ProviderFailure> {
+    let connection = open_catalog(state_store)?;
+    find_provider_revalidation_record(&connection, provider_id)?.ok_or_else(provider_not_found)
+}
+
 pub(super) fn replace_provider(
     state_store: &StateStore,
     provider_id: &str,
@@ -488,7 +502,8 @@ pub(super) fn record_revalidation(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| state_unavailable())?;
     ensure_no_pending_native_operation(&transaction, provider_id)?;
-    let record = find_provider_record(&transaction, provider_id)?.ok_or_else(provider_not_found)?;
+    let record = find_provider_revalidation_record(&transaction, provider_id)?
+        .ok_or_else(provider_not_found)?;
     if record.verification_fingerprint != original_fingerprint {
         return Err(verification_expired());
     }
@@ -638,6 +653,29 @@ fn find_provider_record(
                     verification_fingerprint: row.get(6)?,
                     reasoning_selection: reasoning::for_base_url(&row.get::<_, String>(2)?),
                     discovered_models,
+                })
+            },
+        )
+        .optional()
+        .map_err(|_| state_unavailable())
+}
+
+fn find_provider_revalidation_record(
+    connection: &Connection,
+    provider_id: &str,
+) -> Result<Option<ProviderRevalidationRecord>, ProviderFailure> {
+    let Some(summary) = find_provider(connection, provider_id)? else {
+        return Ok(None);
+    };
+    connection
+        .query_row(
+            "SELECT api_key, verification_fingerprint FROM providers WHERE id = ?1",
+            [provider_id],
+            |row| {
+                Ok(ProviderRevalidationRecord {
+                    summary,
+                    api_key: row.get(0)?,
+                    verification_fingerprint: row.get(1)?,
                 })
             },
         )

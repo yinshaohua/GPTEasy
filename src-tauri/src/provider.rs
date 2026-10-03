@@ -845,7 +845,7 @@ impl ProviderApplication {
         F: Fn(ProviderValidationProgress),
     {
         let cancellation = self.begin_request(&request_id)?;
-        let record = match catalog::get_provider(&self.state_store, &provider_id) {
+        let record = match catalog::get_provider_for_revalidation(&self.state_store, &provider_id) {
             Ok(record) => record,
             Err(failure) => {
                 self.finish_request(&request_id);
