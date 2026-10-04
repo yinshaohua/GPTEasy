@@ -10,6 +10,7 @@ pub mod environment;
 pub mod provider;
 pub mod session;
 pub mod session_visibility;
+pub mod shared_daemon;
 #[cfg(windows)]
 pub mod single_instance;
 pub mod startup;
