@@ -16,18 +16,71 @@ use uuid::Uuid;
 
 use crate::codex_config::{STATUS_LINE_TOML, apply_status_line, has_expected_status_line};
 use crate::provider::ProviderSummary;
+use crate::provider::model_catalog;
 use crate::provider::reasoning::{self, ReasoningSelection};
+use crate::provider::reasoning_capability::{self, CodexMetadataSnapshot};
 use crate::state::StateStore;
 
 #[cfg(windows)]
 const WSL_REGISTRY_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Lxss";
-const HELPER_VERSION: &str = "gpteasy-wsl-guest-writer-v2";
-const HELPER_PATH: &str = "$HOME/.local/lib/gpteasy/guest-writer-v2";
+const HELPER_VERSION: &str = "gpteasy-wsl-guest-writer-v3";
+const HELPER_PATH: &str = "$HOME/.local/lib/gpteasy/guest-writer-v3";
 const BUNDLE_MAGIC: &str = "GPTEASY_WSL_BUNDLE_V2";
 const NATURAL_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const NATURAL_STOP_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const WSL_DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(5);
+const WSL_DAEMON_READY_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const CODEX_VERSION_PROBE_PREFIX: &str = "__GPTEASY_CODEX_VERSION__:";
 const CODEX_NOT_FOUND_PROBE_RESULT: &str = "__GPTEASY_CODEX_NOT_FOUND__";
+const WSL_GUEST_EXEC_SCRIPT: &str = r#"exec /bin/bash --noprofile --norc -c "$1" gpteasy "${@:2}""#;
+const WSL_DAEMON_REFRESH_SCRIPT: &str = r#"set -eu
+action=$1
+guest_uid=$(id -u)
+guest_home=${HOME:?}
+guest_codex_home=${CODEX_HOME:-$guest_home/.codex}
+if [ "$(stat -c '%u' "$guest_codex_home" 2>/dev/null || printf '%s' '-1')" != "$guest_uid" ]; then
+    exit 46
+fi
+export CODEX_HOME="$guest_codex_home"
+if ! command -v codex >/dev/null 2>&1; then
+    printf '%s\n' '__GPTEASY_WSL_DAEMON_UNAVAILABLE__'
+    exit 44
+fi
+case "$action" in
+  version|restart) ;;
+  *) exit 45 ;;
+esac
+control_socket="$guest_codex_home/app-server-control/app-server-control.sock"
+if [ ! -S "$control_socket" ]; then
+    printf '%s\n' '{"status":"stopped"}'
+    exit 0
+fi
+output=$(codex app-server daemon "$action" 2>/dev/null) || exit 43
+printf '%s\n' "$output"
+"#;
+#[cfg(windows)]
+const WSL_MODEL_PROBE_SCRIPT: &str = r#"set -eu
+codex_path=$(type -P codex) || exit 42
+umask 077
+probe_home=$(mktemp -d /tmp/gpteasy-wsl-model-probe.XXXXXX)
+trap 'rm -rf -- "$probe_home"' EXIT
+cat > "$probe_home/config.toml" <<'GPTEASY_OFFLINE_CONFIG'
+model = "gpteasy-offline-probe"
+model_provider = "offline_probe"
+[analytics]
+enabled = false
+[model_providers.offline_probe]
+name = "GPTEasy offline reasoning probe"
+base_url = "http://127.0.0.1:9/v1"
+wire_api = "responses"
+requires_openai_auth = false
+GPTEASY_OFFLINE_CONFIG
+cd "$probe_home"
+export CODEX_HOME="$probe_home" HOME="$probe_home"
+unset OPENAI_API_KEY OPENAI_BASE_URL OPENAI_API_BASE OPENAI_API_HOST OPENAI_ORG_ID OPENAI_ORGANIZATION OPENAI_PROJECT CODEX_API_KEY CODEX_API_URL CODEX_BASE_URL CODEX_API_BASE AZURE_OPENAI_API_KEY AZURE_OPENAI_ENDPOINT ANTHROPIC_API_KEY GOOGLE_API_KEY GEMINI_API_KEY
+# Bound the guest process as well as the host protocol; never touch the user's daemon.
+timeout 12s "$codex_path" app-server --stdio
+"#;
 const CODEX_VERSION_PROBE_SCRIPT: &str = r#"codex_path=$(type -P codex 2>/dev/null) || {
     printf '%s\n' '__GPTEASY_CODEX_NOT_FOUND__'
     exit 42
@@ -147,6 +200,45 @@ pub struct WslApplyResult {
     pub environment: WslEnvironmentSummary,
     pub pending_restart: bool,
     pub lifecycle_outcome: WslLifecycleOutcome,
+    pub daemon_refresh: Option<WslDaemonRefreshResult>,
+    #[serde(skip)]
+    pub(crate) reasoning_audit: Option<reasoning::ReasoningAuditContext>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WslDaemonRefreshResult {
+    pub operation_id: String,
+    pub status: WslDaemonRefreshStatus,
+    pub daemon: WslManagedDaemonStatus,
+    pub before: Option<WslDaemonIdentity>,
+    pub after: Option<WslDaemonIdentity>,
+    pub message_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WslDaemonRefreshStatus {
+    Refreshed,
+    NotRunning,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WslManagedDaemonStatus {
+    Managed,
+    Unavailable,
+    Unsafe,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WslDaemonIdentity {
+    pub pid: Option<u32>,
+    pub version: Option<String>,
+    pub cli_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -270,6 +362,7 @@ pub(crate) struct WslProbe {
 pub(crate) struct WslArtifacts {
     pub config: Option<Vec<u8>>,
     pub credentials: Option<Vec<u8>>,
+    pub model_catalog: Option<Vec<u8>>,
 }
 
 pub(crate) trait WslRuntime: Send + Sync {
@@ -308,8 +401,17 @@ pub(crate) trait WslRuntime: Send + Sync {
         environment: &WslProbe,
         lock_token: &str,
         old_config_hash: &str,
+        old_catalog_hash: &str,
         bundle: &[u8],
     ) -> Result<String, WslFailure>;
+    fn probe_model_metadata(
+        &self,
+        _environment: &WslProbe,
+        _models: &[String],
+    ) -> Option<CodexMetadataSnapshot> {
+        None
+    }
+    fn refresh_managed_daemon(&self, environment: &WslProbe) -> WslDaemonRefreshResult;
 }
 
 #[derive(Clone)]
@@ -365,10 +467,13 @@ impl WslApplication {
     ) -> Result<reasoning::ReasoningAuditContext, WslFailure> {
         let connection = self.open_state()?;
         let provider = load_provider(&connection, provider_id)?;
-        Ok(reasoning::ReasoningAuditContext::new(
-            provider.id,
-            provider.base_url,
-            provider.default_model,
+        Ok(reasoning::ReasoningAuditContext::for_provider_environment(
+            "wsl",
+            provider.id.clone(),
+            Some(&provider.name),
+            provider.base_url.clone(),
+            provider.default_model.clone(),
+            None,
         ))
     }
     pub fn new(state_store: StateStore) -> Self {
@@ -1301,12 +1406,15 @@ impl WslApplication {
         if matches!(&result, Err(failure) if failure.category == WslFailureCategory::Interrupted) {
             return Err(result.expect_err("matched interrupted failure"));
         }
-        if let Err(failure) = result {
-            if let Some(pending) = load_pending_operation(connection, &probe.environment_id)? {
-                self.reconcile_pending_for_probe(connection, &pending, probe, false)?;
+        let snapshot = match result {
+            Ok(snapshot) => snapshot,
+            Err(failure) => {
+                if let Some(pending) = load_pending_operation(connection, &probe.environment_id)? {
+                    self.reconcile_pending_for_probe(connection, &pending, probe, false)?;
+                }
+                return Err(failure);
             }
-            return Err(failure);
-        }
+        };
         self.runtime.release_lock(probe, &token)?;
         connection
             .execute(
@@ -1314,7 +1422,18 @@ impl WslApplication {
                 [probe.environment_id.as_str()],
             )
             .map_err(|_| state_unavailable())?;
-        self.load_apply_result(connection, probe, originally_running)
+        let daemon_refresh = Some(self.runtime.refresh_managed_daemon(probe));
+        let mut applied =
+            self.load_apply_result(connection, probe, originally_running, daemon_refresh)?;
+        applied.reasoning_audit = Some(reasoning::ReasoningAuditContext::for_provider_environment(
+            "wsl",
+            provider.id.clone(),
+            Some(&provider.name),
+            provider.base_url.clone(),
+            provider.default_model.clone(),
+            snapshot.as_ref(),
+        ));
+        Ok(applied)
     }
 
     fn reclaim_check_requires_confirmation(
@@ -1383,7 +1502,7 @@ impl WslApplication {
         lock_token: &str,
         mode: WslApplyMode,
         progress: &mut dyn FnMut(WslReclaimProgress),
-    ) -> Result<(), WslFailure> {
+    ) -> Result<Option<CodexMetadataSnapshot>, WslFailure> {
         let current_probe = self
             .runtime
             .probe()?
@@ -1432,10 +1551,48 @@ impl WslApplication {
             render_config(original.config.as_deref(), provider, &source_id)?
         };
         let credentials = render_credentials(&provider.api_key)?;
+        let mut model_ids = provider.discovered_models.clone();
+        if !model_ids.contains(&provider.default_model) {
+            model_ids.push(provider.default_model.clone());
+        }
+        model_ids.sort();
+        model_ids.dedup();
+        let mut snapshot = self
+            .runtime
+            .probe_model_metadata(&current_probe, &model_ids)
+            .filter(|snapshot| snapshot.covers_models_in_environment(&model_ids, "wsl"));
+        if let Some(snapshot) = snapshot.as_mut() {
+            match provider.reasoning_selection.rule_id.as_str() {
+                reasoning::DAYWAY_DS_DEEPSEEK_RULE => {
+                    reasoning_capability::apply_dayway_ds_compatibility(snapshot)
+                }
+                reasoning::DEEPSEEK_HIGH_RULE => {
+                    reasoning_capability::apply_deepseek_compatibility(
+                        snapshot,
+                        &provider.default_model,
+                    )
+                }
+                _ => {}
+            }
+        }
+        let model_catalog = model_catalog::render_for_environment(
+            &provider.discovered_models,
+            &provider.default_model,
+            snapshot.as_ref(),
+            "wsl",
+        )
+        .map_err(|_| {
+            WslFailure::new(
+                WslFailureCategory::InvalidEnvironment,
+                "wsl.model_catalog_invalid",
+            )
+        })?;
         let old_config_hash = hash_optional(original.config.as_deref());
         let old_credentials_hash = hash_optional(original.credentials.as_deref());
+        let old_model_catalog_hash = hash_optional(original.model_catalog.as_deref());
         let new_config_hash = hash_bytes(&config);
         let new_credentials_hash = hash_bytes(&credentials);
+        let new_model_catalog_hash = hash_bytes(&model_catalog);
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|_| state_unavailable())?;
@@ -1461,22 +1618,24 @@ impl WslApplication {
         }
         self.faults.check(WslFailurePoint::AfterPrepared)?;
 
-        let bundle = bundle_bytes(&config, &credentials);
-        let writer_output =
-            match self
-                .runtime
-                .write_bundle(&current_probe, lock_token, &old_config_hash, &bundle)
-            {
-                Ok(output) => output,
-                Err(failure) => {
-                    mark_pending_attention(
-                        connection,
-                        &current_probe.environment_id,
-                        failure.message_id,
-                    )?;
-                    return Err(failure);
-                }
-            };
+        let bundle = bundle_bytes(&config, &credentials, &model_catalog);
+        let writer_output = match self.runtime.write_bundle(
+            &current_probe,
+            lock_token,
+            &old_config_hash,
+            &old_model_catalog_hash,
+            &bundle,
+        ) {
+            Ok(output) => output,
+            Err(failure) => {
+                mark_pending_attention(
+                    connection,
+                    &current_probe.environment_id,
+                    failure.message_id,
+                )?;
+                return Err(failure);
+            }
+        };
         if !writer_output.contains("\"status\":\"written\"")
             || !writer_output.contains(HELPER_VERSION)
         {
@@ -1528,6 +1687,7 @@ impl WslApplication {
         let written = self.runtime.read_artifacts(&latest)?;
         if hash_optional(written.config.as_deref()) != new_config_hash
             || hash_optional(written.credentials.as_deref()) != new_credentials_hash
+            || hash_optional(written.model_catalog.as_deref()) != new_model_catalog_hash
         {
             mark_pending_attention(
                 connection,
@@ -1574,7 +1734,7 @@ impl WslApplication {
         self.faults.check(WslFailurePoint::AfterStateCommitted)?;
         self.runtime
             .cleanup_credentials(&current_probe, lock_token)?;
-        Ok(())
+        Ok(snapshot)
     }
 
     fn load_apply_result(
@@ -1582,11 +1742,14 @@ impl WslApplication {
         connection: &Connection,
         probe: &WslProbe,
         originally_running: bool,
+        daemon_refresh: Option<WslDaemonRefreshResult>,
     ) -> Result<WslApplyResult, WslFailure> {
         Ok(WslApplyResult {
             environment: load_summary(connection, probe)?,
             pending_restart: originally_running,
             lifecycle_outcome: WslLifecycleOutcome::UnchangedRunning,
+            daemon_refresh,
+            reasoning_audit: None,
         })
     }
 
@@ -1819,25 +1982,41 @@ struct WslProvider {
     verified_at: u64,
     recommendation_id: Option<String>,
     reasoning_selection: ReasoningSelection,
+    discovered_models: Vec<String>,
 }
 
 fn load_provider(connection: &Connection, provider_id: &str) -> Result<WslProvider, WslFailure> {
     connection
         .query_row(
-            "SELECT id, name, base_url, api_key, default_model, verified_at, recommendation_id
-             FROM providers WHERE id = ?1",
+            "SELECT p.id, p.name, p.base_url, p.api_key, p.default_model, p.verified_at,
+                    p.recommendation_id, p.verification_fingerprint,
+                    c.verification_fingerprint, c.models_json
+             FROM providers p LEFT JOIN provider_model_catalog c ON c.provider_id = p.id
+             WHERE p.id = ?1",
             [provider_id],
             |row| {
+                let name = row.get::<_, String>(1)?;
                 let base_url = row.get::<_, String>(2)?;
+                let api_key = row.get::<_, String>(3)?;
+                let default_model = row.get::<_, String>(4)?;
+                let expected_fingerprint =
+                    crate::provider::combination_fingerprint(&base_url, &api_key, &default_model);
+                let discovered_models = decode_wsl_model_catalog(
+                    row.get::<_, Option<String>>(8)?.as_deref(),
+                    row.get::<_, Option<String>>(9)?.as_deref(),
+                    &expected_fingerprint,
+                )
+                .unwrap_or_default();
                 Ok(WslProvider {
                     id: row.get(0)?,
                     name: row.get(1)?,
-                    reasoning_selection: reasoning::for_base_url(&base_url),
+                    reasoning_selection: reasoning::for_provider(&name, &base_url),
                     base_url,
-                    api_key: row.get(3)?,
-                    default_model: row.get(4)?,
+                    api_key,
+                    default_model,
                     verified_at: row.get::<_, String>(5)?.parse().unwrap_or_default(),
                     recommendation_id: row.get(6)?,
+                    discovered_models,
                 })
             },
         )
@@ -1849,6 +2028,20 @@ fn load_provider(connection: &Connection, provider_id: &str) -> Result<WslProvid
                 "wsl.provider_not_found",
             )
         })
+}
+
+fn decode_wsl_model_catalog(
+    catalog_fingerprint: Option<&str>,
+    models_json: Option<&str>,
+    expected_fingerprint: &str,
+) -> Option<Vec<String>> {
+    if catalog_fingerprint != Some(expected_fingerprint) {
+        return None;
+    }
+    // WSL 只消费供应商发现目录；即使数据库存在 Windows native 能力快照，
+    // 也不能把它带入 WSL。合法的 [] 仍然是合法的空发现结果，损坏 JSON
+    // 则安全降级为无目录而不是伪装成空列表。
+    serde_json::from_str::<Vec<String>>(models_json?).ok()
 }
 
 fn load_summaries(
@@ -2310,10 +2503,16 @@ fn schema_v1_block_variant(block: &[&str]) -> Option<SchemaV1Variant> {
     let document = block.join("\n").parse::<toml_edit::DocumentMut>().ok()?;
     let root = document.as_table();
     let has_reasoning_effort = root.contains_key("model_reasoning_effort");
-    if root.len() != if has_reasoning_effort { 4 } else { 3 }
+    let has_model_catalog = root.contains_key("model_catalog_json");
+    if root.len() != 3 + usize::from(has_reasoning_effort) + usize::from(has_model_catalog)
         || !root.contains_key("model")
         || !root.contains_key("model_provider")
         || !root.contains_key("model_providers")
+        || (has_model_catalog
+            && root
+                .get("model_catalog_json")
+                .and_then(|value| value.as_str())
+                != Some("gpteasy-model-catalog.json"))
         || root.get("model_reasoning_effort").is_some_and(|value| {
             value
                 .as_str()
@@ -2668,11 +2867,17 @@ fn same_environment_identity(left: &WslProbe, right: &WslProbe) -> bool {
         && left.wsl_version == right.wsl_version
 }
 
-fn bundle_bytes(config: &[u8], credentials: &[u8]) -> Vec<u8> {
-    let mut bundle =
-        format!("{BUNDLE_MAGIC}\n{}\n{}\n", config.len(), credentials.len()).into_bytes();
+fn bundle_bytes(config: &[u8], credentials: &[u8], model_catalog: &[u8]) -> Vec<u8> {
+    let mut bundle = format!(
+        "{BUNDLE_MAGIC}\n{}\n{}\n{}\n",
+        config.len(),
+        credentials.len(),
+        model_catalog.len()
+    )
+    .into_bytes();
     bundle.extend_from_slice(config);
     bundle.extend_from_slice(credentials);
+    bundle.extend_from_slice(model_catalog);
     bundle
 }
 
@@ -2718,6 +2923,7 @@ fn render_config(
         format!("# GPTEasy provider-id: {}", provider.id),
         format!("# GPTEasy source-id: {source_id}"),
         format!("# GPTEasy credential-file: {credential_relative}"),
+        "model_catalog_json = \"gpteasy-model-catalog.json\"".to_owned(),
         format!(
             "model = {}",
             toml_edit::Value::from(provider.default_model.as_str())
@@ -3138,6 +3344,8 @@ impl WslRuntime for SystemWslRuntime {
             .as_deref()
             .ok_or_else(|| wsl_availability_failure(environment.availability))?;
         let config = read_guest_file(&self.program, name, ".codex/config.toml")?;
+        let model_catalog =
+            read_guest_file(&self.program, name, ".codex/gpteasy-model-catalog.json")?;
         let credentials = config
             .as_deref()
             .and_then(credential_relative_from_config)
@@ -3147,6 +3355,7 @@ impl WslRuntime for SystemWslRuntime {
         Ok(WslArtifacts {
             config,
             credentials,
+            model_catalog,
         })
     }
 
@@ -3227,6 +3436,7 @@ impl WslRuntime for SystemWslRuntime {
         environment: &WslProbe,
         lock_token: &str,
         old_config_hash: &str,
+        old_catalog_hash: &str,
         bundle: &[u8],
     ) -> Result<String, WslFailure> {
         let name = environment
@@ -3244,6 +3454,7 @@ impl WslRuntime for SystemWslRuntime {
             "gpteasy",
             lock_token,
             old_config_hash,
+            old_catalog_hash,
         ];
         let output = run_wsl_raw_with(&self.program, &args, Some(bundle))?;
         if output.status.success() {
@@ -3270,6 +3481,209 @@ impl WslRuntime for SystemWslRuntime {
                 ),
             };
             Err(WslFailure::new(category, message_id))
+        }
+    }
+
+    fn probe_model_metadata(
+        &self,
+        environment: &WslProbe,
+        models: &[String],
+    ) -> Option<CodexMetadataSnapshot> {
+        #[cfg(windows)]
+        {
+            let name = environment.command_name.as_deref()?;
+            let mut command = Command::new(&self.program);
+            command.args([
+                "--distribution",
+                name,
+                "--exec",
+                "/bin/bash",
+                "-lic",
+                WSL_GUEST_EXEC_SCRIPT,
+                "gpteasy",
+                WSL_MODEL_PROBE_SCRIPT,
+            ]);
+            reasoning_capability::probe_via_command(command, models, "wsl").ok()
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (environment, models);
+            None
+        }
+    }
+
+    fn refresh_managed_daemon(&self, environment: &WslProbe) -> WslDaemonRefreshResult {
+        let operation_id = Uuid::new_v4().to_string();
+        let unavailable = || WslDaemonRefreshResult {
+            operation_id: operation_id.clone(),
+            status: WslDaemonRefreshStatus::NotRunning,
+            daemon: WslManagedDaemonStatus::Unavailable,
+            before: None,
+            after: None,
+            message_id: "wsl.daemon_refresh.unavailable".to_owned(),
+        };
+        #[cfg(not(windows))]
+        {
+            let _ = environment;
+            return unavailable();
+        }
+        #[cfg(windows)]
+        {
+            let Some(name) = environment.command_name.as_deref() else {
+                return WslDaemonRefreshResult {
+                    operation_id,
+                    status: WslDaemonRefreshStatus::Failed,
+                    daemon: WslManagedDaemonStatus::Unsafe,
+                    before: None,
+                    after: None,
+                    message_id: "wsl.daemon_refresh.unsafe".to_owned(),
+                };
+            };
+            if !environment.running {
+                return unavailable();
+            }
+            let inspect = |action: &str| -> Result<Option<WslDaemonIdentity>, &'static str> {
+                let output = run_wsl_raw_with(
+                    &self.program,
+                    &[
+                        "--distribution",
+                        name,
+                        "--exec",
+                        "/bin/bash",
+                        "-lic",
+                        WSL_GUEST_EXEC_SCRIPT,
+                        "gpteasy",
+                        WSL_DAEMON_REFRESH_SCRIPT,
+                        action,
+                    ],
+                    None,
+                )
+                .map_err(|_| "wsl.daemon_refresh.inspect_failed")?;
+                if output.status.code() == Some(44) {
+                    return Ok(None);
+                }
+                if output.status.code() == Some(46) {
+                    return Err("wsl.daemon_refresh.unsafe");
+                }
+                if !output.status.success() {
+                    return Err("wsl.daemon_refresh.inspect_failed");
+                }
+                // Login shells may print profile noise. Parse only a complete JSON object and
+                // never expose the raw guest response to the result or issue log.
+                let value = output
+                    .stdout
+                    .split(|byte| *byte == b'\n')
+                    .rev()
+                    .find_map(|line| serde_json::from_slice::<serde_json::Value>(line).ok())
+                    .ok_or("wsl.daemon_refresh.protocol_incompatible")?;
+                if value.get("status").and_then(|v| v.as_str()) != Some("running") {
+                    return Ok(None);
+                }
+                let pid = value.get("pid").and_then(|v| v.as_u64());
+                let version = value.get("appServerVersion").and_then(|v| v.as_str());
+                let cli_version = value.get("cliVersion").and_then(|v| v.as_str());
+                if pid.is_some_and(|pid| pid > u32::MAX as u64)
+                    || version.is_some_and(|value| {
+                        value.len() > 128 || value.chars().any(char::is_control)
+                    })
+                    || cli_version.is_some_and(|value| {
+                        value.len() > 128 || value.chars().any(char::is_control)
+                    })
+                {
+                    return Err("wsl.daemon_refresh.protocol_incompatible");
+                }
+                Ok(Some(WslDaemonIdentity {
+                    pid: pid.map(|value| value as u32),
+                    version: version.map(str::to_owned),
+                    cli_version: cli_version.map(str::to_owned),
+                }))
+            };
+            let before = match inspect("version") {
+                Ok(Some(identity)) => identity,
+                Ok(None) => {
+                    return WslDaemonRefreshResult {
+                        operation_id,
+                        status: WslDaemonRefreshStatus::NotRunning,
+                        daemon: WslManagedDaemonStatus::Managed,
+                        before: None,
+                        after: None,
+                        message_id: "wsl.daemon_refresh.not_running".to_owned(),
+                    };
+                }
+                Err(message_id) => {
+                    return WslDaemonRefreshResult {
+                        operation_id,
+                        status: WslDaemonRefreshStatus::Failed,
+                        daemon: WslManagedDaemonStatus::Unsafe,
+                        before: None,
+                        after: None,
+                        message_id: message_id.to_owned(),
+                    };
+                }
+            };
+            let restart = run_wsl_raw_with(
+                &self.program,
+                &[
+                    "--distribution",
+                    name,
+                    "--exec",
+                    "/bin/bash",
+                    "-lic",
+                    WSL_GUEST_EXEC_SCRIPT,
+                    "gpteasy",
+                    WSL_DAEMON_REFRESH_SCRIPT,
+                    "restart",
+                ],
+                None,
+            );
+            if restart.is_err() || !restart.as_ref().is_ok_and(|output| output.status.success()) {
+                return WslDaemonRefreshResult {
+                    operation_id,
+                    status: WslDaemonRefreshStatus::Failed,
+                    daemon: WslManagedDaemonStatus::Managed,
+                    before: Some(before),
+                    after: None,
+                    message_id: "wsl.daemon_refresh.restart_failed".to_owned(),
+                };
+            }
+            let deadline = Instant::now() + WSL_DAEMON_READY_TIMEOUT;
+            loop {
+                match inspect("version") {
+                    Ok(Some(after)) => {
+                        return WslDaemonRefreshResult {
+                            operation_id,
+                            status: WslDaemonRefreshStatus::Refreshed,
+                            daemon: WslManagedDaemonStatus::Managed,
+                            before: Some(before),
+                            after: Some(after),
+                            message_id: "wsl.daemon_refresh.refreshed".to_owned(),
+                        };
+                    }
+                    Ok(None) if Instant::now() < deadline => {
+                        thread::sleep(WSL_DAEMON_READY_POLL_INTERVAL);
+                    }
+                    Ok(None) => {
+                        return WslDaemonRefreshResult {
+                            operation_id,
+                            status: WslDaemonRefreshStatus::Failed,
+                            daemon: WslManagedDaemonStatus::Managed,
+                            before: Some(before),
+                            after: None,
+                            message_id: "wsl.daemon_refresh.ready_timeout".to_owned(),
+                        };
+                    }
+                    Err(message_id) => {
+                        return WslDaemonRefreshResult {
+                            operation_id,
+                            status: WslDaemonRefreshStatus::Failed,
+                            daemon: WslManagedDaemonStatus::Unsafe,
+                            before: Some(before),
+                            after: None,
+                            message_id: message_id.to_owned(),
+                        };
+                    }
+                }
+            }
         }
     }
 }
@@ -3739,6 +4153,10 @@ mod tests {
         lifecycle_waits: AtomicUsize,
         waited_after_lock_release: AtomicBool,
         credential_cleanups: AtomicUsize,
+        daemon_refresh_calls: AtomicUsize,
+        daemon_refresh_after_lock_release: AtomicBool,
+        daemon_refresh_result: Mutex<WslDaemonRefreshResult>,
+        model_metadata: Mutex<Option<CodexMetadataSnapshot>>,
     }
 
     impl FakeRuntime {
@@ -3767,6 +4185,17 @@ mod tests {
                 lifecycle_waits: AtomicUsize::new(0),
                 waited_after_lock_release: AtomicBool::new(false),
                 credential_cleanups: AtomicUsize::new(0),
+                model_metadata: Mutex::new(None),
+                daemon_refresh_calls: AtomicUsize::new(0),
+                daemon_refresh_after_lock_release: AtomicBool::new(false),
+                daemon_refresh_result: Mutex::new(WslDaemonRefreshResult {
+                    operation_id: "fake-daemon-operation".to_owned(),
+                    status: WslDaemonRefreshStatus::NotRunning,
+                    daemon: WslManagedDaemonStatus::Unavailable,
+                    before: None,
+                    after: None,
+                    message_id: "wsl.daemon_refresh.not_running".to_owned(),
+                }),
             }
         }
     }
@@ -3931,24 +4360,46 @@ mod tests {
             _environment: &WslProbe,
             _lock_token: &str,
             _old_config_hash: &str,
+            _old_catalog_hash: &str,
             bundle: &[u8],
         ) -> Result<String, WslFailure> {
             self.writes.fetch_add(1, Ordering::SeqCst);
             if let Some(failure) = self.write_failure.lock().expect("write failure").clone() {
                 return Err(failure);
             }
-            let (config, credentials) = decode_test_bundle(bundle);
+            let (config, credentials, model_catalog) = decode_test_bundle(bundle);
             *self.artifacts.lock().expect("artifacts") = WslArtifacts {
                 config: Some(config),
                 credentials: Some(credentials),
+                model_catalog: Some(model_catalog),
             };
             Ok(format!(
                 "{{\"status\":\"written\",\"helper\":\"{HELPER_VERSION}\"}}"
             ))
         }
+
+        fn probe_model_metadata(
+            &self,
+            _environment: &WslProbe,
+            _models: &[String],
+        ) -> Option<CodexMetadataSnapshot> {
+            self.model_metadata.lock().expect("model metadata").clone()
+        }
+
+        fn refresh_managed_daemon(&self, _environment: &WslProbe) -> WslDaemonRefreshResult {
+            self.daemon_refresh_calls.fetch_add(1, Ordering::SeqCst);
+            self.daemon_refresh_after_lock_release.store(
+                self.active_locks.lock().expect("active locks").is_empty(),
+                Ordering::SeqCst,
+            );
+            self.daemon_refresh_result
+                .lock()
+                .expect("daemon refresh result")
+                .clone()
+        }
     }
 
-    fn decode_test_bundle(bundle: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    fn decode_test_bundle(bundle: &[u8]) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
         let mut newlines = bundle
             .iter()
             .enumerate()
@@ -3956,6 +4407,7 @@ mod tests {
         let first = newlines.next().expect("magic line");
         let second = newlines.next().expect("config length line");
         let third = newlines.next().expect("credentials length line");
+        let fourth = newlines.next().expect("catalog length line");
         assert_eq!(&bundle[..first], BUNDLE_MAGIC.as_bytes());
         let config_length = std::str::from_utf8(&bundle[first + 1..second])
             .expect("config length utf8")
@@ -3965,11 +4417,17 @@ mod tests {
             .expect("credentials length utf8")
             .parse::<usize>()
             .expect("credentials length");
-        let config_end = third + 1 + config_length;
+        let catalog_length = std::str::from_utf8(&bundle[third + 1..fourth])
+            .expect("catalog length utf8")
+            .parse::<usize>()
+            .expect("catalog length");
+        let config_end = fourth + 1 + config_length;
         let credentials_end = config_end + credentials_length;
+        let catalog_end = credentials_end + catalog_length;
         (
-            bundle[third + 1..config_end].to_vec(),
+            bundle[fourth + 1..config_end].to_vec(),
             bundle[config_end..credentials_end].to_vec(),
+            bundle[credentials_end..catalog_end].to_vec(),
         )
     }
 
@@ -4012,8 +4470,212 @@ mod tests {
         (temp, store, application)
     }
 
+    #[test]
+    fn wsl_catalog_decoder_requires_its_own_fingerprint_and_valid_json() {
+        assert_eq!(
+            decode_wsl_model_catalog(Some("expected"), Some("[]"), "expected"),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            decode_wsl_model_catalog(Some("expected"), Some("not-json"), "expected"),
+            None
+        );
+        assert_eq!(
+            decode_wsl_model_catalog(Some("stored"), Some(r#"["model-a"]"#), "expected"),
+            None
+        );
+        assert_eq!(
+            decode_wsl_model_catalog(None, Some(r#"["model-a"]"#), "expected"),
+            None
+        );
+    }
+
+    #[test]
+    fn wsl_apply_does_not_inherit_native_reasoning_snapshot() {
+        let provider_id = "22222222-2222-4222-8222-222222222222";
+        let mut running_probe = probe();
+        running_probe.running = true;
+        let runtime = Arc::new(FakeRuntime::new(
+            running_probe,
+            WslArtifacts {
+                config: None,
+                credentials: None,
+                model_catalog: None,
+            },
+        ));
+        let (_temp, store, application) = application(runtime.clone());
+        let fingerprint = crate::provider::combination_fingerprint(
+            "https://provider.example/v1",
+            "secret",
+            "model-a",
+        );
+        let native_snapshot = serde_json::json!({
+            "schemaVersion": 1,
+            "targetEnvironment": "native",
+            "codexVersion": "0.160.1",
+            "executableFingerprint": "sha256:test",
+            "observedAtEpochSeconds": 1,
+            "status": "complete",
+            "models": [{
+                "modelId": "model-a",
+                "state": "known_non_empty",
+                "defaultReasoningEffort": "high",
+                "supportedReasoningEfforts": ["low", "medium", "high"],
+                "source": "codex_builtin",
+                "sourceId": "codex.model/list"
+            }]
+        });
+        let connection = Connection::open(store.paths().database()).expect("state database");
+        connection
+            .execute(
+                "UPDATE providers SET verification_fingerprint = ?1 WHERE id = ?2",
+                params![fingerprint.as_str(), provider_id],
+            )
+            .expect("provider fingerprint");
+        connection
+            .execute(
+                "INSERT INTO provider_model_catalog(
+                    provider_id, verification_fingerprint, models_json, capability_snapshot_json
+                 ) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    provider_id,
+                    fingerprint.as_str(),
+                    r#"["model-a","provider-only"]"#,
+                    native_snapshot.to_string(),
+                ],
+            )
+            .expect("catalog");
+
+        let environment = application.list().expect("list WSL").remove(0);
+        let applied = application
+            .apply_provider(
+                &environment.environment_id,
+                provider_id,
+                &environment.revision,
+                true,
+            )
+            .expect("apply WSL provider");
+        assert_eq!(
+            applied.environment.configuration_state,
+            WslConfigurationState::Current
+        );
+        assert_eq!(runtime.starts.load(Ordering::SeqCst), 0);
+
+        let artifacts = runtime.artifacts.lock().expect("artifacts").clone();
+        let catalog: serde_json::Value =
+            serde_json::from_slice(artifacts.model_catalog.as_deref().expect("model catalog"))
+                .expect("catalog json");
+        for model_id in ["model-a", "provider-only"] {
+            let model = catalog["models"]
+                .as_array()
+                .expect("models")
+                .iter()
+                .find(|model| model["slug"] == model_id)
+                .expect("model entry");
+            assert!(model["default_reasoning_level"].is_null());
+            assert!(
+                model["supported_reasoning_levels"]
+                    .as_array()
+                    .expect("levels")
+                    .is_empty()
+            );
+            assert_eq!(model["description"], "供应商已发现模型，能力未识别");
+        }
+    }
+
+    #[test]
+    fn wsl_dayway_ds_selector_uses_guest_metadata_and_keeps_other_models_unknown() {
+        for target in ["wsl", "native"] {
+            let provider_id = "22222222-2222-4222-8222-222222222222";
+            let mut guest = probe();
+            guest.running = true;
+            let runtime = Arc::new(FakeRuntime::new(
+                guest,
+                WslArtifacts {
+                    config: None,
+                    credentials: None,
+                    model_catalog: None,
+                },
+            ));
+            let (_temp, store, application) = application(runtime.clone());
+            let ids = [
+                "deepseek-v4-pro",
+                "deepseek-v4-flash",
+                "deepseek-v4-pro-preview",
+            ];
+            let fingerprint = crate::provider::combination_fingerprint(
+                "https://provider.example/v1",
+                "secret",
+                ids[0],
+            );
+            let connection = Connection::open(store.paths().database()).expect("db");
+            connection.execute("UPDATE providers SET name = 'DayWay-DS', default_model = ?1, verification_fingerprint = ?2 WHERE id = ?3",
+                params![ids[0], fingerprint, provider_id]).expect("provider");
+            connection.execute("INSERT INTO provider_model_catalog(provider_id, verification_fingerprint, models_json) VALUES (?1, ?2, ?3)",
+                params![provider_id, fingerprint, serde_json::json!(ids).to_string()]).expect("catalog");
+            *runtime.model_metadata.lock().expect("metadata") = Some(serde_json::from_value(serde_json::json!({
+                "schemaVersion": 1, "targetEnvironment": target, "codexVersion": "0.160.1",
+                "executableFingerprint": null, "observedAtEpochSeconds": 1, "status": "complete",
+                "models": ids.iter().map(|id| serde_json::json!({
+                    "modelId": id, "state": "not_found", "defaultReasoningEffort": null,
+                    "supportedReasoningEfforts": [], "source": "codex_builtin", "sourceId": "codex.model/list"
+                })).collect::<Vec<_>>()
+            })).expect("snapshot"));
+            let environment = application.list().expect("list").remove(0);
+            let applied = application
+                .apply_provider(
+                    &environment.environment_id,
+                    provider_id,
+                    &environment.revision,
+                    true,
+                )
+                .expect("apply");
+            let artifacts = runtime.artifacts.lock().expect("artifacts");
+            let config =
+                String::from_utf8(artifacts.config.clone().expect("config")).expect("utf8");
+            assert!(config.contains("model_reasoning_effort = \"high\""));
+            let catalog: serde_json::Value =
+                serde_json::from_slice(artifacts.model_catalog.as_deref().expect("catalog"))
+                    .expect("json");
+            for model in catalog["models"].as_array().expect("models") {
+                let expected = if target == "wsl" && model["slug"] != ids[2] {
+                    3
+                } else {
+                    0
+                };
+                assert_eq!(
+                    model["supported_reasoning_levels"]
+                        .as_array()
+                        .expect("levels")
+                        .len(),
+                    expected
+                );
+            }
+            let details = reasoning::audit_details(
+                applied.reasoning_audit.as_ref(),
+                "reasoning_metadata.render",
+                "applied",
+                Some(true),
+            );
+            if target == "wsl" {
+                assert!(details.contains("capability_source=vendor_compatibility"));
+                assert!(details.contains("vendor_fallback=enabled"));
+            }
+            for secret in [
+                "secret",
+                "DayWay-DS",
+                ids[0],
+                provider_id,
+                "https://provider.example/v1",
+            ] {
+                assert!(!details.contains(secret));
+            }
+        }
+    }
+
     fn provider(id: &str) -> WslProvider {
         WslProvider {
+            discovered_models: Vec::new(),
             id: id.to_owned(),
             name: "Example".to_owned(),
             base_url: "https://provider.example/v1".to_owned(),
@@ -4060,6 +4722,7 @@ model_providers.gpteasy.auth.command = \"sh\"\n\
                     .to_vec(),
                 ),
                 credentials: Some(b"secret".to_vec()),
+                model_catalog: None,
             },
         ));
         let (_temp, _store, application) = application(runtime);
@@ -4137,6 +4800,7 @@ model_providers.gpteasy.auth.command = \"sh\"\n\
             WslArtifacts {
                 config: Some(historical),
                 credentials: Some(b"old-secret".to_vec()),
+                model_catalog: None,
             },
         ));
         let (_temp, store, application) = application(runtime.clone());
@@ -4190,6 +4854,7 @@ model_providers.gpteasy.auth.command = \"sh\"\n\
             WslArtifacts {
                 config: Some(schema_v1_config(provider_id, "shell-export")),
                 credentials: Some(b"secret".to_vec()),
+                model_catalog: None,
             },
         ));
         let (_temp, _store, application) = application(runtime);
@@ -4215,6 +4880,7 @@ model_providers.gpteasy.auth.command = \"sh\"\n\
             WslArtifacts {
                 config: Some(b"custom = true\nmodel_reasoning_effort = \"low\"\n".to_vec()),
                 credentials: None,
+                model_catalog: None,
             },
         ));
         let (_temp, _store, application) = application(runtime.clone());
@@ -4255,6 +4921,7 @@ model_providers.gpteasy.auth.command = \"sh\"\n\
             WslArtifacts {
                 config: Some(b"custom = true\nmodel_reasoning_effort = \"low\"\n".to_vec()),
                 credentials: None,
+                model_catalog: None,
             },
         ));
         let (_temp, _store, application) =
@@ -4287,6 +4954,7 @@ model_providers.gpteasy.auth.command = \"sh\"\n\
             WslArtifacts {
                 config: Some(schema_v1_config(provider_id, "shell-export")),
                 credentials: Some(b"secret".to_vec()),
+                model_catalog: None,
             },
         ));
         let (_temp, store, application) = application(runtime.clone());
@@ -4309,6 +4977,7 @@ model_providers.gpteasy.auth.command = \"sh\"\n\
             WslArtifacts {
                 config: None,
                 credentials: None,
+                model_catalog: None,
             },
         ));
         runtime.lock_busy.store(true, Ordering::SeqCst);
@@ -4334,6 +5003,7 @@ model_providers.gpteasy.auth.command = \"sh\"\n\
             WslArtifacts {
                 config: Some(schema_v1_config(provider_id, "shell-export")),
                 credentials: Some(b"secret".to_vec()),
+                model_catalog: None,
             },
         ));
         let (_temp, store, _) = application(runtime.clone());
@@ -4397,6 +5067,7 @@ model_providers.gpteasy.auth.command = \"sh\"\n\
             WslArtifacts {
                 config: Some(b"custom = true\n".to_vec()),
                 credentials: None,
+                model_catalog: None,
             },
         ));
         let (_temp, store, application) = application(runtime.clone());
@@ -4452,6 +5123,7 @@ model_providers.gpteasy.auth.command = \"sh\"\n\
                 WslArtifacts {
                     config: Some(schema_v1_config(provider_id, "shell-export")),
                     credentials: Some(b"secret".to_vec()),
+                    model_catalog: None,
                 },
             ));
             let (temp, store, _) = application(runtime.clone());
@@ -4508,6 +5180,7 @@ model_providers.gpteasy.auth.command = \"sh\"\n\
             WslArtifacts {
                 config: Some(schema_v1_config(provider_id, "shell-export")),
                 credentials: Some(b"secret".to_vec()),
+                model_catalog: None,
             },
         ));
         let (_temp, store, application) = application(runtime.clone());
@@ -4573,6 +5246,7 @@ model_providers.gpteasy.auth.command = \"sh\"\n\
             WslArtifacts {
                 config: Some(schema_v1_config(provider_id, "shell-export")),
                 credentials: Some(b"secret".to_vec()),
+                model_catalog: None,
             },
         ));
         let (_temp, _store, application) = application(runtime.clone());
@@ -4587,6 +5261,7 @@ model_providers.gpteasy.auth.command = \"sh\"\n\
         *runtime.artifacts.lock().expect("artifacts") = WslArtifacts {
             config: Some(updated_config),
             credentials: Some(b"old-secret".to_vec()),
+            model_catalog: None,
         };
         let updated = application.list().expect("updated").remove(0);
         assert_eq!(updated.configuration_state, WslConfigurationState::Updated);
@@ -4608,6 +5283,7 @@ model_providers.{provider_id}.requires_openai_auth = true\n\
                 .into_bytes(),
             ),
             credentials: None,
+            model_catalog: None,
         };
         let legacy = application.list().expect("legacy").remove(0);
         assert_eq!(legacy.configuration_state, WslConfigurationState::Legacy);
@@ -4616,6 +5292,7 @@ model_providers.{provider_id}.requires_openai_auth = true\n\
         *runtime.artifacts.lock().expect("artifacts") = WslArtifacts {
             config: Some(schema_v1_config(missing_id, "old-export")),
             credentials: Some(b"retired-secret".to_vec()),
+            model_catalog: None,
         };
         let missing = application.list().expect("missing provider").remove(0);
         assert_eq!(
@@ -4632,6 +5309,7 @@ model_providers.{provider_id}.requires_openai_auth = true\n\
         *runtime.artifacts.lock().expect("artifacts") = WslArtifacts {
             config: Some(conflict_config),
             credentials: Some(b"secret".to_vec()),
+            model_catalog: None,
         };
         let conflict = application.list().expect("conflict").remove(0);
         assert_eq!(
@@ -4713,6 +5391,7 @@ model_providers.{provider_id}.requires_openai_auth = true\n\
             WslArtifacts {
                 config: Some(schema_v1_config(provider_id, "shell-export")),
                 credentials: Some(b"secret".to_vec()),
+                model_catalog: None,
             },
         ));
         *runtime.read_failure.lock().expect("read failure") = Some(WslFailure::new(
@@ -4744,6 +5423,7 @@ model_providers.{provider_id}.requires_openai_auth = true\n\
             WslArtifacts {
                 config: Some(schema_v1_config(provider_id, "shell-export")),
                 credentials: Some(b"secret".to_vec()),
+                model_catalog: None,
             },
         ));
         let (_temp, store, application) = application(runtime.clone());
@@ -4792,6 +5472,7 @@ model_providers.{provider_id}.requires_openai_auth = true\n\
             WslArtifacts {
                 config: Some(unknown_schema.clone()),
                 credentials: Some(b"secret".to_vec()),
+                model_catalog: None,
             },
         ));
         let (_temp, _store, application) = application(runtime.clone());
@@ -4825,6 +5506,7 @@ model_providers.{provider_id}.requires_openai_auth = true\n\
         let original = WslArtifacts {
             config: Some(b"custom = true\n".to_vec()),
             credentials: Some(b"old-secret".to_vec()),
+            model_catalog: None,
         };
         let runtime = Arc::new(FakeRuntime::new(probe(), original.clone()));
         let (_temp, store, application) = application(runtime.clone());
@@ -4885,6 +5567,7 @@ model_providers.{provider_id}.requires_openai_auth = true\n\
             WslArtifacts {
                 config: Some(b"custom = true\n".to_vec()),
                 credentials: None,
+                model_catalog: None,
             },
         ));
         let (_temp, store, application) = application(runtime.clone());
@@ -4948,6 +5631,7 @@ model_providers.{provider_id}.requires_openai_auth = true\n\
             WslArtifacts {
                 config: Some(unknown_schema.clone()),
                 credentials: Some(b"old-secret".to_vec()),
+                model_catalog: None,
             },
         ));
         let (_temp, store, application) = application(runtime.clone());
@@ -5060,6 +5744,7 @@ model_providers.{provider_id}.requires_openai_auth = true\n\
             WslArtifacts {
                 config: Some(broken),
                 credentials: None,
+                model_catalog: None,
             },
         ));
         let (_temp, _store, application) = application(runtime.clone());
@@ -5111,6 +5796,7 @@ model_providers.{provider_id}.requires_openai_auth = true\n\
         let original = WslArtifacts {
             config: Some(unknown_schema),
             credentials: Some(b"old-secret".to_vec()),
+            model_catalog: None,
         };
         let runtime = Arc::new(FakeRuntime::new(running_probe, original.clone()));
         *runtime.write_failure.lock().expect("write failure") = Some(WslFailure::new(
@@ -5158,7 +5844,7 @@ model_providers.{provider_id}.requires_openai_auth = true\n\
 
     #[test]
     fn bundle_has_unambiguous_lengths_and_no_secret_in_header() {
-        let bundle = bundle_bytes(b"config\n", br#"{"OPENAI_API_KEY":"secret"}"#);
+        let bundle = bundle_bytes(b"config\n", br#"{"OPENAI_API_KEY":"secret"}"#, b"{}");
         let header_end = bundle.iter().position(|byte| *byte == b'\n').unwrap() + 1;
         let header_end = bundle[header_end..]
             .iter()
@@ -5380,6 +6066,7 @@ status_line = ["current-dir"]
             WslArtifacts {
                 config: Some(b"custom = true\n".to_vec()),
                 credentials: None,
+                model_catalog: None,
             },
         ));
         let (_temp, store, application) = application(runtime.clone());
@@ -5435,6 +6122,7 @@ status_line = ["current-dir"]
             WslArtifacts {
                 config: Some(schema_v1_config(provider_id, "shell-export")),
                 credentials: Some(b"secret".to_vec()),
+                model_catalog: None,
             },
         ));
         let (_temp, _store, application) = application(runtime.clone());
@@ -5478,6 +6166,7 @@ status_line = ["current-dir"]
             WslArtifacts {
                 config: Some(schema_v1_config(provider_id, "shell-export")),
                 credentials: Some(b"secret".to_vec()),
+                model_catalog: None,
             },
         ));
         let mut running_probe = probe();
@@ -5530,6 +6219,7 @@ status_line = ["current-dir"]
                     "shell-export",
                 )),
                 credentials: Some(b"secret".to_vec()),
+                model_catalog: None,
             },
         ));
         let (_temp, _store, application) = application(runtime.clone());
@@ -5570,6 +6260,7 @@ status_line = ["current-dir"]
             WslArtifacts {
                 config: None,
                 credentials: None,
+                model_catalog: None,
             },
         ));
         runtime.fail_lock_release.store(true, Ordering::SeqCst);
@@ -5590,6 +6281,7 @@ status_line = ["current-dir"]
             WslArtifacts {
                 config: None,
                 credentials: None,
+                model_catalog: None,
             },
         ));
         let (_temp, _store, application) = application(runtime);
@@ -5626,6 +6318,7 @@ status_line = ["current-dir"]
             WslArtifacts {
                 config: Some(schema_v1_config(provider_id, "old-export")),
                 credentials: Some(b"secret".to_vec()),
+                model_catalog: None,
             },
         ));
         let (_temp, _store, application) = application(runtime.clone());
@@ -5650,6 +6343,7 @@ status_line = ["current-dir"]
             WslArtifacts {
                 config: Some(b"custom = true\n".to_vec()),
                 credentials: None,
+                model_catalog: None,
             },
         ));
         let (_temp, _store, application) = application(runtime.clone());
@@ -5681,6 +6375,7 @@ status_line = ["current-dir"]
             WslArtifacts {
                 config: Some(b"custom = true\n".to_vec()),
                 credentials: None,
+                model_catalog: None,
             },
         ));
         let (_temp, _store, application) = application(runtime.clone());
@@ -5710,6 +6405,7 @@ status_line = ["current-dir"]
             WslArtifacts {
                 config: None,
                 credentials: None,
+                model_catalog: None,
             },
         ));
         let (_temp, _store, application) = application(runtime.clone());
@@ -5732,6 +6428,7 @@ status_line = ["current-dir"]
             WslArtifacts {
                 config: None,
                 credentials: None,
+                model_catalog: None,
             },
         ));
         let (_temp, _store, application) = application(runtime.clone());
@@ -5756,6 +6453,7 @@ status_line = ["current-dir"]
             WslArtifacts {
                 config: Some(target_config.clone()),
                 credentials: Some(target_credentials.clone()),
+                model_catalog: None,
             },
         ));
         let (_temp, store, application) = application(runtime.clone());

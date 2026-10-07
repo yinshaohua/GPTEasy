@@ -2,6 +2,7 @@ mod catalog;
 mod linux_export;
 pub(crate) mod model_catalog;
 pub(crate) mod reasoning;
+pub(crate) mod reasoning_capability;
 mod validation;
 
 pub use linux_export::{
@@ -937,10 +938,13 @@ impl ProviderApplication {
             records
                 .into_iter()
                 .map(|record| {
-                    reasoning::ReasoningAuditContext::new(
-                        record.summary.id,
+                    reasoning::ReasoningAuditContext::for_provider_environment(
+                        "linux_export",
+                        record.summary.id.clone(),
+                        Some(&record.summary.name),
                         record.summary.base_url,
                         record.summary.default_model,
+                        record.capability_snapshot.as_ref(),
                     )
                 })
                 .collect()

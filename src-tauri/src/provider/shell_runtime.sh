@@ -56,6 +56,14 @@ gpteasy__provider_reasoning_effort() {
 gpteasy__print_credential() {
     gpteasy__provider_value "$1" credential
 }
+
+gpteasy__provider_catalog_json() {
+    gpteasy__provider_model_catalog "$1"
+}
+
+gpteasy__json_escape() {
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
 {{GPTEASY_SHELL_SETUP}}
 
 gpteasy__help() {
@@ -126,6 +134,45 @@ gpteasy__check_codex_compatibility() {
     gpteasy__codex_cli_state=ready
 }
 
+gpteasy__restart_daemon_best_effort() {
+    local result deadline_seconds
+    # Configuration is committed and the lock released before this best-effort step.
+    # Never leave the caller waiting indefinitely, or expose raw CLI diagnostics.
+    if [[ "${gpteasy__codex_cli_state:-missing}" == missing ]]; then
+        return 0
+    fi
+    if ! command -v timeout >/dev/null 2>&1; then
+        printf '%s\n' '[gpteasy daemon-refresh] stage=restart result=skipped_no_timeout' >&2
+        printf '%s\n' '警告：配置已生效，但缺少 timeout，已跳过 Codex 服务刷新，避免切换阻塞。' >&2
+        return 0
+    fi
+    # Codex's managed daemon may spend up to 60 seconds draining active work before
+    # it starts again. Keep a test-only override so the shell regression stays fast.
+    deadline_seconds=${GPTEASY_TEST_DAEMON_REFRESH_DEADLINE_SECONDS:-75}
+    case "$deadline_seconds" in
+        ''|*[!0-9]*|0) deadline_seconds=75 ;;
+    esac
+    printf '[gpteasy daemon-refresh] stage=restart result=started deadline_seconds=%s\n' "$deadline_seconds" >&2
+    # Keep a separate process group so the deadline also terminates descendants.
+    # Disconnect stdin: daemon control must not consume the user's terminal input.
+    if command timeout --kill-after=5s "${deadline_seconds}s" codex app-server daemon restart </dev/null >/dev/null 2>&1; then
+        printf '%s\n' '[gpteasy daemon-refresh] stage=restart result=command_completed' >&2
+    else
+        result=$?
+        case "$result" in
+            124 | 137)
+                printf '%s\n' '[gpteasy daemon-refresh] stage=restart result=timeout' >&2
+                printf '%s\n' '警告：配置已生效，但 Codex 服务刷新超时，已停止等待。若 Codex 提示 Server is draining，请检查服务状态后重试，或切回原供应商。' >&2
+                ;;
+            *)
+                printf '[gpteasy daemon-refresh] stage=restart result=command_failed exit_code=%s\n' "$result" >&2
+                printf '%s\n' '警告：配置已生效，但 Codex 服务刷新失败，请在 Linux 环境检查服务状态后重试。' >&2
+                ;;
+        esac
+    fi
+    return 0
+}
+
 gpteasy__current_uid() {
     id -u
 }
@@ -148,18 +195,18 @@ gpteasy__directory_is_owned() {
 }
 
 gpteasy__warn_if_permissions_are_broad() {
-    local path=$1 mode
-    mode=$(stat -c '%a' -- "$path" 2>/dev/null) || return
+    local target_path=$1 mode
+    mode=$(stat -c '%a' -- "$target_path" 2>/dev/null) || return
     if (( (8#$mode & 8#77) != 0 )); then
         gpteasy__permission_warning=1
     fi
 }
 
 gpteasy__report_identity_mismatch() {
-    local path=$1 owner sudo_user=${SUDO_USER:-}
-    owner=$(stat -c '%u' -- "$path" 2>/dev/null) || return
+    local target_path=$1 owner sudo_user=${SUDO_USER:-}
+    owner=$(stat -c '%u' -- "$target_path" 2>/dev/null) || return
     printf '目标环境身份不匹配：当前用户 %s（uid=%s）不能管理 %s（所有者 %s）。请以该所有者身份执行；例如 sudo -u <用户> -H。' \
-        "$(id -un)" "$(gpteasy__current_uid)" "$path" "$(gpteasy__owner_label "$owner")" >&2
+        "$(id -un)" "$(gpteasy__current_uid)" "$target_path" "$(gpteasy__owner_label "$owner")" >&2
     if [[ -n "$sudo_user" ]]; then
         printf ' 检测到 SUDO_USER=%s；sudo 可能正在为错误的用户环境写入。' "$sudo_user" >&2
     fi
@@ -487,6 +534,7 @@ gpteasy__schema_v1_is_valid() {
         index(line, source) == 1 { source_count += 1; next }
         index(line, credential) == 1 { credential_count += 1; next }
         index(line, "model = ") == 1 { model_count += 1; next }
+        line == "model_catalog_json = \"gpteasy-model-catalog.json\"" { catalog_count += 1; next }
         index(line, "model_reasoning_effort = ") == 1 {
             value = line
             sub(/^model_reasoning_effort = "/, "", value)
@@ -505,7 +553,7 @@ gpteasy__schema_v1_is_valid() {
         { invalid = 1 }
         END {
             valid = !invalid && schema_count == 1 && provider_count == 1 && source_count == 1 &&
-                credential_count == 1 && model_count == 1 && reasoning_count <= 1 &&
+                credential_count == 1 && model_count == 1 && catalog_count == 1 && reasoning_count <= 1 &&
                 model_provider_count == 1 &&
                 name_count == 1 && base_url_count == 1 && wire_count == 1 && websocket_count == 1 &&
                 auth_command_count == 1 && auth_args_count == 1
@@ -648,7 +696,7 @@ gpteasy__current_state() {
 }
 
 gpteasy__prepare_candidate() {
-    local provider_id=$1 target_dir=${gpteasy__config_target%/*} block
+    local provider_id=$1 target_dir=${gpteasy__config_target%/*} block catalog
     block=$(mktemp "$target_dir/.gpteasy-block.XXXXXX") || return
     gpteasy__candidate=$(mktemp "$target_dir/.config.toml.gpteasy.XXXXXX") || {
         rm -f -- "$block"
@@ -658,6 +706,14 @@ gpteasy__prepare_candidate() {
         rm -f -- "$block" "$gpteasy__candidate"
         return 1
     fi
+    gpteasy__catalog_target="$target_dir/gpteasy-model-catalog.json"
+    gpteasy__catalog_original_hash=$(gpteasy__file_hash "$gpteasy__catalog_target") || return 1
+    gpteasy__catalog_candidate=$(mktemp "$target_dir/.catalog.gpteasy.XXXXXX") || return 1
+    catalog=$(gpteasy__provider_catalog_json "$provider_id") || return 1
+    printf '%s\n' "$catalog" >"$gpteasy__catalog_candidate" || return 1
+    chmod 600 "$gpteasy__catalog_candidate"
+    sync -f "$gpteasy__catalog_candidate" || return 1
+    gpteasy__catalog_candidate_hash=$(gpteasy__file_hash "$gpteasy__catalog_candidate") || return 1
     cat -- "$block" >"$gpteasy__candidate" || return
     rm -f -- "$block"
     if [[ -f "$gpteasy__config_target" ]]; then
@@ -685,13 +741,21 @@ gpteasy__create_restore_point() {
         printf '%s' "$gpteasy__config_link_value" >"$gpteasy__restore_point/symlink-target" || return
         chmod 600 "$gpteasy__restore_point/symlink-target" || return
     fi
+    if [[ -f "${gpteasy__catalog_target:-}" ]]; then
+        cat -- "$gpteasy__catalog_target" >"$gpteasy__restore_point/model-catalog.json" || return
+        chmod 600 "$gpteasy__restore_point/model-catalog.json" || return
+        sync -f "$gpteasy__restore_point/model-catalog.json" || return
+    else
+        printf '%s\n' missing >"$gpteasy__restore_point/model-catalog.missing" || return
+        chmod 600 "$gpteasy__restore_point/model-catalog.missing" || return
+    fi
     chmod 600 "$gpteasy__restore_point/config-kind" || return
 }
 
 gpteasy__discard_restore_point() {
     local point=${1:-${gpteasy__restore_point:-}}
     [[ -n "$point" && "$point" == "$gpteasy__restore_root/"* && -d "$point" && ! -L "$point" ]] || return 1
-    rm -f -- "$point/config.toml" "$point/config-kind" "$point/symlink-target" || return
+    rm -f -- "$point/config.toml" "$point/config-kind" "$point/symlink-target" "$point/model-catalog.json" "$point/model-catalog.missing" || return
     rmdir -- "$point"
 }
 
@@ -847,6 +911,7 @@ gpteasy__cleanup_credentials() {
 
 gpteasy__cleanup_failed_apply() {
     rm -f -- "${gpteasy__candidate:-}" 2>/dev/null || true
+    rm -f -- "${gpteasy__catalog_candidate:-}" 2>/dev/null || true
     if [[ "${gpteasy__credential_created:-0}" -eq 1 && -n "${gpteasy__credential_path:-}" ]]; then
         rm -f -- "$gpteasy__credential_path" 2>/dev/null || true
     fi
@@ -856,11 +921,12 @@ gpteasy__cleanup_failed_apply() {
 }
 
 gpteasy__apply_provider_locked() {
-    local provider_id=$1 target_dir
+    local provider_id=$1 target_dir catalog_target
     gpteasy__candidate=
     gpteasy__restore_point=
     gpteasy__credential_created=0
     gpteasy__credential_path=
+    gpteasy__catalog_candidate=
     gpteasy__resolve_config_target || return
     gpteasy__prepare_candidate "$provider_id" || {
         gpteasy__cleanup_failed_apply
@@ -879,13 +945,29 @@ gpteasy__apply_provider_locked() {
         gpteasy__cleanup_failed_apply
         return 1
     fi
+    if [[ "$(gpteasy__file_hash "$gpteasy__catalog_target")" != "$gpteasy__catalog_original_hash" ]]; then
+        printf '%s\n' '模型目录在操作期间发生变化，已停止覆盖。' >&2
+        gpteasy__cleanup_failed_apply
+        return 1
+    fi
     target_dir=${gpteasy__config_target%/*}
     if ! mv -f -- "$gpteasy__candidate" "$gpteasy__config_target"; then
         gpteasy__cleanup_failed_apply
         return 1
     fi
+    catalog_target=${gpteasy__catalog_target}
+    if ! mv -f -- "$gpteasy__catalog_candidate" "$catalog_target"; then
+        printf '%s\n' '模型目录替换失败，已保留原配置。' >&2
+        if [[ "$gpteasy__config_kind" == missing ]]; then
+            rm -f -- "$gpteasy__config_target"
+        elif [[ -f "$gpteasy__restore_point/config.toml" ]]; then
+            cp -- "$gpteasy__restore_point/config.toml" "$gpteasy__config_target"
+        fi
+        return 1
+    fi
     gpteasy__candidate=
-    if ! sync -f "$target_dir" 2>/dev/null || [[ "$(gpteasy__file_hash "$gpteasy__config_target")" != "$gpteasy__candidate_hash" ]]; then
+    gpteasy__catalog_candidate=
+    if ! sync -f "$target_dir" 2>/dev/null || [[ "$(gpteasy__file_hash "$gpteasy__config_target")" != "$gpteasy__candidate_hash" ]] || [[ "$(gpteasy__file_hash "$catalog_target")" != "$gpteasy__catalog_candidate_hash" ]]; then
         printf '%s\n' '配置替换后的复核失败，请使用 restore 检查最近恢复点。' >&2
         return 1
     fi
@@ -920,6 +1002,9 @@ gpteasy__switch_provider() {
         printf '%s\n' '配置已处理，但 shell 锁释放失败；请检查 gpteasy unlock。' >&2
         return 1
     }
+    if [[ "$result" -eq 0 ]]; then
+        gpteasy__restart_daemon_best_effort
+    fi
     return "$result"
 }
 

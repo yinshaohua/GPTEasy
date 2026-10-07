@@ -44,6 +44,7 @@ for (const viewport of [{ width: 680, height: 520 }, { width: 1120, height: 800 
     const titleBar = page.getByRole("banner", { name: "全局标题栏" });
     await expect(titleBar.getByRole("heading", { name: "供应商管理" })).toBeVisible();
     await expect(titleBar.getByRole("button", { name: "启动 Codex" })).toBeVisible();
+    await expect(titleBar.getByRole("button", { name: "刷新模型目录" })).toBeVisible();
     await expect(titleBar.getByRole("button", { name: "帮帮我" })).toBeVisible();
     const addProvider = page.getByRole("button", { name: "添加供应商" });
     await expect(addProvider).toHaveClass(/command-button/);
@@ -58,6 +59,12 @@ for (const viewport of [{ width: 680, height: 520 }, { width: 1120, height: 800 
     expect(titleBounds).not.toBeNull();
     expect(statusBounds).not.toBeNull();
     expect(statusBounds!.y).toBeGreaterThanOrEqual(titleBounds!.y + titleBounds!.height - 0.5);
+    await expectNoHorizontalOverflow(page, viewport.width);
+    await titleBar.getByRole("button", { name: "刷新模型目录" }).click();
+    await expect(titleBar.getByText("未发现可用的 Codex 服务管理入口，无需刷新模型目录。")).toBeVisible();
+    const feedbackBounds = await titleBar.locator(".desktop-feedback").boundingBox();
+    const refreshedStatusBounds = await visibilityStatus.boundingBox();
+    expect(feedbackBounds!.y + feedbackBounds!.height).toBeLessThanOrEqual(refreshedStatusBounds!.y);
     await expectNoHorizontalOverflow(page, viewport.width);
 
     await page.getByRole("button", { name: "会话管理" }).click();

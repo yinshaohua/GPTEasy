@@ -9,7 +9,7 @@ use rusqlite::backup::Backup;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction};
 use serde::Serialize;
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 10;
+pub const CURRENT_SCHEMA_VERSION: i64 = 11;
 const APPLICATION_ID: i64 = 0x4750_5445;
 const BACKUP_LIMIT: usize = 3;
 const INSTALLATION_MARKER_CONTENT: &[u8] = b"gpteasy-state-v1\n";
@@ -173,6 +173,10 @@ CREATE TABLE provider_model_catalog (
 ) STRICT;
 "#;
 
+const SCHEMA_V11: &str = r#"
+ALTER TABLE provider_model_catalog ADD COLUMN capability_snapshot_json TEXT;
+"#;
+
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, SCHEMA_V1),
     (2, SCHEMA_V2),
@@ -184,6 +188,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (8, SCHEMA_V8),
     (9, SCHEMA_V9),
     (10, SCHEMA_V10),
+    (11, SCHEMA_V11),
 ];
 
 #[derive(Debug, Clone)]

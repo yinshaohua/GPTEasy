@@ -191,7 +191,7 @@ fn installation_key(executable: &Path, user_sid: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-fn current_user_sid() -> io::Result<Vec<u8>> {
+pub(crate) fn current_user_sid() -> io::Result<Vec<u8>> {
     let mut token = std::ptr::null_mut();
     if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
         return Err(io::Error::last_os_error());

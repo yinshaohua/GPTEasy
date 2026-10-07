@@ -14,6 +14,9 @@ use crate::environment::{
     EnvironmentApplication, EnvironmentFailure, EnvironmentFailureCategory, EnvironmentSnapshot,
     EnvironmentVisibilityContext,
 };
+use crate::model_catalog_refresh::{
+    ModelCatalogRefreshResult, ModelCatalogRefreshStatus, ModelCatalogRefresher, RefreshSource,
+};
 use crate::provider::reasoning::{self, ReasoningAuditContext};
 use crate::provider::{
     AppliedProviderUpdate, DAYWAY_WEBSITE, DiscoveryInput, LinuxExportFailure, LinuxExportResult,
@@ -41,9 +44,9 @@ use crate::update::{
     UpdateInstallFailureCategory, UpdateSnapshot, UpdateState,
 };
 use crate::wsl::{
-    WslApplication, WslApplyResult, WslDeletionAuditError, WslEnvironmentSummary, WslFailure,
-    WslLifecycleOutcome, WslLifecycleResult, WslReclaimProgress, WslRefreshResult,
-    summarize_wsl_inventory,
+    WslApplication, WslApplyResult, WslDaemonRefreshResult, WslDaemonRefreshStatus,
+    WslDeletionAuditError, WslEnvironmentSummary, WslFailure, WslLifecycleOutcome,
+    WslLifecycleResult, WslReclaimProgress, WslRefreshResult, summarize_wsl_inventory,
 };
 
 pub(crate) struct StartupRuntime {
@@ -60,6 +63,10 @@ pub(crate) struct EnvironmentRuntime {
 
 pub(crate) struct DesktopRuntime {
     application: DesktopApplication,
+}
+
+pub(crate) struct ModelCatalogRefreshRuntime {
+    pub(crate) refresher: ModelCatalogRefresher,
 }
 
 pub(crate) struct WslRuntime {
@@ -406,21 +413,30 @@ fn log_reasoning_audit(
 }
 
 fn reasoning_failure_stage(message_id: &str) -> &'static str {
-    if message_id == "environment.catalog_schema_incompatible" {
-        "catalog_schema"
-    } else if message_id.contains("restart") {
-        "codex_restart"
+    if message_id == "environment.catalog_schema_incompatible"
+        || message_id == "wsl.model_catalog_invalid"
+        || message_id == "linux_export.snapshot_invalid"
+        || message_id.contains("catalog_schema")
+        || message_id.contains("model_catalog")
+        || message_id.contains("snapshot_invalid")
+    {
+        "reasoning_metadata.render"
+    } else if message_id.contains("write")
+        || message_id.contains("commit")
+        || message_id.contains("artifact")
+        || message_id.contains("backup")
+        || message_id.contains("restart")
+        || message_id == "environment.concurrent_modification"
+        || message_id == "environment.operation_interrupted"
+    {
+        "reasoning_metadata.commit"
     } else {
-        "config_write"
+        "reasoning_metadata.inspect"
     }
 }
 
-fn reasoning_success_stage(context: Option<&ReasoningAuditContext>) -> &'static str {
-    if context.is_some_and(|context| context.selection.effort.is_none()) {
-        "mapping_missing"
-    } else {
-        "config_write"
-    }
+fn reasoning_success_stage(_context: Option<&ReasoningAuditContext>) -> &'static str {
+    "reasoning_metadata.commit"
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -496,6 +512,86 @@ fn log_wsl_reclaim_progress(store: &IssueLogStore, progress: WslReclaimProgress)
         WslReclaimProgress::StateCommitted => WslReclaimAuditPhase::StateCommitted,
     };
     log_wsl_reclaim_phase(store, phase);
+}
+
+fn log_wsl_daemon_refresh(
+    store: &IssueLogStore,
+    source: &str,
+    result: &WslDaemonRefreshResult,
+    originally_running: bool,
+    lifecycle: WslLifecycleOutcome,
+) {
+    let common = format!(
+        "operation_id={} source={} status={:?} daemon={:?} before_version={} after_version={} cli_version={} originally_running={} lifecycle_continuation=true",
+        result.operation_id,
+        source,
+        result.status,
+        result.daemon,
+        result
+            .before
+            .as_ref()
+            .and_then(|item| item.version.as_deref())
+            .unwrap_or("unknown"),
+        result
+            .after
+            .as_ref()
+            .and_then(|item| item.version.as_deref())
+            .unwrap_or("unknown"),
+        result
+            .after
+            .as_ref()
+            .or(result.before.as_ref())
+            .and_then(|item| item.cli_version.as_deref())
+            .unwrap_or("unknown"),
+        originally_running,
+    );
+    store.append(
+        IssueLogLevel::Info,
+        "wsl.daemon_refresh.start",
+        "wsl.daemon_refresh.started",
+        Some(common.clone()),
+    );
+    store.append(
+        IssueLogLevel::Info,
+        "wsl.daemon_refresh.inspect",
+        "wsl.daemon_refresh.inspected",
+        Some(common.clone()),
+    );
+    let (event, message, level) = match result.status {
+        WslDaemonRefreshStatus::Refreshed => (
+            "wsl.daemon_refresh.ready",
+            "wsl.daemon_refresh.refreshed",
+            IssueLogLevel::Info,
+        ),
+        WslDaemonRefreshStatus::NotRunning => (
+            "wsl.daemon_refresh.not_running",
+            "wsl.daemon_refresh.not_running",
+            IssueLogLevel::Info,
+        ),
+        WslDaemonRefreshStatus::Failed => (
+            "wsl.daemon_refresh.failed",
+            result.message_id.as_str(),
+            IssueLogLevel::Warn,
+        ),
+    };
+    store.append(level, event, message, Some(common.clone()));
+    if result.before.is_some() {
+        store.append(
+            IssueLogLevel::Info,
+            "wsl.daemon_refresh.restart_requested",
+            "wsl.daemon_refresh.restart_requested",
+            Some(common.clone()),
+        );
+    }
+    store.append(
+        IssueLogLevel::Info,
+        "wsl.daemon_refresh.follow_up",
+        "wsl.daemon_refresh.follow_up",
+        Some(format!(
+            "{} lifecycle_outcome={lifecycle:?} rollback=false",
+            common
+        )),
+    );
 }
 
 fn wsl_inventory_details(provider_count: usize, environments: &[WslEnvironmentSummary]) -> String {
@@ -626,6 +722,103 @@ pub(crate) async fn get_desktop_snapshot(
     finish_command(&logs.store, "desktop.inspect", result)
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CatalogRefreshReport<T: Serialize> {
+    #[serde(flatten)]
+    primary: T,
+    model_catalog_refresh: ModelCatalogRefreshResult,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CatalogDesktopFailure {
+    #[serde(flatten)]
+    primary: DesktopFailure,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_catalog_refresh: Option<ModelCatalogRefreshResult>,
+}
+async fn run_catalog_refresh(app: &AppHandle, source: RefreshSource) -> ModelCatalogRefreshResult {
+    let service = app.state::<ModelCatalogRefreshRuntime>().refresher.clone();
+    let logs = app.state::<IssueLogRuntime>().store.clone();
+    match tauri::async_runtime::spawn_blocking(move || service.refresh(source, &logs)).await {
+        Ok(result) => result,
+        Err(_) => {
+            let result = ModelCatalogRefreshResult {
+                operation_id: uuid::Uuid::new_v4().to_string(),
+                status: ModelCatalogRefreshStatus::Failed,
+                daemon: crate::model_catalog_refresh::ManagedDaemonStatus::Unknown,
+                before: None,
+                after: None,
+                message_id: "model_catalog_refresh.task_failed".into(),
+            };
+            app.state::<IssueLogRuntime>().store.append(
+                IssueLogLevel::Warn,
+                "model_catalog_refresh.failed",
+                &result.message_id,
+                Some(format!(
+                    "operation_id={} source={} independent_operation=not_blocked",
+                    result.operation_id,
+                    source.as_str()
+                )),
+            );
+            result
+        }
+    }
+}
+// Refresh is a result value, never the primary operation's error channel.
+async fn attach_refresh_after_commit<T: Serialize, E, F, Fut>(
+    result: Result<T, E>,
+    refresh: F,
+) -> Result<CatalogRefreshReport<T>, E>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ModelCatalogRefreshResult>,
+{
+    let primary = result?;
+    Ok(CatalogRefreshReport {
+        primary,
+        model_catalog_refresh: refresh().await,
+    })
+}
+async fn continue_after_catalog_refresh<O, F, Fut>(
+    refresh: impl std::future::Future<Output = ModelCatalogRefreshResult>,
+    continuation: F,
+) -> (O, ModelCatalogRefreshResult)
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = O>,
+{
+    let refresh = refresh.await;
+    (continuation().await, refresh)
+}
+async fn refresh_after_provider_commit<T: Serialize, E>(
+    app: &AppHandle,
+    result: Result<T, E>,
+) -> Result<CatalogRefreshReport<T>, E> {
+    let report = attach_refresh_after_commit(result, || {
+        run_catalog_refresh(app, RefreshSource::ProviderSwitch)
+    })
+    .await?;
+    app.state::<IssueLogRuntime>().store.append(
+        IssueLogLevel::Info,
+        "model_catalog_refresh.follow_up",
+        "model_catalog_refresh.provider_committed",
+        Some(format!(
+            "operation_id={} source=provider_switch primary=committed refresh={:?} rollback=false",
+            report.model_catalog_refresh.operation_id, report.model_catalog_refresh.status
+        )),
+    );
+    Ok(report)
+}
+#[tauri::command]
+pub(crate) async fn refresh_model_catalog(
+    app: AppHandle,
+    logs: State<'_, IssueLogRuntime>,
+) -> Result<ModelCatalogRefreshResult, CommandFailure> {
+    let result = run_catalog_refresh(&app, RefreshSource::ManualButton).await;
+    finish_command(&logs.store, "model_catalog_refresh.failed", Ok(result))
+}
+
 #[tauri::command]
 pub(crate) async fn start_desktop_application(
     app: AppHandle,
@@ -659,8 +852,13 @@ pub(crate) async fn restart_desktop_application(
     environment: State<'_, EnvironmentRuntime>,
     logs: State<'_, IssueLogRuntime>,
     expected_roots: Vec<crate::consumer::ConsumerIdentity>,
-) -> Result<DesktopSnapshot, DesktopFailure> {
-    ensure_session_visibility_restart_allowed(&sessions.visibility, &logs.store)?;
+) -> Result<CatalogRefreshReport<DesktopSnapshot>, CatalogDesktopFailure> {
+    ensure_session_visibility_restart_allowed(&sessions.visibility, &logs.store).map_err(
+        |primary| CatalogDesktopFailure {
+            primary,
+            model_catalog_refresh: None,
+        },
+    )?;
     let application = state.application.clone();
     let session_application = sessions.application.clone();
     let visibility = sessions.visibility.clone();
@@ -668,29 +866,68 @@ pub(crate) async fn restart_desktop_application(
     let checkpoint_app = app.clone();
     let checkpoint_logs = logs.store.clone();
     let expected_root_count = expected_roots.len();
-    let (result, observed_after_failure) = tauri::async_runtime::spawn_blocking(move || {
-        let result = application.restart_with_checkpoint(&expected_roots, move || {
-            let coordination =
-                tauri::async_runtime::block_on(coordinate_pending_session_visibility(
-                    Some(&checkpoint_app),
-                    &session_application,
-                    &visibility,
-                    &environment_application,
-                    &checkpoint_logs,
-                ));
-            ensure_coordination_allows_restart(coordination, &visibility)
-        });
-        let observed_after_failure = result.is_err().then(|| application.inspect());
-        (result, observed_after_failure)
-    })
-    .await
-    .map_err(|_| desktop_task_failed())?;
-    finish_command_with_desktop_restart(
+    let (restart_outcome, refresh) = continue_after_catalog_refresh(
+        run_catalog_refresh(&app, RefreshSource::DesktopRestart),
+        || async {
+            tauri::async_runtime::spawn_blocking(move || {
+                let result = application.restart_with_checkpoint(&expected_roots, move || {
+                    let coordination =
+                        tauri::async_runtime::block_on(coordinate_pending_session_visibility(
+                            Some(&checkpoint_app),
+                            &session_application,
+                            &visibility,
+                            &environment_application,
+                            &checkpoint_logs,
+                        ));
+                    ensure_coordination_allows_restart(coordination, &visibility)
+                });
+                let observed_after_failure = result.is_err().then(|| application.inspect());
+                (result, observed_after_failure)
+            })
+            .await
+        },
+    )
+    .await;
+    let (result, observed_after_failure) = restart_outcome.map_err(|_| {
+        let primary = desktop_task_failed();
+        logs.store.append(
+            IssueLogLevel::Error,
+            "desktop.restart",
+            primary.message_id,
+            Some(primary.diagnostic_details()),
+        );
+        record_catalog_desktop_follow_up(&logs.store, &refresh, false);
+        CatalogDesktopFailure {
+            primary,
+            model_catalog_refresh: Some(refresh.clone()),
+        }
+    })?;
+    let desktop_result = finish_command_with_desktop_restart(
         &logs.store,
         result,
         expected_root_count,
         observed_after_failure.as_ref(),
-    )
+    );
+    record_catalog_desktop_follow_up(&logs.store, &refresh, desktop_result.is_ok());
+    desktop_result
+        .map(|primary| CatalogRefreshReport {
+            primary,
+            model_catalog_refresh: refresh.clone(),
+        })
+        .map_err(|primary| CatalogDesktopFailure {
+            primary,
+            model_catalog_refresh: Some(refresh),
+        })
+}
+
+fn record_catalog_desktop_follow_up(
+    logs: &IssueLogStore,
+    refresh: &ModelCatalogRefreshResult,
+    success: bool,
+) {
+    logs.append(IssueLogLevel::Info, "model_catalog_refresh.follow_up", "model_catalog_refresh.desktop_attempted",
+        Some(format!("operation_id={} source=desktop_restart desktop_attempted=true desktop_success={} refresh={:?}",
+            refresh.operation_id, success, refresh.status)));
 }
 
 fn ensure_coordination_allows_restart(
@@ -2024,6 +2261,28 @@ pub(crate) fn export_linux_script(
         .application
         .reasoning_audit_contexts()
         .unwrap_or_default();
+    let unknown_context = ReasoningAuditContext::unknown("linux_export");
+    if audit_contexts.is_empty() {
+        log_reasoning_audit(
+            &logs.store,
+            "linux_export.write",
+            Some(&unknown_context),
+            "reasoning_metadata.inspect",
+            "started",
+            None,
+        );
+    } else {
+        for context in &audit_contexts {
+            log_reasoning_audit(
+                &logs.store,
+                "linux_export.write",
+                Some(context),
+                "reasoning_metadata.inspect",
+                "started",
+                None,
+            );
+        }
+    }
     let activity = app
         .state::<UpdateRuntime>()
         .activity
@@ -2047,8 +2306,8 @@ pub(crate) fn export_linux_script(
         log_reasoning_audit(
             &logs.store,
             "linux_export.write",
-            None,
-            failure_stage.unwrap_or("config_write"),
+            Some(&unknown_context),
+            failure_stage.unwrap_or_else(|| reasoning_success_stage(Some(&unknown_context))),
             if failure_stage.is_some() {
                 "failed"
             } else {
@@ -2271,7 +2530,18 @@ pub(crate) async fn apply_wsl_provider(
     expected_revision: String,
     confirm: bool,
 ) -> Result<WslApplyResult, WslFailure> {
-    let audit_context = state.application.reasoning_audit_context(&provider_id).ok();
+    let audit_context = state
+        .application
+        .reasoning_audit_context(&provider_id)
+        .unwrap_or_else(|_| ReasoningAuditContext::unknown("wsl"));
+    log_reasoning_audit(
+        &logs.store,
+        "wsl.apply_provider",
+        Some(&audit_context),
+        "reasoning_metadata.inspect",
+        "started",
+        None,
+    );
     let Some(_activity) = app.state::<UpdateRuntime>().activity.try_begin("WSL2 应用") else {
         let result = Err(WslFailure::new(
             crate::wsl::WslFailureCategory::StateUnavailable,
@@ -2280,7 +2550,7 @@ pub(crate) async fn apply_wsl_provider(
         log_reasoning_audit(
             &logs.store,
             "wsl.apply_provider",
-            audit_context.as_ref(),
+            Some(&audit_context),
             reasoning_failure_stage("update.installing"),
             "failed",
             None,
@@ -2299,9 +2569,14 @@ pub(crate) async fn apply_wsl_provider(
         )
     })
     .and_then(|result| result);
+    let audit_context = result
+        .as_ref()
+        .ok()
+        .and_then(|applied| applied.reasoning_audit.as_ref())
+        .unwrap_or(&audit_context);
     let (stage, status, pending_restart) = match &result {
         Ok(result) => (
-            reasoning_success_stage(audit_context.as_ref()),
+            reasoning_success_stage(Some(audit_context)),
             "applied",
             Some(result.pending_restart),
         ),
@@ -2310,11 +2585,22 @@ pub(crate) async fn apply_wsl_provider(
     log_reasoning_audit(
         &logs.store,
         "wsl.apply_provider",
-        audit_context.as_ref(),
+        Some(audit_context),
         stage,
         status,
         pending_restart,
     );
+    if let Ok(applied) = &result {
+        if let Some(refresh) = &applied.daemon_refresh {
+            log_wsl_daemon_refresh(
+                &logs.store,
+                "wsl_provider_switch",
+                refresh,
+                applied.pending_restart,
+                applied.lifecycle_outcome,
+            );
+        }
+    }
     finish_command(&logs.store, "wsl.apply_provider", result)
 }
 
@@ -2374,7 +2660,18 @@ pub(crate) async fn reclaim_wsl_provider(
         return result;
     }
     match &result {
-        Ok(_) => log_wsl_reclaim_phase(&logs.store, WslReclaimAuditPhase::Succeeded),
+        Ok(applied) => {
+            log_wsl_reclaim_phase(&logs.store, WslReclaimAuditPhase::Succeeded);
+            if let Some(refresh) = &applied.daemon_refresh {
+                log_wsl_daemon_refresh(
+                    &logs.store,
+                    "wsl_provider_reclaim",
+                    refresh,
+                    applied.pending_restart,
+                    applied.lifecycle_outcome,
+                );
+            }
+        }
         Err(_) => {}
     }
     finish_command(&logs.store, "wsl.reclaim_provider", result)
@@ -2425,8 +2722,19 @@ pub(crate) async fn apply_environment_provider(
     logs: State<'_, IssueLogRuntime>,
     provider_id: String,
     expected_revision: String,
-) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
-    let audit_context = state.application.reasoning_audit_context(&provider_id).ok();
+) -> Result<CatalogRefreshReport<EnvironmentSnapshot>, EnvironmentFailure> {
+    let audit_context = state
+        .application
+        .reasoning_audit_context(&provider_id)
+        .unwrap_or_else(|_| ReasoningAuditContext::unknown("native"));
+    log_reasoning_audit(
+        &logs.store,
+        "environment.apply_provider",
+        Some(&audit_context),
+        "reasoning_metadata.inspect",
+        "started",
+        None,
+    );
     let Some(_activity) = app.state::<UpdateRuntime>().activity.try_begin("配置写入") else {
         let result = Err(EnvironmentFailure::new(
             EnvironmentFailureCategory::StateUnavailable,
@@ -2435,7 +2743,7 @@ pub(crate) async fn apply_environment_provider(
         log_reasoning_audit(
             &logs.store,
             "environment.apply_provider",
-            audit_context.as_ref(),
+            Some(&audit_context),
             reasoning_failure_stage("update.installing"),
             "failed",
             None,
@@ -2476,7 +2784,7 @@ pub(crate) async fn apply_environment_provider(
     }
     let (stage, status, pending_restart) = match &result {
         Ok(snapshot) => (
-            reasoning_success_stage(audit_context.as_ref()),
+            reasoning_success_stage(Some(&audit_context)),
             "applied",
             Some(snapshot.pending_restart),
         ),
@@ -2485,12 +2793,13 @@ pub(crate) async fn apply_environment_provider(
     log_reasoning_audit(
         &logs.store,
         "environment.apply_provider",
-        audit_context.as_ref(),
+        Some(&audit_context),
         stage,
         status,
         pending_restart,
     );
     let result = refresh_environment_tray_after(&app, result);
+    let result = refresh_after_provider_commit(&app, result).await;
     finish_command(&logs.store, "environment.apply_provider", result)
 }
 
@@ -2502,8 +2811,19 @@ pub(crate) async fn force_apply_environment_provider(
     provider_id: String,
     expected_revision: String,
     confirm_rebuild: bool,
-) -> Result<EnvironmentSnapshot, EnvironmentFailure> {
-    let audit_context = state.application.reasoning_audit_context(&provider_id).ok();
+) -> Result<CatalogRefreshReport<EnvironmentSnapshot>, EnvironmentFailure> {
+    let audit_context = state
+        .application
+        .reasoning_audit_context(&provider_id)
+        .unwrap_or_else(|_| ReasoningAuditContext::unknown("native"));
+    log_reasoning_audit(
+        &logs.store,
+        "environment.force_apply_provider",
+        Some(&audit_context),
+        "reasoning_metadata.inspect",
+        "started",
+        None,
+    );
     let Some(_activity) = app
         .state::<UpdateRuntime>()
         .activity
@@ -2516,7 +2836,7 @@ pub(crate) async fn force_apply_environment_provider(
         log_reasoning_audit(
             &logs.store,
             "environment.force_apply_provider",
-            audit_context.as_ref(),
+            Some(&audit_context),
             reasoning_failure_stage("update.installing"),
             "failed",
             None,
@@ -2539,7 +2859,7 @@ pub(crate) async fn force_apply_environment_provider(
     }
     let (stage, status, pending_restart) = match &result {
         Ok(snapshot) => (
-            reasoning_success_stage(audit_context.as_ref()),
+            reasoning_success_stage(Some(&audit_context)),
             "applied",
             Some(snapshot.pending_restart),
         ),
@@ -2548,11 +2868,12 @@ pub(crate) async fn force_apply_environment_provider(
     log_reasoning_audit(
         &logs.store,
         "environment.force_apply_provider",
-        audit_context.as_ref(),
+        Some(&audit_context),
         stage,
         status,
         pending_restart,
     );
+    let result = refresh_after_provider_commit(&app, result).await;
     finish_command(&logs.store, "environment.force_apply_provider", result)
 }
 
@@ -3070,7 +3391,7 @@ pub(crate) async fn save_and_apply_provider_update(
     validation_id: String,
     provider_id: String,
     name: String,
-) -> Result<AppliedProviderUpdate, ProviderFailure> {
+) -> Result<CatalogRefreshReport<AppliedProviderUpdate>, ProviderFailure> {
     let Some(_activity) = app.state::<UpdateRuntime>().activity.try_begin("配置写入") else {
         return finish_command(
             &logs.store,
@@ -3108,6 +3429,7 @@ pub(crate) async fn save_and_apply_provider_update(
         }
         Err(failure) => Err(failure),
     };
+    let result = refresh_after_provider_commit(&app, result).await;
     finish_command(&logs.store, "provider.save_and_apply_update", result)
 }
 
@@ -3321,7 +3643,7 @@ mod tests {
     };
     use crate::desktop::{DesktopAction, DesktopFailure, DesktopFailureCategory, DesktopSnapshot};
     use crate::environment::{AuthenticationMode, EnvironmentApplication, OpenAiLoginProbe};
-    use crate::provider::reasoning::ReasoningAuditContext;
+    use crate::provider::reasoning::{self, ReasoningAuditContext};
     use crate::session_visibility::{
         SessionVisibilityApplication, SessionVisibilityPreview, VisibilityAppServerCapability,
         VisibilityConsumerState, VisibilityCoordinationOutcome, VisibilityCoordinationStatus,
@@ -3431,18 +3753,34 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_audit_stage_classification_distinguishes_schema_restart_and_mapping() {
+    fn reasoning_audit_stage_classification_distinguishes_inspect_render_and_commit() {
         assert_eq!(
             reasoning_failure_stage("environment.catalog_schema_incompatible"),
-            "catalog_schema"
+            "reasoning_metadata.render"
         );
         assert_eq!(
-            reasoning_failure_stage("environment.restart_blocked"),
-            "codex_restart"
+            reasoning_failure_stage("wsl.model_catalog_invalid"),
+            "reasoning_metadata.render"
+        );
+        assert_eq!(
+            reasoning_failure_stage("linux_export.snapshot_invalid"),
+            "reasoning_metadata.render"
+        );
+        assert_eq!(
+            reasoning_failure_stage("update.installing"),
+            "reasoning_metadata.inspect"
+        );
+        assert_eq!(
+            reasoning_failure_stage("wsl.state_unavailable"),
+            "reasoning_metadata.inspect"
         );
         assert_eq!(
             reasoning_failure_stage("environment.artifact_write_failed"),
-            "config_write"
+            "reasoning_metadata.commit"
+        );
+        assert_eq!(
+            reasoning_failure_stage("environment.restart_blocked"),
+            "reasoning_metadata.commit"
         );
 
         let mapped = ReasoningAuditContext::new(
@@ -3450,15 +3788,37 @@ mod tests {
             "https://api.openai.com/v1".to_owned(),
             "gpt-5".to_owned(),
         );
-        assert_eq!(reasoning_success_stage(Some(&mapped)), "config_write");
+        assert_eq!(
+            reasoning_success_stage(Some(&mapped)),
+            "reasoning_metadata.commit"
+        );
 
         let unmapped = ReasoningAuditContext::new(
             "custom".to_owned(),
             "https://provider.example/v1".to_owned(),
             "custom-model".to_owned(),
         );
-        assert_eq!(reasoning_success_stage(Some(&unmapped)), "mapping_missing");
-        assert_eq!(reasoning_success_stage(None), "config_write");
+        assert_eq!(
+            reasoning_success_stage(Some(&unmapped)),
+            "reasoning_metadata.commit"
+        );
+        assert_eq!(reasoning_success_stage(None), "reasoning_metadata.commit");
+    }
+
+    #[test]
+    fn reasoning_audit_start_records_inspection_stage_and_target_environment() {
+        let context = ReasoningAuditContext::unknown("wsl");
+        let details = reasoning::audit_details(
+            Some(&context),
+            "reasoning_metadata.inspect",
+            "started",
+            None,
+        );
+        assert!(details.contains("target_environment=wsl"));
+        assert!(details.contains("metadata_stage=reasoning_metadata.inspect"));
+        assert!(details.contains("stage=reasoning_metadata.inspect"));
+        assert!(details.contains("status=started"));
+        assert!(!details.contains("operation_id=unknown"));
     }
 
     #[test]
@@ -4283,6 +4643,7 @@ mod tests {
             "leave_session_management",
             "cancel_session_request",
             "execute_session_visibility",
+            "refresh_model_catalog",
         ];
 
         for block in source.split("#[tauri::command]").skip(1) {
@@ -4308,5 +4669,88 @@ mod tests {
                 "fallible Tauri command {function_name} does not record its failure"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod catalog_coordination_tests {
+    use super::*;
+    use crate::model_catalog_refresh::ManagedDaemonStatus;
+    fn refresh(status: ModelCatalogRefreshStatus) -> ModelCatalogRefreshResult {
+        ModelCatalogRefreshResult {
+            operation_id: "test-operation".into(),
+            status,
+            daemon: ManagedDaemonStatus::Managed,
+            before: None,
+            after: None,
+            message_id: "model_catalog_refresh.test".into(),
+        }
+    }
+    #[test]
+    fn failed_commit_does_not_request_refresh() {
+        let result = tauri::async_runtime::block_on(attach_refresh_after_commit(
+            Err::<u32, _>("commit_failed"),
+            || async { panic!("must not refresh before commit") },
+        ));
+        assert_eq!(result.unwrap_err(), "commit_failed");
+    }
+    #[test]
+    fn refresh_failure_keeps_committed_primary_and_flat_json_contract() {
+        let report = tauri::async_runtime::block_on(attach_refresh_after_commit(
+            Ok::<_, ()>(serde_json::json!({"state":"managed"})),
+            || async { refresh(ModelCatalogRefreshStatus::Failed) },
+        ))
+        .unwrap();
+        assert_eq!(report.primary["state"], "managed");
+        let json = serde_json::to_value(report).unwrap();
+        assert_eq!(json["state"], "managed");
+        assert_eq!(json["modelCatalogRefresh"]["status"], "failed");
+    }
+    #[test]
+    fn every_refresh_outcome_continues_desktop_and_preserves_both_results() {
+        for status in [
+            ModelCatalogRefreshStatus::Failed,
+            ModelCatalogRefreshStatus::NotRunning,
+            ModelCatalogRefreshStatus::Refreshed,
+        ] {
+            for success in [true, false] {
+                let called = std::cell::Cell::new(false);
+                let (desktop, catalog) = tauri::async_runtime::block_on(
+                    continue_after_catalog_refresh(async { refresh(status) }, || async {
+                        called.set(true);
+                        if success {
+                            Ok(42)
+                        } else {
+                            Err("desktop_failed")
+                        }
+                    }),
+                );
+                assert!(called.get());
+                assert_eq!(catalog.status, status);
+                assert_eq!(
+                    desktop,
+                    if success {
+                        Ok(42)
+                    } else {
+                        Err("desktop_failed")
+                    }
+                );
+            }
+        }
+    }
+    #[test]
+    fn follow_up_log_distinguishes_desktop_failure_from_refresh_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = IssueLogStore::new(dir.path());
+        record_catalog_desktop_follow_up(&logs, &refresh(ModelCatalogRefreshStatus::Failed), true);
+        record_catalog_desktop_follow_up(
+            &logs,
+            &refresh(ModelCatalogRefreshStatus::Refreshed),
+            false,
+        );
+        let evidence = serde_json::to_string(&logs.list_all(0, None, None)).unwrap();
+        assert!(evidence.contains("desktop_success=true refresh=Failed"));
+        assert!(evidence.contains("desktop_success=false refresh=Refreshed"));
+        assert!(!evidence.contains("socket"));
     }
 }

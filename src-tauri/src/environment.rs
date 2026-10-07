@@ -17,6 +17,7 @@ pub use crate::consumer::ConsumerStatus;
 use crate::consumer::{ConsumerIdentity, ConsumerScan, ConsumerScanner, WindowsConsumerScanner};
 use crate::provider::model_catalog;
 use crate::provider::reasoning::{self, ReasoningSelection};
+use crate::provider::reasoning_capability::{self, CodexMetadataSnapshot};
 use crate::provider::{ProviderSummary, combination_fingerprint};
 use crate::state::StateStore;
 
@@ -301,10 +302,13 @@ impl EnvironmentApplication {
     ) -> Result<reasoning::ReasoningAuditContext, EnvironmentFailure> {
         let connection = self.open_state()?;
         let provider = load_provider(&connection, provider_id)?;
-        Ok(reasoning::ReasoningAuditContext::new(
-            provider.id,
-            provider.base_url,
-            provider.default_model,
+        Ok(reasoning::ReasoningAuditContext::for_provider_environment(
+            "native",
+            provider.id.clone(),
+            Some(&provider.name),
+            provider.base_url.clone(),
+            provider.default_model.clone(),
+            provider.capability_snapshot.as_ref(),
         ))
     }
     pub fn new(state_store: StateStore, codex_home: impl AsRef<Path>) -> Self {
@@ -1150,6 +1154,8 @@ impl EnvironmentApplication {
             ));
         }
 
+        let mut provider = provider;
+        refresh_provider_capability_snapshot(&mut provider);
         let provider_alias_ids = known_provider_ids(connection)?;
         let prepared = if rebuild_config {
             PreparedSwitch::prepare_rebuild(&self.codex_home, provider)?
@@ -1325,6 +1331,8 @@ pub(crate) struct ProviderTarget {
     default_model: String,
     #[serde(default)]
     discovered_models: Vec<String>,
+    #[serde(default)]
+    capability_snapshot: Option<CodexMetadataSnapshot>,
     verified_at_epoch_seconds: u64,
     verification_fingerprint: String,
     #[serde(default)]
@@ -1348,7 +1356,7 @@ impl ProviderTarget {
         recommendation_id: Option<String>,
         recommendation_template_base_url: Option<String>,
     ) -> Self {
-        let reasoning_selection = reasoning::for_base_url(&base_url);
+        let reasoning_selection = reasoning::for_provider(&name, &base_url);
         Self {
             id,
             name,
@@ -1356,6 +1364,7 @@ impl ProviderTarget {
             api_key,
             default_model,
             discovered_models,
+            capability_snapshot: None,
             verified_at_epoch_seconds,
             verification_fingerprint,
             reasoning_selection,
@@ -1423,17 +1432,35 @@ fn load_provider(
         .query_row(
             "SELECT p.id, p.name, p.base_url, p.api_key, p.default_model, p.verified_at,
                     p.verification_fingerprint, p.recommendation_id, p.recommendation_template_base_url,
-                    COALESCE(c.models_json, '[]')
+                    c.verification_fingerprint, c.models_json, c.capability_snapshot_json
              FROM providers p LEFT JOIN provider_model_catalog c ON c.provider_id = p.id WHERE p.id = ?1",
             [provider_id],
             |row| {
                 let verified_at = row.get::<_, String>(5)?;
+                let name = row.get::<_, String>(1)?;
+                let base_url = row.get::<_, String>(2)?;
+                let api_key = row.get::<_, String>(3)?;
+                let default_model = row.get::<_, String>(4)?;
+                let expected_fingerprint = combination_fingerprint(
+                    &base_url,
+                    &api_key,
+                    &default_model,
+                );
+                let catalog = decode_provider_model_catalog(
+                    row.get::<_, Option<String>>(9)?.as_deref(),
+                    row.get::<_, Option<String>>(10)?.as_deref(),
+                    row.get::<_, Option<String>>(11)?.as_deref(),
+                    &expected_fingerprint,
+                    &default_model,
+                );
+                let (discovered_models, capability_snapshot) =
+                    catalog.unwrap_or_default();
                 Ok(ProviderTarget {
                     id: row.get(0)?,
-                    name: row.get(1)?,
-                    base_url: row.get(2)?,
-                    api_key: row.get(3)?,
-                    default_model: row.get(4)?,
+                    name: name.clone(),
+                    base_url: base_url.clone(),
+                    api_key,
+                    default_model,
                     verified_at_epoch_seconds: verified_at.parse().map_err(|error| {
                         rusqlite::Error::FromSqlConversionFailure(
                             5,
@@ -1442,10 +1469,14 @@ fn load_provider(
                         )
                     })?,
                     verification_fingerprint: row.get(6)?,
-                    reasoning_selection: reasoning::for_base_url(&row.get::<_, String>(2)?),
+                    reasoning_selection: reasoning::for_provider(
+                        &name,
+                        &base_url,
+                    ),
                     recommendation_id: row.get(7)?,
                     recommendation_template_base_url: row.get(8)?,
-                    discovered_models: serde_json::from_str::<Vec<String>>(&row.get::<_, String>(9)?).unwrap_or_default(),
+                    discovered_models,
+                    capability_snapshot,
                 })
             },
         )
@@ -1457,6 +1488,200 @@ fn load_provider(
                 "environment.provider_not_found",
             )
         })
+}
+
+fn decode_provider_model_catalog(
+    catalog_fingerprint: Option<&str>,
+    models_json: Option<&str>,
+    snapshot_json: Option<&str>,
+    expected_fingerprint: &str,
+    default_model: &str,
+) -> Option<(Vec<String>, Option<CodexMetadataSnapshot>)> {
+    if catalog_fingerprint != Some(expected_fingerprint) {
+        return None;
+    }
+    // 合法的 [] 与损坏/缺失 JSON 必须保持可区分；后者安全降级为无目录。
+    let models = serde_json::from_str::<Vec<String>>(models_json?).ok()?;
+    let mut rendered_models = models.clone();
+    if !rendered_models.iter().any(|model| model == default_model) {
+        rendered_models.push(default_model.to_owned());
+    }
+    let snapshot = snapshot_json
+        .and_then(|json| serde_json::from_str::<CodexMetadataSnapshot>(json).ok())
+        .filter(|snapshot| snapshot.covers_exact_models(&rendered_models));
+    Some((models, snapshot))
+}
+
+#[cfg(test)]
+mod provider_model_catalog_decode_tests {
+    use super::decode_provider_model_catalog;
+    use crate::provider::reasoning_capability::{
+        CapabilitySource, CapabilityState, CodexMetadataSnapshot, CodexModelMetadata,
+        SNAPSHOT_SCHEMA_VERSION, SnapshotStatus,
+    };
+
+    fn snapshot(models: &[&str]) -> String {
+        serde_json::to_string(&CodexMetadataSnapshot {
+            schema_version: SNAPSHOT_SCHEMA_VERSION,
+            target_environment: "native".to_owned(),
+            codex_version: Some("0.160.1".to_owned()),
+            executable_fingerprint: Some("sha256:test".to_owned()),
+            observed_at_epoch_seconds: 1,
+            status: SnapshotStatus::Complete,
+            models: models
+                .iter()
+                .map(|model| CodexModelMetadata {
+                    model_id: (*model).to_owned(),
+                    state: CapabilityState::KnownNonEmpty,
+                    default_reasoning_effort: Some("medium".to_owned()),
+                    supported_reasoning_efforts: vec!["medium".to_owned()],
+                    source: CapabilitySource::CodexBuiltin,
+                    source_id: "codex.model/list".to_owned(),
+                })
+                .collect(),
+        })
+        .expect("snapshot json")
+    }
+
+    #[test]
+    fn mismatched_fingerprint_discards_catalog() {
+        assert!(
+            decode_provider_model_catalog(
+                Some("stored"),
+                Some(r#"["model-a"]"#),
+                None,
+                "expected",
+                "default-model",
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn corrupt_models_json_cannot_be_treated_as_empty() {
+        assert!(
+            decode_provider_model_catalog(
+                Some("expected"),
+                Some("not-json"),
+                None,
+                "expected",
+                "default-model",
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn corrupt_snapshot_downgrades_only_capability_metadata() {
+        assert_eq!(
+            decode_provider_model_catalog(
+                Some("expected"),
+                Some(r#"["model-a"]"#),
+                Some("not-json"),
+                "expected",
+                "default-model",
+            ),
+            Some((vec!["model-a".to_owned()], None))
+        );
+    }
+
+    #[test]
+    fn partial_snapshot_is_not_reused_for_a_mixed_model_set() {
+        assert_eq!(
+            decode_provider_model_catalog(
+                Some("expected"),
+                Some(r#"["model-a","model-b"]"#),
+                Some(&snapshot(&["model-a", "default-model"])),
+                "expected",
+                "default-model",
+            ),
+            Some((vec!["model-a".to_owned(), "model-b".to_owned()], None))
+        );
+    }
+
+    #[test]
+    fn missing_snapshot_keeps_a_legacy_provider_catalog_as_unknown() {
+        assert_eq!(
+            decode_provider_model_catalog(
+                Some("expected"),
+                Some(r#"["model-a"]"#),
+                None,
+                "expected",
+                "default-model",
+            ),
+            Some((vec!["model-a".to_owned()], None))
+        );
+    }
+
+    #[test]
+    fn legal_empty_array_is_preserved() {
+        assert_eq!(
+            decode_provider_model_catalog(
+                Some("expected"),
+                Some("[]"),
+                None,
+                "expected",
+                "default-model",
+            ),
+            Some((Vec::new(), None))
+        );
+    }
+
+    #[test]
+    fn complete_snapshot_includes_the_default_model_added_during_render() {
+        let decoded = decode_provider_model_catalog(
+            Some("expected"),
+            Some(r#"["model-a"]"#),
+            Some(&snapshot(&["model-a", "default-model"])),
+            "expected",
+            "default-model",
+        )
+        .expect("catalog");
+        assert!(decoded.1.is_some());
+    }
+}
+
+fn provider_model_ids(provider: &ProviderTarget) -> Vec<String> {
+    let mut models = provider.discovered_models.clone();
+    if !models.iter().any(|model| model == &provider.default_model) {
+        models.push(provider.default_model.clone());
+    }
+    models
+}
+
+fn refresh_provider_capability_snapshot(provider: &mut ProviderTarget) {
+    let model_ids = provider_model_ids(provider);
+    if model_ids.is_empty() {
+        provider.capability_snapshot = None;
+        return;
+    }
+    if provider
+        .capability_snapshot
+        .as_ref()
+        .is_some_and(|snapshot| {
+            reasoning_capability::snapshot_matches_current_codex(snapshot, &model_ids)
+        })
+    {
+        if provider.reasoning_selection.rule_id == reasoning::DAYWAY_DS_DEEPSEEK_RULE {
+            if let Some(snapshot) = provider.capability_snapshot.as_mut() {
+                reasoning_capability::apply_dayway_ds_compatibility(snapshot);
+            }
+        }
+        return;
+    }
+    provider.capability_snapshot = reasoning_capability::probe_codex_metadata(&model_ids).ok();
+    if let Some(snapshot) = provider.capability_snapshot.as_mut() {
+        match provider.reasoning_selection.rule_id.as_str() {
+            reasoning::DEEPSEEK_HIGH_RULE => reasoning_capability::apply_deepseek_compatibility(
+                snapshot,
+                &provider.default_model,
+            ),
+            reasoning::DAYWAY_DS_DEEPSEEK_RULE => {
+                reasoning_capability::apply_dayway_ds_compatibility(snapshot)
+            }
+            _ => {}
+        }
+    }
 }
 
 fn known_provider_ids(connection: &Connection) -> Result<Vec<String>, EnvironmentFailure> {
@@ -2640,9 +2865,12 @@ impl PreparedSwitch {
             render_config(config.bytes.as_deref(), &provider, &provider_alias_ids)?;
         let catalog_path = codex_home.join("gpteasy-model-catalog.json");
         let catalog_old = read_artifact(&catalog_path)?;
-        let catalog_new =
-            model_catalog::render(&provider.discovered_models, &provider.default_model)
-                .map_err(|_| catalog_schema_incompatible())?;
+        let catalog_new = model_catalog::render_with_snapshot(
+            &provider.discovered_models,
+            &provider.default_model,
+            provider.capability_snapshot.as_ref(),
+        )
+        .map_err(|_| catalog_schema_incompatible())?;
         let credentials = read_artifact(&credentials_path)?;
         let rendered_credentials =
             render_credentials(credentials.bytes.as_deref(), &provider.api_key)?;
@@ -2700,9 +2928,12 @@ impl PreparedSwitch {
         .into_bytes();
         let catalog_path = codex_home.join("gpteasy-model-catalog.json");
         let catalog_old = read_artifact(&catalog_path)?;
-        let catalog_new =
-            model_catalog::render(&provider.discovered_models, &provider.default_model)
-                .map_err(|_| catalog_schema_incompatible())?;
+        let catalog_new = model_catalog::render_with_snapshot(
+            &provider.discovered_models,
+            &provider.default_model,
+            provider.capability_snapshot.as_ref(),
+        )
+        .map_err(|_| catalog_schema_incompatible())?;
         let rendered_credentials = render_credentials(None, &provider.api_key)?;
         Ok(Self {
             operation_id: Uuid::new_v4().to_string(),
@@ -3386,6 +3617,41 @@ fn persist_pending_custom_provider_repair(
     transaction.commit().map_err(|_| state_unavailable())
 }
 
+fn store_provider_model_catalog(
+    transaction: &rusqlite::Transaction<'_>,
+    provider: &ProviderTarget,
+) -> Result<(), EnvironmentFailure> {
+    let models_json =
+        serde_json::to_string(&provider.discovered_models).map_err(|_| state_unavailable())?;
+    let snapshot_json = provider
+        .capability_snapshot
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|_| state_unavailable())?;
+    transaction
+        .execute(
+            "INSERT INTO provider_model_catalog(
+                provider_id, verification_fingerprint, models_json, capability_snapshot_json
+             ) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(provider_id) DO UPDATE SET
+                verification_fingerprint=excluded.verification_fingerprint,
+                models_json=excluded.models_json,
+                capability_snapshot_json=COALESCE(
+                    excluded.capability_snapshot_json,
+                    provider_model_catalog.capability_snapshot_json
+                )",
+            params![
+                provider.id,
+                provider.verification_fingerprint,
+                models_json,
+                snapshot_json,
+            ],
+        )
+        .map_err(|_| state_unavailable())?;
+    Ok(())
+}
+
 fn commit_applied_state(
     connection: &mut Connection,
     prepared: &PreparedSwitch,
@@ -3420,6 +3686,7 @@ fn commit_applied_state(
             return Err(state_unavailable());
         }
     }
+    store_provider_model_catalog(&transaction, &prepared.provider)?;
     transaction
         .execute(
             "INSERT INTO last_applied_state (
@@ -3617,6 +3884,7 @@ fn commit_recovered_state(
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| state_unavailable())?;
+    store_provider_model_catalog(&transaction, &provider)?;
     if pending.operation_kind == "save_and_apply" {
         let changed = transaction
             .execute(
@@ -5894,7 +6162,8 @@ impl PreparedModelCatalogRepair {
         let Some(provider_id) = provider_id else {
             return Ok(None);
         };
-        let provider = load_provider(connection, &provider_id)?;
+        let mut provider = load_provider(connection, &provider_id)?;
+        refresh_provider_capability_snapshot(&mut provider);
         if provider.verification_fingerprint
             != combination_fingerprint(
                 &provider.base_url,
@@ -5932,8 +6201,12 @@ impl PreparedModelCatalogRepair {
         let Some(old_bytes) = catalog.bytes.as_deref() else {
             return Ok(None);
         };
-        let new_bytes = model_catalog::render(&provider.discovered_models, &provider.default_model)
-            .map_err(|_| invalid_config())?;
+        let new_bytes = model_catalog::render_with_snapshot(
+            &provider.discovered_models,
+            &provider.default_model,
+            provider.capability_snapshot.as_ref(),
+        )
+        .map_err(|_| invalid_config())?;
         if !legacy_catalog_matches(&old_bytes, &new_bytes) {
             return Ok(None);
         }

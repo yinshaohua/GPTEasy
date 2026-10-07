@@ -4,9 +4,13 @@ use uuid::Uuid;
 use crate::state::StateStore;
 
 use super::reasoning::{self, ReasoningSelection};
+use super::reasoning_capability::{
+    CodexMetadataSnapshot, apply_dayway_ds_compatibility, apply_deepseek_compatibility,
+};
 use super::{
     DAYWAY_BASE_URL, DAYWAY_NAME, ProviderFailure, ProviderFailureCategory, ProviderSummary,
-    ValidationEvidence, VerifiedCandidate, state_unavailable, verification_expired,
+    ValidationEvidence, VerifiedCandidate, combination_fingerprint, state_unavailable,
+    verification_expired,
 };
 
 pub(super) struct ProviderRecord {
@@ -14,6 +18,8 @@ pub(super) struct ProviderRecord {
     pub api_key: String,
     pub verification_fingerprint: String,
     pub reasoning_selection: ReasoningSelection,
+    pub discovered_models: Vec<String>,
+    pub capability_snapshot: Option<CodexMetadataSnapshot>,
 }
 
 pub(super) fn list_providers(
@@ -146,6 +152,7 @@ pub(super) fn insert_provider(
         &summary.id,
         &candidate.evidence.combination_fingerprint,
         &candidate.evidence.discovered_models,
+        None,
     )?;
     transaction.commit().map_err(|_| state_unavailable())?;
     Ok(summary)
@@ -451,6 +458,7 @@ pub(super) fn replace_provider(
         provider_id,
         &candidate.evidence.combination_fingerprint,
         &candidate.evidence.discovered_models,
+        None,
     )?;
     transaction.commit().map_err(|_| state_unavailable())?;
     let mut summary = ProviderSummary {
@@ -508,6 +516,7 @@ pub(super) fn record_revalidation(
         provider_id,
         &evidence.combination_fingerprint,
         &evidence.discovered_models,
+        None,
     )?;
     transaction.commit().map_err(|_| state_unavailable())?;
     Ok(ProviderSummary {
@@ -521,14 +530,30 @@ fn store_model_catalog(
     provider_id: &str,
     fingerprint: &str,
     models: &[String],
+    capability_snapshot: Option<&CodexMetadataSnapshot>,
 ) -> Result<(), ProviderFailure> {
     let models_json = serde_json::to_string(models).map_err(|_| state_unavailable())?;
-    transaction.execute(
-        "INSERT INTO provider_model_catalog(provider_id, verification_fingerprint, models_json)
-         VALUES (?1, ?2, ?3)
-         ON CONFLICT(provider_id) DO UPDATE SET verification_fingerprint=excluded.verification_fingerprint, models_json=excluded.models_json",
-        params![provider_id, fingerprint, models_json],
-    ).map_err(|_| state_unavailable())?;
+    let capability_snapshot_json = capability_snapshot
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|_| state_unavailable())?;
+    transaction
+        .execute(
+            "INSERT INTO provider_model_catalog(
+                provider_id, verification_fingerprint, models_json, capability_snapshot_json
+             ) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(provider_id) DO UPDATE SET
+                verification_fingerprint=excluded.verification_fingerprint,
+                models_json=excluded.models_json,
+                capability_snapshot_json=excluded.capability_snapshot_json",
+            params![
+                provider_id,
+                fingerprint,
+                models_json,
+                capability_snapshot_json
+            ],
+        )
+        .map_err(|_| state_unavailable())?;
     Ok(())
 }
 
@@ -578,7 +603,7 @@ fn find_provider_record(
     connection: &Connection,
     provider_id: &str,
 ) -> Result<Option<ProviderRecord>, ProviderFailure> {
-    connection
+    let record = connection
         .query_row(
             "SELECT p.id, p.name, p.base_url, p.api_key, p.default_model, p.verified_at, \
                     p.verification_fingerprint, p.recommendation_id, p.recommendation_template_base_url, \
@@ -592,12 +617,14 @@ fn find_provider_record(
             [provider_id],
             |row| {
                 let verified_at = row.get::<_, String>(5)?;
+                let name = row.get::<_, String>(1)?;
+                let base_url = row.get::<_, String>(2)?;
                 Ok(ProviderRecord {
                     summary: {
                         let mut summary = ProviderSummary {
                         id: row.get(0)?,
-                        name: row.get(1)?,
-                        base_url: row.get(2)?,
+                        name: name.clone(),
+                        base_url: base_url.clone(),
                         default_model: row.get(4)?,
                         verified_at_epoch_seconds: verified_at.parse().map_err(|error| {
                             SqliteError::FromSqlConversionFailure(
@@ -616,14 +643,267 @@ fn find_provider_record(
                     },
                     api_key: row.get(3)?,
                     verification_fingerprint: row.get(6)?,
-                    reasoning_selection: reasoning::for_base_url(&row.get::<_, String>(2)?),
+                    reasoning_selection: reasoning::for_provider(&name, &base_url),
+                    discovered_models: Vec::new(),
+                    capability_snapshot: None,
                 })
             },
         )
         .optional()
-        .map_err(|_| state_unavailable())
+        .map_err(|_| state_unavailable())?;
+    let Some(mut record) = record else {
+        return Ok(None);
+    };
+    let expected_fingerprint = combination_fingerprint(
+        &record.summary.base_url,
+        &record.api_key,
+        &record.summary.default_model,
+    );
+    let catalog = connection
+        .query_row(
+            "SELECT verification_fingerprint, models_json, capability_snapshot_json
+             FROM provider_model_catalog WHERE provider_id = ?1",
+            [&record.summary.id],
+            |row| {
+                let fingerprint: String = row.get(0)?;
+                let models_json: String = row.get(1)?;
+                let snapshot_json: Option<String> = row.get(2)?;
+                Ok((fingerprint, models_json, snapshot_json))
+            },
+        )
+        .optional()
+        .ok()
+        .flatten()
+        .and_then(|(fingerprint, models_json, snapshot_json)| {
+            decode_model_catalog(
+                &fingerprint,
+                &expected_fingerprint,
+                &models_json,
+                snapshot_json.as_deref(),
+                &record.summary.default_model,
+            )
+        });
+    if let Some(catalog) = catalog {
+        record.discovered_models = catalog.0;
+        record.capability_snapshot = catalog.1;
+        // 导出目录和审计共用兼容规则，只修饰读取副本，保留数据库中的原始探测证据。
+        if let Some(snapshot) = record.capability_snapshot.as_mut() {
+            match record.reasoning_selection.rule_id.as_str() {
+                reasoning::DEEPSEEK_HIGH_RULE => {
+                    apply_deepseek_compatibility(snapshot, &record.summary.default_model)
+                }
+                reasoning::DAYWAY_DS_DEEPSEEK_RULE => apply_dayway_ds_compatibility(snapshot),
+                _ => {}
+            }
+        }
+    }
+    Ok(Some(record))
 }
 
+fn decode_model_catalog(
+    fingerprint: &str,
+    expected_fingerprint: &str,
+    models_json: &str,
+    snapshot_json: Option<&str>,
+    default_model: &str,
+) -> Option<(Vec<String>, Option<CodexMetadataSnapshot>)> {
+    if fingerprint != expected_fingerprint {
+        return None;
+    }
+    // 合法的 [] 是可信的空发现结果；损坏或缺失的 JSON 则不是空目录。
+    let models = serde_json::from_str::<Vec<String>>(models_json).ok()?;
+    let mut rendered_models = models.clone();
+    if !rendered_models.iter().any(|model| model == default_model) {
+        rendered_models.push(default_model.to_owned());
+    }
+    let snapshot = snapshot_json
+        .and_then(|json| serde_json::from_str::<CodexMetadataSnapshot>(json).ok())
+        .filter(|snapshot| snapshot.covers_exact_models(&rendered_models));
+    Some((models, snapshot))
+}
+
+#[cfg(test)]
+mod model_catalog_decode_tests {
+    use super::decode_model_catalog;
+    use crate::provider::reasoning_capability::{
+        CapabilitySource, CapabilityState, CodexMetadataSnapshot, CodexModelMetadata,
+        SNAPSHOT_SCHEMA_VERSION, SnapshotStatus,
+    };
+
+    fn snapshot(models: &[&str]) -> String {
+        serde_json::to_string(&CodexMetadataSnapshot {
+            schema_version: SNAPSHOT_SCHEMA_VERSION,
+            target_environment: "native".to_owned(),
+            codex_version: Some("0.160.1".to_owned()),
+            executable_fingerprint: Some("sha256:test".to_owned()),
+            observed_at_epoch_seconds: 1,
+            status: SnapshotStatus::Complete,
+            models: models
+                .iter()
+                .map(|model| CodexModelMetadata {
+                    model_id: (*model).to_owned(),
+                    state: CapabilityState::KnownNonEmpty,
+                    default_reasoning_effort: Some("medium".to_owned()),
+                    supported_reasoning_efforts: vec!["medium".to_owned()],
+                    source: CapabilitySource::CodexBuiltin,
+                    source_id: "codex.model/list".to_owned(),
+                })
+                .collect(),
+        })
+        .expect("snapshot json")
+    }
+
+    #[test]
+    fn mismatched_fingerprint_does_not_reuse_catalog_or_snapshot() {
+        assert_eq!(
+            decode_model_catalog(
+                "stored",
+                "expected",
+                r#"["model-a"]"#,
+                Some(&snapshot(&["model-a", "default-model"])),
+                "default-model",
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn corrupt_models_json_is_not_a_valid_empty_catalog() {
+        assert_eq!(
+            decode_model_catalog("expected", "expected", "not-json", None, "default-model",),
+            None
+        );
+    }
+
+    #[test]
+    fn corrupt_snapshot_keeps_models_but_safely_drops_capabilities() {
+        assert_eq!(
+            decode_model_catalog(
+                "expected",
+                "expected",
+                r#"["model-a"]"#,
+                Some("not-json"),
+                "default-model",
+            ),
+            Some((vec!["model-a".to_owned()], None))
+        );
+    }
+
+    #[test]
+    fn partial_snapshot_drops_capabilities_for_the_whole_rendered_model_set() {
+        assert_eq!(
+            decode_model_catalog(
+                "expected",
+                "expected",
+                r#"["model-a","model-b"]"#,
+                Some(&snapshot(&["model-a", "default-model"])),
+                "default-model",
+            ),
+            Some((vec!["model-a".to_owned(), "model-b".to_owned()], None))
+        );
+    }
+
+    #[test]
+    fn legacy_provider_without_snapshot_remains_a_valid_unknown_catalog() {
+        assert_eq!(
+            decode_model_catalog(
+                "expected",
+                "expected",
+                r#"["model-a"]"#,
+                None,
+                "default-model",
+            ),
+            Some((vec!["model-a".to_owned()], None))
+        );
+    }
+
+    #[test]
+    fn legal_empty_array_is_preserved_as_an_empty_catalog() {
+        assert_eq!(
+            decode_model_catalog("expected", "expected", "[]", None, "default-model",),
+            Some((Vec::new(), None))
+        );
+    }
+
+    #[test]
+    fn complete_snapshot_must_also_cover_default_model() {
+        let decoded = decode_model_catalog(
+            "expected",
+            "expected",
+            r#"["model-a"]"#,
+            Some(&snapshot(&["model-a", "default-model"])),
+            "default-model",
+        )
+        .expect("catalog");
+        assert!(decoded.1.is_some());
+    }
+}
+
+#[cfg(test)]
+mod model_catalog_storage_tests {
+    use super::store_model_catalog;
+    use crate::state::{StatePaths, StateStore};
+    use rusqlite::{Connection, params};
+    use tempfile::TempDir;
+
+    #[test]
+    fn new_verification_clears_stale_snapshot() {
+        let temp = TempDir::new().expect("temp dir");
+        let store = StateStore::new(StatePaths::from_root(temp.path().join("state")));
+        assert!(store.bootstrap().is_ready());
+        let mut connection = Connection::open(store.paths().database()).expect("database");
+        let snapshot = r#"{"schemaVersion":1,"targetEnvironment":"native"}"#;
+        connection
+            .execute(
+                "INSERT INTO providers(
+                    id, name, base_url, api_key, default_model, verified_at, verification_fingerprint
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    "provider-1",
+                    "Provider 1",
+                    "https://provider.example/v1",
+                    "secret",
+                    "old-model",
+                    "1",
+                    "old-fingerprint",
+                ],
+            )
+            .expect("provider");
+        connection
+            .execute(
+                "INSERT INTO provider_model_catalog(
+                    provider_id, verification_fingerprint, models_json, capability_snapshot_json
+                 ) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    "provider-1",
+                    "old-fingerprint",
+                    r#"["old-model"]"#,
+                    snapshot
+                ],
+            )
+            .expect("existing catalog");
+        {
+            let transaction = connection.transaction().expect("transaction");
+            store_model_catalog(
+                &transaction,
+                "provider-1",
+                "new-fingerprint",
+                &["new-model".to_owned()],
+                None,
+            )
+            .expect("update catalog");
+            transaction.commit().expect("commit");
+        }
+        let stored: Option<String> = connection
+            .query_row(
+                "SELECT capability_snapshot_json FROM provider_model_catalog WHERE provider_id = ?1",
+                ["provider-1"],
+                |row| row.get(0),
+            )
+            .expect("stored snapshot");
+        assert_eq!(stored, None);
+    }
+}
 fn ensure_name_available(
     connection: &Connection,
     provider_id: Option<&str>,

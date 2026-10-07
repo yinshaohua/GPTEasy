@@ -303,15 +303,17 @@ fn checked_output(distribution: &str, args: &[&str], stdin: &[u8]) -> Vec<u8> {
     output.stdout
 }
 
-fn bundle(config: &[u8], credential: &[u8]) -> Vec<u8> {
+fn bundle(config: &[u8], credential: &[u8], catalog: &[u8]) -> Vec<u8> {
     let mut result = format!(
-        "GPTEASY_WSL_BUNDLE_V2\n{}\n{}\n",
+        "GPTEASY_WSL_BUNDLE_V2\n{}\n{}\n{}\n",
         config.len(),
-        credential.len()
+        credential.len(),
+        catalog.len()
     )
     .into_bytes();
     result.extend_from_slice(config);
     result.extend_from_slice(credential);
+    result.extend_from_slice(catalog);
     result
 }
 
@@ -548,8 +550,9 @@ model_providers.gpteasy.auth.command = \"sh\"\n\
             &format!("{home}/writer"),
             token,
             "missing",
+            "missing",
         ],
-        &bundle(config.as_bytes(), &credential),
+        &bundle(config.as_bytes(), &credential, br#"{"models":[]}"#),
     );
     assert!(
         written.status.success(),
@@ -1056,11 +1059,10 @@ mv "$HOME/.codex/reclaim.toml" "$HOME/.codex/config.toml""##,
 cat >"$HOME/fault-bin/sync" <<'SYNC'
 #!/bin/sh
 count_file="$HOME/sync-count"
-count=0
-[ ! -f "$count_file" ] || count=$(cat "$count_file")
-count=$((count + 1))
-printf '%s\n' "$count" >"$count_file"
-[ "$count" -ne 5 ] || exit 1
+if [ "$1" = -f ] && [ "$2" = "$HOME/.codex" ] && [ ! -f "$count_file" ]; then
+  touch "$count_file"
+  exit 1
+fi
 exec /usr/bin/sync "$@"
 SYNC
 chmod 700 "$HOME/fault-bin/sync"
@@ -1082,6 +1084,20 @@ rm -f "$HOME/sync-count""#,
     .expect("config hash is UTF-8")
     .trim()
     .to_owned();
+    let catalog_hash = String::from_utf8(checked_output(
+        &distribution,
+        &[
+            "/usr/bin/env",
+            &shell_home,
+            "/bin/sh",
+            "-c",
+            "sha256sum \"$HOME/.codex/gpteasy-model-catalog.json\" | awk '{print $1}'",
+        ],
+        &[],
+    ))
+    .expect("catalog hash is UTF-8")
+    .trim()
+    .to_owned();
     let failed_candidate = reclaimed_text
         .replace(
             "custom_reclaim_setting = true",
@@ -1089,6 +1105,7 @@ rm -f "$HOME/sync-count""#,
         )
         .into_bytes();
     let rollback_path = format!("PATH={home}/fault-bin:/usr/bin:/bin");
+    let original_catalog = read_file(".codex/gpteasy-model-catalog.json");
     let rollback = wsl_output(
         &distribution,
         &[
@@ -1099,14 +1116,20 @@ rm -f "$HOME/sync-count""#,
             &format!("{home}/writer"),
             rollback_token,
             &expected_hash,
+            &catalog_hash,
         ],
         &bundle(
             &failed_candidate,
             acceptance_key("GPTEASY_ACCEPTANCE_KEY_A", "wsl-harness-secret").as_bytes(),
+            br#"{"models":[]}"#,
         ),
     );
     assert_eq!(rollback.status.code(), Some(44));
     assert_eq!(read_file(".codex/config.toml"), reclaimed_config);
+    assert_eq!(
+        read_file(".codex/gpteasy-model-catalog.json"),
+        original_catalog
+    );
     checked_output(
         &distribution,
         &[

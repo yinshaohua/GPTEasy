@@ -410,6 +410,7 @@ select {
 .app-header-actions {
   min-width: 0;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
@@ -453,7 +454,9 @@ select {
 }
 
 .app-header .desktop-feedback {
-  top: calc(100% + 6px);
+  position: static;
+  flex: 0 0 100%;
+  text-align: right;
 }
 
 .session-visibility-global-status {
@@ -1017,6 +1020,14 @@ select {
 }
 
 .desktop-feedback.is-error {
+  color: var(--danger);
+}
+
+.desktop-feedback p {
+  margin: 0;
+}
+
+.desktop-feedback .is-error {
   color: var(--danger);
 }
 

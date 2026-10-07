@@ -27,6 +27,16 @@ use tempfile::TempDir;
 
 const PROVIDER_ID: &str = "9f319739-f219-48ee-be35-22e08d5402d7";
 const API_KEY: &str = "test-key-not-real";
+fn provider_combination_fingerprint(base_url: &str, api_key: &str, model: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"gpteasy-provider-combination-v1\0");
+    hasher.update(base_url.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(model.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(api_key.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
 
 fn fixture() -> (TempDir, StateStore, EnvironmentApplication) {
     let temp = TempDir::new().expect("temp dir");
@@ -132,6 +142,8 @@ impl EnvironmentFaultInjector for StartsConsumerDuringWrite {
 
 fn insert_provider(store: &StateStore) {
     let connection = Connection::open(store.paths().database()).expect("open state database");
+    let fingerprint =
+        provider_combination_fingerprint("https://fixture.example/v1", API_KEY, "fixture-model");
     connection
         .execute(
             "INSERT INTO providers (
@@ -145,7 +157,7 @@ fn insert_provider(store: &StateStore) {
                 API_KEY,
                 "fixture-model",
                 "1775606400",
-                "fixture-verification-fingerprint",
+                fingerprint.as_str(),
             ],
         )
         .expect("insert provider fixture");
@@ -156,7 +168,7 @@ fn insert_provider(store: &StateStore) {
              ) VALUES (?1, ?2, ?3)",
             params![
                 PROVIDER_ID,
-                "fixture-verification-fingerprint",
+                fingerprint.as_str(),
                 r#"["fixture-model","discovered-only-model"]"#,
             ],
         )
@@ -611,7 +623,7 @@ fn confirmed_takeover_preserves_external_fields_without_guessing_unknown_model_r
         .expect("discovered model entry");
     assert_eq!(
         discovered_model["description"],
-        "供应商已发现模型，能力未识别"
+        "供应商已发现模型，Codex 未识别精确模型能力"
     );
     assert_eq!(
         models[0]["input_modalities"],

@@ -239,9 +239,9 @@ export function saveAndApplyProviderUpdate(
   validationId: string,
   providerId: string,
   name: string,
-): Promise<{ provider: ProviderSummary; environment: EnvironmentSnapshot }> {
+): Promise<{ provider: ProviderSummary; environment: EnvironmentSnapshot; modelCatalogRefresh?: import("./modelCatalogRefresh").ModelCatalogRefreshResult }> {
   if (isBrowserPreview()) return Promise.reject(previewFailure);
-  return invoke<{ provider: ProviderSummary; environment: EnvironmentSnapshot }>("save_and_apply_provider_update", {
+  return invoke<{ provider: ProviderSummary; environment: EnvironmentSnapshot; modelCatalogRefresh?: import("./modelCatalogRefresh").ModelCatalogRefreshResult }>("save_and_apply_provider_update", {
     validationId,
     providerId,
     name,

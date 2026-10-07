@@ -7,6 +7,7 @@ pub mod diagnostic_assistant;
 pub mod diagnostic_report;
 pub mod diagnostics;
 pub mod environment;
+pub mod model_catalog_refresh;
 pub mod provider;
 pub mod session;
 pub mod session_visibility;
@@ -20,25 +21,26 @@ pub mod wsl;
 
 use codex::{CodexInspector, LoginStatusCommand};
 use commands::{
-    DesktopRuntime, EnvironmentRuntime, IssueLogRuntime, ProviderRuntime, SessionRuntime,
-    StartupRuntime, UpdateRuntime, WslRuntime, apply_environment_provider, apply_wsl_provider,
-    archive_sessions, cancel_provider_request, cancel_session_request, check_for_updates,
-    choose_issue_log_export_destination, choose_linux_export_destination,
-    choose_session_export_destination, confirm_provider_validation_base_url, copy_issue_logs,
-    copy_provider_api_key, delete_provider, delete_session, discard_provider_validation,
-    discover_provider_models, discover_provider_models_for_update, enter_session_management,
-    execute_session_visibility, export_all_issue_logs, export_issue_logs, export_linux_script,
-    export_session_markdown, force_apply_environment_provider, get_desktop_snapshot,
-    get_environment_snapshot, get_issue_log_path, get_session_visibility_status,
-    get_startup_snapshot, get_update_snapshot, install_update, leave_session_management,
-    list_issue_logs, list_providers, list_sessions, list_wsl_environments, open_dayway_website,
-    open_update_manual_download, open_update_release_notes, perform_update_check,
-    preview_session_visibility, read_session, reclaim_wsl_provider, record_frontend_failure,
-    refresh_startup_snapshot, refresh_wsl_environment, rename_provider, reorder_providers,
-    restart_desktop_application, restore_last_environment_config, revalidate_provider,
-    reveal_provider_api_key, save_and_apply_provider_update, save_dayway_provider,
-    save_provider_update, save_verified_provider, start_desktop_application,
-    switch_to_openai_login, unarchive_sessions, validate_provider, validate_provider_update,
+    DesktopRuntime, EnvironmentRuntime, IssueLogRuntime, ModelCatalogRefreshRuntime,
+    ProviderRuntime, SessionRuntime, StartupRuntime, UpdateRuntime, WslRuntime,
+    apply_environment_provider, apply_wsl_provider, archive_sessions, cancel_provider_request,
+    cancel_session_request, check_for_updates, choose_issue_log_export_destination,
+    choose_linux_export_destination, choose_session_export_destination,
+    confirm_provider_validation_base_url, copy_issue_logs, copy_provider_api_key, delete_provider,
+    delete_session, discard_provider_validation, discover_provider_models,
+    discover_provider_models_for_update, enter_session_management, execute_session_visibility,
+    export_all_issue_logs, export_issue_logs, export_linux_script, export_session_markdown,
+    force_apply_environment_provider, get_desktop_snapshot, get_environment_snapshot,
+    get_issue_log_path, get_session_visibility_status, get_startup_snapshot, get_update_snapshot,
+    install_update, leave_session_management, list_issue_logs, list_providers, list_sessions,
+    list_wsl_environments, open_dayway_website, open_update_manual_download,
+    open_update_release_notes, perform_update_check, preview_session_visibility, read_session,
+    reclaim_wsl_provider, record_frontend_failure, refresh_model_catalog, refresh_startup_snapshot,
+    refresh_wsl_environment, rename_provider, reorder_providers, restart_desktop_application,
+    restore_last_environment_config, revalidate_provider, reveal_provider_api_key,
+    save_and_apply_provider_update, save_dayway_provider, save_provider_update,
+    save_verified_provider, start_desktop_application, switch_to_openai_login, unarchive_sessions,
+    validate_provider, validate_provider_update,
 };
 use desktop::DesktopApplication;
 use diagnostic_report::{
@@ -48,6 +50,7 @@ use diagnostic_report::{
 };
 use diagnostics::{IssueLogLevel, IssueLogStore, install_panic_issue_logging};
 use environment::{EnvironmentApplication, EnvironmentRecovery};
+use model_catalog_refresh::ModelCatalogRefresher;
 use provider::{ProviderApplication, ProviderValidator, ValidationTimeouts};
 use session::SessionApplication;
 use session_visibility::SessionVisibilityApplication;
@@ -121,6 +124,9 @@ pub fn run() {
             }
             app.manage(EnvironmentRuntime::new(environment));
             app.manage(DesktopRuntime::new(DesktopApplication::new()));
+            app.manage(ModelCatalogRefreshRuntime {
+                refresher: ModelCatalogRefresher::new(&codex_home),
+            });
             let wsl = WslApplication::new(state_store.clone());
             if let Err(failure) = wsl.recover_pending() {
                 app.state::<IssueLogRuntime>().store.append(
@@ -189,6 +195,7 @@ pub fn run() {
             open_update_release_notes,
             get_environment_snapshot,
             get_desktop_snapshot,
+            refresh_model_catalog,
             start_desktop_application,
             restart_desktop_application,
             get_diagnostic_report,

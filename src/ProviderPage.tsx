@@ -79,6 +79,7 @@ import {
   type WslLifecycleOutcome,
   type WslLifecycleResult,
 } from "./contracts/environment";
+import { catalogRefreshMessage } from "./contracts/modelCatalogRefresh";
 import {
   environmentFailureFallback,
   environmentFailureMessages,
@@ -589,6 +590,7 @@ export default function ProviderPage({
       applyEnvironmentSnapshot(updated);
       setCatalogFeedback([
         providerMessages.forceSetSucceeded(provider.name),
+        updated.modelCatalogRefresh ? catalogRefreshMessage(updated.modelCatalogRefresh) : "",
         updated.pendingRestart ? providerMessages.configChangePendingRestart : "",
       ].filter(Boolean).join(" "));
     } catch (error) {
@@ -852,6 +854,7 @@ export default function ProviderPage({
         : item));
       setCatalogFeedback([
         providerMessages.wslApplied(provider.name, target.displayName),
+        wslDaemonRefreshMessage(result.daemonRefresh),
         result.pendingRestart ? providerMessages.wslPendingRestart : "",
         lifecycleOutcomeMessage(result.lifecycleOutcome),
       ].filter(Boolean).join(" "));
@@ -960,6 +963,7 @@ export default function ProviderPage({
       setWslProviderId(provider.id);
       setWslFeedback([
         providerMessages.wslReclaimed(provider.name, target.displayName),
+        wslDaemonRefreshMessage(result.daemonRefresh),
         result.pendingRestart ? providerMessages.wslPendingRestart : "",
         lifecycleOutcomeMessage(result.lifecycleOutcome),
       ].filter(Boolean).join(" "));
@@ -1076,15 +1080,20 @@ export default function ProviderPage({
           request.provider.id,
           request.name,
         );
-        updated = result.environment;
+        updated = { ...result.environment, modelCatalogRefresh: result.modelCatalogRefresh };
         receiptRef.current = null;
         replaceProvider(result.provider);
         resetEditor("catalog");
       }
       applyEnvironmentSnapshot(updated);
-      if (updated.pendingRestart) {
-        setCatalogFeedback(providerMessages.configChangePendingRestart);
-      }
+      const refreshMessage = updated.modelCatalogRefresh
+        ? "供应商切换已成功，" + catalogRefreshMessage(updated.modelCatalogRefresh)
+        : "";
+      setCatalogFeedback([
+        refreshMessage,
+        updated.pendingRestart ? providerMessages.configChangePendingRestart : "",
+      ].filter(Boolean).join(" "));
+
     } catch (error) {
       const refreshed = await refreshEnvironmentAfterFailure();
       if (request.kind === "provider_update") {
@@ -2195,6 +2204,13 @@ function lifecycleOutcomeMessage(outcome: WslLifecycleOutcome | undefined): stri
     default:
       return "";
   }
+}
+
+function wslDaemonRefreshMessage(result: WslApplyResult["daemonRefresh"]): string {
+  if (!result) return "";
+  if (result.status === "refreshed") return providerMessages.wslDaemonRefreshed;
+  if (result.status === "not_running") return providerMessages.wslDaemonNotRunning;
+  return providerMessages.wslDaemonRefreshFailed;
 }
 
 function lifecycleResultsMessage(results: WslLifecycleResult[]): string {

@@ -9,6 +9,7 @@ use gpteasy_lib::provider::{
 };
 use gpteasy_lib::state::{StatePaths, StateStore};
 use rusqlite::{Connection, params};
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -116,6 +117,93 @@ fn zsh_export_captures_every_verified_provider_and_reasoning_rules() {
 }
 
 #[test]
+fn bash_and_zsh_exports_embed_the_same_static_reasoning_snapshot() {
+    let fixture = ExportFixture::new();
+    fixture.insert_provider(
+        "11111111-1111-4111-8111-111111111111",
+        "Alpha Provider",
+        "https://alpha.example/v1",
+        "alpha-secret-key",
+        "gpt-6.1-sol",
+        1,
+    );
+    fixture.insert_model_catalog(
+        "11111111-1111-4111-8111-111111111111",
+        &["gpt-6.1-sol", "provider-only"],
+        Some(
+            r#"{"schemaVersion":1,"targetEnvironment":"native","codexVersion":"0.160.1","executableFingerprint":"sha256:test","observedAtEpochSeconds":1,"status":"complete","models":[{"modelId":"gpt-6.1-sol","state":"known_non_empty","defaultReasoningEffort":"medium","supportedReasoningEfforts":["low","medium","xhigh"],"source":"codex_builtin","sourceId":"codex.model/list"},{"modelId":"provider-only","state":"not_found","defaultReasoningEffort":null,"supportedReasoningEfforts":[],"source":"codex_builtin","sourceId":"codex.model/list"}]}"#,
+        ),
+    );
+
+    let bash_path = fixture.temp.path().join("gpteasy.sh");
+    let zsh_path = fixture.temp.path().join("gpteasy.zsh");
+    fixture
+        .application
+        .export_linux_script(LinuxShell::Bash, &bash_path, false)
+        .expect("export Bash snapshot");
+    fixture
+        .application
+        .export_linux_script(LinuxShell::Zsh, &zsh_path, false)
+        .expect("export Zsh snapshot");
+
+    let bash = fs::read_to_string(bash_path).expect("read Bash snapshot");
+    let zsh = fs::read_to_string(zsh_path).expect("read Zsh snapshot");
+    for script in [&bash, &zsh] {
+        assert!(script.contains("GPTEASY_TEST_DAEMON_REFRESH_DEADLINE_SECONDS:-75"));
+        assert!(script.contains("gpteasy__model_catalog_snapshot_schema='1'"));
+        assert!(script.contains("\"slug\": \"gpt-6.1-sol\""));
+        assert!(script.contains("\"default_reasoning_level\": \"medium\""));
+        assert!(script.contains("\"effort\": \"xhigh\""));
+        assert!(script.contains("\"slug\": \"provider-only\""));
+        assert!(script.contains("供应商已发现模型，Codex 未识别精确模型能力"));
+        assert!(!script.contains("app-server --stdio"));
+        assert!(!script.contains("model-list"));
+    }
+    let bash_catalog = bash
+        .split("gpteasy__provider_model_catalog() {")
+        .nth(1)
+        .expect("Bash catalog function")
+        .split("gpteasy__provider_count=")
+        .next()
+        .expect("Bash catalog body");
+    let zsh_catalog = zsh
+        .split("gpteasy__provider_model_catalog() {")
+        .nth(1)
+        .expect("Zsh catalog function")
+        .split("gpteasy__provider_count=")
+        .next()
+        .expect("Zsh catalog body");
+    assert_eq!(bash_catalog, zsh_catalog);
+}
+
+#[test]
+fn linux_export_downgrades_a_corrupt_snapshot_without_guessing_by_name() {
+    let fixture = ExportFixture::new();
+    fixture.insert_provider(
+        "11111111-1111-4111-8111-111111111111",
+        "Alpha Provider",
+        "https://alpha.example/v1",
+        "alpha-secret-key",
+        "DeepSeek-R1",
+        1,
+    );
+    fixture.insert_model_catalog(
+        "11111111-1111-4111-8111-111111111111",
+        &["DeepSeek-R1"],
+        Some("{not-json"),
+    );
+    let destination = fixture.temp.path().join("gpteasy.sh");
+    fixture
+        .application
+        .export_linux_script(LinuxShell::Bash, &destination, false)
+        .expect("export unknown snapshot");
+    let script = fs::read_to_string(destination).expect("read exported script");
+    assert!(script.contains("\"description\": \"供应商已发现模型，能力未识别\""));
+    assert!(!script.contains("\"default_reasoning_level\": \"high\""));
+    assert!(!script.contains("\"effort\": \"low\""));
+}
+
+#[test]
 fn bash_export_requires_a_verified_provider_without_creating_a_file() {
     let fixture = ExportFixture::new();
     let destination = fixture.temp.path().join("gpteasy.sh");
@@ -159,6 +247,229 @@ fn bash_export_does_not_replace_an_existing_file_without_confirmation() {
         fs::read(destination).expect("read original"),
         b"user-owned original\n"
     );
+}
+
+#[test]
+fn dayway_ds_linux_export_applies_exact_deepseek_compatibility_profile() {
+    let fixture = ExportFixture::new();
+    let ds_id = "11111111-1111-4111-8111-111111111111";
+    let dayway_id = "22222222-2222-4222-8222-222222222222";
+    let models = [
+        "deepseek-v4-pro",
+        "deepseek-v4-flash",
+        "deepseek-v4-pro-preview",
+        "gpt-6.1-sol",
+    ];
+    let snapshot = serde_json::json!({
+        "schemaVersion": 1, "targetEnvironment": "native", "codexVersion": "0.160.1",
+        "executableFingerprint": "sha256:test", "observedAtEpochSeconds": 1, "status": "complete",
+        "models": models.iter().map(|model| serde_json::json!({
+            "modelId": model, "state": if *model == "gpt-6.1-sol" { "known_non_empty" } else { "not_found" },
+            "defaultReasoningEffort": if *model == "gpt-6.1-sol" { Some("medium") } else { None },
+            "supportedReasoningEfforts": if *model == "gpt-6.1-sol" { vec!["low", "medium", "high", "xhigh"] } else { vec![] },
+            "source": "codex_builtin", "sourceId": "codex.model/list"
+        })).collect::<Vec<_>>()
+    }).to_string();
+    for (id, name, order) in [(ds_id, "DayWay-DS", 1), (dayway_id, "DayWay", 2)] {
+        fixture.insert_provider(
+            id,
+            name,
+            "https://dayway.example/v1",
+            "dayway-ds-secret-key",
+            "deepseek-v4-pro",
+            order,
+        );
+        fixture.insert_model_catalog(id, &models, Some(&snapshot));
+    }
+    for shell in shell_matrix_targets() {
+        let destination = fixture.temp.path().join(match shell {
+            LinuxShell::Bash => "dayway-ds.sh",
+            LinuxShell::Zsh => "dayway-ds.zsh",
+        });
+        fixture
+            .application
+            .export_linux_script(shell, &destination, false)
+            .expect("export");
+        let script = fs::read_to_string(&destination).expect("script");
+        let ds = exported_model_catalog(&script, ds_id);
+        let dayway = exported_model_catalog(&script, dayway_id);
+        for model in &ds["models"].as_array().expect("models")[..] {
+            let slug = model["slug"].as_str().expect("slug");
+            let efforts = model["supported_reasoning_levels"]
+                .as_array()
+                .expect("levels")
+                .iter()
+                .map(|level| level["effort"].as_str().expect("effort"))
+                .collect::<Vec<_>>();
+            match slug {
+                "deepseek-v4-pro" | "deepseek-v4-flash" => {
+                    assert_eq!(model["default_reasoning_level"], "high");
+                    assert_eq!(efforts, ["low", "medium", "high"]);
+                }
+                "gpt-6.1-sol" => assert_eq!(efforts, ["low", "medium", "high", "xhigh"]),
+                _ => assert!(efforts.is_empty()),
+            }
+        }
+        for model in dayway["models"].as_array().expect("models") {
+            if model["slug"] != "gpt-6.1-sol" {
+                assert!(
+                    model["supported_reasoning_levels"]
+                        .as_array()
+                        .expect("levels")
+                        .is_empty()
+                );
+            }
+        }
+        run_shell_black_box_with_canaries(
+            shell,
+            &destination,
+            r#"
+set -euo pipefail
+workspace=$(mktemp -d "${TMPDIR:-/tmp}/gpteasy-ds-catalog.XXXXXX")
+trap 'rm -rf -- "$workspace"' EXIT
+mkdir -p "$workspace/bin" "$workspace/codex"
+cp -- "$1" "$workspace/export"
+chmod 600 "$workspace/export"
+export CODEX_HOME="$workspace/codex"
+export PATH="$workspace/bin:$PATH"
+cat >"$workspace/bin/codex" <<'CODEX'
+#!/usr/bin/env bash
+if [[ "$*" == --version ]]; then echo 'codex-cli 0.160.1'; exit 0; fi
+[[ "$*" == 'app-server daemon restart' ]]
+CODEX
+chmod 700 "$workspace/bin/codex"
+source "$workspace/export"
+[[ ! -e "$CODEX_HOME/gpteasy-model-catalog.json" ]]
+output=$(gpteasy <<<"1" 2>&1)
+[[ "$output" == *'已切换到：DayWay-DS'* ]]
+[[ "$output" == *'stage=restart result=command_completed'* ]]
+grep -Fq 'model_reasoning_effort = "high"' "$CODEX_HOME/config.toml"
+grep -Fq 'model_catalog_json = "gpteasy-model-catalog.json"' "$CODEX_HOME/config.toml"
+[[ ! -e "$CODEX_HOME/.gpteasy-shell/lock/active" ]]
+cp -- "$CODEX_HOME/gpteasy-model-catalog.json" "$1.ds.json"
+
+
+output=$(gpteasy <<<"2" 2>&1)
+[[ "$output" == *'已切换到：DayWay'* ]]
+cp -- "$CODEX_HOME/gpteasy-model-catalog.json" "$1.dayway.json"
+"#,
+            &["dayway-ds-secret-key", "https://dayway.example/v1"],
+        );
+        // Local optional shell absence may skip the harness.
+        if Path::new(&format!("{}.ds.json", destination.display())).exists() {
+            for (suffix, expected) in [("ds", ds), ("dayway", dayway)] {
+                let actual: serde_json::Value = serde_json::from_str(
+                    &fs::read_to_string(format!("{}.{suffix}.json", destination.display()))
+                        .expect("Linux catalog"),
+                )
+                .expect("Linux catalog JSON");
+                assert_eq!(actual, expected);
+            }
+        }
+    }
+    let connection = Connection::open(fixture.store.paths().database()).expect("state");
+    let stored: String = connection
+        .query_row(
+            "SELECT capability_snapshot_json FROM provider_model_catalog WHERE provider_id = ?1",
+            [ds_id],
+            |row| row.get(0),
+        )
+        .expect("stored snapshot");
+    assert_eq!(
+        stored, snapshot,
+        "export must preserve the stored probe evidence"
+    );
+}
+
+#[test]
+fn dayway_ds_export_preserves_known_capabilities_and_unknown_evidence() {
+    for case in [
+        "known_empty",
+        "known_non_empty",
+        "conflict",
+        "probe_failed",
+        "missing",
+        "corrupt",
+        "partial",
+        "fingerprint",
+    ] {
+        let fixture = ExportFixture::new();
+        let id = "11111111-1111-4111-8111-111111111111";
+        let model = "deepseek-v4-pro";
+        fixture.insert_provider(
+            id,
+            "DayWay-DS",
+            "https://dayway.example/v1",
+            "test-key",
+            model,
+            1,
+        );
+        let snapshot = serde_json::json!({
+            "schemaVersion": 1, "targetEnvironment": "native", "codexVersion": "0.160.1",
+            "executableFingerprint": "sha256:test", "observedAtEpochSeconds": 1, "status": "complete",
+            "models": [{"modelId": if case == "partial" { "other" } else { model },
+                "state": if ["known_empty", "known_non_empty", "conflict", "probe_failed"].contains(&case) { case } else { "not_found" },
+                "defaultReasoningEffort": if case == "known_non_empty" { Some("xhigh") } else { None },
+                "supportedReasoningEfforts": if case == "known_non_empty" { vec!["xhigh"] } else { vec![] },
+                "source": "codex_builtin", "sourceId": "codex.model/list"}]
+        }).to_string();
+        fixture.insert_model_catalog(
+            id,
+            &[model],
+            match case {
+                "missing" => None,
+                "corrupt" => Some("not-json"),
+                _ => Some(&snapshot),
+            },
+        );
+        if case == "fingerprint" {
+            Connection::open(fixture.store.paths().database())
+                .expect("state")
+                .execute(
+                    "UPDATE provider_model_catalog SET verification_fingerprint = 'mismatch'",
+                    [],
+                )
+                .expect("invalidate fingerprint");
+        }
+        for shell in shell_matrix_targets() {
+            let destination = fixture.temp.path().join(match shell {
+                LinuxShell::Bash => "boundary.sh",
+                LinuxShell::Zsh => "boundary.zsh",
+            });
+            fixture
+                .application
+                .export_linux_script(shell, &destination, false)
+                .expect("export");
+            let script = fs::read_to_string(destination).expect("script");
+            let catalog = exported_model_catalog(&script, id);
+            let entry = &catalog["models"][0];
+            let levels = entry["supported_reasoning_levels"]
+                .as_array()
+                .expect("levels");
+            if case == "known_non_empty" {
+                assert_eq!(levels.len(), 1, "{case}");
+                assert_eq!(levels[0]["effort"], "xhigh", "{case}");
+                assert_eq!(entry["default_reasoning_level"], "xhigh", "{case}");
+            } else {
+                assert!(levels.is_empty(), "{case}");
+                assert!(entry["default_reasoning_level"].is_null(), "{case}");
+            }
+        }
+    }
+}
+
+fn exported_model_catalog(script: &str, provider_id: &str) -> serde_json::Value {
+    let marker = format!("GPTEASY_MODEL_CATALOG_{provider_id}");
+    let open = format!("cat <<'{marker}'\n");
+    let close = format!("\n{marker}\n");
+    let json = script
+        .split_once(&open)
+        .expect("catalog start")
+        .1
+        .split_once(&close)
+        .expect("catalog end")
+        .0;
+    serde_json::from_str(json).expect("exported model catalog JSON")
 }
 
 #[test]
@@ -365,11 +676,20 @@ too_old=$(gpteasy <<<"1" 2>&1 || true)
 
 cat >"$fake_bin/codex" <<'SUPPORTED_CODEX'
 #!/usr/bin/env bash
+if [[ "$*" == 'app-server daemon restart' ]]; then
+    printf '%s\n' "$*" >>"$GPTEASY_DAEMON_CALLS"
+    exit "${GPTEASY_DAEMON_RESTART_STATUS:-0}"
+fi
 printf '%s\n' 'codex-cli 0.147.0'
 SUPPORTED_CODEX
 chmod 700 "$fake_bin/codex"
-menu=$(gpteasy <<<"1")
+export GPTEASY_DAEMON_CALLS="$workspace/daemon-calls"
+export GPTEASY_DAEMON_RESTART_STATUS=17
+menu=$(gpteasy <<<"1" 2>&1)
 [[ "$menu" == *'Alpha Provider (alpha-model)'* ]]
+[[ "$menu" == *'已切换到：Alpha Provider'* ]]
+[[ "$menu" == *'stage=restart result=command_failed exit_code=17'* ]]
+[[ "$(cat "$GPTEASY_DAEMON_CALLS")" == 'app-server daemon restart' ]]
 grep -Fq '# GPTEasy schema-version: 1' "$codex_home/config.toml"
 grep -Fq '# GPTEasy provider-id: 11111111-1111-4111-8111-111111111111' "$codex_home/config.toml"
 grep -Fq '# GPTEasy source-id:' "$codex_home/config.toml"
@@ -1198,6 +1518,126 @@ credential=$(find "$codex_home/.gpteasy-shell/credentials" -type f -name '*.toke
     }
 }
 
+#[test]
+fn shell_switch_returns_when_daemon_restart_hangs_without_rolling_back() {
+    let fixture = ExportFixture::new();
+    fixture.insert_provider(
+        "11111111-1111-4111-8111-111111111111",
+        "Alpha Provider",
+        "https://alpha.example/v1",
+        "alpha-secret-key",
+        "alpha-model",
+        1,
+    );
+    for shell in shell_matrix_targets() {
+        let destination = fixture.temp.path().join(match shell {
+            LinuxShell::Bash => "bounded.sh",
+            LinuxShell::Zsh => "bounded.zsh",
+        });
+        fixture
+            .application
+            .export_linux_script(shell, &destination, false)
+            .expect("export shell snapshot");
+        run_shell_black_box(
+            shell,
+            &destination,
+            r#"
+set -euo pipefail
+workspace=$(mktemp -d "${TMPDIR:-/tmp}/gpteasy-daemon-timeout.XXXXXX")
+trap 'rm -rf -- "$workspace"' EXIT
+script="$workspace/gpteasy-export"
+cp -- "$1" "$script"
+chmod 600 "$script"
+mkdir -p "$workspace/bin" "$workspace/codex"
+export CODEX_HOME="$workspace/codex"
+export PATH="$workspace/bin:$PATH"
+export GPTEASY_DAEMON_CALLS="$workspace/calls"
+export GPTEASY_TEST_DAEMON_REFRESH_DEADLINE_SECONDS=1
+cat >"$workspace/bin/codex" <<'CODEX'
+#!/usr/bin/env bash
+if [[ "$*" == --version ]]; then
+    echo 'codex-cli 0.147.0'
+    exit 0
+fi
+printf '%s\n' "$*" >>"$GPTEASY_DAEMON_CALLS"
+# Exercise a stuck draining operation that even ignores graceful termination.
+trap '' TERM
+while :; do sleep 1; done
+CODEX
+chmod 700 "$workspace/bin/codex"
+# An outer deadline catches the original hang, including inherited output pipes.
+if ! timeout --kill-after=1s 16s "$2" -c 'source "$1"; gpteasy <<<"1"; echo SWITCH_RETURNED' shell "$script" >"$workspace/output" 2>&1; then
+    echo 'FAIL: provider switch did not return after daemon refresh hung' >&2
+    exit 1
+fi
+output=$(cat "$workspace/output")
+[[ "$output" == *'SWITCH_RETURNED'* ]]
+[[ "$output" == *'已切换到：Alpha Provider'* ]]
+[[ "$output" == *'stage=restart result=timeout'* ]]
+[[ "$output" == *'配置已生效'* ]]
+[[ "$output" != *'alpha-secret-key'* ]]
+[[ "$output" != *'https://alpha.example/v1'* ]]
+[[ "$(cat "$GPTEASY_DAEMON_CALLS")" == 'app-server daemon restart' ]]
+[[ ! -e "$CODEX_HOME/.gpteasy-shell/lock/active" ]]
+source "$script"
+[[ "$(gpteasy current)" == *'Alpha Provider'* ]]
+[[ -s "$CODEX_HOME/config.toml" ]]
+[[ -n "$(find "$CODEX_HOME/.gpteasy-shell/credentials" -name '*.token' -print -quit)" ]]
+
+# A graceful restart can take longer than the old 10-second deadline.
+cat >"$workspace/bin/codex" <<'CODEX'
+#!/usr/bin/env bash
+if [[ "$*" == --version ]]; then echo 'codex-cli 0.147.0'; exit 0; fi
+if [[ "$*" == 'app-server daemon restart' ]]; then
+    sleep 2
+fi
+if read -r unexpected; then exit 23; fi
+printf '%s\n' "$*" >>"$GPTEASY_DAEMON_CALLS"
+exit 0
+CODEX
+chmod 700 "$workspace/bin/codex"
+export GPTEASY_TEST_DAEMON_REFRESH_DEADLINE_SECONDS=3
+slow=$(gpteasy <<<"1" 2>&1)
+[[ "$slow" == *'stage=restart result=started deadline_seconds=3'* ]]
+[[ "$slow" == *'stage=restart result=command_completed'* ]]
+unset GPTEASY_TEST_DAEMON_REFRESH_DEADLINE_SECONDS
+
+# Success only proves the control command completed, not daemon readiness.
+cat >"$workspace/bin/codex" <<'CODEX'
+#!/usr/bin/env bash
+if [[ "$*" == --version ]]; then echo 'codex-cli 0.147.0'; exit 0; fi
+if read -r unexpected; then exit 23; fi
+printf '%s\n' "$*" >>"$GPTEASY_DAEMON_CALLS"
+echo 'raw diagnostic alpha-secret-key https://alpha.example/v1' >&2
+exit "${GPTEASY_DAEMON_RESTART_STATUS:-0}"
+CODEX
+chmod 700 "$workspace/bin/codex"
+export GPTEASY_DAEMON_RESTART_STATUS=0
+good=$(gpteasy <<<"1" 2>&1)
+[[ "$good" == *'stage=restart result=command_completed'* ]]
+[[ "$good" != *'raw diagnostic'* ]]
+export GPTEASY_DAEMON_RESTART_STATUS=17
+failed=$(gpteasy <<<"1" 2>&1)
+[[ "$failed" == *'stage=restart result=command_failed exit_code=17'* ]]
+[[ "$failed" == *'配置已生效'* ]]
+[[ "$failed" != *'raw diagnostic'* ]]
+[[ "$(gpteasy current)" == *'Alpha Provider'* ]]
+# No CLI: do not try to refresh a preconfigured environment.
+before=$(cat "$GPTEASY_DAEMON_CALLS")
+gpteasy__codex_cli_state=missing
+missing=$(gpteasy__restart_daemon_best_effort 2>&1)
+[[ -z "$missing" ]]
+[[ "$before" == "$(cat "$GPTEASY_DAEMON_CALLS")" ]]
+# No deadline utility: fail closed on refresh, not on the committed switch.
+gpteasy__codex_cli_state=ready
+skipped=$(PATH="$workspace/bin" gpteasy__restart_daemon_best_effort 2>&1)
+[[ "$skipped" == *'stage=restart result=skipped_no_timeout'* ]]
+[[ "$before" == "$(cat "$GPTEASY_DAEMON_CALLS")" ]]
+"#,
+        );
+    }
+}
+
 struct ExportFixture {
     temp: TempDir,
     store: StateStore,
@@ -1417,14 +1857,65 @@ impl ExportFixture {
         sort_order: i64,
     ) {
         let connection = Connection::open(self.store.paths().database()).expect("open state");
+        let fingerprint = provider_combination_fingerprint(base_url, api_key, default_model);
         connection
             .execute(
                 "INSERT INTO providers (
                     id, name, base_url, api_key, default_model, verified_at,
                     verification_fingerprint, sort_order
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, '1786800000', 'verified', ?6)",
-                params![id, name, base_url, api_key, default_model, sort_order],
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, '1786800000', ?6, ?7)",
+                params![
+                    id,
+                    name,
+                    base_url,
+                    api_key,
+                    default_model,
+                    fingerprint,
+                    sort_order
+                ],
             )
             .expect("insert verified provider fixture");
     }
+
+    fn insert_model_catalog(
+        &self,
+        provider_id: &str,
+        models: &[&str],
+        capability_snapshot_json: Option<&str>,
+    ) {
+        let connection = Connection::open(self.store.paths().database()).expect("open state");
+        let (base_url, api_key, default_model): (String, String, String) = connection
+            .query_row(
+                "SELECT base_url, api_key, default_model FROM providers WHERE id = ?1",
+                [provider_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("provider fixture exists");
+        let fingerprint = provider_combination_fingerprint(&base_url, &api_key, &default_model);
+        let models_json = serde_json::to_string(models).expect("serialize model fixture");
+        connection
+            .execute(
+                "INSERT INTO provider_model_catalog(
+                    provider_id, verification_fingerprint, models_json, capability_snapshot_json
+                 ) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    provider_id,
+                    fingerprint,
+                    models_json,
+                    capability_snapshot_json
+                ],
+            )
+            .expect("insert model catalog fixture");
+    }
+}
+
+fn provider_combination_fingerprint(base_url: &str, api_key: &str, model: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"gpteasy-provider-combination-v1\0");
+    hasher.update(base_url.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(model.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(api_key.as_bytes());
+    format!("{:x}", hasher.finalize())
 }

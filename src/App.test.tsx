@@ -2271,6 +2271,7 @@ describe("Codex 环境接管", () => {
           requiresTakeoverConfirmation: false,
           currentProvider: { ...provider, isCurrent: true },
           pendingRestart: true,
+          modelCatalogRefresh: { operationId: "switch-test", status: "failed", daemon: "unknown", before: null, after: null, messageId: "model_catalog_refresh.timeout" },
           consumers: { desktop: "running", cli: "running" },
         });
       }
@@ -2292,6 +2293,8 @@ describe("Codex 环境接管", () => {
       });
     });
     expect(await screen.findByText(/运行中的 Codex 消费者可能继续使用旧配置/)).toBeInTheDocument();
+    expect(screen.getByText(/供应商切换已成功，模型目录刷新失败/)).toBeInTheDocument();
+    expect(invoke.mock.calls.some(([command]) => command === "refresh_model_catalog")).toBe(false);
   });
 
   it("运行中消费者只产生被动待重启反馈", async () => {

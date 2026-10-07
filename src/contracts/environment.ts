@@ -23,6 +23,7 @@ export interface ArtifactImpact {
 }
 
 export interface EnvironmentSnapshot {
+  modelCatalogRefresh?: import("./modelCatalogRefresh").ModelCatalogRefreshResult;
   state: EnvironmentState;
   mode: AuthenticationMode | null;
   messageId: string;
@@ -102,6 +103,23 @@ export interface WslApplyResult {
   environment: WslEnvironmentSummary;
   pendingRestart: boolean;
   lifecycleOutcome: WslLifecycleOutcome;
+  daemonRefresh: WslDaemonRefreshResult | null;
+}
+
+export type WslDaemonRefreshStatus = "refreshed" | "not_running" | "failed";
+export type WslManagedDaemonStatus = "managed" | "unavailable" | "unsafe" | "unknown";
+export interface WslDaemonIdentity {
+  pid: number | null;
+  version: string | null;
+  cliVersion: string | null;
+}
+export interface WslDaemonRefreshResult {
+  operationId: string;
+  status: WslDaemonRefreshStatus;
+  daemon: WslManagedDaemonStatus;
+  before: WslDaemonIdentity | null;
+  after: WslDaemonIdentity | null;
+  messageId: string;
 }
 
 export interface WslRefreshResult {

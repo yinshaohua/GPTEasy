@@ -1485,6 +1485,38 @@ fn unexpected_exit() -> SessionFailure {
     )
 }
 
+// Daemon management shares executable discovery, not the stdio connection or its lifecycle.
+pub(crate) fn managed_daemon_cli_command() -> Option<std::process::Command> {
+    Some(std::process::Command::new(
+        discover_codex_native_executable()?,
+    ))
+}
+
+/// 返回可以被安全地直接启动的原生 Codex 可执行文件。
+///
+/// 能力探测必须能够在超时后清理自己创建的子进程，因此不会返回 `.cmd`、
+/// `cmd.exe` 或其它 shell shim。这里复用会话使用的当前用户 PATH 和 Windows
+/// 桌面应用目录发现逻辑，但不会读取 Codex 配置或认证文件。
+pub(crate) fn discover_codex_native_executable() -> Option<PathBuf> {
+    if let Some(override_path) = std::env::var_os("GPTEASY_CODEX_EXECUTABLE") {
+        let path = PathBuf::from(override_path);
+        if path.is_file()
+            && !path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("cmd"))
+        {
+            return Some(path);
+        }
+    }
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    #[cfg(windows)]
+    let user_path = read_current_user_path();
+    #[cfg(not(windows))]
+    let user_path: Option<OsString> = None;
+    let launch = discover_codex_in_paths(&path, user_path.as_deref()).ok()?;
+    launch.args_prefix.is_empty().then_some(launch.program)
+}
+
 fn discover_codex(state_store: Option<&StateStore>) -> Result<LaunchCommand, SessionFailure> {
     if let Some(override_path) = std::env::var_os("GPTEASY_CODEX_EXECUTABLE") {
         let path = PathBuf::from(override_path);

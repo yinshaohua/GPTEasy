@@ -175,7 +175,7 @@ fn read_destination(destination: &Path) -> Result<Option<Vec<u8>>, LinuxExportFa
 
 fn render(shell: LinuxShell, export_id: &str, providers: &[catalog::ProviderRecord]) -> String {
     let mut script = format!(
-        "#!/usr/bin/env {}\n# GPTEasy {} Linux provider snapshot. This file contains sensitive credentials.\ngpteasy__schema_version='1'\n",
+        "#!/usr/bin/env {}\n# GPTEasy {} Linux provider snapshot. This file contains sensitive credentials.\ngpteasy__schema_version='1'\ngpteasy__model_catalog_snapshot_schema='1'\n",
         shell.executable(),
         shell.display_name(),
     );
@@ -202,6 +202,26 @@ fn render(shell: LinuxShell, export_id: &str, providers: &[catalog::ProviderReco
         ));
     }
     script.push_str("GPTEASY_PROVIDER_CATALOG\n}\n");
+    script.push_str("\n# 每个供应商的 Codex 模型目录快照。切换时写入当前 CODEX_HOME。\n");
+    script.push_str("gpteasy__provider_model_catalog() {\n    case \"$1\" in\n");
+    for provider in providers {
+        let catalog = super::model_catalog::render_with_snapshot(
+            &provider.discovered_models,
+            &provider.summary.default_model,
+            provider.capability_snapshot.as_ref(),
+        )
+        .expect("model catalog serialization");
+        let marker = format!("GPTEASY_MODEL_CATALOG_{}", provider.summary.id);
+        script.push_str(&format!(
+            "        {})\n            cat <<'{}'\n",
+            provider.summary.id, marker
+        ));
+        script.push_str(&String::from_utf8_lossy(&catalog));
+        script.push_str(&format!("\n{}\n            ;;\n", marker));
+    }
+    script.push_str(
+        "        *)\n            model=$(gpteasy__provider_model \"$1\") || return 1\n            model_json=$(gpteasy__json_escape \"$model\") || return 1\n            printf '%s\\n' '{\"models\":[{\"slug\":\"'\"$model_json\"'\",\"display_name\":\"'\"$model_json\"'\",\"description\":\"供应商已发现模型，能力未识别\",\"default_reasoning_level\":null,\"supported_reasoning_levels\":[],\"shell_type\":\"default\",\"visibility\":\"list\",\"supported_in_api\":true,\"priority\":1,\"support_verbosity\":false,\"default_verbosity\":null,\"context_window\":128000,\"max_context_window\":128000,\"input_modalities\":[\"text\",\"image\"],\"supports_image_detail_original\":false,\"supports_parallel_tool_calls\":false,\"truncation_policy\":{\"mode\":\"tokens\",\"limit\":10000},\"experimental_supported_tools\":[],\"base_instructions\":\"\"}]}'\n            ;;\n    esac\n}\n",
+    );
     script.push_str(
         "gpteasy__provider_count=$(gpteasy__provider_catalog | awk 'NF && $1 !~ /^#/ { count += 1 } END { print count + 0 }')\n\n",
     );
@@ -232,6 +252,7 @@ gpteasy__print_block() {{
     printf '# GPTEasy source-id: %s\n' "$gpteasy__export_id"
     printf '# GPTEasy credential-file: %s\n' "$credential_relative"
     printf 'model = %s\n' "$(gpteasy__toml_string "$model")"
+    printf '%s\n' 'model_catalog_json = "gpteasy-model-catalog.json"'
     if [[ -n "$reasoning_effort" ]]; then
         printf 'model_reasoning_effort = %s\n' "$(gpteasy__toml_string "$reasoning_effort")"
     fi
@@ -409,6 +430,84 @@ fn write_failed() -> LinuxExportFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn export_audit_uses_the_same_vendor_fallback_as_the_exported_catalog() {
+        use crate::provider::reasoning::{DAYWAY_DS_DEEPSEEK_RULE, audit_details};
+        use crate::provider::{ProviderApplication, ProviderValidator, ValidationTimeouts};
+        use crate::state::StatePaths;
+        use rusqlite::{Connection, params};
+
+        let temporary = tempfile::TempDir::new().expect("fixture");
+        let store = StateStore::new(StatePaths::from_root(temporary.path().join("state")));
+        assert!(store.bootstrap().is_ready());
+        let id = "11111111-1111-4111-8111-111111111111";
+        let base_url = "https://private.example/v1";
+        let key = "export-audit-secret";
+        let model = "deepseek-v4-pro";
+        let fingerprint = crate::provider::combination_fingerprint(base_url, key, model);
+        let connection = Connection::open(store.paths().database()).expect("database");
+        connection.execute(
+            "INSERT INTO providers(id, name, base_url, api_key, default_model, verified_at, verification_fingerprint, sort_order)
+             VALUES (?1, 'DayWay-DS', ?2, ?3, ?4, '1786800000', ?5, 1)",
+            params![id, base_url, key, model, fingerprint],
+        ).expect("provider");
+        let snapshot = serde_json::json!({
+            "schemaVersion": 1, "targetEnvironment": "native", "codexVersion": "0.160.1",
+            "executableFingerprint": "sha256:test", "observedAtEpochSeconds": 1, "status": "complete",
+            "models": [{"modelId": model, "state": "not_found", "defaultReasoningEffort": null,
+                "supportedReasoningEfforts": [], "source": "codex_builtin", "sourceId": "codex.model/list"}]
+        }).to_string();
+        connection.execute(
+            "INSERT INTO provider_model_catalog(provider_id, verification_fingerprint, models_json, capability_snapshot_json)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![id, fingerprint, serde_json::json!([model]).to_string(), snapshot],
+        ).expect("snapshot");
+        let application =
+            ProviderApplication::new(store, ProviderValidator::new(ValidationTimeouts::default()));
+        let contexts = application
+            .reasoning_audit_contexts()
+            .expect("audit contexts");
+        let details = audit_details(
+            Some(&contexts[0]),
+            "reasoning_metadata.render",
+            "applied",
+            None,
+        );
+        assert!(details.contains("target_environment=linux_export"));
+        assert!(details.contains("capability_source=vendor_compatibility"));
+        assert!(details.contains("capability_state=known_nonempty"));
+        assert!(details.contains("vendor_fallback=enabled"));
+        assert!(details.contains(&format!("rule_id={DAYWAY_DS_DEEPSEEK_RULE}")));
+        for secret in [id, base_url, key, model, "DayWay-DS"] {
+            assert!(!details.contains(secret), "audit data must be redacted");
+        }
+        let destination = temporary.path().join("export.sh");
+        application
+            .export_linux_script(LinuxShell::Bash, &destination, false)
+            .expect("export");
+        let exported = fs::read_to_string(destination).expect("script");
+        assert!(exported.contains("\"effort\": \"low\""));
+
+        // Missing evidence remains unknown in both the audit and the exported catalog.
+        connection
+            .execute(
+                "UPDATE provider_model_catalog SET capability_snapshot_json = NULL",
+                [],
+            )
+            .expect("clear snapshot");
+        let contexts = application
+            .reasoning_audit_contexts()
+            .expect("unknown contexts");
+        let details = audit_details(
+            Some(&contexts[0]),
+            "reasoning_metadata.unknown",
+            "applied",
+            None,
+        );
+        assert!(details.contains("capability_source=unknown"));
+        assert!(details.contains("vendor_fallback=disabled"));
+    }
 
     #[test]
     fn shared_runtime_limits_shell_divergence_to_declared_syntax_slots() {

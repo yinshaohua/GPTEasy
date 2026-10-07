@@ -68,6 +68,12 @@ DeepSeek 的 `max` 不能在 GPTEasy 中被当作 OpenAI `high` 的默认替代�
 
 映射表只能决定当前配置写入的生效值，不能自动生成或裁剪 Codex 选择器的可选范围。模型目录能力描述和供应商官方验证证据仍需分开保存。
 
+#### DayWay-DS 精确兼容 profile
+
+\`DayWay-DS\` 使用版本化规则 \`dayway-ds-deepseek-effort-v1\` 将 Codex 的 \`high\` 生效值映射到该供应商的兼容接口。该规则只在供应商名称不区分大小写匹配 \`DayWay-DS\` 时启用，并只对精确模型 ID \`deepseek-v4-flash\` 和 \`deepseek-v4-pro\` 生效；不会根据任意模型名包含 \`deepseek\` 推断能力，也不会影响普通 \`DayWay\` 或预览模型。
+
+当 Codex 离线 \`model/list\` 将上述模型报告为 \`not_found\` 时，能力快照才允许由该兼容 profile 补充 \`low\`、\`medium\`、\`high\`，默认值为 \`high\`，来源记录为 \`vendor_compatibility\`。这条兜底同时写入脱敏审计证据，区分 Codex 原生能力和供应商兼容声明。
+
 ### 未知模型与模型切换
 
 - 未知模型仍可进入当前供应商目录，但不能仅凭模型 ID 声明推理档位；
@@ -132,3 +138,8 @@ DeepSeek 的 `max` 不能在 GPTEasy 中被当作 OpenAI `high` 的默认替代�
 该设计消除了 GPTEasy 以模型家族名义限制 Codex 思考强度选择范围的问题，同时保留对默认实际生效值的明确控制。DeepSeek 采用与 OpenAI `high` 等效的 `high`，不会错误地把最大强度 `max` 当成默认值。
 
 代价是 GPTEasy 必须针对实际 Codex 版本验证目录 schema，并维护有官方出处的供应商映射；对于没有可靠官方定义的供应商，系统可能无法自动写入推理强度，需要沿用供应商默认行为或等待后续兼容设计。这比把未知模型静默伪造成三档更可审计，也更符合能力声明与配置生效值分离的原则。
+
+## 后续规划（未实施）
+
+2026-10-06 的本机差分证据表明，统一空范围会覆盖 Codex 对已知模型的可选档位。
+当前实现已按 [推理档位能力发现与兼容兜底方案](../plans/reasoning-capability-discovery-2026-10-06.md) 接入精确模型元数据，并新增上述 DayWay-DS 显式兼容 profile；未知模型仍保持明确降级。真实安装包 UI 复测和真实供应商请求仍需独立验收。

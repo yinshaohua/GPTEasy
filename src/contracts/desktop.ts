@@ -12,6 +12,7 @@ export interface DesktopIdentity {
 }
 
 export interface DesktopSnapshot {
+  modelCatalogRefresh?: import("./modelCatalogRefresh").ModelCatalogRefreshResult;
   status: DesktopStatus;
   action: DesktopAction;
   messageId: string;
@@ -19,6 +20,7 @@ export interface DesktopSnapshot {
 }
 
 export interface DesktopFailure {
+  modelCatalogRefresh?: import("./modelCatalogRefresh").ModelCatalogRefreshResult;
   category: string;
   messageId: string;
 }
