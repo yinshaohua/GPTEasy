@@ -317,7 +317,26 @@ impl_issue_loggable_failure!(DesktopFailure);
 impl_issue_loggable_failure!(LinuxExportFailure);
 impl_issue_loggable_failure!(ProviderFailure);
 impl_issue_loggable_failure!(SessionFailure);
-impl_issue_loggable_failure!(WslFailure);
+impl IssueLoggableFailure for WslFailure {
+    fn message_id(&self) -> &str {
+        self.message_id
+    }
+    fn category_name(&self) -> String {
+        stable_category_name(&self.category)
+    }
+    fn diagnostic_details(&self) -> String {
+        match self.registry_diagnostic {
+            Some(d) => format!(
+                "category={} stage={} error_code={}",
+                stable_category_name(&self.category),
+                d.stage,
+                d.error_code
+                    .map_or("none".to_owned(), |code| code.to_string())
+            ),
+            None => format!("category={}", stable_category_name(&self.category)),
+        }
+    }
+}
 
 impl IssueLoggableFailure for VisibilityFailure {
     fn message_id(&self) -> &str {

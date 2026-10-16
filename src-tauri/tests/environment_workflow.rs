@@ -555,6 +555,8 @@ fn confirmed_takeover_preserves_external_fields_without_guessing_unknown_model_r
         "# user heading\r\n",
         "model = \"old-model\"\r\n",
         "model_reasoning_effort = \"low\"\r\n",
+        "model_context_window = 128000\r\n",
+        "model_auto_compact_token_limit = 100000\r\n",
         "model_provider = \"legacy\"\r\n",
         "custom_flag = true\r\n",
         "\r\n",
@@ -598,6 +600,17 @@ fn confirmed_takeover_preserves_external_fields_without_guessing_unknown_model_r
         .expect("applied config is TOML");
     assert_eq!(document["model"].as_str(), Some("fixture-model"));
     assert!(document.get("model_reasoning_effort").is_none());
+    let block = config
+        .split("# <<< GPTEasy managed provider <<<")
+        .next()
+        .expect("managed block")
+        .parse::<toml_edit::DocumentMut>()
+        .expect("managed block is TOML");
+    assert_eq!(block["model_context_window"].as_integer(), Some(512000));
+    assert_eq!(
+        block["model_auto_compact_token_limit"].as_integer(),
+        Some(400000)
+    );
     assert_eq!(
         document["model_catalog_json"].as_str(),
         Some("gpteasy-model-catalog.json")
@@ -940,6 +953,51 @@ fn applying_provider_upgrades_legacy_managed_block_with_external_catalog_path() 
         Some("gpteasy-model-catalog.json")
     );
     assert!(config.matches("model_catalog_json = ").count() == 1);
+}
+
+#[test]
+fn applying_provider_moves_external_context_limits_into_the_legacy_managed_block() {
+    let (temp, _, application) = fixture();
+    application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("initial apply");
+    let config_path = temp.path().join(".codex/config.toml");
+    let config = fs::read_to_string(&config_path).expect("read config");
+    let legacy = config
+        .replace("model_context_window = 512000\n", "")
+        .replace("model_auto_compact_token_limit = 400000\n", "")
+        .replace(
+            "# <<< GPTEasy managed provider <<<\n",
+            "# <<< GPTEasy managed provider <<<\nmodel_context_window = 128000\nmodel_auto_compact_token_limit = 100000\n",
+        );
+    fs::write(&config_path, legacy).expect("write legacy config");
+
+    application
+        .apply_provider(PROVIDER_ID, true)
+        .expect("upgrade context limits");
+
+    let config = fs::read_to_string(&config_path).expect("read upgraded config");
+    config
+        .parse::<toml_edit::DocumentMut>()
+        .expect("no duplicate keys");
+    let block = config
+        .split("# <<< GPTEasy managed provider <<<")
+        .next()
+        .unwrap();
+    assert!(block.contains("model_context_window = 512000\n"));
+    assert!(block.contains("model_auto_compact_token_limit = 400000\n"));
+    assert_eq!(config.matches("model_context_window = ").count(), 1);
+    assert_eq!(
+        config.matches("model_auto_compact_token_limit = ").count(),
+        1
+    );
+    assert_eq!(
+        application
+            .inspect()
+            .expect("inspect upgraded config")
+            .state,
+        EnvironmentState::Managed
+    );
 }
 
 #[test]

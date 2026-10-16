@@ -220,7 +220,7 @@ fn render(shell: LinuxShell, export_id: &str, providers: &[catalog::ProviderReco
         script.push_str(&format!("\n{}\n            ;;\n", marker));
     }
     script.push_str(
-        "        *)\n            model=$(gpteasy__provider_model \"$1\") || return 1\n            model_json=$(gpteasy__json_escape \"$model\") || return 1\n            printf '%s\\n' '{\"models\":[{\"slug\":\"'\"$model_json\"'\",\"display_name\":\"'\"$model_json\"'\",\"description\":\"供应商已发现模型，能力未识别\",\"default_reasoning_level\":null,\"supported_reasoning_levels\":[],\"shell_type\":\"default\",\"visibility\":\"list\",\"supported_in_api\":true,\"priority\":1,\"support_verbosity\":false,\"default_verbosity\":null,\"context_window\":128000,\"max_context_window\":128000,\"input_modalities\":[\"text\",\"image\"],\"supports_image_detail_original\":false,\"supports_parallel_tool_calls\":false,\"truncation_policy\":{\"mode\":\"tokens\",\"limit\":10000},\"experimental_supported_tools\":[],\"base_instructions\":\"\"}]}'\n            ;;\n    esac\n}\n",
+        "        *)\n            model=$(gpteasy__provider_model \"$1\") || return 1\n            model_json=$(gpteasy__json_escape \"$model\") || return 1\n            printf '%s\\n' '{\"models\":[{\"slug\":\"'\"$model_json\"'\",\"display_name\":\"'\"$model_json\"'\",\"description\":\"供应商已发现模型，能力未识别\",\"default_reasoning_level\":null,\"supported_reasoning_levels\":[],\"shell_type\":\"default\",\"visibility\":\"list\",\"supported_in_api\":true,\"priority\":1,\"support_verbosity\":false,\"default_verbosity\":null,\"input_modalities\":[\"text\",\"image\"],\"supports_image_detail_original\":false,\"supports_parallel_tool_calls\":false,\"truncation_policy\":{\"mode\":\"tokens\",\"limit\":10000},\"experimental_supported_tools\":[],\"base_instructions\":\"\"}]}'\n            ;;\n    esac\n}\n",
     );
     script.push_str(
         "gpteasy__provider_count=$(gpteasy__provider_catalog | awk 'NF && $1 !~ /^#/ { count += 1 } END { print count + 0 }')\n\n",
@@ -256,6 +256,8 @@ gpteasy__print_block() {{
     if [[ -n "$reasoning_effort" ]]; then
         printf 'model_reasoning_effort = %s\n' "$(gpteasy__toml_string "$reasoning_effort")"
     fi
+    printf '%s\n' 'model_context_window = 512000'
+    printf '%s\n' 'model_auto_compact_token_limit = 400000'
     printf '%s\n' 'model_provider = "gpteasy"'
     printf 'model_providers.gpteasy.name = %s\n' "$(gpteasy__toml_string "$name")"
     printf 'model_providers.gpteasy.base_url = %s\n' "$(gpteasy__toml_string "$base_url")"

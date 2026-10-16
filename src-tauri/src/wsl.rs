@@ -306,6 +306,15 @@ pub struct WslFailure {
     pub message_id: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lifecycle_outcome: Option<WslLifecycleOutcome>,
+    #[serde(skip)]
+    pub(crate) registry_diagnostic: Option<RegistryDiagnostic>,
+}
+
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RegistryDiagnostic {
+    pub(crate) stage: &'static str,
+    pub(crate) error_code: Option<i32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -337,7 +346,18 @@ impl WslFailure {
             category,
             message_id,
             lifecycle_outcome: None,
+            registry_diagnostic: None,
         }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn with_registry_diagnostic(
+        mut self,
+        stage: &'static str,
+        error_code: Option<i32>,
+    ) -> Self {
+        self.registry_diagnostic = Some(RegistryDiagnostic { stage, error_code });
+        self
     }
 
     fn with_lifecycle_outcome(mut self, outcome: WslLifecycleOutcome) -> Self {
@@ -2504,7 +2524,19 @@ fn schema_v1_block_variant(block: &[&str]) -> Option<SchemaV1Variant> {
     let root = document.as_table();
     let has_reasoning_effort = root.contains_key("model_reasoning_effort");
     let has_model_catalog = root.contains_key("model_catalog_json");
-    if root.len() != 3 + usize::from(has_reasoning_effort) + usize::from(has_model_catalog)
+    let context_fields = ["model_context_window", "model_auto_compact_token_limit"];
+    let context_field_count = context_fields
+        .iter()
+        .filter(|key| root.contains_key(key))
+        .count();
+    if root.len()
+        != 3 + usize::from(has_reasoning_effort)
+            + usize::from(has_model_catalog)
+            + context_field_count
+        || context_fields.iter().any(|key| {
+            root.get(key)
+                .is_some_and(|value| value.as_integer().is_none_or(|value| value <= 0))
+        })
         || !root.contains_key("model")
         || !root.contains_key("model_provider")
         || !root.contains_key("model_providers")
@@ -2928,6 +2960,8 @@ fn render_config(
             "model = {}",
             toml_edit::Value::from(provider.default_model.as_str())
         ),
+        "model_context_window = 512000".to_owned(),
+        "model_auto_compact_token_limit = 400000".to_owned(),
         "model_provider = \"gpteasy\"".to_owned(),
         format!(
             "model_providers.gpteasy.name = {}",
@@ -2984,32 +3018,33 @@ fn render_config(
                         "wsl.managed_conflict",
                     )
                 })?;
-            if block_document.get("model_reasoning_effort").is_none()
-                && document.get("model_reasoning_effort").is_some()
-            {
-                document.remove("model_reasoning_effort");
-                let migrated = document.to_string();
-                let migrated_start = migrated.find(start).ok_or_else(|| {
-                    WslFailure::new(
-                        WslFailureCategory::InvalidEnvironment,
-                        "wsl.managed_conflict",
-                    )
-                })?;
-                let migrated_end_at = migrated.find(end).ok_or_else(|| {
-                    WslFailure::new(
-                        WslFailureCategory::InvalidEnvironment,
-                        "wsl.managed_conflict",
-                    )
-                })?;
-                let migrated_end = migrated[migrated_end_at..]
-                    .find('\n')
-                    .map(|offset| migrated_end_at + offset + 1)
-                    .unwrap_or(migrated.len());
+            let upgrade_fields = [
+                "model_reasoning_effort",
+                "model_context_window",
+                "model_auto_compact_token_limit",
+            ]
+            .into_iter()
+            .filter(|key| block_document.get(key).is_none() && document.get(key).is_some())
+            .collect::<Vec<_>>();
+            if !upgrade_fields.is_empty() {
+                // Parse outside the block so removing a field cannot remove its end marker.
+                let migrate_outside = |outside: &str| -> Result<String, WslFailure> {
+                    let mut outside = outside.parse::<toml_edit::DocumentMut>().map_err(|_| {
+                        WslFailure::new(
+                            WslFailureCategory::InvalidEnvironment,
+                            "wsl.managed_conflict",
+                        )
+                    })?;
+                    for key in &upgrade_fields {
+                        outside.remove(key);
+                    }
+                    Ok(outside.to_string())
+                };
                 format!(
                     "{}{}{}",
-                    &migrated[..migrated_start],
+                    migrate_outside(&source[..start_at])?,
                     block,
-                    &migrated[migrated_end..]
+                    migrate_outside(&source[end_line..])?
                 )
             } else {
                 format!("{}{}{}", &source[..start_at], block, &source[end_line..])
@@ -3018,6 +3053,8 @@ fn render_config(
         (0, 0) => {
             document.remove("model");
             document.remove("model_reasoning_effort");
+            document.remove("model_context_window");
+            document.remove("model_auto_compact_token_limit");
             document.remove("model_provider");
             format!("{}{}{}", block, newline, document)
         }
@@ -3101,6 +3138,8 @@ fn render_reclaimed_config(
     };
     document.remove("model");
     document.remove("model_reasoning_effort");
+    document.remove("model_context_window");
+    document.remove("model_auto_compact_token_limit");
     document.remove("model_provider");
     let remove_providers = document
         .get_mut("model_providers")
@@ -3994,34 +4033,40 @@ fn probes_from_registry(
 #[cfg(windows)]
 fn read_registry_distributions() -> Result<Vec<RegistryDistro>, WslFailure> {
     use std::io::ErrorKind;
-    use std::path::Path;
     use winreg::RegKey;
     use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
 
     let current_user = RegKey::predef(HKEY_CURRENT_USER);
-    let lxss = match current_user.open_subkey_with_flags(WSL_REGISTRY_KEY, KEY_READ) {
-        Ok(lxss) => lxss,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(_) => {
-            return Err(WslFailure::new(
-                WslFailureCategory::ProbeFailed,
-                "wsl.registry_unavailable",
-            ));
-        }
-    };
+    match current_user.open_subkey_with_flags(WSL_REGISTRY_KEY, KEY_READ) {
+        Ok(lxss) => read_registry_distributions_from(&lxss),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(registry_failure("root_open", &error)),
+    }
+}
+
+#[cfg(windows)]
+fn read_registry_distributions_from(
+    lxss: &winreg::RegKey,
+) -> Result<Vec<RegistryDistro>, WslFailure> {
+    use std::path::Path;
+    use uuid::Uuid;
+    use winreg::enums::KEY_READ;
+
     let mut result = Vec::new();
     for id in lxss.enum_keys() {
-        let id = id.map_err(|_| {
-            WslFailure::new(WslFailureCategory::ProbeFailed, "wsl.registry_unavailable")
-        })?;
-        let distribution = lxss.open_subkey_with_flags(&id, KEY_READ).map_err(|_| {
-            WslFailure::new(WslFailureCategory::ProbeFailed, "wsl.registry_unavailable")
-        })?;
+        let id = id.map_err(|error| registry_failure("enumerate", &error))?;
+        let canonical = id
+            .strip_prefix('{')
+            .and_then(|value| value.strip_suffix('}'));
+        if canonical.is_none() || Uuid::parse_str(canonical.unwrap()).is_err() {
+            continue;
+        }
+        let distribution = lxss
+            .open_subkey_with_flags(&id, KEY_READ)
+            .map_err(|error| registry_failure("distribution_open", &error))?;
         let name = distribution
             .get_value::<String, _>("DistributionName")
-            .map_err(|_| {
-                WslFailure::new(WslFailureCategory::ProbeFailed, "wsl.registry_unavailable")
-            })?;
+            .map_err(|error| registry_failure("distribution_name_read", &error))?;
         let base_path_available = distribution
             .get_value::<String, _>("BasePath")
             .ok()
@@ -4035,6 +4080,12 @@ fn read_registry_distributions() -> Result<Vec<RegistryDistro>, WslFailure> {
         });
     }
     Ok(result)
+}
+
+#[cfg(windows)]
+fn registry_failure(stage: &'static str, error: &std::io::Error) -> WslFailure {
+    WslFailure::new(WslFailureCategory::ProbeFailed, "wsl.registry_unavailable")
+        .with_registry_diagnostic(stage, error.raw_os_error())
 }
 
 #[cfg(windows)]
@@ -5995,6 +6046,8 @@ model_providers.{provider_id}.requires_openai_auth = true\n\
     fn first_takeover_removes_legacy_selection_and_preserves_unrelated_fields() {
         let original = br#"custom_flag = true
 model = "legacy-model"
+model_context_window = 128000
+model_auto_compact_token_limit = 100000
 model_provider = "legacy"
 
 [model_providers.legacy]
@@ -6012,6 +6065,17 @@ status_line = ["current-dir"]
 
         assert_eq!(document["custom_flag"].as_bool(), Some(true));
         assert_eq!(document["model"].as_str(), Some("model-a"));
+        let block = text
+            .split("# <<< GPTEasy managed provider <<<")
+            .next()
+            .unwrap()
+            .parse::<toml_edit::DocumentMut>()
+            .expect("managed block TOML");
+        assert_eq!(block["model_context_window"].as_integer(), Some(512000));
+        assert_eq!(
+            block["model_auto_compact_token_limit"].as_integer(),
+            Some(400000)
+        );
         assert_eq!(document["model_provider"].as_str(), Some("gpteasy"));
         assert_eq!(
             document["model_providers"]["legacy"]["name"].as_str(),
@@ -6031,6 +6095,33 @@ status_line = ["current-dir"]
             text.matches("# >>> GPTEasy managed provider >>>").count(),
             1
         );
+    }
+
+    #[test]
+    fn context_limits_upgrade_legacy_blocks_and_remain_recognizable() {
+        let provider_id = "22222222-2222-4222-8222-222222222222";
+        let legacy = String::from_utf8(schema_v1_config(provider_id, "shell-export"))
+            .expect("utf8")
+            + "model_context_window = 128000\nmodel_auto_compact_token_limit = 100000\n";
+        let target = provider(provider_id);
+        let upgraded = render_config(Some(legacy.as_bytes()), &target, "desktop-test")
+            .expect("upgrade legacy context limits");
+        let reapplied = render_config(Some(&upgraded), &target, "desktop-test")
+            .expect("reapply without duplicate keys");
+        let text = std::str::from_utf8(&reapplied).expect("utf8");
+        text.parse::<toml_edit::DocumentMut>().expect("valid TOML");
+        let block = text
+            .split("# <<< GPTEasy managed provider <<<")
+            .next()
+            .unwrap();
+        assert!(block.contains("model_context_window = 512000\n"));
+        assert!(block.contains("model_auto_compact_token_limit = 400000\n"));
+        assert_eq!(text.matches("model_context_window = ").count(), 1);
+        assert_eq!(text.matches("model_auto_compact_token_limit = ").count(), 1);
+        assert!(!matches!(
+            inspect_actual_managed_state(Some(&reapplied), Some(b"secret")),
+            ActualManagedState::Conflict { .. }
+        ));
     }
 
     #[test]
@@ -6510,6 +6601,29 @@ status_line = ["current-dir"]
                 .expect("pending count"),
             0
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn registry_discovery_skips_auxiliary_subkeys() {
+        use winreg::RegKey;
+        use winreg::enums::HKEY_CURRENT_USER;
+        let current_user = RegKey::predef(HKEY_CURRENT_USER);
+        let root_name = format!(r"Software\GPTEasyTestLxss{}", std::process::id());
+        let (root, _) = current_user.create_subkey(&root_name).expect("test root");
+        let (aux, _) = root.create_subkey("Notifications").expect("aux");
+        aux.set_value("DrvFsPerfDisabled", &1u32)
+            .expect("aux value");
+        let id = "{11111111-1111-4111-8111-111111111111}";
+        let (distro, _) = root.create_subkey(id).expect("distro");
+        distro
+            .set_value("DistributionName", &"Ubuntu-Test")
+            .expect("name");
+        let result = read_registry_distributions_from(&root).expect("discover");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id, id);
+        assert_eq!(result[0].name, "Ubuntu-Test");
+        current_user.delete_subkey_all(&root_name).expect("cleanup");
     }
 
     #[cfg(windows)]
