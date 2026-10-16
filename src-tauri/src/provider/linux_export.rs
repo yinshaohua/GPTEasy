@@ -253,11 +253,7 @@ gpteasy__print_block() {{
     printf '# GPTEasy credential-file: %s\n' "$credential_relative"
     printf 'model = %s\n' "$(gpteasy__toml_string "$model")"
     printf '%s\n' 'model_catalog_json = "gpteasy-model-catalog.json"'
-    if [[ -n "$reasoning_effort" ]]; then
-        printf 'model_reasoning_effort = %s\n' "$(gpteasy__toml_string "$reasoning_effort")"
-    fi
-    printf '%s\n' 'model_context_window = 512000'
-    printf '%s\n' 'model_auto_compact_token_limit = 400000'
+    printf '%s\n' 'model_reasoning_effort = "high"'
     printf '%s\n' 'model_provider = "gpteasy"'
     printf 'model_providers.gpteasy.name = %s\n' "$(gpteasy__toml_string "$name")"
     printf 'model_providers.gpteasy.base_url = %s\n' "$(gpteasy__toml_string "$base_url")"

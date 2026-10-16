@@ -134,7 +134,10 @@ fn capability_fields(
     match capability.state {
         CapabilityState::KnownNonEmpty => (
             "Codex 已验证精确模型推理元数据".to_owned(),
-            capability.default_level.clone(),
+            capability
+                .default_level
+                .as_deref()
+                .map(|level| if level == "low" { "high" } else { level }.to_owned()),
             capability
                 .levels
                 .iter()
@@ -169,6 +172,25 @@ mod tests {
     use crate::provider::reasoning_capability::{
         CapabilitySource, CodexModelMetadata, SNAPSHOT_SCHEMA_VERSION, SnapshotStatus,
     };
+
+    #[test]
+    fn catalog_uses_high_instead_of_low_and_omits_context_windows() {
+        let snapshot = snapshot(vec![CodexModelMetadata {
+            model_id: "model-a".to_owned(),
+            state: CapabilityState::KnownNonEmpty,
+            default_reasoning_effort: Some("low".to_owned()),
+            supported_reasoning_efforts: vec!["low".to_owned(), "high".to_owned()],
+            source: CapabilitySource::CodexBuiltin,
+            source_id: "codex.model/list".to_owned(),
+        }]);
+        let bytes = render_with_snapshot(&["model-a".to_owned()], "model-a", Some(&snapshot))
+            .expect("catalog");
+        let value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        let model = &value["models"][0];
+        assert_eq!(model["default_reasoning_level"], "high");
+        assert!(model.get("context_window").is_none());
+        assert!(model.get("max_context_window").is_none());
+    }
 
     fn snapshot(models: Vec<CodexModelMetadata>) -> CodexMetadataSnapshot {
         CodexMetadataSnapshot {

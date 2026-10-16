@@ -321,16 +321,19 @@ impl IssueLoggableFailure for WslFailure {
     fn message_id(&self) -> &str {
         self.message_id
     }
+
     fn category_name(&self) -> String {
         stable_category_name(&self.category)
     }
+
     fn diagnostic_details(&self) -> String {
         match self.registry_diagnostic {
-            Some(d) => format!(
+            Some(diagnostic) => format!(
                 "category={} stage={} error_code={}",
                 stable_category_name(&self.category),
-                d.stage,
-                d.error_code
+                diagnostic.stage,
+                diagnostic
+                    .error_code
                     .map_or("none".to_owned(), |code| code.to_string())
             ),
             None => format!("category={}", stable_category_name(&self.category)),
@@ -3672,8 +3675,8 @@ mod tests {
     };
     use crate::state::{PendingSessionVisibilityTargetMode, StatePaths, StateStore};
     use crate::wsl::{
-        WslAvailability, WslConfigurationState, WslEnvironmentSummary, WslReclaimPreview,
-        WslReclaimScope,
+        RegistryDiagnostic, WslAvailability, WslConfigurationState, WslEnvironmentSummary,
+        WslFailure, WslFailureCategory, WslReclaimPreview, WslReclaimScope,
     };
     use rusqlite::{Connection, params};
     use std::sync::{Arc, Mutex};
@@ -3838,6 +3841,33 @@ mod tests {
         assert!(details.contains("stage=reasoning_metadata.inspect"));
         assert!(details.contains("status=started"));
         assert!(!details.contains("operation_id=unknown"));
+    }
+
+    #[test]
+    fn wsl_registry_failure_log_records_redacted_stage_and_error_code() {
+        let directory = tempdir().expect("issue log directory");
+        let store = IssueLogStore::new(directory.path());
+        let mut failure =
+            WslFailure::new(WslFailureCategory::ProbeFailed, "wsl.registry_unavailable");
+        failure.registry_diagnostic = Some(RegistryDiagnostic {
+            stage: "distribution_name_read",
+            error_code: Some(2),
+        });
+
+        let result: Result<(), _> = finish_command(&store, "wsl.list", Err(failure));
+
+        assert!(result.is_err());
+        let records = store.list(0, Some(IssueLogLevel::Error), Some("wsl.list"));
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].message, "wsl.registry_unavailable");
+        assert_eq!(
+            records[0].details.as_deref(),
+            Some("category=probe_failed stage=distribution_name_read error_code=2")
+        );
+        let encoded = serde_json::to_string(&records[0]).expect("serialize issue log record");
+        assert!(!encoded.contains("DistributionName"));
+        assert!(!encoded.contains("C:\\private\\workspace"));
+        assert!(!encoded.contains("api-key-canary"));
     }
 
     #[test]

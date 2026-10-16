@@ -54,11 +54,10 @@ struct InterruptAt(WslFailurePoint);
 impl WslFaultInjector for InterruptAt {
     fn check(&self, point: WslFailurePoint) -> Result<(), WslFailure> {
         if point == self.0 {
-            Err(WslFailure {
-                category: WslFailureCategory::Interrupted,
-                message_id: "wsl.acceptance_interruption",
-                lifecycle_outcome: None,
-            })
+            Err(WslFailure::new(
+                WslFailureCategory::Interrupted,
+                "wsl.acceptance_interruption",
+            ))
         } else {
             Ok(())
         }

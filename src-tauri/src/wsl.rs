@@ -310,7 +310,6 @@ pub struct WslFailure {
     pub(crate) registry_diagnostic: Option<RegistryDiagnostic>,
 }
 
-#[cfg(windows)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RegistryDiagnostic {
     pub(crate) stage: &'static str,
@@ -341,7 +340,7 @@ impl WslFaultInjector for NoWslFaults {
 }
 
 impl WslFailure {
-    pub(crate) fn new(category: WslFailureCategory, message_id: &'static str) -> Self {
+    pub fn new(category: WslFailureCategory, message_id: &'static str) -> Self {
         Self {
             category,
             message_id,
@@ -2524,19 +2523,7 @@ fn schema_v1_block_variant(block: &[&str]) -> Option<SchemaV1Variant> {
     let root = document.as_table();
     let has_reasoning_effort = root.contains_key("model_reasoning_effort");
     let has_model_catalog = root.contains_key("model_catalog_json");
-    let context_fields = ["model_context_window", "model_auto_compact_token_limit"];
-    let context_field_count = context_fields
-        .iter()
-        .filter(|key| root.contains_key(key))
-        .count();
-    if root.len()
-        != 3 + usize::from(has_reasoning_effort)
-            + usize::from(has_model_catalog)
-            + context_field_count
-        || context_fields.iter().any(|key| {
-            root.get(key)
-                .is_some_and(|value| value.as_integer().is_none_or(|value| value <= 0))
-        })
+    if root.len() != 3 + usize::from(has_reasoning_effort) + usize::from(has_model_catalog)
         || !root.contains_key("model")
         || !root.contains_key("model_provider")
         || !root.contains_key("model_providers")
@@ -2944,6 +2931,8 @@ fn render_config(
         })?
     };
     let mut document = parsed;
+    document.remove("model_context_window");
+    document.remove("model_auto_compact_token_limit");
     let credential_relative = format!(
         ".gpteasy-shell/credentials/{source_id}/{}.token",
         provider.id
@@ -2960,8 +2949,6 @@ fn render_config(
             "model = {}",
             toml_edit::Value::from(provider.default_model.as_str())
         ),
-        "model_context_window = 512000".to_owned(),
-        "model_auto_compact_token_limit = 400000".to_owned(),
         "model_provider = \"gpteasy\"".to_owned(),
         format!(
             "model_providers.gpteasy.name = {}",
@@ -2981,15 +2968,7 @@ fn render_config(
         "# <<< GPTEasy managed provider <<<".to_owned(),
         String::new(),
     ];
-    if let Some(effort) = provider.reasoning_selection.effort.as_deref() {
-        block.insert(
-            6,
-            format!(
-                "model_reasoning_effort = {}",
-                toml_edit::Value::from(effort)
-            ),
-        );
-    }
+    block.insert(6, "model_reasoning_effort = \"high\"".to_owned());
     let block = block.join(newline);
     let source = document.to_string();
     let start = "# >>> GPTEasy managed provider >>>";
@@ -3018,33 +2997,32 @@ fn render_config(
                         "wsl.managed_conflict",
                     )
                 })?;
-            let upgrade_fields = [
-                "model_reasoning_effort",
-                "model_context_window",
-                "model_auto_compact_token_limit",
-            ]
-            .into_iter()
-            .filter(|key| block_document.get(key).is_none() && document.get(key).is_some())
-            .collect::<Vec<_>>();
-            if !upgrade_fields.is_empty() {
-                // Parse outside the block so removing a field cannot remove its end marker.
-                let migrate_outside = |outside: &str| -> Result<String, WslFailure> {
-                    let mut outside = outside.parse::<toml_edit::DocumentMut>().map_err(|_| {
-                        WslFailure::new(
-                            WslFailureCategory::InvalidEnvironment,
-                            "wsl.managed_conflict",
-                        )
-                    })?;
-                    for key in &upgrade_fields {
-                        outside.remove(key);
-                    }
-                    Ok(outside.to_string())
-                };
+            if block_document.get("model_reasoning_effort").is_none()
+                && document.get("model_reasoning_effort").is_some()
+            {
+                document.remove("model_reasoning_effort");
+                let migrated = document.to_string();
+                let migrated_start = migrated.find(start).ok_or_else(|| {
+                    WslFailure::new(
+                        WslFailureCategory::InvalidEnvironment,
+                        "wsl.managed_conflict",
+                    )
+                })?;
+                let migrated_end_at = migrated.find(end).ok_or_else(|| {
+                    WslFailure::new(
+                        WslFailureCategory::InvalidEnvironment,
+                        "wsl.managed_conflict",
+                    )
+                })?;
+                let migrated_end = migrated[migrated_end_at..]
+                    .find('\n')
+                    .map(|offset| migrated_end_at + offset + 1)
+                    .unwrap_or(migrated.len());
                 format!(
                     "{}{}{}",
-                    migrate_outside(&source[..start_at])?,
+                    &migrated[..migrated_start],
                     block,
-                    migrate_outside(&source[end_line..])?
+                    &migrated[migrated_end..]
                 )
             } else {
                 format!("{}{}{}", &source[..start_at], block, &source[end_line..])
@@ -3053,8 +3031,6 @@ fn render_config(
         (0, 0) => {
             document.remove("model");
             document.remove("model_reasoning_effort");
-            document.remove("model_context_window");
-            document.remove("model_auto_compact_token_limit");
             document.remove("model_provider");
             format!("{}{}{}", block, newline, document)
         }
@@ -3138,8 +3114,6 @@ fn render_reclaimed_config(
     };
     document.remove("model");
     document.remove("model_reasoning_effort");
-    document.remove("model_context_window");
-    document.remove("model_auto_compact_token_limit");
     document.remove("model_provider");
     let remove_providers = document
         .get_mut("model_providers")
@@ -4037,11 +4011,12 @@ fn read_registry_distributions() -> Result<Vec<RegistryDistro>, WslFailure> {
     use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
 
     let current_user = RegKey::predef(HKEY_CURRENT_USER);
-    match current_user.open_subkey_with_flags(WSL_REGISTRY_KEY, KEY_READ) {
-        Ok(lxss) => read_registry_distributions_from(&lxss),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(Vec::new()),
-        Err(error) => Err(registry_failure("root_open", &error)),
-    }
+    let lxss = match current_user.open_subkey_with_flags(WSL_REGISTRY_KEY, KEY_READ) {
+        Ok(lxss) => lxss,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(registry_failure("root_open", &error)),
+    };
+    read_registry_distributions_from(&lxss)
 }
 
 #[cfg(windows)]
@@ -4049,7 +4024,6 @@ fn read_registry_distributions_from(
     lxss: &winreg::RegKey,
 ) -> Result<Vec<RegistryDistro>, WslFailure> {
     use std::path::Path;
-    use uuid::Uuid;
     use winreg::enums::KEY_READ;
 
     let mut result = Vec::new();
@@ -4922,7 +4896,7 @@ model_providers.gpteasy.auth.command = \"sh\"\n\
     }
 
     #[test]
-    fn desktop_apply_omits_reasoning_effort_for_an_unmapped_provider() {
+    fn desktop_apply_sets_high_reasoning_effort_for_an_unmapped_provider() {
         let provider_id = "22222222-2222-4222-8222-222222222222";
         let mut running_probe = probe();
         running_probe.running = true;
@@ -4949,9 +4923,11 @@ model_providers.gpteasy.auth.command = \"sh\"\n\
         let artifacts = runtime.artifacts.lock().expect("artifacts").clone();
         assert_eq!(artifacts.credentials.as_deref(), Some(b"secret".as_slice()));
         let config = String::from_utf8_lossy(artifacts.config.as_deref().expect("written config"));
-        assert!(!config.contains("model_reasoning_effort = "));
         assert!(!config.contains("model_reasoning_effort = \"low\""));
-        assert_eq!(config.matches("model_reasoning_effort = ").count(), 0);
+        assert_eq!(
+            config.matches("model_reasoning_effort = \"high\"").count(),
+            1
+        );
         assert!(!config.contains("requires_openai_auth"));
         assert!(matches!(
             inspect_actual_managed_state(
@@ -6046,8 +6022,6 @@ model_providers.{provider_id}.requires_openai_auth = true\n\
     fn first_takeover_removes_legacy_selection_and_preserves_unrelated_fields() {
         let original = br#"custom_flag = true
 model = "legacy-model"
-model_context_window = 128000
-model_auto_compact_token_limit = 100000
 model_provider = "legacy"
 
 [model_providers.legacy]
@@ -6065,17 +6039,6 @@ status_line = ["current-dir"]
 
         assert_eq!(document["custom_flag"].as_bool(), Some(true));
         assert_eq!(document["model"].as_str(), Some("model-a"));
-        let block = text
-            .split("# <<< GPTEasy managed provider <<<")
-            .next()
-            .unwrap()
-            .parse::<toml_edit::DocumentMut>()
-            .expect("managed block TOML");
-        assert_eq!(block["model_context_window"].as_integer(), Some(512000));
-        assert_eq!(
-            block["model_auto_compact_token_limit"].as_integer(),
-            Some(400000)
-        );
         assert_eq!(document["model_provider"].as_str(), Some("gpteasy"));
         assert_eq!(
             document["model_providers"]["legacy"]["name"].as_str(),
@@ -6095,33 +6058,6 @@ status_line = ["current-dir"]
             text.matches("# >>> GPTEasy managed provider >>>").count(),
             1
         );
-    }
-
-    #[test]
-    fn context_limits_upgrade_legacy_blocks_and_remain_recognizable() {
-        let provider_id = "22222222-2222-4222-8222-222222222222";
-        let legacy = String::from_utf8(schema_v1_config(provider_id, "shell-export"))
-            .expect("utf8")
-            + "model_context_window = 128000\nmodel_auto_compact_token_limit = 100000\n";
-        let target = provider(provider_id);
-        let upgraded = render_config(Some(legacy.as_bytes()), &target, "desktop-test")
-            .expect("upgrade legacy context limits");
-        let reapplied = render_config(Some(&upgraded), &target, "desktop-test")
-            .expect("reapply without duplicate keys");
-        let text = std::str::from_utf8(&reapplied).expect("utf8");
-        text.parse::<toml_edit::DocumentMut>().expect("valid TOML");
-        let block = text
-            .split("# <<< GPTEasy managed provider <<<")
-            .next()
-            .unwrap();
-        assert!(block.contains("model_context_window = 512000\n"));
-        assert!(block.contains("model_auto_compact_token_limit = 400000\n"));
-        assert_eq!(text.matches("model_context_window = ").count(), 1);
-        assert_eq!(text.matches("model_auto_compact_token_limit = ").count(), 1);
-        assert!(!matches!(
-            inspect_actual_managed_state(Some(&reapplied), Some(b"secret")),
-            ActualManagedState::Conflict { .. }
-        ));
     }
 
     #[test]
@@ -6608,22 +6544,31 @@ status_line = ["current-dir"]
     fn registry_discovery_skips_auxiliary_subkeys() {
         use winreg::RegKey;
         use winreg::enums::HKEY_CURRENT_USER;
+
         let current_user = RegKey::predef(HKEY_CURRENT_USER);
         let root_name = format!(r"Software\GPTEasyTestLxss{}", std::process::id());
+        let _ = current_user.delete_subkey_all(&root_name);
         let (root, _) = current_user.create_subkey(&root_name).expect("test root");
         let (aux, _) = root.create_subkey("Notifications").expect("aux");
         aux.set_value("DrvFsPerfDisabled", &1u32)
             .expect("aux value");
+        let (future_aux, _) = root.create_subkey("FutureSettings").expect("future aux");
+        future_aux
+            .set_value("DistributionName", &"Not-A-Distribution")
+            .expect("future aux value");
         let id = "{11111111-1111-4111-8111-111111111111}";
         let (distro, _) = root.create_subkey(id).expect("distro");
         distro
             .set_value("DistributionName", &"Ubuntu-Test")
             .expect("name");
-        let result = read_registry_distributions_from(&root).expect("discover");
+
+        let result = read_registry_distributions_from(&root);
+        let cleanup = current_user.delete_subkey_all(&root_name);
+        assert!(cleanup.is_ok(), "cleanup test root: {cleanup:?}");
+        let result = result.expect("discover");
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].id, id);
         assert_eq!(result[0].name, "Ubuntu-Test");
-        current_user.delete_subkey_all(&root_name).expect("cleanup");
     }
 
     #[cfg(windows)]

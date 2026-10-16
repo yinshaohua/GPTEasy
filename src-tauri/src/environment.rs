@@ -5030,13 +5030,9 @@ fn render_managed_block(provider: &ProviderTarget, aliases: &[String], newline: 
         format!("{PROVIDER_ID_PREFIX} {}", provider.id),
         format!("model = {}", string(&provider.default_model)),
         "model_catalog_json = \"gpteasy-model-catalog.json\"".to_owned(),
-        "model_context_window = 512000".to_owned(),
-        "model_auto_compact_token_limit = 400000".to_owned(),
         format!("model_provider = {}", string(&provider.id)),
     ];
-    if let Some(effort) = provider.reasoning_selection.effort.as_deref() {
-        lines.insert(3, format!("model_reasoning_effort = {}", string(&effort)));
-    }
+    lines.insert(3, "model_reasoning_effort = \"high\"".to_owned());
     for id in std::iter::once(&provider.id).chain(aliases.iter()) {
         let table = format!("model_providers.{id}");
         lines.extend([
@@ -5219,16 +5215,14 @@ fn recover_desktop_managed_block(
     let primary_lines = text
         .get(start_line_end..)?
         .split_inclusive('\n')
-        .take(13)
+        .take(11)
         .collect::<Vec<_>>();
     let optional_root_fields = primary_lines
         .iter()
-        .take(7)
+        .take(5)
         .filter(|line| {
             line.starts_with("model_reasoning_effort = ")
                 || line.starts_with("model_catalog_json = ")
-                || line.starts_with("model_context_window = ")
-                || line.starts_with("model_auto_compact_token_limit = ")
         })
         .count();
     let required_len = 7 + optional_root_fields;
@@ -5416,23 +5410,27 @@ fn replace_managed_block_with_reasoning_upgrade(
         .parse::<DocumentMut>()
         .map_err(|_| managed_conflict())?;
     let replacement = preserve_unknown_managed_fields(&block, replacement)?;
-    let upgrade_fields = [
-        "model_reasoning_effort",
-        "model_catalog_json",
-        "model_context_window",
-        "model_auto_compact_token_limit",
-    ]
-    .into_iter()
-    .filter(|key| block_document.get(key).is_none() && document.get(key).is_some())
-    .collect::<Vec<_>>();
-    if upgrade_fields.is_empty() {
+    let needs_reasoning_upgrade = block_document.get("model_reasoning_effort").is_none()
+        && document.get("model_reasoning_effort").is_some();
+    let needs_catalog_upgrade = block_document.get("model_catalog_json").is_none()
+        && document.get("model_catalog_json").is_some();
+    if !needs_reasoning_upgrade
+        && !needs_catalog_upgrade
+        && document.get("model_context_window").is_none()
+        && document.get("model_auto_compact_token_limit").is_none()
+    {
         return replace_managed_block(text, managed, Some(&replacement))
             .ok_or_else(managed_conflict);
     }
 
     let mut migrated = document.clone();
-    for key in upgrade_fields {
-        migrated.remove(key);
+    migrated.remove("model_context_window");
+    migrated.remove("model_auto_compact_token_limit");
+    if needs_reasoning_upgrade {
+        migrated.remove("model_reasoning_effort");
+    }
+    if needs_catalog_upgrade {
+        migrated.remove("model_catalog_json");
     }
     let migrated = normalize_newlines(&migrated.to_string(), newline);
     let ManagedBlock::Valid(migrated_block) = managed_block(&migrated) else {
@@ -5713,11 +5711,6 @@ fn historical_alias_free_fingerprint(bytes: &[u8]) -> Option<String> {
             "model_catalog_json = {}",
             string(model_catalog_json)
         ));
-    }
-    for key in ["model_context_window", "model_auto_compact_token_limit"] {
-        if let Some(value) = document.get(key).and_then(|item| item.as_integer()) {
-            primary_lines.push(format!("{key} = {value}"));
-        }
     }
     primary_lines.push(format!("model_provider = {}", string(&managed.provider_id)));
     if let Some(name) = fields.name {

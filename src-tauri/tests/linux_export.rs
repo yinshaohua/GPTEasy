@@ -645,16 +645,6 @@ export CODEX_HOME="$fresh_home"
 fresh=$(PATH="$fake_bin:/usr/bin:/bin" gpteasy <<<"3" 2>&1)
 [[ "$fresh" == *'已预先配置：Manual Provider'* ]]
 [[ -f "$fresh_home/config.toml" ]]
-assert_context_limits() {
-    awk '
-        /^# >>> GPTEasy managed provider >>>$/ { managed = 1 }
-        /^# <<< GPTEasy managed provider <<<$/ { managed = 0 }
-        $0 == "model_context_window = 512000" && managed { context_count++ }
-        $0 == "model_auto_compact_token_limit = 400000" && managed { compact_count++ }
-        END { exit !(context_count == 1 && compact_count == 1) }
-    ' "$1"
-}
-assert_context_limits "$fresh_home/config.toml"
 [[ $(stat -c '%a' "$fresh_home") == '700' ]]
 [[ $(find "$fresh_home/.gpteasy-shell/credentials" -type f -name '*.token' | wc -l) -eq 1 ]]
 grep -Fq '# GPTEasy provider-id: 33333333-3333-4333-8333-333333333333' "$fresh_home/config.toml"
@@ -667,7 +657,6 @@ missing=$(PATH="$fake_bin:/usr/bin:/bin" gpteasy <<<"1" 2>&1 || true)
 [[ "$missing" != *'版本过低'* ]]
 [[ "$auth_before" == "$(sha256sum "$codex_home/auth.json")" ]]
 grep -Fq '# GPTEasy schema-version: 1' "$codex_home/config.toml"
-assert_context_limits "$codex_home/config.toml"
 missing_config=$(sha256sum "$codex_home/config.toml")
 [[ -e "$codex_home/.gpteasy-shell" ]]
 cat >"$fake_bin/codex" <<'OLD_CODEX'
@@ -701,7 +690,6 @@ menu=$(gpteasy <<<"1" 2>&1)
 [[ "$menu" == *'已切换到：Alpha Provider'* ]]
 [[ "$menu" == *'stage=restart result=command_failed exit_code=17'* ]]
 [[ "$(cat "$GPTEASY_DAEMON_CALLS")" == 'app-server daemon restart' ]]
-assert_context_limits "$codex_home/config.toml"
 grep -Fq '# GPTEasy schema-version: 1' "$codex_home/config.toml"
 grep -Fq '# GPTEasy provider-id: 11111111-1111-4111-8111-111111111111' "$codex_home/config.toml"
 grep -Fq '# GPTEasy source-id:' "$codex_home/config.toml"
