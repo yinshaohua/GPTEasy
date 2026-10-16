@@ -123,6 +123,20 @@ impl DiagnosticApplication {
                 repairable: false,
             });
         }
+        if !config.context_overrides.is_empty() {
+            findings.push(DiagnosticFinding {
+                code: "model_context_root_override",
+                origin: DiagnosticOrigin::Local,
+                severity: DiagnosticSeverity::Warning,
+                title: "根级容量设置可能覆盖模型目录".to_owned(),
+                summary: format!(
+                    "config.toml 存在根级设置：{}。{}",
+                    config.context_overrides.join("、"),
+                    crate::provider::model_catalog::context_budget_summary()
+                ),
+                repairable: false,
+            });
+        }
         let (errors, log_findings) = classify_issue_logs(issue_logs);
         findings.extend(log_findings);
         DiagnosticReport {
@@ -546,6 +560,7 @@ struct ConfigInspection {
     active_provider: Option<String>,
     declared_providers: Vec<String>,
     credential_store: CredentialStore,
+    context_overrides: Vec<&'static str>,
 }
 
 fn empty_config_inspection(status: DiagnosticConfigStatus) -> ConfigInspection {
@@ -554,6 +569,7 @@ fn empty_config_inspection(status: DiagnosticConfigStatus) -> ConfigInspection {
         active_provider: None,
         declared_providers: Vec::new(),
         credential_store: CredentialStore::Unknown,
+        context_overrides: Vec::new(),
     }
 }
 
@@ -589,6 +605,10 @@ fn inspect_config(path: &Path) -> ConfigInspection {
         active_provider,
         declared_providers,
         credential_store,
+        context_overrides: ["model_context_window", "model_auto_compact_token_limit"]
+            .into_iter()
+            .filter(|key| document.get(key).is_some())
+            .collect(),
     }
 }
 

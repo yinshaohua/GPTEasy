@@ -4,6 +4,30 @@ use super::reasoning_capability::{
     CapabilityState, CodexMetadataSnapshot, ReasoningCapability, merge_exact,
 };
 
+/// Uniform client defaults; these do not claim measured provider capacity.
+pub(crate) const CONTEXT_POLICY_ID: &str = "uniform-context-v1";
+pub(crate) const DEFAULT_CONTEXT_WINDOW: u64 = 272_000;
+pub(crate) const DEFAULT_MAX_CONTEXT_WINDOW: u64 = 872_000;
+pub(crate) const DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT: u8 = 95;
+pub(crate) const DEFAULT_AUTO_COMPACT_TOKEN_LIMIT: Option<u64> = None;
+
+pub(crate) fn context_budget_summary() -> String {
+    format!(
+        "全部模型采用统一默认上下文 {} token，最大窗口元数据 {} token，可用比例 {}%；自动压缩阈值由 Codex 推导。应用时迁移旧根级容量设置，运行中的 Codex 需重启后生效。",
+        DEFAULT_CONTEXT_WINDOW,
+        DEFAULT_MAX_CONTEXT_WINDOW,
+        DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT
+    )
+}
+
+pub(crate) fn context_audit_details() -> String {
+    let auto_compact =
+        serde_json::to_string(&DEFAULT_AUTO_COMPACT_TOKEN_LIMIT).expect("default limit");
+    format!(
+        "context_policy={CONTEXT_POLICY_ID}; context_window={DEFAULT_CONTEXT_WINDOW}; max_context_window={DEFAULT_MAX_CONTEXT_WINDOW}; effective_context_window_percent={DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT}; auto_compact_limit={auto_compact}"
+    )
+}
+
 /// The on-disk catalog format consumed by Codex's `model_catalog_json` option.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub(crate) struct ModelCatalog {
@@ -29,6 +53,10 @@ pub(crate) struct ModelCatalogEntry {
     pub truncation_policy: TruncationPolicy,
     pub experimental_supported_tools: Vec<String>,
     pub base_instructions: String,
+    pub context_window: u64,
+    pub max_context_window: u64,
+    pub effective_context_window_percent: u8,
+    pub auto_compact_token_limit: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -122,6 +150,10 @@ fn entry(slug: String, capability: Option<&ReasoningCapability>) -> ModelCatalog
         },
         experimental_supported_tools: Vec::new(),
         base_instructions: String::new(),
+        context_window: DEFAULT_CONTEXT_WINDOW,
+        max_context_window: DEFAULT_MAX_CONTEXT_WINDOW,
+        effective_context_window_percent: DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT,
+        auto_compact_token_limit: DEFAULT_AUTO_COMPACT_TOKEN_LIMIT,
     }
 }
 
@@ -174,7 +206,7 @@ mod tests {
     };
 
     #[test]
-    fn catalog_uses_high_instead_of_low_and_omits_context_windows() {
+    fn catalog_uses_high_instead_of_low_and_uniform_context_defaults() {
         let snapshot = snapshot(vec![CodexModelMetadata {
             model_id: "model-a".to_owned(),
             state: CapabilityState::KnownNonEmpty,
@@ -188,8 +220,82 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
         let model = &value["models"][0];
         assert_eq!(model["default_reasoning_level"], "high");
-        assert!(model.get("context_window").is_none());
-        assert!(model.get("max_context_window").is_none());
+        assert_context_defaults(&value);
+    }
+
+    fn assert_context_defaults(value: &serde_json::Value) {
+        for model in value["models"].as_array().expect("models") {
+            assert_eq!(model["context_window"], 272_000);
+            assert_eq!(model["max_context_window"], 872_000);
+            assert_eq!(model["effective_context_window_percent"], 95);
+            assert_eq!(
+                model.get("auto_compact_token_limit"),
+                Some(&serde_json::Value::Null)
+            );
+        }
+    }
+
+    #[test]
+    fn defaults_cover_all_environments_without_a_trusted_snapshot() {
+        for environment in ["native", "wsl", "linux"] {
+            for status in [SnapshotStatus::Complete, SnapshotStatus::ProbeFailed] {
+                let mut metadata = snapshot(Vec::new());
+                metadata.status = status;
+                let bytes = render_for_environment(
+                    &[
+                        "unknown".into(),
+                        "gpt-6.1-sol".into(),
+                        "unknown".into(),
+                        " ".into(),
+                    ],
+                    "default-only",
+                    Some(&metadata),
+                    environment,
+                )
+                .expect("catalog");
+                let value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+                assert_eq!(value["models"].as_array().unwrap().len(), 3);
+                assert_context_defaults(&value);
+            }
+            let bytes =
+                render_for_environment(&["unknown".into()], "default-only", None, environment)
+                    .expect("catalog");
+            assert_context_defaults(&serde_json::from_slice(&bytes).expect("json"));
+        }
+    }
+
+    #[test]
+    #[ignore = "requires GPTEASY_REAL_CODEX pointing to a real supported Codex executable and Node.js"]
+    fn real_codex_loads_generated_context_and_auto_compacts() {
+        let executable = std::env::var("GPTEASY_REAL_CODEX").expect("select Codex executable");
+        let directory = tempfile::tempdir().expect("isolated catalog");
+        let path = directory.path().join("catalog.json");
+        std::fs::write(
+            &path,
+            render(
+                &["gpteasy-context-fixture".into()],
+                "gpteasy-context-default",
+            )
+            .expect("catalog"),
+        )
+        .expect("write catalog");
+        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../scripts/test-codex-context-budget.mjs");
+        let mut command = std::process::Command::new("node");
+        command.arg(script).arg(executable).arg(path);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x0800_0000);
+        }
+        let output = command.output().expect("run offline Codex acceptance");
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        println!("{}", String::from_utf8_lossy(&output.stdout));
     }
 
     fn snapshot(models: Vec<CodexModelMetadata>) -> CodexMetadataSnapshot {
@@ -251,6 +357,7 @@ mod tests {
         )
         .expect("json");
         let value: serde_json::Value = serde_json::from_slice(&bytes).expect("catalog");
+        assert_context_defaults(&value);
         let models = value["models"].as_array().expect("models");
         let known = models
             .iter()

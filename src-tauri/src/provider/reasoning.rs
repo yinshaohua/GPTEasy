@@ -250,12 +250,25 @@ pub(crate) fn audit_details(
         Some(false) => "not_required",
         None => "unknown",
     };
+    let context_budget = super::model_catalog::context_audit_details();
+    // Only a numeric version may enter the public audit; arbitrary probe output stays hashed.
+    let codex_version = context
+        .and_then(|context| context.codex_version.as_deref())
+        .map(|version| version.strip_prefix("codex-cli ").unwrap_or(version))
+        .filter(|version| {
+            version.len() <= 32
+                && version.split('.').count() == 3
+                && version
+                    .split('.')
+                    .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+        })
+        .unwrap_or("unknown");
     let codex_model_match = codex_model_match(context);
     let vendor_fallback = context
         .and_then(|context| context.capability.as_ref())
         .is_some_and(|capability| capability.source == CapabilitySource::VendorCompatibility);
     format!(
-        "operation_id={operation_id}; target_environment={target_environment}; provider_ref={provider_ref}; provider_host_ref={provider_host_ref}; model_ref={model_ref}; capability_state={capability_state}; capability_source={capability_source}; source_id_ref={source_id_ref}; codex_version_ref={codex_version_ref}; capability_message_id={capability_message_id}; codex_model_match={codex_model_match}; vendor_fallback={}; metadata_stage={metadata_stage}; rule_id={rule_id}; target_effort={target_effort}; mapping={mapping}; catalog_schema={CODEX_MODEL_INFO_SCHEMA}; stage={stage}; status={status}; codex_restart={restart}",
+        "operation_id={operation_id}; target_environment={target_environment}; provider_ref={provider_ref}; provider_host_ref={provider_host_ref}; model_ref={model_ref}; capability_state={capability_state}; capability_source={capability_source}; source_id_ref={source_id_ref}; codex_version_ref={codex_version_ref}; capability_message_id={capability_message_id}; codex_model_match={codex_model_match}; vendor_fallback={}; metadata_stage={metadata_stage}; rule_id={rule_id}; target_effort={target_effort}; mapping={mapping}; catalog_schema={CODEX_MODEL_INFO_SCHEMA}; stage={stage}; status={status}; codex_restart={restart}; {context_budget}; target_codex_version={codex_version}",
         if vendor_fallback {
             "enabled"
         } else {
@@ -406,6 +419,12 @@ mod tests {
         assert!(details.contains("stage=reasoning_metadata.commit"));
         assert!(details.contains("catalog_schema=codex_model_info_v1"));
         assert!(details.contains("codex_restart=pending"));
+        assert!(details.contains("context_policy=uniform-context-v1"));
+        assert!(details.contains("context_window=272000"));
+        assert!(details.contains("max_context_window=872000"));
+        assert!(details.contains("effective_context_window_percent=95"));
+        assert!(details.contains("auto_compact_limit=null"));
+        assert!(details.contains("target_codex_version=unknown"));
         assert!(details.contains("vendor_fallback=disabled"));
         assert!(!details.contains("provider-id-with-secret"));
         assert!(!details.contains("model/with-secret-looking-name"));
@@ -447,11 +466,23 @@ mod tests {
         assert!(details.contains("codex_model_match=recognized"));
         assert!(details.contains("source_id_ref=sha256:"));
         assert!(details.contains("codex_version_ref=sha256:"));
+        assert!(details.contains("target_codex_version=0.160.1"));
         assert!(!details.contains("provider-sensitive"));
         assert!(!details.contains("sensitive.example"));
         assert!(!details.contains("gpt-6.1-sol"));
         assert!(!details.contains("codex.model/list"));
         assert!(!details.contains("codex-cli 0.160.1"));
+    }
+
+    #[test]
+    fn context_audit_never_logs_arbitrary_version_output() {
+        let mut context = ReasoningAuditContext::unknown("wsl");
+        context.codex_version = Some("0.160.1; secret-probe-output".into());
+        let details = audit_details(Some(&context), "reasoning_metadata.render", "failed", None);
+        assert!(details.contains("target_codex_version=unknown"));
+        assert!(details.contains("status=failed"));
+        assert!(details.contains("codex_restart=unknown"));
+        assert!(!details.contains("secret-probe-output"));
     }
 
     #[test]

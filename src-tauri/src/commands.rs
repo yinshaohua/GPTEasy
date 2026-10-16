@@ -2651,6 +2651,18 @@ pub(crate) async fn reclaim_wsl_provider(
             )),
         );
     };
+    let audit_context = state
+        .application
+        .reasoning_audit_context(&provider_id)
+        .unwrap_or_else(|_| ReasoningAuditContext::unknown("wsl"));
+    log_reasoning_audit(
+        &logs.store,
+        "wsl.reclaim_provider",
+        Some(&audit_context),
+        "reasoning_metadata.inspect",
+        "started",
+        None,
+    );
     log_wsl_reclaim_phase(&logs.store, WslReclaimAuditPhase::SafeApplyCheck);
     if confirm_reclaim {
         log_wsl_reclaim_phase(&logs.store, WslReclaimAuditPhase::UserConfirmed);
@@ -2696,6 +2708,27 @@ pub(crate) async fn reclaim_wsl_provider(
         }
         Err(_) => {}
     }
+    let context = result
+        .as_ref()
+        .ok()
+        .and_then(|applied| applied.reasoning_audit.as_ref())
+        .unwrap_or(&audit_context);
+    let (stage, status, pending_restart) = match &result {
+        Ok(applied) => (
+            reasoning_success_stage(Some(context)),
+            "applied",
+            Some(applied.pending_restart),
+        ),
+        Err(failure) => (reasoning_failure_stage(failure.message_id), "failed", None),
+    };
+    log_reasoning_audit(
+        &logs.store,
+        "wsl.reclaim_provider",
+        Some(context),
+        stage,
+        status,
+        pending_restart,
+    );
     finish_command(&logs.store, "wsl.reclaim_provider", result)
 }
 
@@ -3825,6 +3858,44 @@ mod tests {
             "reasoning_metadata.commit"
         );
         assert_eq!(reasoning_success_stage(None), "reasoning_metadata.commit");
+    }
+
+    #[test]
+    fn context_policy_audit_is_persisted_for_each_target_and_failure_stage() {
+        let directory = tempdir().expect("issue logs");
+        let store = IssueLogStore::new(directory.path());
+        for environment in ["native", "wsl", "linux_export"] {
+            let context = ReasoningAuditContext::unknown(environment);
+            for (stage, status, restart) in [
+                ("reasoning_metadata.inspect", "started", None),
+                ("reasoning_metadata.render", "failed", None),
+                ("reasoning_metadata.commit", "applied", Some(true)),
+            ] {
+                super::log_reasoning_audit(
+                    &store,
+                    "context.test",
+                    Some(&context),
+                    stage,
+                    status,
+                    restart,
+                );
+            }
+        }
+        let records = store.list(0, None, None);
+        assert_eq!(records.len(), 9);
+        for record in records {
+            let details = record.details.expect("audit details");
+            for expected in [
+                "context_policy=uniform-context-v1",
+                "context_window=272000",
+                "max_context_window=872000",
+                "effective_context_window_percent=95",
+                "auto_compact_limit=null",
+                "target_codex_version=unknown",
+            ] {
+                assert!(details.contains(expected));
+            }
+        }
     }
 
     #[test]

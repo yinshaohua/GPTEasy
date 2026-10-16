@@ -4605,6 +4605,13 @@ mod tests {
                     .is_empty()
             );
             assert_eq!(model["description"], "供应商已发现模型，能力未识别");
+            assert_eq!(model["context_window"], 272_000);
+            assert_eq!(model["max_context_window"], 872_000);
+            assert_eq!(model["effective_context_window_percent"], 95);
+            assert_eq!(
+                model.get("auto_compact_token_limit"),
+                Some(&serde_json::Value::Null)
+            );
         }
     }
 
@@ -4812,7 +4819,7 @@ model_providers.gpteasy.auth.command = \"sh\"\n\
         let mut running_probe = probe();
         running_probe.running = true;
         let historical = format!(
-            "custom_setting = true\n{}",
+            "custom_setting = true\nmodel_context_window = 512000\nmodel_auto_compact_token_limit = 400000\n{}",
             String::from_utf8(
                 include_bytes!("../tests/fixtures/wsl/schema-v1-requires-openai-auth-false.toml")
                     .to_vec(),
@@ -4854,6 +4861,8 @@ model_providers.gpteasy.auth.command = \"sh\"\n\
         let artifacts = runtime.artifacts.lock().expect("artifacts").clone();
         let text = String::from_utf8(artifacts.config.expect("config")).expect("utf8");
         assert!(text.contains("custom_setting = true"));
+        assert!(!text.contains("model_context_window"));
+        assert!(!text.contains("model_auto_compact_token_limit"));
         assert!(!text.contains("requires_openai_auth"));
         assert_eq!(artifacts.credentials.as_deref(), Some(b"secret".as_slice()));
         assert_eq!(runtime.writes.load(Ordering::SeqCst), 1);

@@ -151,6 +151,17 @@ fn bash_and_zsh_exports_embed_the_same_static_reasoning_snapshot() {
     for script in [&bash, &zsh] {
         assert!(script.contains("GPTEASY_TEST_DAEMON_REFRESH_DEADLINE_SECONDS:-75"));
         assert!(script.contains("gpteasy__model_catalog_snapshot_schema='1'"));
+        let catalog = exported_model_catalog(script, "11111111-1111-4111-8111-111111111111");
+        assert_eq!(catalog["models"].as_array().unwrap().len(), 2);
+        for model in catalog["models"].as_array().unwrap() {
+            assert_eq!(model["context_window"], 272_000);
+            assert_eq!(model["max_context_window"], 872_000);
+            assert_eq!(model["effective_context_window_percent"], 95);
+            assert_eq!(
+                model.get("auto_compact_token_limit"),
+                Some(&serde_json::Value::Null)
+            );
+        }
         assert!(script.contains("\"slug\": \"gpt-6.1-sol\""));
         assert!(script.contains("\"default_reasoning_level\": \"medium\""));
         assert!(script.contains("\"effort\": \"xhigh\""));
@@ -201,6 +212,16 @@ fn linux_export_downgrades_a_corrupt_snapshot_without_guessing_by_name() {
     assert!(script.contains("\"description\": \"供应商已发现模型，能力未识别\""));
     assert!(!script.contains("\"default_reasoning_level\": \"high\""));
     assert!(!script.contains("\"effort\": \"low\""));
+    let catalog = exported_model_catalog(&script, "11111111-1111-4111-8111-111111111111");
+    for model in catalog["models"].as_array().unwrap() {
+        assert_eq!(model["context_window"], 272_000);
+        assert_eq!(model["max_context_window"], 872_000);
+        assert_eq!(model["effective_context_window_percent"], 95);
+        assert_eq!(
+            model.get("auto_compact_token_limit"),
+            Some(&serde_json::Value::Null)
+        );
+    }
 }
 
 #[test]
@@ -650,6 +671,10 @@ fresh=$(PATH="$fake_bin:/usr/bin:/bin" gpteasy <<<"3" 2>&1)
 grep -Fq '# GPTEasy provider-id: 33333333-3333-4333-8333-333333333333' "$fresh_home/config.toml"
 manual_credential=$(find "$fresh_home/.gpteasy-shell/credentials" -type f -name '*.token' -print -quit)
 [[ $(cat "$manual_credential") == 'manual-secret-key' ]]
+for expected_field in '"context_window":272000' '"max_context_window":872000' '"effective_context_window_percent":95' '"auto_compact_token_limit":null'; do
+    grep -Fq "$expected_field" "$fresh_home/gpteasy-model-catalog.json"
+done
+! grep -Eq '^model_(context_window|auto_compact_token_limit) *=' "$fresh_home/config.toml"
 export CODEX_HOME="$codex_home"
 missing=$(PATH="$fake_bin:/usr/bin:/bin" gpteasy <<<"1" 2>&1 || true)
 [[ "$missing" == *'已预先配置：Alpha Provider'* ]]

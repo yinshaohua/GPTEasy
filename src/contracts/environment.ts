@@ -31,6 +31,7 @@ export interface EnvironmentSnapshot {
   requiresTakeoverConfirmation: boolean;
   takeoverAvailable: boolean;
   impacts: ArtifactImpact[];
+  modelContextSummary?: string;
   currentProvider: ProviderSummary | null;
   restoreAvailability: RestoreAvailability;
   restorePreview: {

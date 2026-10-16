@@ -615,6 +615,7 @@ mod tests {
                 cli: ConsumerStatus::Stopped,
             },
             inspection_stage: None,
+            model_context_summary: crate::provider::model_catalog::context_budget_summary(),
         }
     }
 

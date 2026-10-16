@@ -909,3 +909,50 @@ fn json_and_markdown_exports_exclude_credentials_and_full_config_values() {
         assert!(export.contains("invalid_api_key"));
     }
 }
+
+#[test]
+fn detects_only_root_context_overrides_without_exposing_values() {
+    for (settings, expected) in [
+        (
+            "model_context_window = 12345\n",
+            vec!["model_context_window"],
+        ),
+        (
+            "model_auto_compact_token_limit = 12345\n",
+            vec!["model_auto_compact_token_limit"],
+        ),
+        (
+            "model_context_window = 12345\nmodel_auto_compact_token_limit = 6789\n",
+            vec!["model_context_window", "model_auto_compact_token_limit"],
+        ),
+        ("[profiles.custom]\nmodel_context_window = 12345\n", vec![]),
+        (
+            "model_catalog_json = 'gpteasy-model-catalog.json'\n",
+            vec![],
+        ),
+    ] {
+        let directory = tempdir().expect("directory");
+        std::fs::write(directory.path().join("config.toml"), settings).expect("config");
+        let report = DiagnosticApplication::new(directory.path(), None)
+            .inspect_with(&stopped_observations(), &[]);
+        let finding = report
+            .findings
+            .iter()
+            .find(|finding| finding.code == "model_context_root_override");
+        if expected.is_empty() {
+            assert!(finding.is_none());
+        } else {
+            let finding = finding.expect("override warning");
+            for key in expected {
+                assert!(finding.summary.contains(key));
+            }
+            assert!(finding.summary.contains("272000"));
+            assert!(!finding.summary.contains("12345"));
+            assert!(!finding.repairable);
+        }
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("config.toml")).unwrap(),
+            settings
+        );
+    }
+}

@@ -93,6 +93,7 @@ pub struct EnvironmentSnapshot {
     pub requires_takeover_confirmation: bool,
     pub takeover_available: bool,
     pub impacts: Vec<ArtifactImpact>,
+    pub model_context_summary: String,
     pub current_provider: Option<ProviderSummary>,
     pub restore_availability: RestoreAvailability,
     pub restore_preview: Option<RestorePreview>,
@@ -1765,6 +1766,7 @@ fn inspect_environment(
                 "model",
                 "model_reasoning_effort",
                 "model_provider",
+                "model_catalog_json",
                 "model_providers.<provider-id>",
             ],
         },
@@ -1892,6 +1894,7 @@ fn inspect_environment(
             requires_consumer_confirmation: false,
             consumers: unknown_consumers(),
             inspection_stage: None,
+            model_context_summary: model_catalog::context_budget_summary(),
         });
     }
 
@@ -2118,6 +2121,7 @@ fn inspect_environment(
         requires_consumer_confirmation: false,
         consumers: unknown_consumers(),
         inspection_stage: None,
+        model_context_summary: model_catalog::context_budget_summary(),
     })
 }
 
@@ -2181,6 +2185,7 @@ fn external_snapshot(
         requires_consumer_confirmation: false,
         consumers: unknown_consumers(),
         inspection_stage: None,
+        model_context_summary: model_catalog::context_budget_summary(),
     }
 }
 
@@ -2208,6 +2213,7 @@ fn external_openai_snapshot(
         requires_consumer_confirmation: false,
         consumers: unknown_consumers(),
         inspection_stage: None,
+        model_context_summary: model_catalog::context_budget_summary(),
     }
 }
 
@@ -2235,6 +2241,7 @@ fn conflict_snapshot(
         requires_consumer_confirmation: false,
         consumers: unknown_consumers(),
         inspection_stage: None,
+        model_context_summary: model_catalog::context_budget_summary(),
     }
 }
 

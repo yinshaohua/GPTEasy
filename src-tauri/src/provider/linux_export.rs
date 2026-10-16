@@ -188,6 +188,10 @@ fn render(shell: LinuxShell, export_id: &str, providers: &[catalog::ProviderReco
         "gpteasy__export_id={}\n\n",
         shell_quote(export_id)
     ));
+    script.push_str(&format!(
+        "# {}\n",
+        super::model_catalog::context_budget_summary()
+    ));
     script.push_str("# 供应商目录。可脱离 GPTEasy 手工维护：每行依次为供应商 ID、名称、服务地址、默认模型、API Key、推理强度，并以 Tab 分隔；可使用空行和 # 注释。字段不可包含 Tab 或换行。\n");
     script.push_str("gpteasy__provider_catalog() {\n    cat <<'GPTEASY_PROVIDER_CATALOG'\n");
     for provider in providers {
@@ -219,9 +223,19 @@ fn render(shell: LinuxShell, export_id: &str, providers: &[catalog::ProviderReco
         script.push_str(&String::from_utf8_lossy(&catalog));
         script.push_str(&format!("\n{}\n            ;;\n", marker));
     }
-    script.push_str(
-        "        *)\n            model=$(gpteasy__provider_model \"$1\") || return 1\n            model_json=$(gpteasy__json_escape \"$model\") || return 1\n            printf '%s\\n' '{\"models\":[{\"slug\":\"'\"$model_json\"'\",\"display_name\":\"'\"$model_json\"'\",\"description\":\"供应商已发现模型，能力未识别\",\"default_reasoning_level\":null,\"supported_reasoning_levels\":[],\"shell_type\":\"default\",\"visibility\":\"list\",\"supported_in_api\":true,\"priority\":1,\"support_verbosity\":false,\"default_verbosity\":null,\"input_modalities\":[\"text\",\"image\"],\"supports_image_detail_original\":false,\"supports_parallel_tool_calls\":false,\"truncation_policy\":{\"mode\":\"tokens\",\"limit\":10000},\"experimental_supported_tools\":[],\"base_instructions\":\"\"}]}'\n            ;;\n    esac\n}\n",
-    );
+    // Even manually added providers use the shared catalog schema and defaults.
+    let fallback = super::model_catalog::render_with_snapshot(
+        &["GPTEASYMODELPLACEHOLDER".to_owned()],
+        "GPTEASYMODELPLACEHOLDER",
+        None,
+    )
+    .expect("fallback catalog");
+    let fallback: serde_json::Value = serde_json::from_slice(&fallback).expect("fallback json");
+    let fallback = shell_quote(&serde_json::to_string(&fallback).expect("compact fallback"))
+        .replace("GPTEASYMODELPLACEHOLDER", "'\"$model_json\"'");
+    script.push_str(&format!(
+        "        *)\n            model=$(gpteasy__provider_model \"$1\") || return 1\n            model_json=$(gpteasy__json_escape \"$model\") || return 1\n            printf '%s\\n' {fallback}\n            ;;\n    esac\n}}\n",
+    ));
     script.push_str(
         "gpteasy__provider_count=$(gpteasy__provider_catalog | awk 'NF && $1 !~ /^#/ { count += 1 } END { print count + 0 }')\n\n",
     );

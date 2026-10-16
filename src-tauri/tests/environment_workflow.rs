@@ -611,6 +611,17 @@ fn confirmed_takeover_preserves_external_fields_without_guessing_unknown_model_r
         .as_array()
         .expect("model catalog entries");
     assert_eq!(models.len(), 2);
+    for model in models {
+        assert_eq!(model["context_window"], 272_000);
+        assert_eq!(model["max_context_window"], 872_000);
+        assert_eq!(model["effective_context_window_percent"], 95);
+        assert_eq!(
+            model.get("auto_compact_token_limit"),
+            Some(&serde_json::Value::Null)
+        );
+    }
+    assert!(document.get("model_context_window").is_none());
+    assert!(document.get("model_auto_compact_token_limit").is_none());
     let model_slugs = models
         .iter()
         .map(|model| model["slug"].as_str().expect("model slug"))
@@ -939,6 +950,19 @@ fn applying_provider_replaces_legacy_context_limits_with_reasoning_effort() {
     assert!(document.get("model_context_window").is_none());
     assert!(document.get("model_auto_compact_token_limit").is_none());
     assert_eq!(config.matches("model_reasoning_effort = ").count(), 1);
+    let catalog: Value = serde_json::from_slice(
+        &fs::read(codex_home.join("gpteasy-model-catalog.json")).expect("catalog"),
+    )
+    .expect("json");
+    for model in catalog["models"].as_array().expect("models") {
+        assert_eq!(model["context_window"], 272_000);
+        assert_eq!(model["max_context_window"], 872_000);
+        assert_eq!(model["effective_context_window_percent"], 95);
+        assert_eq!(
+            model.get("auto_compact_token_limit"),
+            Some(&serde_json::Value::Null)
+        );
+    }
 }
 #[test]
 fn applying_provider_upgrades_legacy_managed_block_with_external_catalog_path() {

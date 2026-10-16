@@ -1656,8 +1656,8 @@ export default function ProviderPage({
             ? providerMessages.firstProviderApplyTitle
             : providerMessages.configChangeTitle}
           message={configChangeRequest.kind === "force"
-            ? providerMessages.forceSetRebuildingMessage
-            : configChangeMessage(configChangeRequest)}
+            ? `${providerMessages.forceSetRebuildingMessage} ${environment?.modelContextSummary ?? ""}`
+            : configChangeMessage(configChangeRequest, environment?.modelContextSummary)}
           primaryLabel={configChangeRequest.kind === "force"
             ? providerMessages.forceSetRebuildingConfirm
             : configChangeRequest.kind === "provider" && configChangeRequest.firstSaved
@@ -1703,6 +1703,7 @@ export default function ProviderPage({
       {wslDialogOpen && (
         <WslProviderDialog
           environments={wslEnvironments}
+          contextSummary={environment?.modelContextSummary}
           providers={providers}
           state={wslState}
           selectedEnvironmentId={wslEnvironmentId}
@@ -2007,6 +2008,7 @@ function linuxExportFailureMessage(failure: LinuxExportFailure): string {
 }
 
 function WslProviderDialog({
+  contextSummary,
   environments,
   providers,
   state,
@@ -2025,6 +2027,7 @@ function WslProviderDialog({
   onClose,
 }: {
   environments: WslEnvironmentSummary[];
+  contextSummary?: string;
   providers: ProviderSummary[];
   state: "loading" | "ready" | "error";
   selectedEnvironmentId: string | null;
@@ -2094,6 +2097,7 @@ function WslProviderDialog({
         )}
         {state === "ready" && (
           <>
+            {contextSummary && <p className="pane-note">{contextSummary}</p>}
             <div className="wsl-dialog-fields">
               <label className="form-field">
                 <span>{providerMessages.wslDistribution}</span>
@@ -2238,9 +2242,9 @@ function openAiLoginReason(snapshot: EnvironmentSnapshot | null): string {
   return openAiReason;
 }
 
-function configChangeMessage(request: ConfigChangeRequest): string {
+function configChangeMessage(request: ConfigChangeRequest, contextSummary?: string): string {
   if (request.kind === "force") return providerMessages.forceSetRebuildingMessage;
-  const risk = providerMessages.configChangeConsumerRisk;
+  const risk = `${providerMessages.configChangeConsumerRisk}${request.kind === "openai" ? "" : ` ${contextSummary ?? ""}`}`;
   if (request.kind === "provider") {
     if (request.firstSaved) {
       return `${providerMessages.firstProviderApplyMessage(request.provider.name)}${risk}`;
