@@ -86,3 +86,17 @@ GitHub Release `v1.4.3` 发布后，第一次 Gitee 同步 [35096430884](https:/
 维护者确认上传后，无 Cookie、无 Token 的完整 GET 返回 HTTP 200。Gitee 忽略 Range 并返回完整文件；安装包大小为 3,889,015 字节，SHA-256 为 `6b6dd88fecc4a816bffc78b98d5ec107dc8f05b94ad5db92197461f19027585f`，与 GitHub Release 一致。第二次同步 [35106458030](https://github.com/yinshaohua/GPTEasy/actions/runs/35106458030) 通过，公开 `latest.md` 推进到 1.4.3；`.sig`、`SHA256SUMS.txt`、静态清单检查和应用内公钥 updater 签名验证均通过。
 
 本次流程确认了长期操作边界：正式 `.exe` 网页上传是维护者手工步骤。后续助手只负责打开并保留编辑页、提供精确路径、等待维护者确认，以及完成上传后的匿名验证和自动同步，不自行尝试网页或 API 上传。
+
+## 2026-10-17 v1.5.2 正式分发
+
+GitHub Release [`v1.5.2`](https://github.com/yinshaohua/GPTEasy/releases/tag/v1.5.2) 发布后，Gitee 同步工作流 [38990744896](https://github.com/yinshaohua/GPTEasy/actions/runs/38990744896) 按两阶段流程完成正式分发。公开国内分发仓库为 [`ericshaohua/gpteasy-releases`](https://gitee.com/ericshaohua/gpteasy-releases)，Gitee Release 页面为 [`v1.5.2`](https://gitee.com/ericshaohua/gpteasy-releases/releases/tag/v1.5.2)。标准 Windows x64 `.exe` 由维护者在 Gitee 网页中上传；助手未代替维护者操作文件选择器或提交页面。
+
+维护者完成网页上传后，匿名完整下载和同步收尾均通过：
+
+- `GPTEasy_1.5.2_x64-setup.exe` 大小为 3,984,406 字节，SHA-256 为 `944ef456316f38408c1da1f9ac8bdde61642f5d2f4463d98c2108f99548c42f4`；
+- `GPTEasy_1.5.2_x64-setup.exe.sig` 已同步，大小为 416 字节，SHA-256 为 `06104806d8282f737f4cd28eaa75bbafc71d3f81e92c7d091829f3cbd04cac29`；
+- `SHA256SUMS.txt`、`.exe` 和 `.sig` 均通过匿名完整性校验，公开 `latest.md` 返回 HTTP 200 并推进到版本 `1.5.2`；
+- `latest.md` 中的安装包 URL、大小和 SHA-256 与权威构建产物一致，updater 签名字段存在，应用内置公钥验签通过；
+- Gitee Release 页面和公开附件可访问，未发现需要额外登录或图形验证的下载阻断。
+
+本次正式交付的 Gitee 平台证据覆盖网页上传、附件同步、匿名下载、公开清单推进、SHA-256 校验和 updater 签名验证。GitHub 仍是源码、Tag、构建产物和发布说明的权威来源，Gitee 只承载国内分发副本。
