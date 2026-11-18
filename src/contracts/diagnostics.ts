@@ -39,13 +39,13 @@ export interface DiagnosticRepairPreview {
   providerName: string;
   baseUrl: string;
   model: string;
-  authentication: "current_api_key";
+  authentication: "current_api_key" | "not_changed";
   changes: Array<
     | "backup_config"
     | "add_custom_provider_definition"
     | "verify_and_rediagnose"
     | "backup_model_catalog"
-    | "update_image_compatibility"
+    | "refresh_model_capabilities"
     | "restart_codex_if_running"
   >;
   kind?: "custom_provider" | "model_catalog";

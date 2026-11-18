@@ -4616,7 +4616,7 @@ mod tests {
     }
 
     #[test]
-    fn wsl_dayway_ds_selector_uses_guest_metadata_and_keeps_other_models_unknown() {
+    fn wsl_dayway_ds_selector_uses_guest_metadata_before_generic_fallback() {
         for target in ["wsl", "native"] {
             let provider_id = "22222222-2222-4222-8222-222222222222";
             let mut guest = probe();
@@ -4670,10 +4670,12 @@ mod tests {
                 serde_json::from_slice(artifacts.model_catalog.as_deref().expect("catalog"))
                     .expect("json");
             for model in catalog["models"].as_array().expect("models") {
-                let expected = if target == "wsl" && model["slug"] != ids[2] {
+                let expected = if target != "wsl" {
+                    0
+                } else if model["slug"] != ids[2] {
                     3
                 } else {
-                    0
+                    4
                 };
                 assert_eq!(
                     model["supported_reasoning_levels"]

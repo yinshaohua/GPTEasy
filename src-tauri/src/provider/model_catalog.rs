@@ -157,6 +157,9 @@ fn entry(slug: String, capability: Option<&ReasoningCapability>) -> ModelCatalog
     }
 }
 
+pub(crate) const FALLBACK_DESCRIPTION: &str =
+    "未识别精确模型；使用 GPTEasy OpenAI 兼容档位 v1，非供应商能力声明";
+
 fn capability_fields(
     capability: Option<&ReasoningCapability>,
 ) -> (String, Option<String>, Vec<ReasoningLevel>) {
@@ -185,9 +188,14 @@ fn capability_fields(
             Vec::new(),
         ),
         CapabilityState::NotFound => (
-            "供应商已发现模型，Codex 未识别精确模型能力".to_owned(),
-            None,
-            Vec::new(),
+            FALLBACK_DESCRIPTION.to_owned(),
+            Some("high".to_owned()),
+            ["low", "medium", "high", "xhigh"]
+                .map(|effort| ReasoningLevel {
+                    effort: effort.to_owned(),
+                    description: format!("GPTEasy 兼容档位 {effort}（供应商未验证）"),
+                })
+                .to_vec(),
         ),
         CapabilityState::ProbeFailed => (
             "供应商已发现模型，Codex 元数据探测失败".to_owned(),
@@ -376,13 +384,16 @@ mod tests {
             .iter()
             .find(|model| model["slug"] == "gpt-6.1-sol-preview")
             .expect("provider-only model");
-        assert!(
+        assert_eq!(preview["default_reasoning_level"], "high");
+        assert_eq!(
             preview["supported_reasoning_levels"]
                 .as_array()
-                .expect("levels")
-                .is_empty()
+                .unwrap()
+                .iter()
+                .map(|v| v["effort"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["low", "medium", "high", "xhigh"]
         );
-        assert!(preview["default_reasoning_level"].is_null());
     }
 
     #[test]
@@ -443,10 +454,7 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&bytes).expect("catalog");
         let models = value["models"].as_array().expect("models");
         assert_eq!(models[0]["description"], "Codex 已验证精确模型没有推理档位");
-        assert_eq!(
-            models[1]["description"],
-            "供应商已发现模型，Codex 未识别精确模型能力"
-        );
+        assert_eq!(models[1]["description"], FALLBACK_DESCRIPTION);
     }
 
     #[test]
@@ -585,12 +593,7 @@ mod tests {
             .iter()
             .find(|model| model["slug"] == "deepseek-v4-pro-preview")
             .expect("preview model");
-        assert!(
-            preview["supported_reasoning_levels"]
-                .as_array()
-                .expect("levels")
-                .is_empty()
-        );
-        assert!(preview["default_reasoning_level"].is_null());
+        assert_eq!(preview["description"], FALLBACK_DESCRIPTION);
+        assert_eq!(preview["default_reasoning_level"], "high");
     }
 }

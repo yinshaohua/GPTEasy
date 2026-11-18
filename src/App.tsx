@@ -58,6 +58,7 @@ export default function App() {
   const [installError, setInstallError] = useState<string | null>(null);
   const [currentProviderName, setCurrentProviderName] = useState<string | null>(null);
   const [catalogRepair, setCatalogRepair] = useState<DiagnosticRepairPreview | null>(null);
+  const [catalogRepairMessage, setCatalogRepairMessage] = useState("");
   const [catalogRepairBusy, setCatalogRepairBusy] = useState(false);
   const installInFlight = useRef(false);
 
@@ -108,12 +109,15 @@ export default function App() {
 
   const applyCatalogRepair = useCallback(() => {
     if (!catalogRepair || catalogRepairBusy) return;
-    if (!window.confirm("当前模型目录由 GPTEasy 生成，但仍使用旧的图片输入声明。确认备份并更新为 text/image 兼容配置吗？")) return;
+    if (!window.confirm("确认备份并刷新当前模型目录的思考强度或图片输入声明吗？此操作不会重启 Codex。")) return;
+    setCatalogRepairMessage("");
     setCatalogRepairBusy(true);
     void repairDiagnosticCustomProvider(catalogRepair.previewId)
       .then((execution) => {
+        setCatalogRepairMessage(execution.status === "succeeded" ? "已备份并更新本机模型目录。正在运行的 Codex 需重新启动；未修改现有会话或默认强度设置。" : "未完成目录更新，请刷新诊断查看当前状态。");
         setCatalogRepair(execution.report.repairPreview?.kind === "model_catalog" ? execution.report.repairPreview : null);
       })
+      .catch(() => setCatalogRepairMessage("目录更新失败，请刷新诊断后重试。"))
       .finally(() => setCatalogRepairBusy(false));
   }, [catalogRepair, catalogRepairBusy]);
 
@@ -153,7 +157,8 @@ export default function App() {
         currentProviderName={currentProviderName}
         update={updateSidebar}
       >
-        {catalogRepair && <CatalogRepairNotice preview={catalogRepair} busy={catalogRepairBusy} onApply={applyCatalogRepair} />}
+        {catalogRepairMessage && <p role="status">{catalogRepairMessage}</p>}
+      {catalogRepair && <CatalogRepairNotice preview={catalogRepair} busy={catalogRepairBusy} onApply={applyCatalogRepair} />}
         {page === "logs" ? (
           <IssueLogPage active />
         ) : (
@@ -182,6 +187,7 @@ export default function App() {
       currentProviderName={currentProviderName}
       update={updateSidebar}
     >
+      {catalogRepairMessage && <p role="status">{catalogRepairMessage}</p>}
       {catalogRepair && <CatalogRepairNotice preview={catalogRepair} busy={catalogRepairBusy} onApply={applyCatalogRepair} />}
       <div className="app-view" hidden={page !== "providers"}>
         <ProviderPage
@@ -417,11 +423,11 @@ function CatalogRepairNotice({
   return (
     <section className="app-notice app-notice-warning" role="status">
       <div>
-        <strong>发现旧的模型图片兼容配置</strong>
-        <p>供应商“{preview.providerName}”的 {preview.model} 目录仍会阻止 Codex 发送图片请求。GPTEasy 可以只备份并更新模型目录，不会修改供应商、凭据或模型列表；若 Codex 正在运行，更新后请重启 Codex。</p>
+        <strong>发现可更新的模型能力目录</strong>
+        <p>供应商“{preview.providerName}”的 {preview.model} 目录与当前生成的模型能力声明不同。GPTEasy 可以只备份并更新模型目录，不会修改供应商、凭据或模型列表；若 Codex 正在运行，更新后请重启 Codex。</p>
       </div>
       <button className="command-button" type="button" onClick={onApply} disabled={busy}>
-        {busy ? "正在更新" : "更新兼容配置"}
+        {busy ? "正在更新" : "刷新模型能力"}
       </button>
     </section>
   );

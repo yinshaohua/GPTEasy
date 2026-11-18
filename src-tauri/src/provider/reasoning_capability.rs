@@ -214,6 +214,9 @@ pub(crate) fn merge_exact(
     if let Some(vendor) = vendor {
         return vendor.clone();
     }
+    if let Some(codex) = codex {
+        return codex.clone();
+    }
     ReasoningCapability {
         state: CapabilityState::NotFound,
         levels: Vec::new(),

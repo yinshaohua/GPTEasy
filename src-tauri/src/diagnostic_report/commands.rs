@@ -163,6 +163,15 @@ pub(crate) async fn repair_diagnostic_custom_provider(
     .map_err(|_| DiagnosticFailure {
         message_id: "diagnostics.repair_failed",
     });
+    if let Ok(execution) = &result {
+        let (level, details) = repair_commit_evidence(execution.status);
+        logs.store.append(
+            level,
+            "diagnostics.repair_result",
+            execution.message_id,
+            Some(details.to_owned()),
+        );
+    }
     log_diagnostic_failure(&logs, "diagnostics.repair_custom_provider", &result);
     result
 }
@@ -326,6 +335,36 @@ fn recent_error_logs(logs: &IssueLogRuntime) -> Vec<IssueLogRecord> {
         Some(IssueLogLevel::Error),
         None,
     )
+}
+
+fn repair_commit_evidence(status: DiagnosticRepairStatus) -> (IssueLogLevel, &'static str) {
+    match status {
+        DiagnosticRepairStatus::Succeeded => (
+            IssueLogLevel::Info,
+            "stage=commit status=verified client_reload=not_requested",
+        ),
+        DiagnosticRepairStatus::NotModified => {
+            (IssueLogLevel::Warn, "stage=commit status=not_modified")
+        }
+        DiagnosticRepairStatus::RolledBack => {
+            (IssueLogLevel::Warn, "stage=commit status=rolled_back")
+        }
+        DiagnosticRepairStatus::ManualRequired => {
+            (IssueLogLevel::Error, "stage=commit status=manual_required")
+        }
+    }
+}
+
+#[test]
+fn repair_evidence_distinguishes_disk_commit_from_reload_and_no_write() {
+    assert_eq!(
+        repair_commit_evidence(DiagnosticRepairStatus::Succeeded).1,
+        "stage=commit status=verified client_reload=not_requested"
+    );
+    assert_eq!(
+        repair_commit_evidence(DiagnosticRepairStatus::NotModified).1,
+        "stage=commit status=not_modified"
+    );
 }
 
 fn log_diagnostic_failure<T>(

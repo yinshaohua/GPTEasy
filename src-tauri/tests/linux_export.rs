@@ -166,7 +166,9 @@ fn bash_and_zsh_exports_embed_the_same_static_reasoning_snapshot() {
         assert!(script.contains("\"default_reasoning_level\": \"medium\""));
         assert!(script.contains("\"effort\": \"xhigh\""));
         assert!(script.contains("\"slug\": \"provider-only\""));
-        assert!(script.contains("供应商已发现模型，Codex 未识别精确模型能力"));
+        assert!(
+            script.contains("未识别精确模型；使用 GPTEasy OpenAI 兼容档位 v1，非供应商能力声明")
+        );
         assert!(!script.contains("app-server --stdio"));
         assert!(!script.contains("model-list"));
     }
@@ -328,17 +330,22 @@ fn dayway_ds_linux_export_applies_exact_deepseek_compatibility_profile() {
                     assert_eq!(efforts, ["low", "medium", "high"]);
                 }
                 "gpt-6.1-sol" => assert_eq!(efforts, ["low", "medium", "high", "xhigh"]),
-                _ => assert!(efforts.is_empty()),
+                _ => {
+                    assert_eq!(efforts, ["low", "medium", "high", "xhigh"]);
+                    assert_eq!(model["default_reasoning_level"], "high");
+                }
             }
         }
         for model in dayway["models"].as_array().expect("models") {
             if model["slug"] != "gpt-6.1-sol" {
-                assert!(
+                assert_eq!(
                     model["supported_reasoning_levels"]
                         .as_array()
                         .expect("levels")
-                        .is_empty()
+                        .len(),
+                    4
                 );
+                assert_eq!(model["default_reasoning_level"], "high");
             }
         }
         run_shell_black_box_with_canaries(

@@ -687,7 +687,7 @@ fn detects_and_repairs_legacy_model_catalog_image_declaration() {
     let preview = report.repair_preview.expect("catalog repair preview");
     assert_eq!(preview.kind, "model_catalog");
     assert!(report.findings.iter().any(|finding| {
-        finding.code == "model_catalog_image_compatibility" && finding.repairable
+        finding.code == "model_catalog_capabilities_stale" && finding.repairable
     }));
 
     let result = application.repair_custom_provider(&preview.preview_id);
@@ -954,5 +954,86 @@ fn detects_only_root_context_overrides_without_exposing_values() {
             std::fs::read_to_string(directory.path().join("config.toml")).unwrap(),
             settings
         );
+    }
+}
+
+/// Runs against an explicitly selected installed CLI, never against the user's CODEX_HOME.
+#[test]
+#[ignore = "requires GPTEASY_CODEX_EXECUTABLE with both 6.2 models"]
+fn real_cli_refreshes_stale_reasoning_catalog_without_touching_config_or_auth() {
+    let executable = std::env::var_os("GPTEASY_CODEX_EXECUTABLE").expect("select native Codex");
+    let home = tempdir().unwrap();
+    let store = StateStore::new(StatePaths::from_root(home.path().join("state")));
+    assert!(store.bootstrap().is_ready());
+    let ids = ["gpt-6.2-astra", "gpt-6.2-sol", "gpteasy-not-found-fixture"];
+    insert_verified_provider(
+        &store,
+        CURRENT_SOURCE_PROVIDER_ID,
+        "Test",
+        "https://provider.example/v1",
+        "fixture",
+        ids[0],
+        true,
+    );
+    let db = rusqlite::Connection::open(store.paths().database()).unwrap();
+    db.execute("INSERT OR REPLACE INTO provider_model_catalog(provider_id,verification_fingerprint,models_json) SELECT id,verification_fingerprint,?1 FROM providers WHERE id=?2", rusqlite::params![serde_json::json!(ids).to_string(),CURRENT_SOURCE_PROVIDER_ID]).unwrap();
+    drop(db);
+    let app = EnvironmentApplication::new(store, home.path());
+    app.apply_provider(CURRENT_SOURCE_PROVIDER_ID, true)
+        .unwrap();
+    let path = home.path().join("gpteasy-model-catalog.json");
+    let config = home.path().join("config.toml");
+    let auth = home.path().join("auth.json");
+    let auth_before = std::fs::read(&auth).unwrap();
+    let mut old: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    for m in old["models"].as_array_mut().unwrap() {
+        m["description"] = "供应商已发现模型，Codex 未识别精确模型能力".into();
+        m["supported_reasoning_levels"] = serde_json::json!([]);
+        m["default_reasoning_level"] = serde_json::Value::Null;
+    }
+    std::fs::write(&path, old.to_string()).unwrap();
+    let preview = app.preview_model_catalog_repair().unwrap().unwrap();
+    let mut config_before = std::fs::read(&config).unwrap();
+    config_before.extend_from_slice(b"\n# unrelated preference\n");
+    std::fs::write(&config, &config_before).unwrap();
+    let mut custom = old.clone();
+    custom["models"][0]["base_instructions"] = "user edit".into();
+    std::fs::write(&path, custom.to_string()).unwrap();
+    assert!(app.preview_model_catalog_repair().unwrap().is_none());
+    assert_eq!(
+        app.repair_model_catalog(&preview.preview_id).status,
+        gpteasy_lib::environment::ModelCatalogRepairStatus::NotModified
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), custom.to_string());
+    std::fs::write(&path, old.to_string()).unwrap();
+    assert_eq!(
+        app.repair_model_catalog(&preview.preview_id).status,
+        gpteasy_lib::environment::ModelCatalogRepairStatus::Succeeded
+    );
+    assert!(app.preview_model_catalog_repair().unwrap().is_none());
+    assert_eq!(std::fs::read(config).unwrap(), config_before);
+    assert_eq!(std::fs::read(auth).unwrap(), auth_before);
+    let output = std::process::Command::new(executable)
+        .env("CODEX_HOME", home.path())
+        .args(["debug", "models"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let loaded: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    for id in ids {
+        let m = loaded["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["slug"] == id)
+            .unwrap();
+        let levels = m["supported_reasoning_levels"].as_array().unwrap();
+        if id == ids[2] {
+            assert_eq!(levels.len(), 4);
+            assert_eq!(m["default_reasoning_level"], "high");
+        } else {
+            assert_eq!(levels.len(), 6);
+        }
     }
 }

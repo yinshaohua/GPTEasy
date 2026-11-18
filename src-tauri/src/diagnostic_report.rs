@@ -104,11 +104,11 @@ impl DiagnosticApplication {
         }
         if catalog_repair_preview.is_some() {
             findings.push(DiagnosticFinding {
-                code: "model_catalog_image_compatibility",
+                code: "model_catalog_capabilities_stale",
                 origin: DiagnosticOrigin::Local,
                 severity: DiagnosticSeverity::Warning,
-                title: "模型图片兼容配置需要更新".to_owned(),
-                summary: "当前供应商的 GPTEasy 模型目录仍使用旧的图片输入声明；确认后只更新该目录并创建备份。".to_owned(),
+                title: "受管模型能力目录需要更新".to_owned(),
+                summary: "当前供应商的 GPTEasy 模型目录包含过期的思考强度或图片输入声明；确认后只更新该目录并创建备份。".to_owned(),
                 repairable: true,
             });
         }
@@ -413,7 +413,7 @@ impl From<crate::environment::ModelCatalogRepairPreview> for DiagnosticRepairPre
             authentication: "not_changed",
             changes: vec![
                 "backup_model_catalog",
-                "update_image_compatibility",
+                "refresh_model_capabilities",
                 "restart_codex_if_running",
             ],
             kind: "model_catalog",

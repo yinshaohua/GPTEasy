@@ -6222,14 +6222,14 @@ impl PreparedModelCatalogRepair {
             provider.capability_snapshot.as_ref(),
         )
         .map_err(|_| invalid_config())?;
-        if !legacy_catalog_matches(&old_bytes, &new_bytes) {
+        if !managed_catalog_update(old_bytes, &new_bytes) {
             return Ok(None);
         }
         let model_count = serde_json::from_slice::<Value>(&new_bytes)
             .ok()
             .and_then(|value| value.get("models").and_then(Value::as_array).map(Vec::len))
             .unwrap_or_default();
-        let preview_id = model_catalog_repair_preview_id(config_bytes, old_bytes, &provider_id);
+        let preview_id = model_catalog_repair_preview_id(old_bytes, &new_bytes, &provider_id);
         Ok(Some(Self {
             preview: ModelCatalogRepairPreview {
                 preview_id,
@@ -6241,13 +6241,16 @@ impl PreparedModelCatalogRepair {
     }
 }
 
-fn legacy_catalog_matches(old_bytes: &[u8], new_bytes: &[u8]) -> bool {
+fn managed_catalog_update(old_bytes: &[u8], new_bytes: &[u8]) -> bool {
     let Ok(mut old) = serde_json::from_slice::<Value>(old_bytes) else {
         return false;
     };
     let Ok(new) = serde_json::from_slice::<Value>(new_bytes) else {
         return false;
     };
+    if old == new || old.as_object().is_none_or(|object| object.len() != 1) {
+        return false;
+    }
     let (Some(old_models), Some(new_models)) = (
         old.get_mut("models").and_then(Value::as_array_mut),
         new.get("models").and_then(Value::as_array),
@@ -6265,17 +6268,48 @@ fn legacy_catalog_matches(old_bytes: &[u8], new_bytes: &[u8]) -> bool {
         };
         let old_modalities = old_object.remove("input_modalities");
         let old_original = old_object.remove("supports_image_detail_original");
-        if !matches!(&old_modalities, Some(Value::Array(values)) if values == &vec![Value::String("text".to_owned())])
+        if old_modalities.as_ref() != Some(&serde_json::json!(["text", "image"]))
+            && old_modalities.as_ref() != Some(&serde_json::json!(["text"]))
             && old_modalities.is_some()
         {
             return false;
         }
-        if old_original.is_some_and(|value| value != Value::Bool(false)) {
+        if old_original
+            .as_ref()
+            .is_some_and(|value| value != &Value::Bool(false))
+        {
             return false;
         }
         let mut expected = new_object.clone();
         expected.remove("input_modalities");
         expected.remove("supports_image_detail_original");
+        // Only replace reasoning fields that match an exact GPTEasy-generated shape.
+        let fields = [
+            "description",
+            "supported_reasoning_levels",
+            "default_reasoning_level",
+        ];
+        if fields
+            .iter()
+            .any(|k| old_object.get(*k) != expected.get(*k))
+        {
+            if !generated_reasoning_fields(old_object)
+                || !matches!(
+                    expected.get("description").and_then(Value::as_str),
+                    Some(
+                        "Codex 已验证精确模型推理元数据"
+                            | "Codex 已验证精确模型没有推理档位"
+                            | model_catalog::FALLBACK_DESCRIPTION
+                    )
+                )
+            {
+                return false;
+            }
+            for key in fields {
+                old_object.remove(key);
+                expected.remove(key);
+            }
+        }
         if *old_object != expected {
             return false;
         }
@@ -6283,13 +6317,60 @@ fn legacy_catalog_matches(old_bytes: &[u8], new_bytes: &[u8]) -> bool {
     true
 }
 
-fn model_catalog_repair_preview_id(config: &[u8], catalog: &[u8], provider_id: &str) -> String {
+fn generated_reasoning_fields(model: &serde_json::Map<String, Value>) -> bool {
+    let Some(levels) = model
+        .get("supported_reasoning_levels")
+        .and_then(Value::as_array)
+    else {
+        return false;
+    };
+    let default = model.get("default_reasoning_level");
+    match model.get("description").and_then(Value::as_str) {
+        Some("供应商已发现模型，Codex 未识别精确模型能力" | "供应商已发现模型，能力未识别" | "Codex 已验证精确模型没有推理档位" | "供应商已发现模型，Codex 元数据探测失败" | "推理能力来源冲突，未生成档位") => levels.is_empty() && default == Some(&Value::Null),
+        Some(model_catalog::FALLBACK_DESCRIPTION) => default.and_then(Value::as_str) == Some("high") && levels.len() == 4 && levels.iter().zip(["low","medium","high","xhigh"]).all(|(v,e)| *v == serde_json::json!({"effort":e,"description":format!("GPTEasy 兼容档位 {e}（供应商未验证）")})),
+        Some("Codex 已验证精确模型推理元数据") => !levels.is_empty() && levels.iter().all(|v| v.get("effort").and_then(Value::as_str).is_some_and(|e| *v == serde_json::json!({"effort":e,"description":format!("Codex 声明的 {e} 推理档位")}))) && default.is_some_and(|d| d.is_null() || levels.iter().any(|v| v.get("effort") == Some(d))),
+        _ => false,
+    }
+}
+
+fn model_catalog_repair_preview_id(old: &[u8], new: &[u8], provider_id: &str) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"gpteasy-model-catalog-image-repair-preview-v1\0");
-    hasher.update(config);
+    hasher.update(b"gpteasy-model-catalog-repair-preview-v2\0");
+    hasher.update(old);
     hasher.update(b"\0");
-    hasher.update(catalog);
+    hasher.update(new);
     hasher.update(b"\0");
     hasher.update(provider_id.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+#[cfg(test)]
+mod reasoning_catalog_repair_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn only_upgrades_generated_reasoning_and_never_erases_levels_on_probe_failure() {
+        let old = json!({"models":[{"slug":"m","description":"供应商已发现模型，Codex 未识别精确模型能力","supported_reasoning_levels":[],"default_reasoning_level":null}]});
+        let mut new = old.clone();
+        let m = &mut new["models"][0];
+        m["description"] = json!("Codex 已验证精确模型推理元数据");
+        m["default_reasoning_level"] = json!("high");
+        m["supported_reasoning_levels"] =
+            json!([{"effort":"high","description":"Codex 声明的 high 推理档位"}]);
+        let eligible = |before: &Value, after: &Value| {
+            managed_catalog_update(
+                &serde_json::to_vec(before).unwrap(),
+                &serde_json::to_vec(after).unwrap(),
+            )
+        };
+        assert!(eligible(&old, &new));
+        assert!(!eligible(&new, &new));
+        let mut failed = old.clone();
+        failed["models"][0]["description"] = json!("供应商已发现模型，Codex 元数据探测失败");
+        assert!(!eligible(&new, &failed));
+        let mut custom = old.clone();
+        custom["models"][0]["base_instructions"] = json!("custom");
+        assert!(!eligible(&custom, &new));
+    }
 }

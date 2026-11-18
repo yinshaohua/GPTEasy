@@ -634,7 +634,7 @@ fn confirmed_takeover_preserves_external_fields_without_guessing_unknown_model_r
         .expect("discovered model entry");
     assert_eq!(
         discovered_model["description"],
-        "供应商已发现模型，Codex 未识别精确模型能力"
+        "未识别精确模型；使用 GPTEasy OpenAI 兼容档位 v1，非供应商能力声明"
     );
     assert_eq!(
         models[0]["input_modalities"],
