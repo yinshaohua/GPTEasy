@@ -27,11 +27,11 @@ describe("模型目录刷新与桌面重启隔离", () => {
     expect(invoke).toHaveBeenCalledWith("refresh_model_catalog");
     expect(invoke.mock.calls.some(([command]) => command === "restart_desktop_application")).toBe(false);
   });
-  it("传输失败显示失败而非无需刷新，允许补偿重试", async () => {
+  it("传输失败显示结果尚未确认，允许补偿重试", async () => {
     render(<DesktopControl />);
     await screen.findByRole("button", { name: "重启 Codex" });
     fireEvent.click(screen.getByRole("button", { name: "刷新模型目录" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("模型目录刷新失败");
+    expect(await screen.findByRole("alert")).toHaveTextContent("模型目录刷新结果尚未确认");
     invoke.mockImplementation((command: string) => Promise.resolve(command === "get_desktop_snapshot" ? snapshot : result("refreshed")));
     fireEvent.click(screen.getByRole("button", { name: "刷新模型目录" }));
     expect(await screen.findByText("模型目录已刷新。")).toBeInTheDocument();

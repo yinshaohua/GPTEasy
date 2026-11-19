@@ -15,7 +15,8 @@ use crate::environment::{
     EnvironmentVisibilityContext,
 };
 use crate::model_catalog_refresh::{
-    ModelCatalogRefreshResult, ModelCatalogRefreshStatus, ModelCatalogRefresher, RefreshSource,
+    DaemonRestartState, ModelCatalogRefreshResult, ModelCatalogRefreshStatus,
+    ModelCatalogRefresher, RefreshSource,
 };
 use crate::provider::reasoning::{self, ReasoningAuditContext};
 use crate::provider::{
@@ -772,6 +773,7 @@ async fn run_catalog_refresh(app: &AppHandle, source: RefreshSource) -> ModelCat
                 before: None,
                 after: None,
                 message_id: "model_catalog_refresh.task_failed".into(),
+                restart_state: DaemonRestartState::Unknown,
             };
             app.state::<IssueLogRuntime>().store.append(
                 IssueLogLevel::Warn,
@@ -4804,6 +4806,7 @@ mod catalog_coordination_tests {
             before: None,
             after: None,
             message_id: "model_catalog_refresh.test".into(),
+            restart_state: DaemonRestartState::Unknown,
         }
     }
     #[test]

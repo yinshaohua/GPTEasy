@@ -79,7 +79,7 @@ import {
   type WslLifecycleOutcome,
   type WslLifecycleResult,
 } from "./contracts/environment";
-import { catalogRefreshMessage } from "./contracts/modelCatalogRefresh";
+import { providerCatalogRefreshMessage } from "./contracts/modelCatalogRefresh";
 import {
   environmentFailureFallback,
   environmentFailureMessages,
@@ -590,7 +590,7 @@ export default function ProviderPage({
       applyEnvironmentSnapshot(updated);
       setCatalogFeedback([
         providerMessages.forceSetSucceeded(provider.name),
-        updated.modelCatalogRefresh ? catalogRefreshMessage(updated.modelCatalogRefresh) : "",
+        updated.modelCatalogRefresh ? providerCatalogRefreshMessage(updated.modelCatalogRefresh) : "",
         updated.pendingRestart ? providerMessages.configChangePendingRestart : "",
       ].filter(Boolean).join(" "));
     } catch (error) {
@@ -1087,7 +1087,7 @@ export default function ProviderPage({
       }
       applyEnvironmentSnapshot(updated);
       const refreshMessage = updated.modelCatalogRefresh
-        ? "供应商切换已成功，" + catalogRefreshMessage(updated.modelCatalogRefresh)
+        ? providerCatalogRefreshMessage(updated.modelCatalogRefresh)
         : "";
       setCatalogFeedback([
         refreshMessage,

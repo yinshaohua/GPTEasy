@@ -1485,11 +1485,34 @@ fn unexpected_exit() -> SessionFailure {
     )
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum CodexCliSource {
+    ExplicitOverride,
+    ProcessPath,
+    UserPath,
+    #[cfg(windows)]
+    Npm,
+    #[cfg(windows)]
+    DesktopPackage,
+}
+impl CodexCliSource {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::ExplicitOverride => "explicit_override",
+            Self::ProcessPath => "process_path",
+            Self::UserPath => "user_path",
+            #[cfg(windows)]
+            Self::Npm => "npm",
+            #[cfg(windows)]
+            Self::DesktopPackage => "desktop_package",
+        }
+    }
+}
+
 // Daemon management shares executable discovery, not the stdio connection or its lifecycle.
-pub(crate) fn managed_daemon_cli_command() -> Option<std::process::Command> {
-    Some(std::process::Command::new(
-        discover_codex_native_executable()?,
-    ))
+pub(crate) fn managed_daemon_cli_command() -> Option<(std::process::Command, CodexCliSource)> {
+    let (program, source) = discover_codex_native_with_source()?;
+    Some((std::process::Command::new(program), source))
 }
 
 /// 返回可以被安全地直接启动的原生 Codex 可执行文件。
@@ -1498,6 +1521,10 @@ pub(crate) fn managed_daemon_cli_command() -> Option<std::process::Command> {
 /// `cmd.exe` 或其它 shell shim。这里复用会话使用的当前用户 PATH 和 Windows
 /// 桌面应用目录发现逻辑，但不会读取 Codex 配置或认证文件。
 pub(crate) fn discover_codex_native_executable() -> Option<PathBuf> {
+    discover_codex_native_with_source().map(|(program, _)| program)
+}
+
+fn discover_codex_native_with_source() -> Option<(PathBuf, CodexCliSource)> {
     if let Some(override_path) = std::env::var_os("GPTEASY_CODEX_EXECUTABLE") {
         let path = PathBuf::from(override_path);
         if path.is_file()
@@ -1505,7 +1532,7 @@ pub(crate) fn discover_codex_native_executable() -> Option<PathBuf> {
                 .extension()
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("cmd"))
         {
-            return Some(path);
+            return Some((path, CodexCliSource::ExplicitOverride));
         }
     }
     let path = std::env::var_os("PATH").unwrap_or_default();
@@ -1513,8 +1540,11 @@ pub(crate) fn discover_codex_native_executable() -> Option<PathBuf> {
     let user_path = read_current_user_path();
     #[cfg(not(windows))]
     let user_path: Option<OsString> = None;
-    let launch = discover_codex_in_paths(&path, user_path.as_deref()).ok()?;
-    launch.args_prefix.is_empty().then_some(launch.program)
+    let (launch, source) = discover_codex_in_paths_with_source(&path, user_path.as_deref()).ok()?;
+    launch
+        .args_prefix
+        .is_empty()
+        .then_some((launch.program, source))
 }
 
 fn discover_codex(state_store: Option<&StateStore>) -> Result<LaunchCommand, SessionFailure> {
@@ -1577,13 +1607,29 @@ fn discover_codex_in_paths(
     process_path: &OsStr,
     current_user_path: Option<&OsStr>,
 ) -> Result<LaunchCommand, SessionFailure> {
-    let mut directories = std::env::split_paths(process_path).collect::<Vec<_>>();
+    discover_codex_in_paths_with_source(process_path, current_user_path).map(|(launch, _)| launch)
+}
+
+fn discover_codex_in_paths_with_source(
+    process_path: &OsStr,
+    current_user_path: Option<&OsStr>,
+) -> Result<(LaunchCommand, CodexCliSource), SessionFailure> {
+    let mut directories: Vec<_> = std::env::split_paths(process_path)
+        .map(|directory| (directory, CodexCliSource::ProcessPath))
+        .collect();
     if let Some(current_user_path) = current_user_path {
-        directories.extend(std::env::split_paths(current_user_path));
+        directories.extend(
+            std::env::split_paths(current_user_path)
+                .map(|directory| (directory, CodexCliSource::UserPath)),
+        );
     }
     #[cfg(windows)]
-    directories.extend(desktop_codex_directories());
-    for directory in directories {
+    directories.extend(
+        desktop_codex_directories()
+            .into_iter()
+            .map(|directory| (directory, CodexCliSource::DesktopPackage)),
+    );
+    for (directory, source) in directories {
         for name in candidate_names() {
             let candidate = directory.join(name);
             if !candidate.is_file() {
@@ -1595,28 +1641,37 @@ fn discover_codex_in_paths(
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("cmd"))
             {
                 if let Some(native) = npm_native_codex(&candidate) {
-                    return Ok(LaunchCommand {
-                        identity: native.clone(),
-                        program: native,
-                        args_prefix: Vec::new(),
-                    });
+                    return Ok((
+                        LaunchCommand {
+                            identity: native.clone(),
+                            program: native,
+                            args_prefix: Vec::new(),
+                        },
+                        CodexCliSource::Npm,
+                    ));
                 }
-                return Ok(LaunchCommand {
-                    identity: candidate.clone(),
-                    program: PathBuf::from("cmd.exe"),
-                    args_prefix: vec![
-                        "/D".into(),
-                        "/S".into(),
-                        "/C".into(),
-                        candidate.into_os_string(),
-                    ],
-                });
+                return Ok((
+                    LaunchCommand {
+                        identity: candidate.clone(),
+                        program: PathBuf::from("cmd.exe"),
+                        args_prefix: vec![
+                            "/D".into(),
+                            "/S".into(),
+                            "/C".into(),
+                            candidate.into_os_string(),
+                        ],
+                    },
+                    source,
+                ));
             }
-            return Ok(LaunchCommand {
-                identity: candidate.clone(),
-                program: candidate,
-                args_prefix: Vec::new(),
-            });
+            return Ok((
+                LaunchCommand {
+                    identity: candidate.clone(),
+                    program: candidate,
+                    args_prefix: Vec::new(),
+                },
+                source,
+            ));
         }
     }
     Err(SessionFailure::new(
@@ -1943,9 +1998,11 @@ mod tests {
         let stale_path = std::env::join_paths([stale_directory]).expect("stale process path");
         let current_user_path = std::env::join_paths([npm_directory]).expect("current user path");
 
-        let launch = discover_codex_in_paths(&stale_path, Some(&current_user_path))
-            .expect("newly installed Codex must be discovered without restarting GPTEasy");
+        let (launch, source) =
+            discover_codex_in_paths_with_source(&stale_path, Some(&current_user_path))
+                .expect("newly installed Codex must be discovered without restarting GPTEasy");
 
+        assert_eq!(source.name(), "npm");
         assert_eq!(launch.identity, native);
         assert_eq!(launch.program, native);
         assert!(launch.args_prefix.is_empty());

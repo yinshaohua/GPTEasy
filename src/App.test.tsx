@@ -2293,7 +2293,7 @@ describe("Codex 环境接管", () => {
       });
     });
     expect(await screen.findByText(/运行中的 Codex 消费者可能继续使用旧配置/)).toBeInTheDocument();
-    expect(screen.getByText(/供应商切换已成功，模型目录刷新失败/)).toBeInTheDocument();
+    expect(screen.getByText(/供应商配置已保存。等待 Codex 服务恢复运行超时，模型目录刷新结果尚未确认/)).toBeInTheDocument();
     expect(invoke.mock.calls.some(([command]) => command === "refresh_model_catalog")).toBe(false);
   });
 
