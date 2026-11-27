@@ -21,6 +21,7 @@ export interface UpdateSnapshot {
   notes: string | null;
   publishedAt: string | null;
   checkedAtEpochSeconds: number | null;
+  nextRetryAtEpochSeconds: number | null;
   downloadedBytes: number;
   totalBytes: number | null;
   progressPercent: number | null;
@@ -37,6 +38,7 @@ export const initialUpdateSnapshot: UpdateSnapshot = {
   notes: null,
   publishedAt: null,
   checkedAtEpochSeconds: null,
+  nextRetryAtEpochSeconds: null,
   downloadedBytes: 0,
   totalBytes: null,
   progressPercent: null,

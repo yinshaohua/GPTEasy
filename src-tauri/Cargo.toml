@@ -24,9 +24,11 @@ tauri-build = { version = "2.5", features = [] }
 [dependencies]
 base64 = "0.22"
 futures-util = "0.3"
+httpdate = "1.0.3"
 minisign-verify = "0.2.5"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 rusqlite = { version = "0.37", features = ["backup", "bundled"] }
+rustls = { version = "0.23", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["raw_value"] }
 sha2 = "0.10"
@@ -44,6 +46,7 @@ uuid = { version = "1.18", features = ["v4"] }
 [dev-dependencies]
 minisign-verify = "0.2.5"
 tempfile = "3.15"
+tokio = { version = "1.47", features = ["test-util"] }
 
 [target.'cfg(windows)'.dependencies]
 sysinfo = { version = "0.36.1", default-features = false, features = ["system"] }

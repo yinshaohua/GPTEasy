@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "./App";
+import { initialUpdateSnapshot } from "./contracts/update";
 
 const { invoke, listen } = vi.hoisted(() => ({ invoke: vi.fn(), listen: vi.fn() }));
 
@@ -576,6 +577,34 @@ describe("应用更新", () => {
     expect(await screen.findByText("更新签名验证失败")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /更新检查失败/ })).not.toBeInTheDocument();
     expect(within(screen.getByRole("dialog", { name: "GPTEasy 更新" })).getByRole("button", { name: "重试" })).toBeInTheDocument();
+  });
+
+  it("显示后台重试时间，允许立即重试并在检查成功后清除提示", async () => {
+    const failedUpdate = {
+      ...initialUpdateSnapshot,
+      state: "failed",
+      failureCategory: "check_failed",
+      errorMessage: "暂时无法检查应用更新。",
+      nextRetryAtEpochSeconds: 1_787_027_230,
+    };
+    const recoveredUpdate = { ...initialUpdateSnapshot, state: "up_to_date" };
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_startup_snapshot") return Promise.resolve(readySnapshot);
+      if (command === "get_update_snapshot") return Promise.resolve(failedUpdate);
+      if (command === "check_for_updates") return Promise.resolve(recoveredUpdate);
+      if (command === "list_providers" || command === "list_wsl_environments") return Promise.resolve([]);
+      return Promise.resolve(undefined);
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "更新失败" }));
+    const dialog = within(screen.getByRole("dialog", { name: "GPTEasy 更新" }));
+    const retryTime = new Date(failedUpdate.nextRetryAtEpochSeconds * 1000).toLocaleString("zh-CN");
+    expect(dialog.getByRole("status")).toHaveTextContent(`下次自动重试时间为 ${retryTime}。`);
+
+    fireEvent.click(dialog.getByRole("button", { name: "立即重试" }));
+    expect(await dialog.findByText("已是最新版本")).toBeInTheDocument();
+    expect(dialog.queryByText(/下次自动重试时间/)).not.toBeInTheDocument();
   });
 
   it("稍后不会启动安装，繁忙拒绝保持待安装状态", async () => {

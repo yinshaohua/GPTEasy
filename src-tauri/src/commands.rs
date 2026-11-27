@@ -41,8 +41,8 @@ use crate::startup::{StartupCoordinator, StartupSnapshot};
 use crate::state::PendingSessionVisibilitySnapshot;
 use crate::tray;
 use crate::update::{
-    UpdateActivityGate, UpdateCoordinator, UpdateFailureCategory, UpdateInstallFailure,
-    UpdateInstallFailureCategory, UpdateSnapshot, UpdateState,
+    UpdateActivityGate, UpdateCheckFailure, UpdateCoordinator, UpdateFailureCategory,
+    UpdateInstallFailure, UpdateInstallFailureCategory, UpdateSnapshot, UpdateState,
 };
 use crate::wsl::{
     WslApplication, WslApplyResult, WslDaemonRefreshResult, WslDaemonRefreshStatus,
@@ -1057,10 +1057,7 @@ pub(crate) fn install_update(
 }
 
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-pub(crate) async fn perform_update_check(
-    app: &AppHandle,
-    retry_incomplete: bool,
-) -> UpdateSnapshot {
+pub(crate) async fn perform_update_check(app: &AppHandle, manual: bool) -> UpdateSnapshot {
     let runtime = app.state::<UpdateRuntime>();
     let coordinator = runtime.coordinator.clone();
     let event_app = app.clone();
@@ -1074,12 +1071,16 @@ pub(crate) async fn perform_update_check(
             );
         }
     };
-    let snapshot = if retry_incomplete {
-        coordinator.check_and_download(progress).await
-    } else {
-        coordinator.scheduled_check_and_download(progress).await
-    };
-    log_update_check_failure(&app.state::<IssueLogRuntime>().store, &snapshot);
+    let (snapshot, failure) = coordinator.check_and_download(manual, progress).await;
+    if let Some((attempt, failure)) = failure {
+        log_update_check_failure(
+            &app.state::<IssueLogRuntime>().store,
+            &snapshot,
+            manual,
+            attempt,
+            &failure,
+        );
+    }
     runtime.notify_if_hidden(app, &snapshot);
     if app.emit("update-progress", snapshot.clone()).is_err() {
         log_runtime_error(
@@ -1093,10 +1094,7 @@ pub(crate) async fn perform_update_check(
 }
 
 #[cfg(not(all(target_os = "windows", target_arch = "x86_64")))]
-pub(crate) async fn perform_update_check(
-    app: &AppHandle,
-    _retry_incomplete: bool,
-) -> UpdateSnapshot {
+pub(crate) async fn perform_update_check(app: &AppHandle, _manual: bool) -> UpdateSnapshot {
     app.state::<UpdateRuntime>().coordinator.snapshot()
 }
 
@@ -1105,19 +1103,39 @@ pub(crate) async fn check_for_updates(app: AppHandle) -> UpdateSnapshot {
     perform_update_check(&app, true).await
 }
 
-fn log_update_check_failure(store: &IssueLogStore, snapshot: &UpdateSnapshot) {
-    let Some(category) = snapshot.failure_category else {
-        return;
-    };
+#[cfg(any(test, all(target_os = "windows", target_arch = "x86_64")))]
+fn log_update_check_failure(
+    store: &IssueLogStore,
+    snapshot: &UpdateSnapshot,
+    manual: bool,
+    attempt: usize,
+    failure: &UpdateCheckFailure,
+) {
+    let mut details = format!(
+        "category={} trigger={} stage={} error={} attempt={}",
+        update_failure_category_name(failure.category()),
+        if manual { "manual" } else { "scheduled" },
+        failure.stage.name(),
+        failure.error.name(),
+        attempt,
+    );
+    if let Some(status) = failure.http_status {
+        details.push_str(&format!(" http_status={status}"));
+    }
+    if let Some(code) = failure.os_error {
+        details.push_str(&format!(" os_error={code}"));
+    }
+    if let Some(version) = &snapshot.available_version {
+        details.push_str(&format!(" target_version={version}"));
+    }
+    if let Some(retry_at) = snapshot.next_retry_at_epoch_seconds {
+        details.push_str(&format!(" next_retry_at_epoch_seconds={retry_at}"));
+    }
     store.append(
         IssueLogLevel::Error,
         "update.check",
         "应用更新检查失败",
-        Some(format!(
-            "category={} target_version={}",
-            update_failure_category_name(category),
-            snapshot.available_version.as_deref().unwrap_or("none"),
-        )),
+        Some(details),
     );
 }
 
@@ -3799,6 +3817,7 @@ mod tests {
             notes: None,
             published_at: None,
             checked_at_epoch_seconds: Some(1),
+            next_retry_at_epoch_seconds: None,
             downloaded_bytes: 0,
             total_bytes: None,
             progress_percent: None,
@@ -4411,27 +4430,42 @@ mod tests {
     }
 
     #[test]
-    fn final_update_check_failure_is_written_to_issue_log_without_network_details() {
+    fn update_check_failure_logs_only_structured_stage_and_retry_evidence() {
+        use crate::update::{UpdateCheckError, UpdateCheckFailure, UpdateCheckStage};
         let directory = tempdir().expect("issue log directory");
         let store = IssueLogStore::new(directory.path());
-        let snapshot = failed_update_snapshot(UpdateFailureCategory::DownloadFailed);
+        let mut snapshot = failed_update_snapshot(UpdateFailureCategory::CheckFailed);
+        snapshot.next_retry_at_epoch_seconds = Some(31);
+        let mut reset = UpdateCheckFailure::new(
+            UpdateCheckStage::ManifestRequest,
+            UpdateCheckError::ConnectionReset,
+        );
+        reset.os_error = Some(10054);
+        log_update_check_failure(&store, &snapshot, false, 1, &reset);
 
-        log_update_check_failure(&store, &snapshot);
+        let mut download = UpdateCheckFailure::new(
+            UpdateCheckStage::DownloadStatus,
+            UpdateCheckError::HttpStatus,
+        );
+        download.http_status = Some(503);
+        snapshot.next_retry_at_epoch_seconds = None;
+        log_update_check_failure(&store, &snapshot, true, 1, &download);
 
         let records = store.list(0, Some(IssueLogLevel::Error), Some("update.check"));
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].event, "update.check");
+        assert_eq!(records.len(), 2);
         assert_eq!(
             records[0].details.as_deref(),
-            Some("category=download_failed target_version=1.1.0")
+            Some(
+                "category=check_failed trigger=scheduled stage=manifest_request error=connection_reset attempt=1 os_error=10054 target_version=1.1.0 next_retry_at_epoch_seconds=31"
+            )
         );
-        assert!(
-            !records[0]
-                .details
-                .as_deref()
-                .unwrap_or_default()
-                .contains("example.invalid")
+        assert_eq!(
+            records[1].details.as_deref(),
+            Some(
+                "category=download_failed trigger=manual stage=download_status error=http_status attempt=1 http_status=503 target_version=1.1.0"
+            )
         );
+        assert!(!IssueLogStore::format(&records).contains("example.invalid"));
     }
 
     #[test]

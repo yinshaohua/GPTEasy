@@ -28,6 +28,8 @@ export const updateMessages = {
   installBusy: "当前有操作正在进行，请先完成或取消后再安装更新。",
   check: "检查更新",
   retry: "重试",
+  retryNow: "立即重试",
+  scheduledRetry: (time: string) => `下次自动重试时间为 ${time}。`,
   redownload: "重新下载",
   close: "关闭",
   downloading: "正在下载",

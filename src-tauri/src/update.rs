@@ -1,5 +1,7 @@
 use std::cmp::Ordering;
+use std::error::Error;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -8,11 +10,19 @@ use base64::Engine;
 use futures_util::StreamExt;
 use minisign_verify::{PublicKey, Signature};
 use reqwest::Client;
+use reqwest::header::RETRY_AFTER;
 use serde::{Deserialize, Serialize};
+use tokio::sync::watch;
+use tokio::time::Instant;
 
 pub const MANUAL_DOWNLOAD_URL: &str = "https://gitee.com/ericshaohua/gpteasy-releases/releases";
 pub const GITEE_RELEASES_URL: &str = "https://gitee.com/ericshaohua/gpteasy-releases/releases/tag";
-pub const CHECK_INTERVAL_SECONDS: u64 = 24 * 60 * 60;
+const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+const RETRY_DELAYS: [Duration; 3] = [
+    Duration::from_secs(30),
+    Duration::from_secs(120),
+    Duration::from_secs(600),
+];
 const NSIS_INSTALL_ARGUMENTS: [&str; 2] = ["/P", "/R"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -45,6 +55,7 @@ pub struct UpdateSnapshot {
     pub notes: Option<String>,
     pub published_at: Option<String>,
     pub checked_at_epoch_seconds: Option<u64>,
+    pub next_retry_at_epoch_seconds: Option<u64>,
     pub downloaded_bytes: u64,
     pub total_bytes: Option<u64>,
     pub progress_percent: Option<u8>,
@@ -63,6 +74,7 @@ impl UpdateSnapshot {
             notes: None,
             published_at: None,
             checked_at_epoch_seconds: None,
+            next_retry_at_epoch_seconds: None,
             downloaded_bytes: 0,
             total_bytes: None,
             progress_percent: None,
@@ -270,11 +282,257 @@ impl Drop for UpdateActivityGuard {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UpdateCheckStage {
+    ManifestRequest,
+    ManifestStatus,
+    ManifestBody,
+    ManifestValidation,
+    DownloadRequest,
+    DownloadStatus,
+    DownloadBody,
+    Signature,
+}
+
+impl UpdateCheckStage {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::ManifestRequest => "manifest_request",
+            Self::ManifestStatus => "manifest_status",
+            Self::ManifestBody => "manifest_body",
+            Self::ManifestValidation => "manifest_validation",
+            Self::DownloadRequest => "download_request",
+            Self::DownloadStatus => "download_status",
+            Self::DownloadBody => "download_body",
+            Self::Signature => "signature",
+        }
+    }
+
+    fn is_manifest_read(self) -> bool {
+        matches!(
+            self,
+            Self::ManifestRequest | Self::ManifestStatus | Self::ManifestBody
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UpdateCheckError {
+    Timeout,
+    ConnectionReset,
+    Connection,
+    Interrupted,
+    Tls,
+    Request,
+    HttpStatus,
+    InvalidJson,
+    InvalidVersion,
+    MissingPlatform,
+    InvalidUrl,
+    InvalidSignature,
+}
+
+impl UpdateCheckError {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Timeout => "timeout",
+            Self::ConnectionReset => "connection_reset",
+            Self::Connection => "connection",
+            Self::Interrupted => "interrupted",
+            Self::Tls => "tls",
+            Self::Request => "request",
+            Self::HttpStatus => "http_status",
+            Self::InvalidJson => "invalid_json",
+            Self::InvalidVersion => "invalid_version",
+            Self::MissingPlatform => "missing_platform",
+            Self::InvalidUrl => "invalid_url",
+            Self::InvalidSignature => "invalid_signature",
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct UpdateCheckFailure {
+    pub(crate) stage: UpdateCheckStage,
+    pub(crate) error: UpdateCheckError,
+    pub(crate) http_status: Option<u16>,
+    pub(crate) os_error: Option<i32>,
+    retry_after: Option<Duration>,
+}
+
+impl UpdateCheckFailure {
+    pub(crate) fn new(stage: UpdateCheckStage, error: UpdateCheckError) -> Self {
+        Self {
+            stage,
+            error,
+            http_status: None,
+            os_error: None,
+            retry_after: None,
+        }
+    }
+
+    fn from_status(stage: UpdateCheckStage, response: &reqwest::Response) -> Self {
+        let status = response.status();
+        let mut failure = Self::new(stage, UpdateCheckError::HttpStatus);
+        failure.http_status = Some(status.as_u16());
+        if failure.retryable() {
+            failure.retry_after = response
+                .headers()
+                .get(RETRY_AFTER)
+                .and_then(|header| header.to_str().ok())
+                .and_then(|header| retry_after_delay(header, SystemTime::now()));
+        }
+        failure
+    }
+
+    fn from_transport(stage: UpdateCheckStage, error: &reqwest::Error) -> Self {
+        let kind = if error.is_timeout() {
+            UpdateCheckError::Timeout
+        } else if error.is_builder() || error.is_redirect() {
+            UpdateCheckError::Request
+        } else if error.is_connect() {
+            UpdateCheckError::Connection
+        } else {
+            UpdateCheckError::Interrupted
+        };
+        let (kind, os_error) = transport_cause(kind, error.source());
+        let mut failure = Self::new(stage, kind);
+        failure.os_error = os_error;
+        failure
+    }
+
+    pub(crate) fn category(&self) -> UpdateFailureCategory {
+        match self.stage {
+            UpdateCheckStage::ManifestValidation => UpdateFailureCategory::ManifestInvalid,
+            UpdateCheckStage::Signature => UpdateFailureCategory::SignatureInvalid,
+            stage if stage.is_manifest_read() => UpdateFailureCategory::CheckFailed,
+            _ => UpdateFailureCategory::DownloadFailed,
+        }
+    }
+
+    fn retryable(&self) -> bool {
+        self.stage.is_manifest_read()
+            && match self.error {
+                UpdateCheckError::Timeout
+                | UpdateCheckError::ConnectionReset
+                | UpdateCheckError::Connection
+                | UpdateCheckError::Interrupted => true,
+                UpdateCheckError::HttpStatus => {
+                    matches!(self.http_status, Some(429 | 500 | 502 | 503 | 504))
+                }
+                _ => false,
+            }
+    }
+}
+
+fn transport_cause(
+    mut kind: UpdateCheckError,
+    mut cause: Option<&(dyn Error + 'static)>,
+) -> (UpdateCheckError, Option<i32>) {
+    let mut os_error = None;
+    while let Some(source) = cause {
+        if source.is::<rustls::Error>() {
+            kind = UpdateCheckError::Tls;
+            break;
+        }
+        if let Some(io_error) = source.downcast_ref::<io::Error>() {
+            os_error = os_error.or(io_error.raw_os_error());
+            if io_error.kind() == io::ErrorKind::ConnectionReset {
+                kind = UpdateCheckError::ConnectionReset;
+            }
+            // TLS wraps the socket error in io::Error. Inspect its payload before
+            // following source(), which can skip the wrapped error itself.
+            if let Some(inner) = io_error.get_ref() {
+                cause = Some(inner);
+                continue;
+            }
+        }
+        cause = source.source();
+    }
+    (kind, os_error)
+}
+
+fn retry_after_delay(value: &str, now: SystemTime) -> Option<Duration> {
+    let value = value.trim();
+    let delay = if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
+        Duration::from_secs(value.parse().ok()?)
+    } else {
+        httpdate::parse_http_date(value)
+            .ok()?
+            .duration_since(now)
+            .ok()?
+    };
+    now.checked_add(delay)?;
+    Some(delay)
+}
+
+#[derive(Debug)]
+struct CheckSchedule {
+    next_check: Instant,
+    retries_scheduled: usize,
+    retry_at_epoch_seconds: Option<u64>,
+}
+
+impl CheckSchedule {
+    fn new() -> Self {
+        Self {
+            next_check: Instant::now(),
+            retries_scheduled: 0,
+            retry_at_epoch_seconds: None,
+        }
+    }
+
+    fn record_result(
+        &mut self,
+        manual: bool,
+        result: Result<(), &UpdateCheckFailure>,
+        now: Instant,
+        epoch: u64,
+    ) {
+        let retry_after = result
+            .as_ref()
+            .err()
+            .and_then(|failure| failure.retry_after)
+            .and_then(|delay| now.checked_add(delay));
+        if manual && result.is_err() {
+            if let Some(earliest) = retry_after.filter(|earliest| *earliest > self.next_check) {
+                self.next_check = earliest;
+                if self.retry_at_epoch_seconds.is_some() {
+                    self.retry_at_epoch_seconds = Some(retry_epoch(epoch, now, earliest));
+                }
+            }
+            return;
+        }
+        if let Err(failure) = result {
+            if failure.retryable() {
+                if let Some(delay) = RETRY_DELAYS.get(self.retries_scheduled) {
+                    self.retries_scheduled += 1;
+                    self.next_check = retry_after.unwrap_or(now).max(now + *delay);
+                    self.retry_at_epoch_seconds = Some(retry_epoch(epoch, now, self.next_check));
+                    return;
+                }
+            }
+        }
+        self.next_check = retry_after.unwrap_or(now).max(now + CHECK_INTERVAL);
+        self.retries_scheduled = 0;
+        self.retry_at_epoch_seconds = None;
+    }
+}
+
+fn retry_epoch(epoch: u64, now: Instant, deadline: Instant) -> u64 {
+    let wait = deadline.duration_since(now);
+    epoch
+        .saturating_add(wait.as_secs())
+        .saturating_add(u64::from(wait.subsec_nanos() != 0))
+}
+
 #[derive(Debug)]
 struct CoordinatorState {
     snapshot: UpdateSnapshot,
     pending: Option<PendingUpdate>,
     installing: bool,
+    checking: bool,
+    schedule: CheckSchedule,
 }
 
 #[derive(Clone)]
@@ -285,6 +543,7 @@ pub struct UpdateCoordinator {
     public_key: String,
     state: Arc<Mutex<CoordinatorState>>,
     install_attempt_path: Option<PathBuf>,
+    schedule_changed: watch::Sender<()>,
 }
 
 impl UpdateCoordinator {
@@ -313,7 +572,10 @@ impl UpdateCoordinator {
                 snapshot: UpdateSnapshot::new(&current_version),
                 pending: None,
                 installing: false,
+                checking: false,
+                schedule: CheckSchedule::new(),
             })),
+            schedule_changed: watch::channel(()).0,
             current_version,
             install_attempt_path: None,
         }
@@ -368,126 +630,217 @@ impl UpdateCoordinator {
         }
     }
 
-    pub(crate) async fn check_and_download<F>(&self, progress: F) -> UpdateSnapshot
-    where
-        F: FnMut(UpdateSnapshot) + Send,
-    {
-        self.check_and_download_with_policy(progress, true).await
-    }
-
-    pub(crate) async fn scheduled_check_and_download<F>(&self, progress: F) -> UpdateSnapshot
-    where
-        F: FnMut(UpdateSnapshot) + Send,
-    {
-        self.check_and_download_with_policy(progress, false).await
-    }
-
-    async fn check_and_download_with_policy<F>(
-        &self,
-        mut progress: F,
-        retry_incomplete: bool,
-    ) -> UpdateSnapshot
-    where
-        F: FnMut(UpdateSnapshot) + Send,
-    {
-        if !self.begin_check(retry_incomplete) {
-            return self.snapshot();
+    pub(crate) async fn wait_for_scheduled_check(&self) {
+        let mut changes = self.schedule_changed.subscribe();
+        loop {
+            let deadline = self
+                .state
+                .lock()
+                .ok()
+                .and_then(|state| (!state.checking).then_some(state.schedule.next_check));
+            if let Some(deadline) = deadline {
+                tokio::select! {
+                    biased;
+                    _ = changes.changed() => continue,
+                    _ = tokio::time::sleep_until(deadline) => return,
+                }
+            }
+            let _ = changes.changed().await;
         }
+    }
 
-        let result = self.fetch_manifest().await;
-        let manifest = match result {
-            Ok(manifest) => manifest,
-            Err(category) => return self.fail(category),
+    pub(crate) async fn check_and_download<F>(
+        &self,
+        manual: bool,
+        mut progress: F,
+    ) -> (UpdateSnapshot, Option<(usize, UpdateCheckFailure)>)
+    where
+        F: FnMut(UpdateSnapshot) + Send,
+    {
+        let Some((attempt, previous_pending)) = self.begin_check(manual) else {
+            return (self.snapshot(), None);
         };
+        progress(self.snapshot());
+        let result = self.run_check(&mut progress).await;
+        let snapshot = self.finish_check(manual, result.as_ref().map(|_| ()), previous_pending);
+        (snapshot, result.err().map(|failure| (attempt, failure)))
+    }
+
+    async fn run_check<F>(&self, progress: &mut F) -> Result<(), UpdateCheckFailure>
+    where
+        F: FnMut(UpdateSnapshot) + Send,
+    {
+        use UpdateCheckError as Failure;
+        use UpdateCheckStage as Stage;
+        let manifest = self.fetch_manifest().await?;
+        let invalid = |error| UpdateCheckFailure::new(Stage::ManifestValidation, error);
         let version = match StableVersion::parse(&manifest.version) {
             Ok(version) => version,
             Err(_) if is_prerelease_version(&manifest.version) => {
                 self.set_up_to_date();
-                return self.snapshot();
+                return Ok(());
             }
-            Err(_) => return self.fail(UpdateFailureCategory::ManifestInvalid),
+            Err(_) => return Err(invalid(Failure::InvalidVersion)),
         };
-        let current = match StableVersion::parse(&self.current_version) {
-            Ok(current) => current,
-            Err(_) => return self.fail(UpdateFailureCategory::ManifestInvalid),
-        };
+        let current = StableVersion::parse(&self.current_version)
+            .map_err(|_| invalid(Failure::InvalidVersion))?;
         if version.cmp(&current) != Ordering::Greater {
             self.set_up_to_date();
-            return self.snapshot();
+            return Ok(());
         }
 
-        let Some(platform) = manifest.platforms.get("windows-x86_64") else {
-            return self.fail(UpdateFailureCategory::ManifestInvalid);
-        };
+        let platform = manifest
+            .platforms
+            .get("windows-x86_64")
+            .ok_or_else(|| invalid(Failure::MissingPlatform))?;
         if !is_permitted_update_url(&platform.url) {
-            return self.fail(UpdateFailureCategory::ManifestInvalid);
+            return Err(invalid(Failure::InvalidUrl));
         }
         if self.is_pending_version(&manifest.version) {
             self.restore_pending();
-            return self.snapshot();
+            return Ok(());
         }
         self.begin_download(&manifest);
         progress(self.snapshot());
 
-        let bytes = match self.download_once(&platform.url, &mut progress).await {
-            Ok(bytes) => bytes,
-            Err(()) => return self.fail(UpdateFailureCategory::DownloadFailed),
-        };
-        if verify_signature(&bytes, &platform.signature, &self.public_key).is_err() {
-            return self.fail(UpdateFailureCategory::SignatureInvalid);
-        }
+        let bytes = self.download_once(&platform.url, progress).await?;
+        verify_signature(&bytes, &platform.signature, &self.public_key)
+            .map_err(|_| UpdateCheckFailure::new(Stage::Signature, Failure::InvalidSignature))?;
         self.mark_ready(manifest, bytes);
-        self.snapshot()
+        Ok(())
     }
 
-    fn begin_check(&self, retry_incomplete: bool) -> bool {
-        let Ok(mut state) = self.state.lock() else {
-            return false;
-        };
-        if matches!(
-            state.snapshot.state,
-            UpdateState::Checking | UpdateState::Downloading
-        ) || state.installing
-            || (state.snapshot.state == UpdateState::Incomplete && !retry_incomplete)
-        {
-            return false;
+    fn begin_check(&self, manual: bool) -> Option<(usize, Option<UpdateSnapshot>)> {
+        let mut state = self.state.lock().ok()?;
+        if state.checking {
+            return None;
         }
+        let now = Instant::now();
+        if !manual && now < state.schedule.next_check {
+            return None;
+        }
+        if state.installing || (state.snapshot.state == UpdateState::Incomplete && !manual) {
+            if !manual {
+                state
+                    .schedule
+                    .record_result(false, Ok(()), now, now_epoch_seconds());
+                state.snapshot.next_retry_at_epoch_seconds = None;
+            }
+            return None;
+        }
+        let attempt = if manual {
+            1
+        } else {
+            state.schedule.retries_scheduled + 1
+        };
+        let previous_pending =
+            (state.snapshot.state == UpdateState::Pending).then(|| state.snapshot.clone());
+        state.checking = true;
         state.snapshot.state = UpdateState::Checking;
         state.snapshot.failure_category = None;
         state.snapshot.error_message = None;
-        true
+        state.snapshot.next_retry_at_epoch_seconds = None;
+        self.schedule_changed.send_replace(());
+        Some((attempt, previous_pending))
     }
 
-    async fn fetch_manifest(&self) -> Result<Manifest, UpdateFailureCategory> {
+    fn finish_check(
+        &self,
+        manual: bool,
+        result: Result<(), &UpdateCheckFailure>,
+        previous_pending: Option<UpdateSnapshot>,
+    ) -> UpdateSnapshot {
+        let Ok(mut state) = self.state.lock() else {
+            return UpdateSnapshot::new(&self.current_version);
+        };
+        let checked_at = now_epoch_seconds();
+        state
+            .schedule
+            .record_result(manual, result, Instant::now(), checked_at);
+        if let Err(failure) = result {
+            if let Some(pending) = previous_pending {
+                state.snapshot = pending;
+            } else {
+                state.snapshot.state = UpdateState::Failed;
+            }
+            let category = failure.category();
+            state.snapshot.failure_category = Some(category);
+            state.snapshot.error_message = Some(
+                match (category, failure.error) {
+                    (UpdateFailureCategory::CheckFailed, UpdateCheckError::Tls) => {
+                        "无法建立安全的更新连接，请检查网络后重试。"
+                    }
+                    (UpdateFailureCategory::CheckFailed, _)
+                        if state.schedule.retry_at_epoch_seconds.is_some() =>
+                    {
+                        "暂时无法检查应用更新。"
+                    }
+                    (UpdateFailureCategory::CheckFailed, _) => "暂时无法检查应用更新，请手动重试。",
+                    (UpdateFailureCategory::ManifestInvalid, _) => "更新清单无效，已停止本次更新。",
+                    (UpdateFailureCategory::DownloadFailed, _) => "应用更新下载失败，请手动重试。",
+                    (UpdateFailureCategory::SignatureInvalid, _) => {
+                        "应用更新未通过签名验证，已拒绝使用。"
+                    }
+                }
+                .to_owned(),
+            );
+        }
+        state.snapshot.checked_at_epoch_seconds = Some(checked_at);
+        state.snapshot.next_retry_at_epoch_seconds = state.schedule.retry_at_epoch_seconds;
+        state.checking = false;
+        self.schedule_changed.send_replace(());
+        state.snapshot.clone()
+    }
+
+    async fn fetch_manifest(&self) -> Result<Manifest, UpdateCheckFailure> {
+        use UpdateCheckStage as Stage;
         let response = self
             .client
             .get(&self.endpoint)
             .send()
             .await
-            .map_err(|_| UpdateFailureCategory::CheckFailed)?;
+            .map_err(|error| UpdateCheckFailure::from_transport(Stage::ManifestRequest, &error))?;
         if !response.status().is_success() {
-            return Err(UpdateFailureCategory::CheckFailed);
+            return Err(UpdateCheckFailure::from_status(
+                Stage::ManifestStatus,
+                &response,
+            ));
         }
-        response
-            .json::<Manifest>()
+        let bytes = response
+            .bytes()
             .await
-            .map_err(|_| UpdateFailureCategory::CheckFailed)
+            .map_err(|error| UpdateCheckFailure::from_transport(Stage::ManifestBody, &error))?;
+        serde_json::from_slice(&bytes).map_err(|_| {
+            UpdateCheckFailure::new(Stage::ManifestValidation, UpdateCheckError::InvalidJson)
+        })
     }
 
-    async fn download_once<F>(&self, url: &str, progress: &mut F) -> Result<Vec<u8>, ()>
+    async fn download_once<F>(
+        &self,
+        url: &str,
+        progress: &mut F,
+    ) -> Result<Vec<u8>, UpdateCheckFailure>
     where
         F: FnMut(UpdateSnapshot) + Send,
     {
-        let response = self.client.get(url).send().await.map_err(|_| ())?;
+        use UpdateCheckStage as Stage;
+        let response =
+            self.client.get(url).send().await.map_err(|error| {
+                UpdateCheckFailure::from_transport(Stage::DownloadRequest, &error)
+            })?;
         if !response.status().is_success() {
-            return Err(());
+            return Err(UpdateCheckFailure::from_status(
+                Stage::DownloadStatus,
+                &response,
+            ));
         }
         let total = response.content_length();
         let initial_capacity = total.unwrap_or_default().min(16 * 1024 * 1024) as usize;
         let mut bytes = Vec::with_capacity(initial_capacity);
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|_| ())?;
+            let chunk = chunk
+                .map_err(|error| UpdateCheckFailure::from_transport(Stage::DownloadBody, &error))?;
             bytes.extend_from_slice(&chunk);
             self.set_progress(bytes.len() as u64, total);
             progress(self.snapshot());
@@ -640,7 +993,7 @@ impl UpdateCoordinator {
                 "update.state_unavailable",
             )
         })?;
-        if state.installing {
+        if state.installing || state.checking {
             return Err(UpdateInstallFailure::new(
                 UpdateInstallFailureCategory::Busy,
                 "update.busy",
@@ -726,26 +1079,6 @@ impl UpdateCoordinator {
         })?;
         Ok(path)
     }
-
-    fn fail(&self, category: UpdateFailureCategory) -> UpdateSnapshot {
-        if let Ok(mut state) = self.state.lock() {
-            state.snapshot.state = UpdateState::Failed;
-            state.snapshot.failure_category = Some(category);
-            state.snapshot.error_message = Some(
-                match category {
-                    UpdateFailureCategory::CheckFailed => "暂时无法检查应用更新，请手动重试。",
-                    UpdateFailureCategory::ManifestInvalid => "更新清单无效，已停止本次更新。",
-                    UpdateFailureCategory::DownloadFailed => "应用更新下载失败，请手动重试。",
-                    UpdateFailureCategory::SignatureInvalid => {
-                        "应用更新未通过签名验证，已拒绝使用。"
-                    }
-                }
-                .to_owned(),
-            );
-            state.snapshot.checked_at_epoch_seconds = Some(now_epoch_seconds());
-        }
-        self.snapshot()
-    }
 }
 
 fn is_permitted_update_url(url: &str) -> bool {
@@ -815,6 +1148,17 @@ mod tests {
         }
 
         fn start_with(build_responses: impl FnOnce(&str) -> Vec<(u16, String)>) -> Self {
+            Self::serve(build_responses, "")
+        }
+
+        fn start_with_headers(responses: Vec<(u16, String)>, headers: &'static str) -> Self {
+            Self::serve(move |_| responses, headers)
+        }
+
+        fn serve(
+            build_responses: impl FnOnce(&str) -> Vec<(u16, String)>,
+            response_headers: &'static str,
+        ) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind update server");
             let address = listener.local_addr().expect("update server address");
             let base_url = format!("http://{address}");
@@ -847,15 +1191,17 @@ mod tests {
                             path,
                             authorization,
                         });
-                    let reason = if status == 200 {
-                        "OK"
+                    if status == 0 {
+                        continue;
+                    }
+                    let (status, length) = if status == 1 {
+                        (200, body.len() + 10)
                     } else {
-                        "Temporary failure"
+                        (status, body.len())
                     };
                     write!(
                         stream,
-                        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                        body.len(),
+                        "HTTP/1.1 {status} Test response\r\n{response_headers}Content-Type: application/json\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n{body}",
                     )
                     .expect("write update response");
                 }
@@ -876,14 +1222,215 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transient_manifest_failure_is_exposed_until_the_user_retries() {
+    async fn scheduled_check_recovers_from_a_disconnected_manifest_request() {
+        let server = ScriptedHttpServer::start(vec![
+            (0, String::new()),
+            (200, r#"{"version":"1.1.5","platforms":{}}"#.to_owned()),
+        ]);
+        let coordinator =
+            UpdateCoordinator::with_endpoint("1.1.5", server.url("/latest.md"), "unused");
+
+        let (failed, failure) = coordinator.check_and_download(false, |_| {}).await;
+        assert_eq!(failed.state, UpdateState::Failed);
+        assert!(failure.unwrap().1.retryable());
+        assert_eq!(
+            failed.next_retry_at_epoch_seconds,
+            failed.checked_at_epoch_seconds.map(|time| time + 30)
+        );
+
+        coordinator.check_and_download(false, |_| {}).await;
+        assert_eq!(server.requests().len(), 1);
+        tokio::time::pause();
+        coordinator.wait_for_scheduled_check().await;
+        tokio::time::resume();
+
+        let (recovered, _) = coordinator.check_and_download(false, |_| {}).await;
+        assert_eq!(recovered.state, UpdateState::UpToDate);
+        assert_eq!(recovered.next_retry_at_epoch_seconds, None);
+        assert_eq!(server.requests().len(), 2);
+    }
+
+    #[test]
+    fn short_retry_schedule_is_bounded_and_restarts_after_the_daily_interval() {
+        let failure = UpdateCheckFailure::new(
+            UpdateCheckStage::ManifestRequest,
+            UpdateCheckError::ConnectionReset,
+        );
+        let mut schedule = CheckSchedule::new();
+        let mut now = schedule.next_check;
+        let mut epoch = 1000;
+        for (attempt, delay) in [30, 120, 600].into_iter().enumerate() {
+            schedule.record_result(false, Err(&failure), now, epoch);
+            assert_eq!(schedule.retries_scheduled, attempt + 1);
+            assert_eq!(schedule.next_check, now + Duration::from_secs(delay));
+            assert_eq!(schedule.retry_at_epoch_seconds, Some(epoch + delay));
+            now = schedule.next_check;
+            epoch += delay;
+        }
+        schedule.record_result(false, Err(&failure), now, epoch);
+        assert_eq!(schedule.next_check, now + CHECK_INTERVAL);
+        assert_eq!(schedule.retry_at_epoch_seconds, None);
+        assert_eq!(schedule.retries_scheduled, 0);
+        let next_day = schedule.next_check;
+        schedule.record_result(
+            false,
+            Err(&failure),
+            next_day,
+            epoch + CHECK_INTERVAL.as_secs(),
+        );
+        assert_eq!(schedule.next_check, next_day + Duration::from_secs(30));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn manual_failure_keeps_the_timer_and_manual_success_moves_it_to_the_next_day() {
+        let coordinator = UpdateCoordinator::with_endpoint("1.1.5", "http://127.0.0.1", "unused");
+        let failure =
+            UpdateCheckFailure::new(UpdateCheckStage::ManifestRequest, UpdateCheckError::Timeout);
+        assert_eq!(coordinator.begin_check(false).unwrap().0, 1);
+        let scheduled = coordinator.finish_check(false, Err(&failure), None);
+        let now = Instant::now();
+        let wait = coordinator.wait_for_scheduled_check();
+        tokio::pin!(wait);
+        assert!(futures_util::poll!(&mut wait).is_pending());
+        tokio::time::advance(Duration::from_secs(10)).await;
+
+        assert!(coordinator.begin_check(true).is_some());
+        let failed = coordinator.finish_check(true, Err(&failure), None);
+        assert_eq!(
+            failed.next_retry_at_epoch_seconds,
+            scheduled.next_retry_at_epoch_seconds
+        );
+        assert_eq!(
+            coordinator.state.lock().unwrap().schedule.next_check,
+            now + RETRY_DELAYS[0]
+        );
+        assert!(futures_util::poll!(&mut wait).is_pending());
+
+        assert!(coordinator.begin_check(true).is_some());
+        tokio::time::advance(Duration::from_secs(20)).await;
+        assert!(futures_util::poll!(&mut wait).is_pending());
+        assert!(coordinator.begin_check(false).is_none());
+        coordinator.set_up_to_date();
+        let recovered = coordinator.finish_check(true, Ok(()), None);
+        assert_eq!(recovered.next_retry_at_epoch_seconds, None);
+        assert_eq!(
+            coordinator.state.lock().unwrap().schedule.retries_scheduled,
+            0
+        );
+        assert!(futures_util::poll!(&mut wait).is_pending());
+        tokio::time::advance(CHECK_INTERVAL).await;
+        wait.await;
+        assert_eq!(coordinator.begin_check(false).unwrap().0, 1);
+    }
+
+    #[test]
+    fn wrapped_socket_error_keeps_the_system_code_and_certificate_failure_is_terminal() {
+        #[cfg(windows)]
+        let reset_code = 10054;
+        #[cfg(not(windows))]
+        let reset_code = io::Error::from(io::ErrorKind::ConnectionReset).raw_os_error();
+        #[cfg(windows)]
+        let socket_error = io::Error::from_raw_os_error(reset_code);
+        #[cfg(not(windows))]
+        let socket_error = io::Error::from(io::ErrorKind::ConnectionReset);
+        let wrapped = io::Error::other(socket_error);
+        let (kind, code) = transport_cause(UpdateCheckError::Connection, Some(&wrapped));
+        assert_eq!(kind, UpdateCheckError::ConnectionReset);
+        #[cfg(windows)]
+        assert_eq!(code, Some(reset_code));
+        #[cfg(not(windows))]
+        assert_eq!(code, reset_code);
+
+        let wrapped = io::Error::other(rustls::Error::InvalidCertificate(
+            rustls::CertificateError::UnknownIssuer,
+        ));
+        let (kind, code) = transport_cause(UpdateCheckError::Connection, Some(&wrapped));
+        assert_eq!(kind, UpdateCheckError::Tls);
+        assert!(code.is_none());
+        let failure = UpdateCheckFailure::new(UpdateCheckStage::ManifestRequest, kind);
+        assert!(!failure.retryable());
+    }
+
+    #[test]
+    fn retry_after_accepts_http_dates_and_delay_seconds() {
+        let now = httpdate::parse_http_date("Sun, 06 Nov 1994 08:49:37 GMT").unwrap();
+        assert_eq!(retry_after_delay("90", now), Some(Duration::from_secs(90)));
+        assert_eq!(
+            retry_after_delay("Sun, 06 Nov 1994 08:51:07 GMT", now),
+            Some(Duration::from_secs(90))
+        );
+        assert_eq!(
+            retry_after_delay("Sun, 06 Nov 1994 08:49:36 GMT", now),
+            None
+        );
+        for invalid in ["garbage", "-20", "18446744073709551615"] {
+            assert_eq!(retry_after_delay(invalid, now), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn scheduled_rate_limit_uses_retry_after_from_the_response() {
+        let server = ScriptedHttpServer::start_with_headers(
+            vec![(429, String::new())],
+            "Retry-After: 180\r\n",
+        );
+        let coordinator =
+            UpdateCoordinator::with_endpoint("1.1.5", server.url("/latest.md"), "unused");
+        let (failed, failure) = coordinator.check_and_download(false, |_| {}).await;
+        let (attempt, failure) = failure.unwrap();
+        assert_eq!(attempt, 1);
+        assert_eq!(failure.http_status, Some(429));
+        assert_eq!(
+            failed.next_retry_at_epoch_seconds,
+            failed.checked_at_epoch_seconds.map(|time| time + 180)
+        );
+        assert_eq!(server.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_manifest_body_is_eligible_for_retry() {
+        let server = ScriptedHttpServer::start(vec![(1, "partial".to_owned())]);
+        let coordinator =
+            UpdateCoordinator::with_endpoint("1.1.5", server.url("/latest.md"), "unused");
+        let (failed, failure) = coordinator.check_and_download(false, |_| {}).await;
+        let (_, failure) = failure.unwrap();
+        assert_eq!(failure.stage, UpdateCheckStage::ManifestBody);
+        assert!(failure.retryable());
+        assert!(failed.next_retry_at_epoch_seconds.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_scheduled_failure_preserves_an_already_verified_pending_update() {
+        let server = ScriptedHttpServer::start(vec![(503, String::new())]);
+        let coordinator =
+            UpdateCoordinator::with_endpoint("1.1.5", server.url("/latest.md"), "unused");
+        coordinator.mark_ready(
+            Manifest {
+                version: "1.1.6".to_owned(),
+                notes: Some("notes".to_owned()),
+                pub_date: None,
+                platforms: std::collections::HashMap::new(),
+            },
+            vec![1, 2, 3],
+        );
+        let (snapshot, failure) = coordinator.check_and_download(false, |_| {}).await;
+        assert_eq!(snapshot.state, UpdateState::Pending);
+        assert_eq!(snapshot.available_version.as_deref(), Some("1.1.6"));
+        assert!(snapshot.next_retry_at_epoch_seconds.is_some());
+        assert_eq!(failure.unwrap().1.http_status, Some(503));
+        assert!(coordinator.begin_install().is_ok());
+    }
+
+    #[tokio::test]
+    async fn permanent_http_failure_is_exposed_without_a_short_retry() {
         let server = ScriptedHttpServer::start(vec![(418, String::new())]);
         let coordinator =
             UpdateCoordinator::with_endpoint("1.1.5", server.url("/latest.md"), "unused");
 
-        let snapshot = coordinator.check_and_download(|_| {}).await;
+        let (snapshot, _) = coordinator.check_and_download(false, |_| {}).await;
 
         assert_eq!(snapshot.state, UpdateState::Failed);
+        assert_eq!(snapshot.next_retry_at_epoch_seconds, None);
         assert_eq!(
             snapshot.failure_category,
             Some(UpdateFailureCategory::CheckFailed)
@@ -904,7 +1451,7 @@ mod tests {
         let coordinator =
             UpdateCoordinator::with_endpoint("1.1.5", server.url("/latest.md"), "unused");
 
-        let snapshot = coordinator.check_and_download(|_| {}).await;
+        let (snapshot, _) = coordinator.check_and_download(true, |_| {}).await;
 
         assert_eq!(snapshot.state, UpdateState::Failed);
         assert_eq!(
@@ -914,7 +1461,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repeated_non_json_manifest_remains_a_recoverable_check_failure() {
+    async fn non_json_manifest_is_invalid_without_a_short_retry() {
         let server = ScriptedHttpServer::start(vec![(
             200,
             "<html>temporary WAF response</html>".to_owned(),
@@ -922,13 +1469,14 @@ mod tests {
         let coordinator =
             UpdateCoordinator::with_endpoint("1.1.5", server.url("/latest.md"), "unused");
 
-        let snapshot = coordinator.check_and_download(|_| {}).await;
+        let (snapshot, _) = coordinator.check_and_download(false, |_| {}).await;
 
         assert_eq!(snapshot.state, UpdateState::Failed);
         assert_eq!(
             snapshot.failure_category,
-            Some(UpdateFailureCategory::CheckFailed)
+            Some(UpdateFailureCategory::ManifestInvalid)
         );
+        assert_eq!(snapshot.next_retry_at_epoch_seconds, None);
     }
 
     #[tokio::test]
@@ -949,9 +1497,10 @@ mod tests {
         let coordinator =
             UpdateCoordinator::with_endpoint("1.1.5", server.url("/latest.md"), TEST_PUBLIC_KEY);
 
-        let snapshot = coordinator.check_and_download(|_| {}).await;
+        let (snapshot, _) = coordinator.check_and_download(false, |_| {}).await;
 
         assert_eq!(snapshot.state, UpdateState::Failed);
+        assert_eq!(snapshot.next_retry_at_epoch_seconds, None);
         assert_eq!(snapshot.available_version.as_deref(), Some("1.1.6"));
         assert_eq!(
             snapshot.failure_category,
@@ -977,9 +1526,10 @@ mod tests {
         let coordinator =
             UpdateCoordinator::with_endpoint("1.1.5", server.url("/latest.md"), TEST_PUBLIC_KEY);
 
-        let snapshot = coordinator.check_and_download(|_| {}).await;
+        let (snapshot, _) = coordinator.check_and_download(false, |_| {}).await;
 
         assert_eq!(snapshot.state, UpdateState::Failed);
+        assert_eq!(snapshot.next_retry_at_epoch_seconds, None);
         assert_eq!(
             snapshot.failure_category,
             Some(UpdateFailureCategory::SignatureInvalid)
@@ -1043,10 +1593,11 @@ mod tests {
     #[test]
     fn check_and_download_is_mutually_exclusive() {
         let coordinator = UpdateCoordinator::with_endpoint("1.0.0", "http://127.0.0.1", "key");
-        assert!(coordinator.begin_check(true));
-        assert!(!coordinator.begin_check(true));
+        assert!(coordinator.begin_check(true).is_some());
+        assert!(coordinator.begin_check(true).is_none());
         coordinator.set_up_to_date();
-        assert!(coordinator.begin_check(true));
+        coordinator.finish_check(true, Ok(()), None);
+        assert!(coordinator.begin_check(true).is_some());
     }
 
     #[test]
@@ -1190,7 +1741,7 @@ mod tests {
 
         assert_eq!(restarted.snapshot().state, UpdateState::Idle);
         assert!(!restarted.is_pending_version("1.1.0"));
-        assert!(restarted.begin_check(true));
+        assert!(restarted.begin_check(true).is_some());
     }
 
     #[test]
@@ -1200,9 +1751,9 @@ mod tests {
         fs::write(&path, br#"{"target_version":"1.1.0"}"#).expect("install attempt");
         let coordinator = UpdateCoordinator::with_state_path("1.0.0", &path);
 
-        assert!(!coordinator.begin_check(false));
+        assert!(coordinator.begin_check(false).is_none());
         assert_eq!(coordinator.snapshot().state, UpdateState::Incomplete);
-        assert!(coordinator.begin_check(true));
+        assert!(coordinator.begin_check(true).is_some());
     }
 
     #[test]

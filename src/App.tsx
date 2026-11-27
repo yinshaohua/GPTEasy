@@ -297,6 +297,9 @@ function UpdateDialog({
   const checkedAt = snapshot.checkedAtEpochSeconds
     ? new Date(snapshot.checkedAtEpochSeconds * 1000).toLocaleString("zh-CN")
     : updateMessages.neverChecked;
+  const nextRetry = snapshot.nextRetryAtEpochSeconds
+    ? new Date(snapshot.nextRetryAtEpochSeconds * 1000).toLocaleString("zh-CN")
+    : null;
   const progress = snapshot.progressPercent === null
     ? snapshot.state === "downloading" ? updateMessages.downloading : null
     : `${snapshot.progressPercent}%`;
@@ -328,7 +331,10 @@ function UpdateDialog({
         {snapshot.state === "up_to_date" && (
           <p className="update-ready-note" role="status">{updateMessages.status.up_to_date}</p>
         )}
-        {snapshot.state === "failed" && <p className="inline-error">{snapshot.errorMessage ?? (snapshot.failureCategory ? updateMessages.errors[snapshot.failureCategory] : updateMessages.errors.check_failed)}</p>}
+        {snapshot.failureCategory && (
+          <p className="inline-error">{snapshot.errorMessage ?? updateMessages.errors[snapshot.failureCategory]}</p>
+        )}
+        {nextRetry && <p className="update-status-note" role="status">{updateMessages.scheduledRetry(nextRetry)}</p>}
         {installError && <p className="inline-error" role="alert">{installError}</p>}
         {progress && <div className="update-progress" aria-label={updateMessages.progressLabel}><span style={{ width: snapshot.progressPercent === null ? "35%" : `${snapshot.progressPercent}%` }} /><strong>{progress}</strong></div>}
         {releaseNotes && <p className="secondary-note">{releaseNotes}</p>}
@@ -340,7 +346,7 @@ function UpdateDialog({
         <div className="update-dialog-actions">
           <button className="secondary-button update-check-button" type="button" onClick={onCheck} disabled={installing || snapshot.state === "checking" || snapshot.state === "downloading"}>
             <RefreshCw size={16} aria-hidden="true" />
-            {snapshot.state === "incomplete" ? updateMessages.redownload : snapshot.state === "failed" ? updateMessages.retry : updateMessages.check}
+            {snapshot.state === "incomplete" ? updateMessages.redownload : nextRetry ? updateMessages.retryNow : snapshot.state === "failed" ? updateMessages.retry : updateMessages.check}
           </button>
           <div className="dialog-actions">
             <button className="secondary-button" type="button" onClick={onManualDownload} disabled={installing}>{updateMessages.manualDownload}</button>
