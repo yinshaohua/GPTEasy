@@ -10,7 +10,7 @@
 
 同步器通过 Gitee 官方 Swagger 声明的 `https://gitee.com/api/v5` 按 Tag 查询 Release，并使用数值 Release ID 操作附件。Token 只来自 GitHub Actions Secret `GITEE_TOKEN`，不进入 URL、清单或日志。真实平台对照证明 Gitee Release API 会超时或重置 `.exe` 上传连接，而网页可以上传并匿名下载同一 `.exe`。因此正式发布采用两阶段协议：自动同步创建 Release 并上传 `.sig` 与 `SHA256SUMS.txt`，维护者通过网页上传 GitHub Release 中的原始 `.exe`，随后自动同步匿名下载并核对三个附件，最后才推进更新清单。人工安装包缺失、遗留 `.exe.bin`、同名内容冲突或签名不匹配时均失败关闭。
 
-客户端只信任一个 Gitee Raw HTTPS 清单端点和现有 updater 公钥。更新失败时手工入口指向对应 Gitee Release；不实现 GitCode 或其它平台回退，也不轮换 updater 密钥。迁移不包含 #53 的 GitCode Contents API 回退。
+客户端配置只保留一个 Gitee Raw HTTPS 信任根和现有 updater 公钥；运行时可使用同仓库公开 Contents API 读取同一分支文件，API 响应只作为清单正文载体，不信任其中的下载地址。更新失败时手工入口指向对应 Gitee Release；不实现 GitCode 或其它平台回退，也不轮换 updater 密钥。迁移不包含 #53 的 GitCode Contents API 回退。
 
 ## 验证
 

@@ -17,6 +17,10 @@ use tokio::time::Instant;
 
 pub const MANUAL_DOWNLOAD_URL: &str = "https://gitee.com/ericshaohua/gpteasy-releases/releases";
 pub const GITEE_RELEASES_URL: &str = "https://gitee.com/ericshaohua/gpteasy-releases/releases/tag";
+const GITEE_RAW_MANIFEST_URL: &str =
+    "https://gitee.com/ericshaohua/gpteasy-releases/raw/main/latest.md";
+const GITEE_CONTENTS_MANIFEST_URL: &str =
+    "https://gitee.com/api/v5/repos/ericshaohua/gpteasy-releases/contents/latest.md?ref=main";
 const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const RETRY_DELAYS: [Duration; 3] = [
     Duration::from_secs(30),
@@ -100,6 +104,35 @@ struct Manifest {
 struct ManifestPlatform {
     url: String,
     signature: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ManifestSource {
+    Api,
+    Raw,
+    Custom,
+}
+
+impl ManifestSource {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Api => "api",
+            Self::Raw => "raw",
+            Self::Custom => "custom",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ManifestEndpoint {
+    url: String,
+    source: ManifestSource,
+}
+
+#[derive(Debug, Deserialize)]
+struct GiteeContentsFile {
+    content: String,
+    encoding: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -357,6 +390,7 @@ pub(crate) struct UpdateCheckFailure {
     pub(crate) error: UpdateCheckError,
     pub(crate) http_status: Option<u16>,
     pub(crate) os_error: Option<i32>,
+    pub(crate) manifest_source: Option<ManifestSource>,
     retry_after: Option<Duration>,
 }
 
@@ -367,6 +401,7 @@ impl UpdateCheckFailure {
             error,
             http_status: None,
             os_error: None,
+            manifest_source: None,
             retry_after: None,
         }
     }
@@ -539,7 +574,7 @@ struct CoordinatorState {
 pub struct UpdateCoordinator {
     client: Client,
     current_version: String,
-    endpoint: String,
+    manifest_endpoints: Vec<ManifestEndpoint>,
     public_key: String,
     state: Arc<Mutex<CoordinatorState>>,
     install_attempt_path: Option<PathBuf>,
@@ -549,12 +584,45 @@ pub struct UpdateCoordinator {
 impl UpdateCoordinator {
     pub fn new(current_version: impl Into<String>) -> Self {
         let (endpoint, public_key) = configured_trust_root();
-        Self::with_endpoint(current_version, endpoint, public_key)
+        let endpoints = if endpoint == GITEE_RAW_MANIFEST_URL {
+            vec![
+                ManifestEndpoint {
+                    url: GITEE_CONTENTS_MANIFEST_URL.to_owned(),
+                    source: ManifestSource::Api,
+                },
+                ManifestEndpoint {
+                    url: endpoint,
+                    source: ManifestSource::Raw,
+                },
+            ]
+        } else {
+            vec![ManifestEndpoint {
+                url: endpoint,
+                source: ManifestSource::Custom,
+            }]
+        };
+        Self::with_manifest_endpoints(current_version, endpoints, public_key)
     }
 
+    #[cfg(test)]
     pub(crate) fn with_endpoint(
         current_version: impl Into<String>,
         endpoint: impl Into<String>,
+        public_key: impl Into<String>,
+    ) -> Self {
+        Self::with_manifest_endpoints(
+            current_version,
+            vec![ManifestEndpoint {
+                url: endpoint.into(),
+                source: ManifestSource::Custom,
+            }],
+            public_key,
+        )
+    }
+
+    fn with_manifest_endpoints(
+        current_version: impl Into<String>,
+        manifest_endpoints: Vec<ManifestEndpoint>,
         public_key: impl Into<String>,
     ) -> Self {
         let current_version = current_version.into();
@@ -566,7 +634,7 @@ impl UpdateCoordinator {
                 .timeout(Duration::from_secs(30))
                 .build()
                 .expect("更新 HTTP 客户端初始化失败"),
-            endpoint: endpoint.into(),
+            manifest_endpoints,
             public_key: public_key.into(),
             state: Arc::new(Mutex::new(CoordinatorState {
                 snapshot: UpdateSnapshot::new(&current_version),
@@ -585,8 +653,7 @@ impl UpdateCoordinator {
         current_version: impl Into<String>,
         install_attempt_path: impl AsRef<Path>,
     ) -> Self {
-        let (endpoint, public_key) = configured_trust_root();
-        let mut coordinator = Self::with_endpoint(current_version, endpoint, public_key);
+        let mut coordinator = Self::new(current_version);
         coordinator.install_attempt_path = Some(install_attempt_path.as_ref().to_path_buf());
         coordinator.restore_install_attempt();
         coordinator
@@ -794,25 +861,94 @@ impl UpdateCoordinator {
 
     async fn fetch_manifest(&self) -> Result<Manifest, UpdateCheckFailure> {
         use UpdateCheckStage as Stage;
+        let mut last_failure = None;
+        for endpoint in &self.manifest_endpoints {
+            match self.fetch_manifest_bytes(endpoint).await {
+                Ok(bytes) => match serde_json::from_slice(&bytes) {
+                    Ok(manifest) => return Ok(manifest),
+                    Err(_) => {
+                        let mut failure = UpdateCheckFailure::new(
+                            Stage::ManifestValidation,
+                            UpdateCheckError::InvalidJson,
+                        );
+                        failure.manifest_source = Some(endpoint.source);
+                        return Err(failure);
+                    }
+                },
+                Err(failure) => {
+                    let retry_with_next_endpoint =
+                        endpoint.source == ManifestSource::Api && self.manifest_endpoints.len() > 1;
+                    last_failure = Some(failure);
+                    if !retry_with_next_endpoint {
+                        break;
+                    }
+                }
+            }
+        }
+        Err(last_failure.expect("更新清单端点不能为空"))
+    }
+
+    async fn fetch_manifest_bytes(
+        &self,
+        endpoint: &ManifestEndpoint,
+    ) -> Result<Vec<u8>, UpdateCheckFailure> {
+        use UpdateCheckStage as Stage;
         let response = self
             .client
-            .get(&self.endpoint)
+            .get(&endpoint.url)
             .send()
             .await
-            .map_err(|error| UpdateCheckFailure::from_transport(Stage::ManifestRequest, &error))?;
+            .map_err(|error| {
+                let mut failure =
+                    UpdateCheckFailure::from_transport(Stage::ManifestRequest, &error);
+                failure.manifest_source = Some(endpoint.source);
+                failure
+            })?;
         if !response.status().is_success() {
-            return Err(UpdateCheckFailure::from_status(
-                Stage::ManifestStatus,
-                &response,
-            ));
+            let mut failure = UpdateCheckFailure::from_status(Stage::ManifestStatus, &response);
+            failure.manifest_source = Some(endpoint.source);
+            return Err(failure);
         }
         let bytes = response
             .bytes()
             .await
-            .map_err(|error| UpdateCheckFailure::from_transport(Stage::ManifestBody, &error))?;
-        serde_json::from_slice(&bytes).map_err(|_| {
-            UpdateCheckFailure::new(Stage::ManifestValidation, UpdateCheckError::InvalidJson)
-        })
+            .map_err(|error| UpdateCheckFailure::from_transport(Stage::ManifestBody, &error));
+        let mut bytes = match bytes {
+            Ok(bytes) => bytes.to_vec(),
+            Err(mut failure) => {
+                failure.manifest_source = Some(endpoint.source);
+                return Err(failure);
+            }
+        };
+        if endpoint.source == ManifestSource::Api {
+            let file: GiteeContentsFile = serde_json::from_slice(&bytes).map_err(|_| {
+                let mut failure = UpdateCheckFailure::new(
+                    Stage::ManifestValidation,
+                    UpdateCheckError::InvalidJson,
+                );
+                failure.manifest_source = Some(endpoint.source);
+                failure
+            })?;
+            if file.encoding != "base64" {
+                let mut failure = UpdateCheckFailure::new(
+                    Stage::ManifestValidation,
+                    UpdateCheckError::InvalidJson,
+                );
+                failure.manifest_source = Some(endpoint.source);
+                return Err(failure);
+            }
+            bytes = base64::engine::general_purpose::STANDARD
+                .decode(file.content.replace(char::is_whitespace, ""))
+                .map_err(|_| {
+                    let mut failure = UpdateCheckFailure::new(
+                        Stage::ManifestValidation,
+                        UpdateCheckError::InvalidJson,
+                    );
+                    failure.manifest_source = Some(endpoint.source);
+                    failure
+                })?;
+        }
+        Ok(bytes)
     }
 
     async fn download_once<F>(
@@ -1221,6 +1357,66 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn canonical_gitee_manifest_prefers_contents_api() {
+        let manifest = serde_json::json!({
+            "version": "1.1.5",
+            "platforms": {}
+        });
+        let encoded = base64::engine::general_purpose::STANDARD.encode(manifest.to_string());
+        let server = ScriptedHttpServer::start_with(|_| {
+            vec![(
+                200,
+                format!(r#"{{"content":"{encoded}","encoding":"base64"}}"#),
+            )]
+        });
+        let coordinator = UpdateCoordinator::with_manifest_endpoints(
+            "1.1.5",
+            vec![ManifestEndpoint {
+                url: server.url("/contents/latest.md?ref=main"),
+                source: ManifestSource::Api,
+            }],
+            "unused",
+        );
+
+        let (snapshot, failure) = coordinator.check_and_download(true, |_| {}).await;
+
+        assert_eq!(snapshot.state, UpdateState::UpToDate);
+        assert!(failure.is_none());
+        assert_eq!(server.requests()[0].path, "/contents/latest.md?ref=main");
+    }
+
+    #[tokio::test]
+    async fn canonical_gitee_manifest_falls_back_to_raw_after_api_failure() {
+        let manifest = serde_json::json!({
+            "version": "1.1.5",
+            "platforms": {}
+        });
+        let server =
+            ScriptedHttpServer::start(vec![(503, String::new()), (200, manifest.to_string())]);
+        let coordinator = UpdateCoordinator::with_manifest_endpoints(
+            "1.1.5",
+            vec![
+                ManifestEndpoint {
+                    url: server.url("/contents/latest.md?ref=main"),
+                    source: ManifestSource::Api,
+                },
+                ManifestEndpoint {
+                    url: server.url("/raw/main/latest.md"),
+                    source: ManifestSource::Raw,
+                },
+            ],
+            "unused",
+        );
+
+        let (snapshot, failure) = coordinator.check_and_download(true, |_| {}).await;
+
+        assert_eq!(snapshot.state, UpdateState::UpToDate);
+        assert!(failure.is_none());
+        assert_eq!(server.requests().len(), 2);
+        assert_eq!(server.requests()[0].path, "/contents/latest.md?ref=main");
+        assert_eq!(server.requests()[1].path, "/raw/main/latest.md");
+    }
     #[tokio::test]
     async fn scheduled_check_recovers_from_a_disconnected_manifest_request() {
         let server = ScriptedHttpServer::start(vec![

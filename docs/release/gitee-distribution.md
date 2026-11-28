@@ -13,7 +13,7 @@ Gitee 仓库不是源码镜像，不运行构建，不单独维护版本或发�
 
 ## 分发源自举
 
-v1.3.0 不会自动迁移国内更新源。首个内置 Gitee Raw 信任根的正式版本必须由旧版本用户从 Gitee Releases 手工安装；不存在 GitCode 桥接版本、Contents API 回退或后台源切换。安装该分发源自举版本后，后续版本仍只读取一次固定的 Gitee Raw 清单，并继续在签名验证完成后等待用户确认安装。
+v1.3.0 不会自动迁移国内更新源。首个内置 Gitee Raw 信任根的正式版本必须由旧版本用户从 Gitee Releases 手工安装；不存在 GitCode 桥接版本或后台源切换。安装该分发源自举版本后，后续版本优先读取固定 Gitee Contents API 的公开 Base64 清单，失败时回退到固定 Gitee Raw 清单，并继续在签名验证完成后等待用户确认安装。
 
 ## 配置位置
 
@@ -85,7 +85,7 @@ unset GITEE_TOKEN
 
 `.github/workflows/gitee-sync.yml` 由 GitHub Release `published` 事件触发，也允许维护者输入同一 Tag 人工重试。工作流只调用 `scripts/sync-gitee-release.mjs` 下载 Release 附件，不运行应用构建。同步器执行以下顺序：
 
-1. 拒绝草稿、预发布和非稳定 SemVer Release；读取当前正式清单以阻止版本降级；比较仓库根 README 与 Gitee `README.md`，不一致时更新并通过匿名 Raw 读取核对。同步器可用公开 Contents 元数据和官方 Raw blob 复核既有清单，但客户端更新端点始终只有一个稳定分支 Raw 地址；
+1. 拒绝草稿、预发布和非稳定 SemVer Release；读取当前正式清单以阻止版本降级；比较仓库根 README 与 Gitee `README.md`，不一致时更新并通过匿名 Raw 读取核对。同步器可用公开 Contents 元数据和官方 Raw blob 复核既有清单，但客户端配置仍保留一个稳定分支 Raw 信任根地址；运行时对该固定地址启用同仓库 Contents API 优先读取，API 失败时回退到 Raw 地址；
 2. 下载 GitHub Release 中的 Windows x64 NSIS 安装包及其 `.sig`，计算大小和 SHA-256，并按标准 `.exe` 文件名生成 `SHA256SUMS.txt`；
 3. 创建或复用同 Tag Gitee Release，正文采用 GitHub 中文发布说明；API 自动上传 `.sig` 和 `SHA256SUMS.txt`，但不尝试上传 `.exe`；
 4. 若标准 `.exe` 尚不存在，同步器输出 `manualActionRequired`、精确文件名和 Gitee Release URL 后失败，不推进正式清单。维护者运行 `bash scripts/manual-upload-gitee-installer.sh <version>`，向导从 GitHub Release 下载权威安装包、验证 PE，打开 Gitee 编辑页指导网页上传，再匿名下载比对并触发同 Tag 同步；
@@ -131,7 +131,7 @@ Gitee 正式 Release 的标准 `.exe` 始终由维护者亲自在网页中上传
 
 迁移前，GitCode 的稳定分支 Raw 地址曾被 WAF 返回 HTTP 403；同一仓库的公开 Contents API、不可变 blob 和 Release 附件仍可正常读取。该历史现象不是 Gitee 已知结论。Gitee 的真实 Raw 可用性必须由本次冒烟在公开仓库上验证；在此之前，不能将本地 adapter 结果或 GitCode 历史记录表述为 Gitee 平台通过。
 
-ADR-0045 已取代 GitCode 的更新源和 #53 的 GitCode Contents API 回退计划；当前客户端只读取 Gitee Raw。
+ADR-0045 已取代 GitCode 的更新源和 #53 的 GitCode Contents API 回退计划；当前客户端仍以 Gitee Raw 作为配置中的信任根，但运行时优先读取同仓库公开 Contents API，API 失败才读取 Gitee Raw。
 
 ## 迁移收口
 

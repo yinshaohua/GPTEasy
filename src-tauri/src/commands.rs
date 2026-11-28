@@ -1125,6 +1125,9 @@ fn log_update_check_failure(
     if let Some(code) = failure.os_error {
         details.push_str(&format!(" os_error={code}"));
     }
+    if let Some(source) = failure.manifest_source {
+        details.push_str(&format!(" manifest_source={}", source.name()));
+    }
     if let Some(version) = &snapshot.available_version {
         details.push_str(&format!(" target_version={version}"));
     }
@@ -4431,7 +4434,9 @@ mod tests {
 
     #[test]
     fn update_check_failure_logs_only_structured_stage_and_retry_evidence() {
-        use crate::update::{UpdateCheckError, UpdateCheckFailure, UpdateCheckStage};
+        use crate::update::{
+            ManifestSource, UpdateCheckError, UpdateCheckFailure, UpdateCheckStage,
+        };
         let directory = tempdir().expect("issue log directory");
         let store = IssueLogStore::new(directory.path());
         let mut snapshot = failed_update_snapshot(UpdateFailureCategory::CheckFailed);
@@ -4441,6 +4446,7 @@ mod tests {
             UpdateCheckError::ConnectionReset,
         );
         reset.os_error = Some(10054);
+        reset.manifest_source = Some(ManifestSource::Raw);
         log_update_check_failure(&store, &snapshot, false, 1, &reset);
 
         let mut download = UpdateCheckFailure::new(
@@ -4456,7 +4462,7 @@ mod tests {
         assert_eq!(
             records[0].details.as_deref(),
             Some(
-                "category=check_failed trigger=scheduled stage=manifest_request error=connection_reset attempt=1 os_error=10054 target_version=1.1.0 next_retry_at_epoch_seconds=31"
+                "category=check_failed trigger=scheduled stage=manifest_request error=connection_reset attempt=1 os_error=10054 manifest_source=raw target_version=1.1.0 next_retry_at_epoch_seconds=31"
             )
         );
         assert_eq!(
